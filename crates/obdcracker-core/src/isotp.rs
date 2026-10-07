@@ -255,12 +255,13 @@ fn decode_st_min(byte: u8) -> Duration {
 
 // Rounds up to the next value STmin can express, so the gap is never shorter than asked.
 fn encode_st_min(st_min: Duration) -> Result<u8, Error> {
-    let micros = st_min.as_micros();
-    match micros {
+    // Nanoseconds, so no remainder is dropped before rounding up.
+    let nanos = st_min.as_nanos();
+    match nanos {
         0 => Ok(0),
-        // 1..=900 µs is 1..=9 hundreds of microseconds
-        1..=900 => Ok(0xF0 + u8::try_from(micros.div_ceil(100)).unwrap_or(9)),
-        _ => u8::try_from(micros.div_ceil(1000))
+        // Up to 900 µs: 1..=9 hundreds of microseconds
+        1..=900_000 => Ok(0xF0 + u8::try_from(nanos.div_ceil(100_000)).unwrap_or(9)),
+        _ => u8::try_from(nanos.div_ceil(1_000_000))
             .ok()
             .filter(|&ms| ms <= 0x7F)
             .ok_or(Error::StMinTooLong),

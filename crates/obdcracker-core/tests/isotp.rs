@@ -351,6 +351,18 @@ mod segment {
                 .as_bytes(),
             [0x30, 0x00, 0x01]
         );
+        // Sub-microsecond remainders round up too
+        assert_eq!(
+            fc(Duration::from_nanos(100_001))
+                .encode(Addressing::Normal)
+                .unwrap()
+                .as_bytes(),
+            [0x30, 0x00, 0xF2]
+        );
+        assert_eq!(
+            fc(Duration::from_millis(127) + Duration::from_nanos(1)).encode(Addressing::Normal),
+            Err(Error::StMinTooLong)
+        );
         let mut buf = [0; 8];
         assert_eq!(
             Reassembler::new(&mut buf, Addressing::Normal)
