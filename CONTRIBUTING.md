@@ -37,14 +37,19 @@ Only fix it in the same change if it blocks your task, and then reference it in 
 
 ## Before opening a pull request
 
-No issue tagged with what the PR touches may be open. Run:
+No open issue may block it. An issue blocks a PR when either:
+
+- it's tagged with an area the PR touches, and its milestone is the PR's milestone, an earlier one, or none; or
+- it's tagged with the PR's milestone, whatever its area.
+
+Issues for later milestones wait until then. Run:
 
 ```sh
-scripts/pr-gate.sh M2   # the milestone the PR is for; leave it out if none
+scripts/pr-gate.sh M2   # the PR's milestone; leave it out if none
 ```
 
-It works out the areas from the files changed since `origin/main`, lists every open issue labelled with one of those
-areas or with the milestone, and fails if there are any. Fix or close them first.
+It works out the areas from the files changed since `origin/main`, lists the blocking issues, and fails if there are
+any. Fix or close them first.
 
 ## Commits
 

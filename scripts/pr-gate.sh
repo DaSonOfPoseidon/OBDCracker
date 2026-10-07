@@ -1,6 +1,8 @@
 #!/bin/sh
-# Run before opening a PR. Lists open issues labelled with an area this branch touches, or with
-# the milestone given as an argument (e.g. `scripts/pr-gate.sh M2`), and fails if there are any.
+# Run before opening a PR, with the PR's milestone if it has one: `scripts/pr-gate.sh M2`.
+# Fails if an open issue blocks it: one tagged with an area this branch touches whose milestone is
+# the PR's, an earlier one, or none. Issues tagged with the PR's milestone block it in any area.
+# Issues for later milestones wait for their own milestone.
 set -e
 cd "$(dirname "$0")/.."
 repo=DaSonOfPoseidon/OBDCracker
@@ -20,22 +22,28 @@ areas=$(git diff --name-only "$base"...HEAD | while read -r path; do
 	esac
 done | sort -u)
 
-labels=""
-for area in $areas; do labels="$labels area:$area"; done
-[ -n "$1" ] && labels="$labels milestone:$1"
-if [ -z "$labels" ]; then
-	echo "No areas touched and no milestone given; nothing to check."
-	exit 0
-fi
+milestone=$(echo "${1:-}" | tr -d 'Mm')
+case $milestone in
+'' | *[!0-9]*) [ -n "$1" ] && { echo "usage: $0 [M<n>]" >&2; exit 2; } ;;
+esac
+echo "Areas touched: $(echo $areas | tr ' ' ',')${1:+; milestone M$milestone}"
 
-echo "Checking:$labels"
-open=$(for label in $labels; do
-	gh issue list -R "$repo" --state open --label "$label" --json number,title \
-		--jq ".[] | \"#\\(.number) [$label] \\(.title)\""
-done | sort -t' ' -k1,1 -u)
+open=$(gh issue list -R "$repo" --state open --limit 500 --json number,title,labels --jq "
+	(\"$(echo $areas)\" | split(\" \") | map(\"area:\" + .)) as \$areas
+	| ${milestone:-0} as \$m
+	| .[]
+	| ([.labels[].name] ) as \$names
+	| ([\$names[] | select(startswith(\"milestone:M\")) | ltrimstr(\"milestone:M\") | tonumber] | min) as \$due
+	| select(
+		(\$m > 0 and \$due == \$m)
+		or (([\$names[] | select(IN(\$areas[]))] | length > 0)
+			and (\$due == null or (\$m > 0 and \$due <= \$m)))
+	)
+	| \"#\\(.number) [\\(\$names | map(select(startswith(\"area:\") or startswith(\"milestone:\"))) | join(\", \"))] \\(.title)\"
+")
 if [ -n "$open" ]; then
 	echo "Open issues block this PR:"
 	echo "$open"
 	exit 1
 fi
-echo "No open issues for these labels."
+echo "No open issues block this PR."
