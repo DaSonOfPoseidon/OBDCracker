@@ -17,11 +17,14 @@ pub use mock::Mock;
 /// A reply from one module: the CAN ID it came from and its reassembled payload.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Response {
+    /// The CAN ID the reply came from.
     pub source: u32,
+    /// The reassembled reply, service ID first.
     pub payload: Vec<u8>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+/// Why a send or receive failed.
 pub enum Error {
     /// No reply arrived in time.
     Timeout,
@@ -40,8 +43,11 @@ impl fmt::Display for Error {
 
 impl std::error::Error for Error {}
 
+/// A connection to the bus through one adapter.
 pub trait Transport {
+    /// Sends one approved request. Unapproved bytes can't be passed in.
     fn send(&mut self, request: &Approved) -> Result<(), Error>;
+    /// Waits up to `timeout` for the next reply.
     fn recv(&mut self, timeout: Duration) -> Result<Response, Error>;
 }
 

@@ -20,6 +20,7 @@ obdcracker-sim = { path = "crates/obdcracker-sim" }
 [workspace.lints.rust]
 unsafe_code = "forbid"
 missing_debug_implementations = "warn"
+missing_docs = "warn"
 
 [workspace.lints.clippy]
 pedantic = { level = "warn", priority = -1 }

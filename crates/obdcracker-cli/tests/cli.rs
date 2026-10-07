@@ -1,3 +1,5 @@
+//! The `obdcracker` binary end to end: dry runs, the audit log, and refusing live runs.
+
 use std::path::PathBuf;
 use std::process::{Command, Output};
 

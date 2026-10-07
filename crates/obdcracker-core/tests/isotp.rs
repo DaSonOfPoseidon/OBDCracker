@@ -1,3 +1,5 @@
+//! ISO-TP framing against ISO 15765-2 examples.
+
 use obdcracker_core::isotp::single_frame;
 
 #[test]

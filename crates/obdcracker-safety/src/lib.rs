@@ -32,6 +32,7 @@ pub enum Target {
 }
 
 impl Target {
+    /// The 11-bit CAN ID the request is sent to.
     #[must_use]
     pub fn can_id(self) -> u32 {
         match self {
@@ -63,16 +64,19 @@ pub struct Approved {
 }
 
 impl Approved {
+    /// Where the request goes.
     #[must_use]
     pub fn target(&self) -> Target {
         self.target
     }
 
+    /// The request bytes, service ID first, exactly as approved.
     #[must_use]
     pub fn payload(&self) -> &[u8] {
         &self.payload
     }
 
+    /// The tier the policy classified the request as.
     #[must_use]
     pub fn tier(&self) -> Tier {
         self.tier
@@ -87,6 +91,7 @@ pub struct Policy {
 }
 
 impl Policy {
+    /// A policy that allows only [`Tier::Read`] requests.
     #[must_use]
     pub fn read_only() -> Self {
         Self {
@@ -94,6 +99,9 @@ impl Policy {
         }
     }
 
+    /// Checks a request against the allowlist and returns it as [`Approved`] if it may be sent.
+    ///
+    /// Flash-tier requests are always [`Rejection::Banned`], whatever the policy unlocks.
     pub fn approve(&self, target: Target, payload: &[u8]) -> Result<Approved, Rejection> {
         let (tier, kind) = classify(payload).ok_or(Rejection::NotAllowed)?;
         if tier == Tier::Flash {

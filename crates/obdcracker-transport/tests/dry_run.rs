@@ -1,3 +1,5 @@
+//! The dry-run backend.
+
 use std::time::Duration;
 
 use obdcracker_safety::{Policy, Target};

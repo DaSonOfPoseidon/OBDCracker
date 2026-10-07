@@ -9,6 +9,7 @@ pub struct SingleFrame {
 }
 
 impl SingleFrame {
+    /// The frame's data bytes, PCI byte first.
     #[must_use]
     pub fn as_bytes(&self) -> &[u8] {
         &self.data[..self.len]

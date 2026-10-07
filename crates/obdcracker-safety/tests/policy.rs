@@ -1,3 +1,5 @@
+//! The safety policy: allowlist cases and properties that must hold for any input.
+
 use obdcracker_safety::{Policy, Rejection, Target, Tier};
 use proptest::prelude::*;
 

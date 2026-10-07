@@ -1,3 +1,5 @@
+//! The audit log wrapper.
+
 use std::path::PathBuf;
 use std::time::Duration;
 

@@ -14,10 +14,12 @@ pub struct DryRun<W> {
 }
 
 impl<W: Write> DryRun<W> {
+    /// Writes planned frames to `out`, such as stdout or a buffer in tests.
     pub fn new(out: W) -> Self {
         Self { out }
     }
 
+    /// Returns the writer, with everything written so far.
     pub fn into_inner(self) -> W {
         self.out
     }

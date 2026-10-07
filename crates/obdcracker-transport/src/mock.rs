@@ -13,10 +13,12 @@ pub struct Mock {
 }
 
 impl Mock {
+    /// Adds a reply for a later `recv` to return.
     pub fn queue(&mut self, response: Response) {
         self.replies.push_back(response);
     }
 
+    /// Every request sent so far, oldest first.
     #[must_use]
     pub fn sent(&self) -> &[Approved] {
         &self.sent

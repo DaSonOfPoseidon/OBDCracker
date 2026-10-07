@@ -1,3 +1,5 @@
+//! The mock backend.
+
 use std::time::Duration;
 
 use obdcracker_safety::{Policy, Target};
