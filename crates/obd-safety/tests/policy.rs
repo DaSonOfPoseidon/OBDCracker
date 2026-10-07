@@ -47,6 +47,12 @@ fn approved_request_carries_its_payload_and_target_unchanged() {
 }
 
 #[test]
+fn targets_map_to_their_can_ids() {
+    assert_eq!(Target::ObdFunctional.can_id(), 0x7DF);
+    assert_eq!(ENGINE.can_id(), 0x7E0);
+}
+
+#[test]
 fn locks_clear_dtc_and_coding_in_read_only() {
     for (payload, tier) in [
         (&[0x04][..], Tier::ClearDtc),

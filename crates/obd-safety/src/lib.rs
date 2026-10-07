@@ -31,6 +31,16 @@ pub enum Target {
     Physical(u32),
 }
 
+impl Target {
+    #[must_use]
+    pub fn can_id(self) -> u32 {
+        match self {
+            Self::ObdFunctional => OBD_FUNCTIONAL_ID,
+            Self::Physical(id) => id,
+        }
+    }
+}
+
 /// Why a request was refused.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Rejection {
