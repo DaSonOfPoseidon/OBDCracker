@@ -398,7 +398,9 @@ enum ReceiveState {
 /// when to send flow control. IO-free and allocation-free.
 ///
 /// A new single or first frame always starts a new payload, abandoning any unfinished one, as
-/// ISO 15765-2 requires. After an error the receiver is idle and waits for the next one.
+/// ISO 15765-2 requires. After an error the receiver is idle and waits for the next one, except
+/// [`Error::WrongAddress`]: with extended addressing that's another module's frame on a shared
+/// reply ID, and the transfer in progress goes on.
 #[derive(Debug)]
 pub struct Reassembler<'b> {
     buf: &'b mut [u8],
@@ -439,7 +441,15 @@ impl<'b> Reassembler<'b> {
     /// [`Error::Overflow`] means the payload won't fit the buffer: send a flow control frame
     /// with [`FlowStatus::Overflow`] so the sender stops.
     pub fn feed(&mut self, bytes: &[u8]) -> Result<Progress<'_>, Error> {
-        let frame = Frame::parse(bytes, self.addressing)?;
+        let frame = match Frame::parse(bytes, self.addressing) {
+            Ok(frame) => frame,
+            // Another module's frame on a shared reply ID: not ours, so the transfer goes on.
+            Err(e @ Error::WrongAddress(_)) => return Err(e),
+            Err(e) => {
+                self.state = ReceiveState::Idle;
+                return Err(e);
+            }
+        };
         match frame {
             Frame::Single(data) => {
                 self.state = ReceiveState::Idle;
@@ -500,7 +510,10 @@ impl<'b> Reassembler<'b> {
                     Progress::Pending
                 })
             }
-            Frame::FlowControl(_) => Err(Error::UnexpectedFrame),
+            Frame::FlowControl(_) => {
+                self.state = ReceiveState::Idle;
+                Err(Error::UnexpectedFrame)
+            }
         }
     }
 }

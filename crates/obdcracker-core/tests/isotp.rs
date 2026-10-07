@@ -403,6 +403,41 @@ mod reassemble {
     }
 
     #[test]
+    fn any_error_mid_transfer_leaves_the_receiver_idle() {
+        for bad in [
+            &[0x40, 0, 0, 0, 0, 0, 0, 0][..], // reserved frame type
+            &[0x30, 0x00, 0x00],              // flow control on the reply ID
+            &[0x05, 1, 2],                    // malformed single frame
+        ] {
+            let mut buf = [0; 64];
+            let mut rx = Reassembler::new(&mut buf, Addressing::Normal);
+            rx.feed(&VIN_FRAMES[0]).unwrap();
+            assert!(rx.feed(bad).is_err(), "{bad:02X?}");
+            assert_eq!(
+                rx.feed(&VIN_FRAMES[1]),
+                Err(Error::UnexpectedFrame),
+                "a stale transfer continued after {bad:02X?}"
+            );
+        }
+    }
+
+    #[test]
+    fn frames_for_another_extended_address_dont_abort_the_transfer() {
+        // Toyota body modules share the 0x758 reply ID; each frame starts with its sender's address
+        let mut buf = [0; 16];
+        let mut rx = Reassembler::new(&mut buf, Addressing::Extended(0x40));
+        rx.feed(&[0x40, 0x10, 0x08, 1, 2, 3, 4, 5]).unwrap();
+        assert_eq!(
+            rx.feed(&[0x41, 0x21, 9, 9, 9]),
+            Err(Error::WrongAddress(0x41))
+        );
+        assert_eq!(
+            rx.feed(&[0x40, 0x21, 6, 7, 8]),
+            Ok(Progress::Complete(&[1, 2, 3, 4, 5, 6, 7, 8]))
+        );
+    }
+
+    #[test]
     fn refuses_a_transfer_longer_than_the_buffer() {
         let mut buf = [0; 16];
         let mut rx = Reassembler::new(&mut buf, Addressing::Normal);
