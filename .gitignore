@@ -3,3 +3,8 @@ CLAUDE.md
 .claude/
 # Audit logs from real car sessions stay local until reviewed
 *.audit.jsonl
+# ECU/TCU flash dumps and tune files are never committed (tuner IP, VIN-specific)
+/dumps/
+*.bin
+*.ori
+*.mod
