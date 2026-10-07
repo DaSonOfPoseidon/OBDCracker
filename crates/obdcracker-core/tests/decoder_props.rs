@@ -54,6 +54,9 @@ proptest! {
         if let Ok((_, records)) = uds::decode_dtcs(&reply) {
             records.for_each(|record| drop(record.dtc.to_string()));
         }
+        if let Ok(count) = uds::decode_dtc_count(&reply) {
+            let _ = uds::UdsDtc::new(0x04_01_00).j2012(count.format);
+        }
     }
 
     #[test]

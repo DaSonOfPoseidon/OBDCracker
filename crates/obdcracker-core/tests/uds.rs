@@ -110,7 +110,7 @@ mod read_dtc_information {
     use obdcracker_core::obd::Dtc;
     use obdcracker_core::response::Error;
     use obdcracker_core::uds::{
-        DtcCount, DtcRecord, DtcStatus, UdsDtc, decode_dtc_count, decode_dtcs,
+        DtcCount, DtcFormat, DtcRecord, DtcStatus, J2012Dtc, UdsDtc, decode_dtc_count, decode_dtcs,
         dtc_count_by_status_mask, dtcs_by_status_mask, supported_dtcs,
     };
 
@@ -127,7 +127,7 @@ mod read_dtc_information {
             decode_dtc_count(&[0x59, 0x01, 0xFF, 0x01, 0x00, 0x03]),
             Ok(DtcCount {
                 availability: DtcStatus(0xFF),
-                format: 0x01,
+                format: DtcFormat::Iso14229,
                 count: 3
             })
         );
@@ -148,22 +148,47 @@ mod read_dtc_information {
         let records: Vec<DtcRecord> = records.collect();
         assert_eq!(records.len(), 2);
         assert_eq!(records[0].dtc, UdsDtc::new(0x04_01_00));
-        assert_eq!(records[0].dtc.to_string(), "P0401-00");
+        assert_eq!(records[0].dtc.to_string(), "040100");
         assert!(records[0].status.confirmed());
         assert!(records[0].status.warning_indicator_requested());
         assert!(!records[0].status.pending());
-        assert_eq!(records[1].dtc.to_string(), "U0100-00");
+        assert_eq!(
+            records[1]
+                .dtc
+                .j2012(DtcFormat::SaeJ2012Da00)
+                .unwrap()
+                .to_string(),
+            "U0100-00"
+        );
         assert!(records[1].status.pending());
         assert!(records[1].status.test_failed_since_last_clear());
         assert!(!records[1].status.confirmed());
     }
 
     #[test]
-    fn three_byte_dtc_splits_into_the_obd_code_and_failure_type() {
+    fn three_byte_dtc_reads_as_j2012_only_in_a_j2012_format() {
         let dtc = UdsDtc::new(0x04_01_1C);
-        assert_eq!(dtc.obd_dtc(), Dtc::new(0x0401));
-        assert_eq!(dtc.failure_type(), 0x1C);
         assert_eq!(dtc.code(), 0x04_01_1C);
+        let expected = Some(J2012Dtc {
+            dtc: Dtc::new(0x0401),
+            failure_type: 0x1C,
+        });
+        assert_eq!(dtc.j2012(DtcFormat::SaeJ2012Da00), expected);
+        assert_eq!(dtc.j2012(DtcFormat::SaeJ2012Da04), expected);
+        // ISO 14229-1's own format is manufacturer-defined, and J1939 is unrelated
+        assert_eq!(dtc.j2012(DtcFormat::Iso14229), None);
+        assert_eq!(dtc.j2012(DtcFormat::SaeJ1939), None);
+        assert_eq!(dtc.j2012(DtcFormat::Other(0x07)), None);
+    }
+
+    #[test]
+    fn dtc_formats_round_trip() {
+        for code in 0..=u8::MAX {
+            assert_eq!(DtcFormat::from(code).code(), code);
+        }
+        assert_eq!(DtcFormat::from(0x00), DtcFormat::SaeJ2012Da00);
+        assert_eq!(DtcFormat::from(0x03), DtcFormat::Iso11992);
+        assert_eq!(DtcFormat::from(0x04), DtcFormat::SaeJ2012Da04);
     }
 
     #[test]

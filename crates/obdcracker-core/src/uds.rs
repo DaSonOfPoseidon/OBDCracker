@@ -206,8 +206,54 @@ impl DtcStatus {
     }
 }
 
-/// A three-byte UDS DTC: the two-byte SAE J2012 code and a failure type byte, shown as
-/// `P0401-00`.
+/// How a module encodes its DTCs, from the reply to [`dtc_count_by_status_mask`]
+/// (ISO 14229-1 D.4).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DtcFormat {
+    /// 0x00: SAE J2012-DA format 00 (ISO 15031-6), the same codes OBD-II reports.
+    SaeJ2012Da00,
+    /// 0x01: ISO 14229-1's own format, whose meaning the manufacturer defines.
+    Iso14229,
+    /// 0x02: SAE J1939-73, used by heavy vehicles.
+    SaeJ1939,
+    /// 0x03: ISO 11992-4, used by trailers.
+    Iso11992,
+    /// 0x04: SAE J2012-DA format 04.
+    SaeJ2012Da04,
+    /// A format without a name here, kept as received.
+    Other(u8),
+}
+
+impl From<u8> for DtcFormat {
+    fn from(code: u8) -> Self {
+        match code {
+            0x00 => Self::SaeJ2012Da00,
+            0x01 => Self::Iso14229,
+            0x02 => Self::SaeJ1939,
+            0x03 => Self::Iso11992,
+            0x04 => Self::SaeJ2012Da04,
+            other => Self::Other(other),
+        }
+    }
+}
+
+impl DtcFormat {
+    /// The format's byte value.
+    #[must_use]
+    pub fn code(self) -> u8 {
+        match self {
+            Self::SaeJ2012Da00 => 0x00,
+            Self::Iso14229 => 0x01,
+            Self::SaeJ1939 => 0x02,
+            Self::Iso11992 => 0x03,
+            Self::SaeJ2012Da04 => 0x04,
+            Self::Other(code) => code,
+        }
+    }
+}
+
+/// A three-byte UDS DTC. What the bytes mean depends on the module's [`DtcFormat`], so it's
+/// shown as 6 hex digits; use [`UdsDtc::j2012`] for the `P0401` form.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct UdsDtc(u32);
 
@@ -224,23 +270,40 @@ impl UdsDtc {
         self.0
     }
 
-    /// The two-byte code, the same as OBD-II mode 03 reports.
+    /// The DTC as an SAE J2012 code and failure type, if the module's format is J2012
+    /// (0x00 or 0x04). `None` for other formats, whose bytes mean something else.
     #[must_use]
-    pub fn obd_dtc(self) -> Dtc {
-        let [_, high, low, _] = self.0.to_be_bytes();
-        Dtc::new(u16::from_be_bytes([high, low]))
-    }
-
-    /// The failure type byte: what kind of fault (such as circuit short to ground).
-    #[must_use]
-    pub fn failure_type(self) -> u8 {
-        self.0.to_be_bytes()[3]
+    pub fn j2012(self, format: DtcFormat) -> Option<J2012Dtc> {
+        if !matches!(format, DtcFormat::SaeJ2012Da00 | DtcFormat::SaeJ2012Da04) {
+            return None;
+        }
+        let [_, high, low, failure_type] = self.0.to_be_bytes();
+        Some(J2012Dtc {
+            dtc: Dtc::new(u16::from_be_bytes([high, low])),
+            failure_type,
+        })
     }
 }
 
 impl fmt::Display for UdsDtc {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}-{:02X}", self.obd_dtc(), self.failure_type())
+        write!(f, "{:06X}", self.0)
+    }
+}
+
+/// A UDS DTC in SAE J2012 form: the two-byte code OBD-II also reports, and a failure type
+/// byte (what kind of fault, such as a short to ground). Shown as `P0401-00`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct J2012Dtc {
+    /// The two-byte code.
+    pub dtc: Dtc,
+    /// The failure type byte.
+    pub failure_type: u8,
+}
+
+impl fmt::Display for J2012Dtc {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}-{:02X}", self.dtc, self.failure_type)
     }
 }
 
@@ -249,8 +312,8 @@ impl fmt::Display for UdsDtc {
 pub struct DtcCount {
     /// Which status bits the module supports.
     pub availability: DtcStatus,
-    /// The DTC format the module uses (0x01 is ISO 14229-1).
-    pub format: u8,
+    /// How the module encodes its DTCs.
+    pub format: DtcFormat,
     /// How many DTCs match the mask.
     pub count: u16,
 }
@@ -274,7 +337,7 @@ pub fn decode_dtc_count(reply: &[u8]) -> Result<DtcCount, Error> {
     };
     Ok(DtcCount {
         availability: DtcStatus(availability),
-        format,
+        format: DtcFormat::from(format),
         count: u16::from_be_bytes([high, low]),
     })
 }
