@@ -6,7 +6,7 @@
 use core::fmt;
 use core::slice;
 
-use crate::response::{Error, positive};
+use crate::response::{Error, positive, printable};
 
 /// Mode 01: current powertrain data.
 pub const CURRENT_DATA: u8 = 0x01;
@@ -255,11 +255,7 @@ fn info(reply: &[u8], pid: u8) -> Result<(usize, &[u8]), Error> {
 // Printable ASCII after trimming the trailing 0x00 padding.
 fn text(bytes: &[u8]) -> Result<&str, Error> {
     let end = bytes.iter().rposition(|&b| b != 0).map_or(0, |i| i + 1);
-    let text = &bytes[..end];
-    if !text.iter().all(|&b| b == b' ' || b.is_ascii_graphic()) {
-        return Err(Error::Malformed);
-    }
-    core::str::from_utf8(text).map_err(|_| Error::Malformed)
+    printable(&bytes[..end])
 }
 
 /// Decodes the mode 09 PID 00 reply: which vehicle information PIDs 01 to 20 are supported.

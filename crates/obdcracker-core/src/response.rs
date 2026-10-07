@@ -153,3 +153,11 @@ pub fn positive(request_sid: u8, reply: &[u8]) -> Result<&[u8], Error> {
     }
     Ok(rest)
 }
+
+// Printable ASCII (spaces allowed) as text, or Malformed.
+pub(crate) fn printable(bytes: &[u8]) -> Result<&str, Error> {
+    if !bytes.iter().all(|&b| b == b' ' || b.is_ascii_graphic()) {
+        return Err(Error::Malformed);
+    }
+    core::str::from_utf8(bytes).map_err(|_| Error::Malformed)
+}
