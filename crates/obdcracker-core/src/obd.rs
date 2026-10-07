@@ -289,7 +289,7 @@ pub fn decode_vin(reply: &[u8]) -> Result<&str, Error> {
 /// with its padding removed. A module may report several.
 pub fn decode_calids(reply: &[u8]) -> Result<Calids<'_>, Error> {
     let (count, data) = info(reply, 0x04)?;
-    if data.len() != count * CALID_LEN {
+    if count == 0 || data.len() != count * CALID_LEN {
         return Err(Error::Malformed);
     }
     Ok(Calids(data.as_chunks::<CALID_LEN>().0.iter()))
@@ -322,7 +322,7 @@ impl fmt::Display for Cvn {
 /// Decodes the mode 09 PID 06 reply: one CVN per calibration ID.
 pub fn decode_cvns(reply: &[u8]) -> Result<Cvns<'_>, Error> {
     let (count, data) = info(reply, 0x06)?;
-    if data.len() != count * CVN_LEN {
+    if count == 0 || data.len() != count * CVN_LEN {
         return Err(Error::Malformed);
     }
     Ok(Cvns(data.as_chunks::<CVN_LEN>().0.iter()))

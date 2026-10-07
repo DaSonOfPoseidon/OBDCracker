@@ -293,6 +293,18 @@ mod vehicle_info {
     }
 
     #[test]
+    fn calid_and_cvn_replies_carry_at_least_one_item() {
+        assert_eq!(
+            decode_calids(&reply(0x04, 0, &[])).err(),
+            Some(Error::Malformed)
+        );
+        assert_eq!(
+            decode_cvns(&reply(0x06, 0, &[])).err(),
+            Some(Error::Malformed)
+        );
+    }
+
+    #[test]
     fn decodes_the_ecu_name() {
         let mut data = padded("ECM", 4);
         data.push(b'-');
