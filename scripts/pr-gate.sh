@@ -43,7 +43,8 @@ git fetch -q origin
 # --no-renames lists a moved file at both its old and new paths, so both areas count.
 areas=$(git diff --name-only --no-renames "$base"...HEAD | areas_of)
 
-fixed=$(git log --format=%s "$base"..HEAD | grep -oiE 'fixes #[0-9]+' | grep -oE '[0-9]+' | sort -u | tr '\n' ',' | sed 's/,$//')
+# `fixes #N` as a whole word, so "prefixes #3" doesn't count.
+fixed=$(git log --format=%s "$base"..HEAD | grep -oiE '(^|[^[:alnum:]_])fixes #[0-9]+' | grep -oE '#[0-9]+' | tr -d '#' | sort -u | tr '\n' ',' | sed 's/,$//')
 milestone=$(echo "${1:-}" | tr -d 'Mm')
 case $milestone in
 '' | *[!0-9]*) [ -n "$1" ] && { echo "usage: $0 [M<n>]" >&2; exit 2; } ;;
