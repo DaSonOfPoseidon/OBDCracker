@@ -119,6 +119,9 @@ version = "0.1.0"
 [[package]]
 name = "obd-transport"
 version = "0.1.0"
+dependencies = [
+ "obd-safety",
+]
 
 [[package]]
 name = "obdcracker"
