@@ -24,9 +24,13 @@ from developers being careful:
 |---|---|---|
 | T0 Read | OBD-II modes 01/03/09, UDS 0x22, 0x19, 0x3E, 0x10 (default/extended session) | allowed |
 | T1 Clear DTCs | UDS 0x14, OBD-II mode 04 | planned |
-| T2 Coding | UDS 0x2E, 0x27, with a backup of the old value and a read-back to verify | planned |
-| T3 Flash | programming session, 0x31, 0x34/0x36/0x37, 0x11 | **hard-banned** until a separate design doc exists |
+| T2 Coding | UDS 0x2E, 0x27 | planned; needs a backup of the current value |
+| T3 Flash | programming session, 0x31, 0x34/0x36/0x37, 0x11 | **hard-banned** until a separate design doc exists; will need a full backup of the current image |
 
+- **Back up before every change.** A write (T1 and up) can't be approved without a `Backup` of what is on the module
+  right now: read from the same module, saved to disk and read back from disk. Every change is reversible from that
+  backup, and each restore path is tested end to end against the simulator (back up → write → restore → read back
+  equals the original) before it touches a car.
 - `--dry-run` prints the exact frames a command would send without opening a device.
 - Every frame sent or received in a real session is appended to an audit log.
 
