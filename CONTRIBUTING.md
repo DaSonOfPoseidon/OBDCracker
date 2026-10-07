@@ -49,7 +49,8 @@ scripts/pr-gate.sh M2   # the PR's milestone; leave it out if none
 ```
 
 It works out the areas from the files changed since `origin/main`, lists the blocking issues, and fails if there are
-any. Fix or close them first.
+any. Fix or close them first. An issue a commit on the branch fixes (`fixes #N` in the subject) doesn't count, since it
+closes when the PR merges.
 
 ## Commits
 
