@@ -1,10 +1,10 @@
-//! Adapter backends. Every send takes a request approved by `obd-safety`, so no backend can put
+//! Adapter backends. Every send takes a request approved by `obdcracker-safety`, so no backend can put
 //! anything on the bus that the policy hasn't allowed.
 
 use std::fmt;
 use std::time::Duration;
 
-use obd_safety::Approved;
+use obdcracker_safety::Approved;
 
 mod mock;
 

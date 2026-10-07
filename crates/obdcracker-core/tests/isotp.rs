@@ -1,4 +1,4 @@
-use obd_core::isotp::single_frame;
+use obdcracker_core::isotp::single_frame;
 
 #[test]
 fn prefixes_the_payload_with_its_length() {

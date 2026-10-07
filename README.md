@@ -11,8 +11,8 @@ and manufacturer diagnostics are added as vehicle profiles. The development test
 The main rule: **nothing this tool sends may brick or damage a car.** That rule comes from how the code is built, not
 from developers being careful:
 
-- Every request goes through `obd-safety`. Its `Policy` gives every OBD-II and UDS service a tier and returns an
-  `Approved` request. That type can only be created inside `obd-safety`, and every transport's `send` requires it.
+- Every request goes through `obdcracker-safety`. Its `Policy` gives every OBD-II and UDS service a tier and returns an
+  `Approved` request. That type can only be created inside `obdcracker-safety`, and every transport's `send` requires it.
 - Anything not on the allowlist is rejected, unknown services included.
 - The policy classifies each request by **protocol**, because service IDs mean different things in different protocols.
   In UDS `0x85` is ControlDTCSetting, but in KWP2000 `10 85` starts the programming (flashing) session. Every protocol
@@ -31,17 +31,17 @@ from developers being careful:
 - Every frame sent or received in a real session is appended to an audit log.
 
 New capabilities are developed test-first: golden-frame unit tests, then property tests and fuzzing of response parsers,
-then a simulated ECU (`obd-sim`), then a dry run on the car, and only then a live session.
+then a simulated ECU (`obdcracker-sim`), then a dry run on the car, and only then a live session.
 
 ## Layout
 
 | Crate | Role |
 |---|---|
-| `obd-core` | Pure `no_std` codecs: CAN, ISO-TP, VW TP2.0, OBD-II, UDS, KWP2000 |
-| `obd-safety` | Tiered policy and `Approved` |
-| `obd-transport` | `Transport` trait and adapter backends |
-| `obd-sim` | Simulated ECUs for tests |
-| `obdcracker` | CLI |
+| `obdcracker-core` | Pure `no_std` codecs: CAN, ISO-TP, VW TP2.0, OBD-II, UDS, KWP2000 |
+| `obdcracker-safety` | Tiered policy and `Approved` |
+| `obdcracker-transport` | `Transport` trait and adapter backends |
+| `obdcracker-sim` | Simulated ECUs for tests |
+| `obdcracker-cli` | The `obdcracker` command-line tool |
 
 ## Adapters
 

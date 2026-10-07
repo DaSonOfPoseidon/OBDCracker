@@ -1,5 +1,5 @@
 [package]
-name = "obdcracker"
+name = "obdcracker-cli"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -11,7 +11,11 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
-obd-core.workspace = true
-obd-safety.workspace = true
-obd-transport.workspace = true
+obdcracker-core.workspace = true
+obdcracker-safety.workspace = true
+obdcracker-transport.workspace = true
 clap = { version = "4.6.7", features = ["derive"] }
+
+[[bin]]
+name = "obdcracker"
+path = "src/main.rs"

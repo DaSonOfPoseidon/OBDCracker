@@ -11,10 +11,10 @@ repository = "https://github.com/DaSonOfPoseidon/OBDCracker"
 publish = false
 
 [workspace.dependencies]
-obd-core = { path = "crates/obd-core" }
-obd-safety = { path = "crates/obd-safety" }
-obd-transport = { path = "crates/obd-transport" }
-obd-sim = { path = "crates/obd-sim" }
+obdcracker-core = { path = "crates/obdcracker-core" }
+obdcracker-safety = { path = "crates/obdcracker-safety" }
+obdcracker-transport = { path = "crates/obdcracker-transport" }
+obdcracker-sim = { path = "crates/obdcracker-sim" }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

@@ -1,4 +1,4 @@
-use obd_safety::{Policy, Rejection, Target, Tier};
+use obdcracker_safety::{Policy, Rejection, Target, Tier};
 use proptest::prelude::*;
 
 const ENGINE: Target = Target::Physical(0x7E0);

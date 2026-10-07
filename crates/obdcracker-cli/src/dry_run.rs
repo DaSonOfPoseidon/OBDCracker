@@ -1,8 +1,8 @@
 use std::time::Duration;
 
-use obd_core::isotp::single_frame;
-use obd_safety::Approved;
-use obd_transport::{Error, Response, Transport};
+use obdcracker_core::isotp::single_frame;
+use obdcracker_safety::Approved;
+use obdcracker_transport::{Error, Response, Transport};
 
 use crate::audit::hex;
 

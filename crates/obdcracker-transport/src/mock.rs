@@ -1,7 +1,7 @@
 use std::collections::VecDeque;
 use std::time::Duration;
 
-use obd_safety::Approved;
+use obdcracker_safety::Approved;
 
 use crate::{Error, Response, Transport};
 

@@ -6,7 +6,7 @@
 //!
 //! ```compile_fail
 //! // Approved can't be built outside this crate, so nothing can skip the policy.
-//! let forged = obd_safety::Approved { target: obd_safety::Target::Physical(0x7E0), payload: vec![0x34], tier: obd_safety::Tier::Read };
+//! let forged = obdcracker_safety::Approved { target: obdcracker_safety::Target::Physical(0x7E0), payload: vec![0x34], tier: obdcracker_safety::Tier::Read };
 //! ```
 
 /// What a request could do to the car, from harmless to dangerous.

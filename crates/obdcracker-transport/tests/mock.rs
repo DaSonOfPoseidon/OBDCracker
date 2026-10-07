@@ -1,7 +1,7 @@
 use std::time::Duration;
 
-use obd_safety::{Policy, Target};
-use obd_transport::{Error, Mock, Response, Transport};
+use obdcracker_safety::{Policy, Target};
+use obdcracker_transport::{Error, Mock, Response, Transport};
 
 const WAIT: Duration = Duration::from_millis(100);
 

@@ -3,8 +3,8 @@ use std::io::{self, Write};
 use std::path::Path;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use obd_safety::Approved;
-use obd_transport::{Error, Response, Transport};
+use obdcracker_safety::Approved;
+use obdcracker_transport::{Error, Response, Transport};
 
 /// Wraps a transport and appends every request and reply to a JSON Lines file. Requests are logged
 /// before they are sent, so a send that crashes the tool is still on record.

@@ -210,35 +210,35 @@ dependencies = [
 ]
 
 [[package]]
-name = "obd-core"
+name = "obdcracker-cli"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "obdcracker-core",
+ "obdcracker-safety",
+ "obdcracker-transport",
+]
+
+[[package]]
+name = "obdcracker-core"
 version = "0.1.0"
 
 [[package]]
-name = "obd-safety"
+name = "obdcracker-safety"
 version = "0.1.0"
 dependencies = [
  "proptest",
 ]
 
 [[package]]
-name = "obd-sim"
+name = "obdcracker-sim"
 version = "0.1.0"
 
 [[package]]
-name = "obd-transport"
+name = "obdcracker-transport"
 version = "0.1.0"
 dependencies = [
- "obd-safety",
-]
-
-[[package]]
-name = "obdcracker"
-version = "0.1.0"
-dependencies = [
- "clap",
- "obd-core",
- "obd-safety",
- "obd-transport",
+ "obdcracker-safety",
 ]
 
 [[package]]

@@ -3,8 +3,8 @@ use std::process::ExitCode;
 use std::time::Duration;
 
 use clap::{Parser, Subcommand};
-use obd_safety::{Policy, Target};
-use obd_transport::{Error, Transport};
+use obdcracker_safety::{Policy, Target};
+use obdcracker_transport::{Error, Transport};
 
 mod audit;
 mod dry_run;
