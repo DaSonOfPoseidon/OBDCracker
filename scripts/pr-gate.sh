@@ -55,11 +55,13 @@ case $milestone in
 esac
 echo "Areas touched: $(echo $areas | tr ' ' ',')${1:+; milestone M$milestone}${fixed:+; fixed here: #$(echo "$fixed" | sed "s/,/, #/g")}"
 
-open=$(gh issue list -R "$repo" --state open --limit 500 --json number,title,labels --jq "
+# Every open issue, page by page (the issues API also lists PRs, which are skipped).
+open=$(gh api --paginate "repos/$repo/issues?state=open&per_page=100" --jq "
 	(\"$(echo $areas)\" | split(\" \") | map(\"area:\" + .)) as \$areas
 	| ${milestone:-0} as \$m
 	| [${fixed}] as \$fixed
 	| .[]
+	| select(.pull_request | not)
 	| select(.number | IN(\$fixed[]) | not)
 	| ([.labels[].name] ) as \$names
 	| ([\$names[] | select(startswith(\"milestone:M\")) | ltrimstr(\"milestone:M\") | tonumber] | min) as \$due
