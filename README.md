@@ -1,7 +1,8 @@
 # OBDCracker
 
-A laptop tool that talks to a car's diagnostic bus through the OBD2 port using an off-the-shelf USB adapter.
-It runs on macOS, Windows and Linux, and its development testbed is a 2014 Audi A7 3.0 TDI (C7).
+A laptop tool that talks to a car's diagnostic bus through the OBD2 port using an off-the-shelf adapter.
+It works with any adapter, any OS (macOS, Windows, Linux) and any manufacturer. OBD-II is the baseline every car shares,
+and manufacturer diagnostics are added as vehicle profiles. The development testbed is a 2014 Audi A7 3.0 TDI (C7).
 
 > **Status:** early scaffolding. Nothing in this repo talks to a car yet.
 
@@ -13,6 +14,10 @@ from developers being careful:
 - Every request goes through `obd-safety`. Its `Policy` gives every OBD-II and UDS service a tier and returns an
   `Approved` request. That type can only be created inside `obd-safety`, and every transport's `send` requires it.
 - Anything not on the allowlist is rejected, unknown services included.
+- The policy classifies each request by **protocol**, because service IDs mean different things in different protocols.
+  In UDS `0x85` is ControlDTCSetting, but in KWP2000 `10 85` starts the programming (flashing) session. Every protocol
+  has its own allowlist and banned list.
+- A vehicle profile can only narrow what the policy allows, never widen it.
 - Each tier above read-only needs a cargo feature, an explicit runtime unlock, and passing preconditions:
 
 | Tier | Allows | Status |
@@ -32,7 +37,7 @@ then a simulated ECU (`obd-sim`), then a dry run on the car, and only then a liv
 
 | Crate | Role |
 |---|---|
-| `obd-core` | Pure `no_std` codecs: CAN, ISO-TP, OBD-II, UDS |
+| `obd-core` | Pure `no_std` codecs: CAN, ISO-TP, VW TP2.0, OBD-II, UDS, KWP2000 |
 | `obd-safety` | Tiered policy and `Approved` |
 | `obd-transport` | `Transport` trait and adapter backends |
 | `obd-sim` | Simulated ECUs for tests |
@@ -40,13 +45,48 @@ then a simulated ECU (`obd-sim`), then a dry run on the car, and only then a liv
 
 ## Adapters
 
-| Backend | Hardware | OS | Status |
+An adapter backend has two parts: the **link** that carries bytes to the adapter, and the **driver** that speaks the
+adapter's command set. The ELM driver takes any two-way byte stream, so serial, TCP and BLE share one tested driver.
+
+| Driver | Hardware | Links | OS | Status |
+|---|---|---|---|---|
+| `mock` | none (tests) | — | all | done |
+| `elm` | ELM327 / STN (e.g. OBDLink EX, MX+, CX) | USB serial, Wi-Fi (TCP), Bluetooth LE, Bluetooth Classic | all | planned (USB serial first, then TCP) |
+| `gsusb` | CANable / candleLight (USB-C) and an OBD2-to-DB9 cable | USB | all | planned, with listen-only mode |
+| `socketcan` | any SocketCAN interface | kernel | Linux | planned |
+| `j2534` | J2534 pass-thru (Tactrix OpenPort, Toyota Mini VCI, VAS 5054A clones) | vendor DLL | Windows | later |
+| `dpdu` | ISO 22900 D-PDU API (what ODIS uses) | vendor DLL | Windows | maybe |
+
+Leaving a wireless adapter plugged in drains the battery and lets anyone in range connect, so the CLI warns about it, and
+the audit log records which link a session used.
+
+## Protocols
+
+| Layer | Protocol | Used by | Status |
 |---|---|---|---|
-| `mock` | none (tests) | all | in progress |
-| `elm` | ELM327 / STN (e.g. OBDLink EX) over USB serial | all | planned |
-| `gsusb` | CANable / candleLight (USB-C) and an OBD2-to-DB9 cable | all | planned |
-| `socketcan` | any SocketCAN interface | Linux | planned |
-| `j2534` | J2534 pass-thru devices | Windows | planned |
+| Physical | CAN 500 kbit/s (OBD pins 6/14), 11- and 29-bit IDs | every US car since 2008 | planned (11-bit first) |
+| Physical | K-line (pin 7): ISO 9141-2, ISO 14230, VW KW1281 | pre-CAN cars, a few older modules | if a profile needs it |
+| Physical | DoIP (ISO 13400, Ethernet on pins 3/11/12/13) | newer cars (around 2020+) | not yet; the transport trait leaves room |
+| Physical | CAN FD | newer cars | not yet |
+| Transport | ISO-TP (ISO 15765-2), normal and extended addressing | almost everyone; Toyota uses extended addressing | in progress (single frames done) |
+| Transport | VW TP2.0 | older VAG module designs | after the A7 module scan |
+| Diagnostic | OBD-II (SAE J1979) | every car | planned (M1) |
+| Diagnostic | UDS (ISO 14229) | most modules from about 2010 | planned (M1) |
+| Diagnostic | KWP2000 (ISO 14230-3) over CAN | VAG TP2.0 modules, Toyota enhanced diagnostics before about 2018 | planned, with its own allowlist |
+
+The OBD port only reaches what the car's gateway passes on, which is the diagnostic bus. Internal buses (body CAN, FlexRay,
+MOST, LIN) need a direct tap. If that is ever supported, it will run in listen-only mode, where the adapter can't transmit
+or acknowledge frames.
+
+## Vehicle profiles
+
+A profile is data, not code: module addresses, addressing mode, protocol per module, the identifiers to read and how to
+decode them. Without a profile the tool falls back to generic OBD-II.
+
+| Profile | Expected setup (confirmed by a read-only module scan before use) |
+|---|---|
+| 2014 Audi A7 3.0 TDI (C7) | CAN 500k behind the J533 gateway; mostly UDS on ISO-TP with 11-bit IDs, maybe some TP2.0/KWP2000 modules; engine 0x7E0/0x7E8 |
+| 2014 Toyota Camry (XV50) | CAN 500k; OBD-II on 0x7DF/0x7E0+; enhanced diagnostics are KWP2000-style (e.g. 0x21 read by local ID) on ISO-TP; body modules sit behind 0x750 with an extended-address byte |
 
 ## Development
 
