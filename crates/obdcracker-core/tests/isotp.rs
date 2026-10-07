@@ -42,6 +42,33 @@ mod parse {
     }
 
     #[test]
+    fn first_frame_escape_carries_a_32_bit_length_on_classic_can() {
+        // ISO 15765-2:2016: FF_DL 0 means the length follows in 4 bytes, leaving 2 data bytes
+        assert_eq!(
+            parse(&[0x10, 0x00, 0x00, 0x00, 0x13, 0x88, 0xAA, 0xBB]),
+            Ok(Frame::First {
+                len: 5000,
+                data: &[0xAA, 0xBB]
+            })
+        );
+        assert_eq!(
+            Frame::parse(
+                &[0x40, 0x10, 0x00, 0x00, 0x00, 0x13, 0x88, 0xAA],
+                Addressing::Extended(0x40)
+            ),
+            Ok(Frame::First {
+                len: 5000,
+                data: &[0xAA]
+            })
+        );
+        // The escape is only for lengths over 4095
+        assert_eq!(
+            parse(&[0x10, 0x00, 0x00, 0x00, 0x0F, 0xFF, 0, 0]),
+            Err(Error::BadLength)
+        );
+    }
+
+    #[test]
     fn consecutive_frame_carries_its_sequence_number() {
         assert_eq!(
             parse(&[0x21, 0x47, 0x50, 0x30, 0x30, 0x52, 0x35, 0x35]),
@@ -200,6 +227,18 @@ mod segment {
     }
 
     #[test]
+    fn payloads_over_4095_bytes_use_the_32_bit_first_frame() {
+        let payload: Vec<u8> = (0..5000u16).map(|i| i.to_le_bytes()[0]).collect();
+        let mut seg = Segmenter::new(&payload, Addressing::Normal).unwrap();
+        assert_eq!(
+            sent(seg.step()),
+            [0x10, 0x00, 0x00, 0x00, 0x13, 0x88, 0x00, 0x01]
+        );
+        seg.flow_control(CTS).unwrap();
+        assert_eq!(sent(seg.step()), [0x21, 2, 3, 4, 5, 6, 7, 8]);
+    }
+
+    #[test]
     fn block_size_makes_it_wait_again() {
         let payload: Vec<u8> = (0..6 + 7 * 3).collect();
         let mut seg = Segmenter::new(&payload, Addressing::Normal).unwrap();
@@ -285,11 +324,7 @@ mod segment {
             Segmenter::new(&[], Addressing::Normal).err(),
             Some(Error::BadLength)
         );
-        assert_eq!(
-            Segmenter::new(&[0; 4096], Addressing::Normal).err(),
-            Some(Error::BadLength)
-        );
-        assert!(Segmenter::new(&[0; 4095], Addressing::Normal).is_ok());
+        assert!(Segmenter::new(&[0; 4096], Addressing::Normal).is_ok());
     }
 
     #[test]
@@ -460,15 +495,15 @@ mod reassemble {
     }
 
     #[test]
-    fn round_trips_the_longest_payload() {
-        // 585 consecutive frames in one block of unlimited size
-        let payload: Vec<u8> = (0..4095u16).map(|i| (i % 251).to_le_bytes()[0]).collect();
+    fn round_trips_a_payload_longer_than_a_12_bit_length() {
+        // Over 700 consecutive frames in one block of unlimited size
+        let payload: Vec<u8> = (0..5000u16).map(|i| (i % 251).to_le_bytes()[0]).collect();
         assert_eq!(round_trip(&payload, Addressing::Normal), payload);
     }
 
     fn round_trip(payload: &[u8], addressing: Addressing) -> Vec<u8> {
         let mut seg = Segmenter::new(payload, addressing).unwrap();
-        let mut buf = [0; 4095];
+        let mut buf = vec![0; 8192];
         let mut rx = Reassembler::new(&mut buf, addressing);
         let mut got = None;
         loop {

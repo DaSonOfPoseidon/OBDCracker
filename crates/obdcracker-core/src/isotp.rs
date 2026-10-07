@@ -6,8 +6,9 @@ use core::time::Duration;
 /// The most bytes a classic CAN frame carries.
 pub const CAN_DLC: usize = 8;
 
-/// The longest payload a classic-CAN ISO-TP transfer can carry (a 12-bit first-frame length).
-pub const MAX_PAYLOAD: usize = 4095;
+/// The longest payload a first frame's 12-bit length can give. Longer payloads use the 32-bit
+/// length escape (ISO 15765-2:2016), which leaves fewer data bytes in the first frame.
+pub const MAX_SHORT_PAYLOAD: usize = 4095;
 
 /// How a module is addressed inside the CAN frame.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -112,7 +113,7 @@ pub enum Frame<'a> {
     /// The start of a multi-frame payload.
     First {
         /// The length of the whole payload.
-        len: u16,
+        len: u32,
         /// The first bytes of the payload.
         data: &'a [u8],
     },
@@ -137,7 +138,7 @@ pub enum Error {
     WrongAddress(u8),
     /// A length field is zero, out of range, or longer than the data.
     BadLength,
-    /// The frame type or flow status is reserved, or needs CAN FD.
+    /// The frame type or flow status is reserved.
     Unsupported,
     /// The receiver refused the transfer because it's too long for its buffer.
     Overflow,
@@ -153,7 +154,7 @@ impl fmt::Display for Error {
             Self::BadFrameSize => f.write_str("ISO-TP frame is empty or longer than 8 bytes"),
             Self::WrongAddress(addr) => write!(f, "ISO-TP frame is for address {addr:02X}"),
             Self::BadLength => f.write_str("ISO-TP length field doesn't match the data"),
-            Self::Unsupported => f.write_str("ISO-TP frame type is reserved or needs CAN FD"),
+            Self::Unsupported => f.write_str("ISO-TP frame type or flow status is reserved"),
             Self::Overflow => f.write_str("ISO-TP receiver's buffer is too small for the transfer"),
             Self::UnexpectedFrame => f.write_str("ISO-TP frame doesn't fit the transfer"),
             Self::WrongSequence => f.write_str("ISO-TP consecutive frame arrived out of order"),
@@ -191,14 +192,23 @@ impl<'a> Frame<'a> {
             }
             0x1 => {
                 let (&len_low, data) = rest.split_first().ok_or(Error::BadLength)?;
-                let len = u16::from(low) << 8 | u16::from(len_low);
-                if len == 0 {
-                    // The escape for lengths over 4095, which classic CAN can't carry
-                    return Err(Error::Unsupported);
-                }
-                if usize::from(len) <= addressing.max_single_frame()
-                    || data.len() != CAN_DLC - 2 - addressing.header_len()
-                {
+                let short = u16::from(low) << 8 | u16::from(len_low);
+                let (len, data, header) = if short == 0 {
+                    // The escape: a 32-bit length follows, for payloads over 4095 bytes
+                    let [a, b, c, d, data @ ..] = data else {
+                        return Err(Error::BadLength);
+                    };
+                    let len = u32::from_be_bytes([*a, *b, *c, *d]);
+                    if len <= 4095 {
+                        return Err(Error::BadLength);
+                    }
+                    (len, data, 6)
+                } else {
+                    (u32::from(short), data, 2)
+                };
+                let too_short =
+                    usize::try_from(len).is_ok_and(|len| len <= addressing.max_single_frame());
+                if too_short || data.len() != CAN_DLC - header - addressing.header_len() {
                     return Err(Error::BadLength);
                 }
                 Ok(Self::First { len, data })
@@ -282,9 +292,9 @@ pub struct Segmenter<'a> {
 }
 
 impl<'a> Segmenter<'a> {
-    /// Starts a transfer of 1 to 4095 bytes.
+    /// Starts a transfer of at least 1 byte and at most `u32::MAX` bytes.
     pub fn new(payload: &'a [u8], addressing: Addressing) -> Result<Self, Error> {
-        if payload.is_empty() || payload.len() > MAX_PAYLOAD {
+        if payload.is_empty() || u32::try_from(payload.len()).is_err() {
             return Err(Error::BadLength);
         }
         Ok(Self {
@@ -341,9 +351,17 @@ impl<'a> Segmenter<'a> {
             frame.push(self.payload);
             self.state = SendState::Done;
         } else {
-            let [low, high, ..] = len.to_le_bytes();
-            let chunk = CAN_DLC - 2 - self.addressing.header_len();
-            frame.push(&[0x10 | high, low]);
+            let chunk = if len <= MAX_SHORT_PAYLOAD {
+                let [low, high, ..] = len.to_le_bytes();
+                frame.push(&[0x10 | high, low]);
+                CAN_DLC - 2 - self.addressing.header_len()
+            } else {
+                // new() checked the length fits 32 bits
+                let len = u32::try_from(len).unwrap_or(u32::MAX);
+                frame.push(&[0x10, 0x00]);
+                frame.push(&len.to_be_bytes());
+                CAN_DLC - 6 - self.addressing.header_len()
+            };
             frame.push(&self.payload[..chunk]);
             self.offset = chunk;
             self.state = SendState::Waiting;
@@ -459,7 +477,7 @@ impl<'b> Reassembler<'b> {
             }
             Frame::First { len, data } => {
                 self.state = ReceiveState::Idle;
-                let len = usize::from(len);
+                let len = usize::try_from(len).map_err(|_| Error::Overflow)?;
                 if len > self.buf.len() {
                     return Err(Error::Overflow);
                 }

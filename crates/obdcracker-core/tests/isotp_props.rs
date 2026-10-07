@@ -35,13 +35,13 @@ proptest! {
 
     #[test]
     fn segment_then_reassemble_is_lossless(
-        payload in prop::collection::vec(any::<u8>(), 1..=4095),
+        payload in prop::collection::vec(any::<u8>(), 1..=6000),
         block_size in any::<u8>(),
         addressing in any_addressing(),
     ) {
         let fc = FlowControl { status: FlowStatus::ContinueToSend, block_size, st_min: Duration::ZERO };
         let mut seg = Segmenter::new(&payload, addressing).unwrap();
-        let mut buf = vec![0; 4095];
+        let mut buf = vec![0; 6000];
         let mut rx = Reassembler::new(&mut buf, addressing).with_flow_control(fc);
         let mut got = None;
         loop {
