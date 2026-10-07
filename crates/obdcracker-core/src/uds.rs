@@ -127,6 +127,9 @@ impl<'a> Iterator for DidValues<'a, '_> {
 }
 
 /// Identification data as text, without the trailing spaces or 0x00 bytes modules pad it with.
+///
+/// Data that's nothing but padding gives an empty string: the module has no value set for that
+/// identifier (an unprogrammed serial number, say), which is a valid state, not a bad reply.
 pub fn decode_text(data: &[u8]) -> Result<&str, Error> {
     let end = data
         .iter()

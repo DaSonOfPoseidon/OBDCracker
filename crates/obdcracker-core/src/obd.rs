@@ -97,7 +97,8 @@ pub enum Value<'a> {
     },
     /// A supported-PID bitmap (PIDs 0x00, 0x20, 0x40, …).
     Supported(SupportedPids),
-    /// A PID this crate doesn't decode yet, with the bytes left in the reply.
+    /// A PID this crate doesn't decode yet, with every byte left in the reply. Its length isn't
+    /// known, so if the request asked for several PIDs, these bytes also hold the later ones.
     Raw(&'a [u8]),
 }
 
