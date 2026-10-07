@@ -29,7 +29,7 @@ fn dry_run_prints_the_frame_and_audits_it() {
     let lines: Vec<_> = audit.lines().collect();
     assert_eq!(lines.len(), 1);
     assert!(
-        lines[0].contains(r#""dir":"tx","id":"7DF","payload":"09 02","dry_run":true"#),
+        lines[0].contains(r#""dir":"tx","id":"7DF","payload":"09 02","link":"dry-run""#),
         "{}",
         lines[0]
     );

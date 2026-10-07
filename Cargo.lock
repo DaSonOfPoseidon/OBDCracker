@@ -214,7 +214,6 @@ name = "obdcracker-cli"
 version = "0.1.0"
 dependencies = [
  "clap",
- "obdcracker-core",
  "obdcracker-safety",
  "obdcracker-transport",
 ]
@@ -238,6 +237,7 @@ version = "0.1.0"
 name = "obdcracker-transport"
 version = "0.1.0"
 dependencies = [
+ "obdcracker-core",
  "obdcracker-safety",
 ]
 

@@ -6,8 +6,12 @@ use std::time::Duration;
 
 use obdcracker_safety::Approved;
 
+mod audit;
+mod dry_run;
 mod mock;
 
+pub use audit::Audited;
+pub use dry_run::DryRun;
 pub use mock::Mock;
 
 /// A reply from one module: the CAN ID it came from and its reassembled payload.
@@ -39,4 +43,14 @@ impl std::error::Error for Error {}
 pub trait Transport {
     fn send(&mut self, request: &Approved) -> Result<(), Error>;
     fn recv(&mut self, timeout: Duration) -> Result<Response, Error>;
+}
+
+/// Bytes as space-separated upper-case hex, the way CAN tools print them: `02 09 02`.
+#[must_use]
+pub fn hex(bytes: &[u8]) -> String {
+    bytes
+        .iter()
+        .map(|b| format!("{b:02X}"))
+        .collect::<Vec<_>>()
+        .join(" ")
 }

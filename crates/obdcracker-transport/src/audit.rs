@@ -4,24 +4,27 @@ use std::path::Path;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use obdcracker_safety::Approved;
-use obdcracker_transport::{Error, Response, Transport};
+
+use crate::{Error, Response, Transport, hex};
 
 /// Wraps a transport and appends every request and reply to a JSON Lines file. Requests are logged
-/// before they are sent, so a send that crashes the tool is still on record.
+/// before they are sent, so a send that crashes the program is still on record.
 #[derive(Debug)]
 pub struct Audited<T> {
     inner: T,
     log: File,
-    dry_run: bool,
+    link: String,
 }
 
 impl<T: Transport> Audited<T> {
-    pub fn open(path: &Path, inner: T, dry_run: bool) -> io::Result<Self> {
+    /// Opens `path` for appending. `link` names how the adapter is connected (e.g. `usb-serial`,
+    /// `tcp`, `dry-run`) and is stored with every entry.
+    pub fn open(path: &Path, inner: T, link: impl Into<String>) -> io::Result<Self> {
         let log = OpenOptions::new().create(true).append(true).open(path)?;
         Ok(Self {
             inner,
             log,
-            dry_run,
+            link: link.into(),
         })
     }
 
@@ -31,9 +34,9 @@ impl<T: Transport> Audited<T> {
             .map_or(0, |t| t.as_millis());
         writeln!(
             self.log,
-            r#"{{"ts_ms":{ts_ms},"dir":"{dir}","id":"{id:03X}","payload":"{}","dry_run":{}}}"#,
+            r#"{{"ts_ms":{ts_ms},"dir":"{dir}","id":"{id:03X}","payload":"{}","link":"{}"}}"#,
             hex(payload),
-            self.dry_run
+            self.link
         )
         .map_err(|e| Error::Adapter(format!("audit log: {e}")))
     }
@@ -50,12 +53,4 @@ impl<T: Transport> Transport for Audited<T> {
         self.record("rx", response.source, &response.payload)?;
         Ok(response)
     }
-}
-
-pub fn hex(bytes: &[u8]) -> String {
-    bytes
-        .iter()
-        .map(|b| format!("{b:02X}"))
-        .collect::<Vec<_>>()
-        .join(" ")
 }

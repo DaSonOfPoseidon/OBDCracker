@@ -1,25 +1,39 @@
+use std::io::Write;
 use std::time::Duration;
 
 use obdcracker_core::isotp::single_frame;
 use obdcracker_safety::Approved;
-use obdcracker_transport::{Error, Response, Transport};
 
-use crate::audit::hex;
+use crate::{Error, Response, Transport, hex};
 
-/// Prints the CAN frame each request would put on the bus and never opens a device.
+/// Writes the CAN frame each request would put on the bus, one per line, and never opens a device.
+/// Every receive times out.
 #[derive(Debug)]
-pub struct DryRun;
+pub struct DryRun<W> {
+    out: W,
+}
 
-impl Transport for DryRun {
+impl<W: Write> DryRun<W> {
+    pub fn new(out: W) -> Self {
+        Self { out }
+    }
+
+    pub fn into_inner(self) -> W {
+        self.out
+    }
+}
+
+impl<W: Write> Transport for DryRun<W> {
     fn send(&mut self, request: &Approved) -> Result<(), Error> {
         let frame = single_frame(request.payload())
             .ok_or_else(|| Error::Adapter("multi-frame requests aren't supported yet".into()))?;
-        println!(
+        writeln!(
+            self.out,
             "{:03X} {}",
             request.target().can_id(),
             hex(frame.as_bytes())
-        );
-        Ok(())
+        )
+        .map_err(|e| Error::Adapter(format!("dry run output: {e}")))
     }
 
     fn recv(&mut self, _timeout: Duration) -> Result<Response, Error> {

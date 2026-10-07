@@ -4,13 +4,7 @@ use std::time::Duration;
 
 use clap::{Parser, Subcommand};
 use obdcracker_safety::{Policy, Target};
-use obdcracker_transport::{Error, Transport};
-
-mod audit;
-mod dry_run;
-
-use audit::{Audited, hex};
-use dry_run::DryRun;
+use obdcracker_transport::{Audited, DryRun, Error, Transport, hex};
 
 const RESPONSE_TIMEOUT: Duration = Duration::from_secs(1);
 
@@ -44,13 +38,14 @@ fn main() -> ExitCode {
         eprintln!("no adapter backend is available yet; run with --dry-run");
         return ExitCode::from(2);
     }
-    let mut transport = match Audited::open(&cli.audit_log, DryRun, cli.dry_run) {
-        Ok(transport) => transport,
-        Err(e) => {
-            eprintln!("can't open audit log {}: {e}", cli.audit_log.display());
-            return ExitCode::FAILURE;
-        }
-    };
+    let mut transport =
+        match Audited::open(&cli.audit_log, DryRun::new(std::io::stdout()), "dry-run") {
+            Ok(transport) => transport,
+            Err(e) => {
+                eprintln!("can't open audit log {}: {e}", cli.audit_log.display());
+                return ExitCode::FAILURE;
+            }
+        };
     let (target, payload) = match cli.command {
         Command::Vin => (Target::ObdFunctional, [0x09, 0x02]),
     };
