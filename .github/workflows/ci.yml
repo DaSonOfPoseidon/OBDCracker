@@ -18,6 +18,8 @@ jobs:
       - run: cargo fmt --check
       - run: cargo clippy --all-targets --all-features -- -D warnings
       - run: cargo test --all-features
+      # obdcracker-core must stay no_std so dongle firmware can reuse it
+      - run: cargo build -p obdcracker-core --target thumbv7em-none-eabihf
       - uses: EmbarkStudios/cargo-deny-action@v2
 
   build:

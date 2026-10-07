@@ -50,6 +50,7 @@ reference it in the commit (`fixes #N`).
 
 ```sh
 cargo fmt --check && cargo clippy --all-targets --all-features -- -D warnings && cargo test --all-features
+cargo build -p obdcracker-core --target thumbv7em-none-eabihf  # obdcracker-core must stay no_std
 ```
 
 New capabilities are written test-first. See the safety model in `README.md` before adding anything that sends a request.
