@@ -93,6 +93,12 @@ mod current_data {
     }
 
     #[test]
+    fn unknown_pid_without_data_is_truncated() {
+        let got: Vec<_> = decode_current_data(&[0x41, 0x5C]).unwrap().collect();
+        assert_eq!(got, [Err(Error::TooShort)]);
+    }
+
+    #[test]
     fn refusal_truncation_and_empty_replies_are_errors() {
         assert_eq!(
             decode_current_data(&[0x7F, 0x01, 0x12]).err(),

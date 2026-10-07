@@ -160,6 +160,10 @@ impl<'a> Iterator for Readings<'a> {
         let (&pid, data) = self.rest.split_first()?;
         if !is_known(pid) {
             self.rest = &[];
+            // Every PID has at least one data byte
+            if data.is_empty() {
+                return Some(Err(Error::TooShort));
+            }
             return Some(Ok(Reading {
                 pid,
                 value: Value::Raw(data),
