@@ -11,6 +11,7 @@ repository = "https://github.com/DaSonOfPoseidon/OBDCracker"
 publish = false
 
 [workspace.dependencies]
+obdcracker = { path = "crates/obdcracker" }
 obdcracker-core = { path = "crates/obdcracker-core" }
 obdcracker-safety = { path = "crates/obdcracker-safety" }
 obdcracker-transport = { path = "crates/obdcracker-transport" }

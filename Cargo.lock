@@ -210,6 +210,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "obdcracker"
+version = "0.1.0"
+dependencies = [
+ "obdcracker-core",
+ "obdcracker-safety",
+ "obdcracker-sim",
+ "obdcracker-transport",
+]
+
+[[package]]
 name = "obdcracker-cli"
 version = "0.1.0"
 dependencies = [

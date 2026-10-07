@@ -1,0 +1,22 @@
+[package]
+name = "obdcracker"
+description = "Safe-by-construction OBD-II, UDS and KWP2000 communication for any adapter, OS and manufacturer"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[features]
+# Simulated ECUs, for testing code built on this crate without a car
+sim = ["dep:obdcracker-sim"]
+
+[dependencies]
+obdcracker-core.workspace = true
+obdcracker-safety.workspace = true
+obdcracker-transport.workspace = true
+obdcracker-sim = { workspace = true, optional = true }
+
+[lints]
+workspace = true
