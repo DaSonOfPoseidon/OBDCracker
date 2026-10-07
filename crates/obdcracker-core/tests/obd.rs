@@ -106,3 +106,53 @@ mod current_data {
         assert_eq!(decode_current_data(&[0x41]).err(), Some(Error::TooShort));
     }
 }
+
+mod stored_dtcs {
+    use obdcracker_core::obd::{Dtc, decode_stored_dtcs, stored_dtcs};
+    use obdcracker_core::response::Error;
+
+    fn codes(reply: &[u8]) -> Vec<String> {
+        decode_stored_dtcs(reply)
+            .unwrap()
+            .map(|dtc| dtc.to_string())
+            .collect()
+    }
+
+    #[test]
+    fn builds_the_request() {
+        assert_eq!(stored_dtcs(), [0x03]);
+    }
+
+    #[test]
+    fn decodes_each_code_after_the_count() {
+        // P0401: EGR flow insufficient; P0113: intake air temperature sensor high
+        assert_eq!(
+            codes(&[0x43, 0x02, 0x04, 0x01, 0x01, 0x13]),
+            ["P0401", "P0113"]
+        );
+        assert_eq!(codes(&[0x43, 0x00]), Vec::<String>::new());
+    }
+
+    #[test]
+    fn top_bits_pick_the_system_and_the_first_digit() {
+        assert_eq!(Dtc::new(0x1234).to_string(), "P1234");
+        assert_eq!(Dtc::new(0x4567).to_string(), "C0567");
+        assert_eq!(Dtc::new(0x9ABC).to_string(), "B1ABC");
+        assert_eq!(Dtc::new(0xC123).to_string(), "U0123");
+        assert_eq!(Dtc::new(0xFFFF).to_string(), "U3FFF");
+        assert_eq!(Dtc::new(0x0401).code(), 0x0401);
+    }
+
+    #[test]
+    fn count_must_match_the_codes() {
+        assert_eq!(
+            decode_stored_dtcs(&[0x43, 0x02, 0x04, 0x01]).err(),
+            Some(Error::Malformed)
+        );
+        assert_eq!(decode_stored_dtcs(&[0x43]).err(), Some(Error::TooShort));
+        assert_eq!(
+            decode_stored_dtcs(&[0x41, 0x00]).err(),
+            Some(Error::WrongService(0x41))
+        );
+    }
+}

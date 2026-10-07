@@ -4,11 +4,15 @@
 //! before they can be sent. Each decoder takes one module's reassembled reply.
 
 use core::fmt;
+use core::slice;
 
 use crate::response::{Error, positive};
 
 /// Mode 01: current powertrain data.
 pub const CURRENT_DATA: u8 = 0x01;
+
+/// Mode 03: stored (confirmed) emissions DTCs.
+pub const STORED_DTCS: u8 = 0x03;
 
 /// A mode 01 request for one PID.
 #[must_use]
@@ -164,5 +168,60 @@ impl<'a> Iterator for Readings<'a> {
         };
         self.rest = &data[len..];
         Some(Ok(Reading { pid, value }))
+    }
+}
+
+/// A mode 03 request for every stored emissions DTC.
+#[must_use]
+pub fn stored_dtcs() -> [u8; 1] {
+    [STORED_DTCS]
+}
+
+/// A two-byte diagnostic trouble code, shown in the SAE J2012 form such as `P0401`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct Dtc(u16);
+
+impl Dtc {
+    /// Wraps the code's two bytes, as sent on the bus.
+    #[must_use]
+    pub fn new(code: u16) -> Self {
+        Self(code)
+    }
+
+    /// The code's two bytes.
+    #[must_use]
+    pub fn code(self) -> u16 {
+        self.0
+    }
+}
+
+impl fmt::Display for Dtc {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // The top two bits pick the system: powertrain, chassis, body or network.
+        let system = ['P', 'C', 'B', 'U'][usize::from(self.0 >> 14)];
+        write!(f, "{system}{:04X}", self.0 & 0x3FFF)
+    }
+}
+
+/// Decodes a mode 03 reply: a count byte, then that many two-byte codes.
+pub fn decode_stored_dtcs(reply: &[u8]) -> Result<Dtcs<'_>, Error> {
+    let (&count, codes) = positive(STORED_DTCS, reply)?
+        .split_first()
+        .ok_or(Error::TooShort)?;
+    if codes.len() != usize::from(count) * 2 {
+        return Err(Error::Malformed);
+    }
+    Ok(Dtcs(codes.as_chunks::<2>().0.iter()))
+}
+
+/// The codes in a mode 03 reply.
+#[derive(Debug, Clone)]
+pub struct Dtcs<'a>(slice::Iter<'a, [u8; 2]>);
+
+impl Iterator for Dtcs<'_> {
+    type Item = Dtc;
+
+    fn next(&mut self) -> Option<Dtc> {
+        self.0.next().map(|&pair| Dtc(u16::from_be_bytes(pair)))
     }
 }
