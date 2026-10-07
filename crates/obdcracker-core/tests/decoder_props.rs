@@ -51,8 +51,10 @@ proptest! {
         }
         let _ = uds::decode_text(&reply);
         let _ = uds::decode_dtc_count(&reply);
-        if let Ok((_, records)) = uds::decode_dtcs(&reply) {
-            records.for_each(|record| drop(record.dtc.to_string()));
+        for decode in [uds::decode_dtcs_by_status_mask, uds::decode_supported_dtcs] {
+            if let Ok((_, records)) = decode(&reply) {
+                records.for_each(|record| drop(record.dtc.to_string()));
+            }
         }
         if let Ok(count) = uds::decode_dtc_count(&reply) {
             let _ = uds::UdsDtc::new(0x04_01_00).j2012(count.format);

@@ -125,8 +125,9 @@ mod read_dtc_information {
     use obdcracker_core::obd::Dtc;
     use obdcracker_core::response::Error;
     use obdcracker_core::uds::{
-        DtcCount, DtcFormat, DtcRecord, DtcStatus, J2012Dtc, UdsDtc, decode_dtc_count, decode_dtcs,
-        dtc_count_by_status_mask, dtcs_by_status_mask, supported_dtcs,
+        DtcCount, DtcFormat, DtcRecord, DtcStatus, J2012Dtc, UdsDtc, decode_dtc_count,
+        decode_dtcs_by_status_mask, decode_supported_dtcs, dtc_count_by_status_mask,
+        dtcs_by_status_mask, supported_dtcs,
     };
 
     #[test]
@@ -158,7 +159,7 @@ mod read_dtc_information {
         let reply = [
             0x59, 0x02, 0xFF, 0x04, 0x01, 0x00, 0x88, 0xC1, 0x00, 0x00, 0x24,
         ];
-        let (availability, records) = decode_dtcs(&reply).unwrap();
+        let (availability, records) = decode_dtcs_by_status_mask(&reply).unwrap();
         assert_eq!(availability, DtcStatus(0xFF));
         let records: Vec<DtcRecord> = records.collect();
         assert_eq!(records.len(), 2);
@@ -208,21 +209,40 @@ mod read_dtc_information {
 
     #[test]
     fn decodes_supported_dtcs_in_the_same_record_format() {
-        let (_, records) = decode_dtcs(&[0x59, 0x0A, 0x7F, 0x04, 0x01, 0x00, 0x00]).unwrap();
+        let (_, records) =
+            decode_supported_dtcs(&[0x59, 0x0A, 0x7F, 0x04, 0x01, 0x00, 0x00]).unwrap();
         assert_eq!(records.count(), 1);
     }
 
     #[test]
     fn rejects_partial_records_and_other_subfunctions() {
         assert_eq!(
-            decode_dtcs(&[0x59, 0x02, 0xFF, 0x04, 0x01, 0x00]).err(),
+            decode_dtcs_by_status_mask(&[0x59, 0x02, 0xFF, 0x04, 0x01, 0x00]).err(),
             Some(Error::Malformed)
         );
         assert_eq!(
-            decode_dtcs(&[0x59, 0x01, 0xFF, 0x01, 0x00, 0x03]).err(),
+            decode_dtcs_by_status_mask(&[0x59, 0x01, 0xFF, 0x01, 0x00, 0x03]).err(),
             Some(Error::Malformed)
         );
-        assert_eq!(decode_dtcs(&[0x59, 0x02]).err(), Some(Error::TooShort));
+        assert_eq!(
+            decode_dtcs_by_status_mask(&[0x59, 0x02]).err(),
+            Some(Error::TooShort)
+        );
+    }
+
+    #[test]
+    fn each_decoder_accepts_only_its_own_subfunction() {
+        // Every supported DTC (0x0A) must not pass as the DTCs matching a mask (0x02)
+        let supported = [0x59, 0x0A, 0x7F, 0x04, 0x01, 0x00, 0x00];
+        let by_mask = [0x59, 0x02, 0xFF, 0x04, 0x01, 0x00, 0x88];
+        assert_eq!(
+            decode_dtcs_by_status_mask(&supported).err(),
+            Some(Error::Malformed)
+        );
+        assert_eq!(
+            decode_supported_dtcs(&by_mask).err(),
+            Some(Error::Malformed)
+        );
     }
 
     #[test]

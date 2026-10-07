@@ -327,12 +327,12 @@ pub struct DtcCount {
     pub count: u16,
 }
 
-// The data after a ReadDTCInformation reply's echoed subfunction, which must be one of `subs`.
-fn dtc_reply<'a>(reply: &'a [u8], subs: &[u8]) -> Result<&'a [u8], Error> {
-    let [sub, rest @ ..] = positive(READ_DTC_INFORMATION, reply)? else {
+// The data after a ReadDTCInformation reply's echoed subfunction, which must be `sub`.
+fn dtc_reply(reply: &[u8], sub: u8) -> Result<&[u8], Error> {
+    let [echoed, rest @ ..] = positive(READ_DTC_INFORMATION, reply)? else {
         return Err(Error::TooShort);
     };
-    if !subs.contains(sub) {
+    if *echoed != sub {
         return Err(Error::Malformed);
     }
     Ok(rest)
@@ -340,7 +340,7 @@ fn dtc_reply<'a>(reply: &'a [u8], subs: &[u8]) -> Result<&'a [u8], Error> {
 
 /// Decodes the reply to [`dtc_count_by_status_mask`].
 pub fn decode_dtc_count(reply: &[u8]) -> Result<DtcCount, Error> {
-    let rest = dtc_reply(reply, &[REPORT_NUMBER_BY_STATUS_MASK])?;
+    let rest = dtc_reply(reply, REPORT_NUMBER_BY_STATUS_MASK)?;
     let [availability, format, high, low] = *rest else {
         return Err(Error::Malformed);
     };
@@ -360,10 +360,21 @@ pub struct DtcRecord {
     pub status: DtcStatus,
 }
 
-/// Decodes the reply to [`dtcs_by_status_mask`] or [`supported_dtcs`]: the status bits the
-/// module supports, and each DTC with its status.
-pub fn decode_dtcs(reply: &[u8]) -> Result<(DtcStatus, DtcRecords<'_>), Error> {
-    let rest = dtc_reply(reply, &[REPORT_DTC_BY_STATUS_MASK, REPORT_SUPPORTED_DTC])?;
+/// Decodes the reply to [`dtcs_by_status_mask`]: the status bits the module supports, and each
+/// DTC matching the mask with its status.
+pub fn decode_dtcs_by_status_mask(reply: &[u8]) -> Result<(DtcStatus, DtcRecords<'_>), Error> {
+    dtc_records(reply, REPORT_DTC_BY_STATUS_MASK)
+}
+
+/// Decodes the reply to [`supported_dtcs`]: the status bits the module supports, and every DTC
+/// it can store with its status.
+pub fn decode_supported_dtcs(reply: &[u8]) -> Result<(DtcStatus, DtcRecords<'_>), Error> {
+    dtc_records(reply, REPORT_SUPPORTED_DTC)
+}
+
+// The availability mask and 4-byte DTC records after the echoed subfunction `sub`.
+fn dtc_records(reply: &[u8], sub: u8) -> Result<(DtcStatus, DtcRecords<'_>), Error> {
+    let rest = dtc_reply(reply, sub)?;
     let (&availability, records) = rest.split_first().ok_or(Error::TooShort)?;
     let (records, partial) = records.as_chunks::<4>();
     if !partial.is_empty() {
