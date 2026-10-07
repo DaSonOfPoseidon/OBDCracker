@@ -206,7 +206,11 @@ impl fmt::Display for Dtc {
     }
 }
 
-/// Decodes a mode 03 reply: a count byte, then that many two-byte codes.
+/// Decodes a mode 03 reply in the CAN format (ISO 15765-4): a count byte, then that many
+/// two-byte codes, such as `43 02 04 01 01 13` for P0401 and P0113.
+///
+/// Pre-CAN protocols (SAE J1850, ISO 9141-2, ISO 14230-4) use another layout, with no count byte
+/// and codes in zero-padded groups of three, so their replies aren't decoded here.
 pub fn decode_stored_dtcs(reply: &[u8]) -> Result<Dtcs<'_>, Error> {
     let (&count, codes) = positive(STORED_DTCS, reply)?
         .split_first()
