@@ -161,6 +161,8 @@ impl fmt::Display for Error {
     }
 }
 
+impl core::error::Error for Error {}
+
 impl<'a> Frame<'a> {
     /// Parses the data bytes of one CAN frame. Padding after a single frame's payload is ignored.
     pub fn parse(bytes: &'a [u8], addressing: Addressing) -> Result<Self, Error> {

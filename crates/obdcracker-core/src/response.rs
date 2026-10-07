@@ -132,6 +132,8 @@ impl fmt::Display for Error {
     }
 }
 
+impl core::error::Error for Error {}
+
 /// Checks that `reply` is a positive answer to a request for service `request_sid`, and returns
 /// the bytes after the reply's service ID.
 pub fn positive(request_sid: u8, reply: &[u8]) -> Result<&[u8], Error> {

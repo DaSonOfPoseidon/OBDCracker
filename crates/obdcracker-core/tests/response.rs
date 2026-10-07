@@ -65,3 +65,20 @@ fn rejects_replies_for_another_service_or_too_short() {
     assert_eq!(positive(0x22, &[]), Err(Error::TooShort));
     assert_eq!(positive(0x22, &[0x7F, 0x22]), Err(Error::TooShort));
 }
+
+#[test]
+fn codec_errors_work_with_the_question_mark_operator() {
+    fn decode() -> Result<(), Box<dyn std::error::Error>> {
+        positive(0x22, &[0x7F, 0x22, 0x33])?;
+        Ok(())
+    }
+    fn parse() -> Result<(), Box<dyn std::error::Error>> {
+        obdcracker_core::isotp::Frame::parse(&[], obdcracker_core::isotp::Addressing::Normal)?;
+        Ok(())
+    }
+    assert_eq!(
+        decode().unwrap_err().to_string(),
+        "service 0x22 refused: security access denied (0x33)"
+    );
+    assert!(parse().is_err());
+}
