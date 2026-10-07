@@ -54,7 +54,20 @@ closes when the PR merges.
 
 ## Reviews
 
-Codex reviews every push to a pull request. Before a PR can be approved:
+Codex reviews every push to a pull request, and each review costs time and usage. So review your
+own change just as hard before pushing, and push fixes in batches rather than one at a time. Check
+each change against:
+
+- **Untrusted input:** every length, count and echoed ID is checked exactly. Reject trailing bytes,
+  zero counts, empty or padding-only values, and anything the standard doesn't allow.
+- **Docs vs code:** every promise in a doc comment holds on every path, including errors and edge
+  values such as 0, the maximum and one past it.
+- **Conversions:** nothing rounds the unsafe way or loses a remainder before rounding.
+- **State:** after any error, nothing stale can complete or leak into the next operation.
+- **Scripts and CI:** every path, rename, word boundary and concurrent run behaves as described.
+- **Your own fixes:** re-read the new code for the same problems; it's where new findings hide.
+
+Before a PR can be approved:
 
 - Answer every finding. Either fix it (with a test first, in its own commit) and reply on the thread with the commit,
   or reply explaining why it doesn't apply. A real problem outside the PR's scope becomes a tagged issue instead.
