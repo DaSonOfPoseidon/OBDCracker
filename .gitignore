@@ -1,0 +1,5 @@
+/target
+CLAUDE.md
+.claude/
+# Audit logs from real car sessions stay local until reviewed
+*.audit.jsonl
