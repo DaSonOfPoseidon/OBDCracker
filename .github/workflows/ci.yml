@@ -1,8 +1,15 @@
 name: CI
 
+# PR branches are checked once per commit through pull_request; main is checked after each merge.
 on:
   push:
+    branches: [main]
   pull_request:
+
+# A newer commit on the same PR supersedes a run still in progress.
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   CARGO_TERM_COLOR: always
