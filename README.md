@@ -11,7 +11,7 @@ The main rule: **nothing this tool sends may brick or damage a car.** That rule 
 from developers being careful:
 
 - Every request goes through `obd-safety`. Its `Policy` gives every OBD-II and UDS service a tier and returns an
-  `Approved<_>` request. That type can only be created inside `obd-safety`, and every transport's `send` requires it.
+  `Approved` request. That type can only be created inside `obd-safety`, and every transport's `send` requires it.
 - Anything not on the allowlist is rejected, unknown services included.
 - Each tier above read-only needs a cargo feature, an explicit runtime unlock, and passing preconditions:
 
@@ -33,7 +33,7 @@ then a simulated ECU (`obd-sim`), then a dry run on the car, and only then a liv
 | Crate | Role |
 |---|---|
 | `obd-core` | Pure `no_std` codecs: CAN, ISO-TP, OBD-II, UDS |
-| `obd-safety` | Tiered policy and `Approved<_>` |
+| `obd-safety` | Tiered policy and `Approved` |
 | `obd-transport` | `Transport` trait and adapter backends |
 | `obd-sim` | Simulated ECUs for tests |
 | `obdcracker` | CLI |
