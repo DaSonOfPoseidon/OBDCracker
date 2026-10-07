@@ -40,7 +40,8 @@ if [ "$1" = --areas-of ]; then
 fi
 
 git fetch -q origin
-areas=$(git diff --name-only "$base"...HEAD | areas_of)
+# --no-renames lists a moved file at both its old and new paths, so both areas count.
+areas=$(git diff --name-only --no-renames "$base"...HEAD | areas_of)
 
 fixed=$(git log --format=%s "$base"..HEAD | grep -oiE 'fixes #[0-9]+' | grep -oE '[0-9]+' | sort -u | tr '\n' ',' | sed 's/,$//')
 milestone=$(echo "${1:-}" | tr -d 'Mm')
