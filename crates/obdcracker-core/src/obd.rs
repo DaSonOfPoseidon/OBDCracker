@@ -359,14 +359,25 @@ pub struct EcuName<'a> {
     pub name: &'a str,
 }
 
-/// Decodes the mode 09 PID 0A reply: 4 bytes of acronym, `-`, then 15 bytes of name.
+/// Decodes the mode 09 PID 0A reply: 4 bytes of acronym, `-`, then 15 bytes of name, each
+/// without blanks and padded with 0x00.
 pub fn decode_ecu_name(reply: &[u8]) -> Result<EcuName<'_>, Error> {
     let (count, data) = info(reply, 0x0A)?;
     if count != 1 || data.len() != ECU_NAME_LEN || data[4] != b'-' {
         return Err(Error::Malformed);
     }
     Ok(EcuName {
-        acronym: text(&data[..4])?,
-        name: text(&data[5..])?,
+        acronym: name_text(&data[..4])?,
+        name: name_text(&data[5..])?,
     })
+}
+
+// An ECU name field: required text with no blanks between words (SAE J1979-DA), such as
+// `EngineControl`.
+fn name_text(bytes: &[u8]) -> Result<&str, Error> {
+    let name = text(bytes)?;
+    if name.contains(' ') {
+        return Err(Error::Malformed);
+    }
+    Ok(name)
 }

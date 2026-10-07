@@ -336,6 +336,18 @@ mod vehicle_info {
     }
 
     #[test]
+    fn ecu_name_has_no_blanks() {
+        // SAE J1979-DA: no blanks between words ("EngineControl"); unused bytes are 0x00
+        let mut data = padded("ECM", 4);
+        data.push(b'-');
+        data.extend(padded("Engine Control", 15));
+        assert_eq!(
+            decode_ecu_name(&reply(0x0A, 1, &data)),
+            Err(Error::Malformed)
+        );
+    }
+
+    #[test]
     fn ecu_name_of_only_padding_is_malformed() {
         let mut no_acronym = vec![0; 4];
         no_acronym.push(b'-');
