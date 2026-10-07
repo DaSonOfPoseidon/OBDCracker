@@ -14,6 +14,9 @@ pub const CURRENT_DATA: u8 = 0x01;
 /// Mode 03: stored (confirmed) emissions DTCs.
 pub const STORED_DTCS: u8 = 0x03;
 
+/// Mode 09: vehicle information.
+pub const VEHICLE_INFO: u8 = 0x09;
+
 /// A mode 01 request for one PID.
 #[must_use]
 pub fn current_data(pid: u8) -> [u8; 2] {
@@ -224,4 +227,131 @@ impl Iterator for Dtcs<'_> {
     fn next(&mut self) -> Option<Dtc> {
         self.0.next().map(|&pair| Dtc(u16::from_be_bytes(pair)))
     }
+}
+
+/// A mode 09 request for one PID.
+#[must_use]
+pub fn vehicle_info(pid: u8) -> [u8; 2] {
+    [VEHICLE_INFO, pid]
+}
+
+const CALID_LEN: usize = 16;
+const CVN_LEN: usize = 4;
+const VIN_LEN: usize = 17;
+const ECU_NAME_LEN: usize = 20;
+
+// A mode 09 reply for `pid`: the item count and the data after it.
+fn info(reply: &[u8], pid: u8) -> Result<(usize, &[u8]), Error> {
+    let rest = positive(VEHICLE_INFO, reply)?;
+    let [got, count, data @ ..] = rest else {
+        return Err(Error::TooShort);
+    };
+    if *got != pid {
+        return Err(Error::Malformed);
+    }
+    Ok((usize::from(*count), data))
+}
+
+// Printable ASCII after trimming the trailing 0x00 padding.
+fn text(bytes: &[u8]) -> Result<&str, Error> {
+    let end = bytes.iter().rposition(|&b| b != 0).map_or(0, |i| i + 1);
+    let text = &bytes[..end];
+    if !text.iter().all(|&b| b == b' ' || b.is_ascii_graphic()) {
+        return Err(Error::Malformed);
+    }
+    core::str::from_utf8(text).map_err(|_| Error::Malformed)
+}
+
+/// Decodes the mode 09 PID 00 reply: which vehicle information PIDs 01 to 20 are supported.
+pub fn decode_supported_info(reply: &[u8]) -> Result<SupportedPids, Error> {
+    let rest = positive(VEHICLE_INFO, reply)?;
+    let [0x00, a, b, c, d, ..] = *rest else {
+        return Err(Error::Malformed);
+    };
+    Ok(SupportedPids::new(0x00, [a, b, c, d]))
+}
+
+/// Decodes the mode 09 PID 02 reply: the 17-character VIN.
+pub fn decode_vin(reply: &[u8]) -> Result<&str, Error> {
+    let (count, data) = info(reply, 0x02)?;
+    if count != 1 || data.len() != VIN_LEN || !data.iter().all(u8::is_ascii_alphanumeric) {
+        return Err(Error::Malformed);
+    }
+    text(data)
+}
+
+/// Decodes the mode 09 PID 04 reply: each calibration ID (the software calibration's name),
+/// with its padding removed. A module may report several.
+pub fn decode_calids(reply: &[u8]) -> Result<Calids<'_>, Error> {
+    let (count, data) = info(reply, 0x04)?;
+    if data.len() != count * CALID_LEN {
+        return Err(Error::Malformed);
+    }
+    Ok(Calids(data.as_chunks::<CALID_LEN>().0.iter()))
+}
+
+/// The calibration IDs in a mode 09 PID 04 reply. One that isn't printable text yields
+/// [`Error::Malformed`].
+#[derive(Debug, Clone)]
+pub struct Calids<'a>(slice::Iter<'a, [u8; CALID_LEN]>);
+
+impl<'a> Iterator for Calids<'a> {
+    type Item = Result<&'a str, Error>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.0.next().map(|calid| text(calid))
+    }
+}
+
+/// A calibration verification number: a checksum of the calibration in the module, shown as
+/// 8 hex digits. A changed calibration (such as a tune) has a different CVN.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct Cvn(pub [u8; CVN_LEN]);
+
+impl fmt::Display for Cvn {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.iter().try_for_each(|b| write!(f, "{b:02X}"))
+    }
+}
+
+/// Decodes the mode 09 PID 06 reply: one CVN per calibration ID.
+pub fn decode_cvns(reply: &[u8]) -> Result<Cvns<'_>, Error> {
+    let (count, data) = info(reply, 0x06)?;
+    if data.len() != count * CVN_LEN {
+        return Err(Error::Malformed);
+    }
+    Ok(Cvns(data.as_chunks::<CVN_LEN>().0.iter()))
+}
+
+/// The CVNs in a mode 09 PID 06 reply.
+#[derive(Debug, Clone)]
+pub struct Cvns<'a>(slice::Iter<'a, [u8; CVN_LEN]>);
+
+impl Iterator for Cvns<'_> {
+    type Item = Cvn;
+
+    fn next(&mut self) -> Option<Cvn> {
+        self.0.next().map(|&cvn| Cvn(cvn))
+    }
+}
+
+/// A module's name from mode 09 PID 0A, such as `ECM` / `EngineControl`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EcuName<'a> {
+    /// The short name, up to 4 characters.
+    pub acronym: &'a str,
+    /// The full name, up to 15 characters.
+    pub name: &'a str,
+}
+
+/// Decodes the mode 09 PID 0A reply: 4 bytes of acronym, `-`, then 15 bytes of name.
+pub fn decode_ecu_name(reply: &[u8]) -> Result<EcuName<'_>, Error> {
+    let (count, data) = info(reply, 0x0A)?;
+    if count != 1 || data.len() != ECU_NAME_LEN || data[4] != b'-' {
+        return Err(Error::Malformed);
+    }
+    Ok(EcuName {
+        acronym: text(&data[..4])?,
+        name: text(&data[5..])?,
+    })
 }

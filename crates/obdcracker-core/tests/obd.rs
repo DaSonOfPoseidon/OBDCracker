@@ -156,3 +156,127 @@ mod stored_dtcs {
         );
     }
 }
+
+mod vehicle_info {
+    use obdcracker_core::obd::{
+        EcuName, decode_calids, decode_cvns, decode_ecu_name, decode_supported_info, decode_vin,
+        vehicle_info,
+    };
+    use obdcracker_core::response::Error;
+
+    fn reply(pid: u8, count: u8, data: &[u8]) -> Vec<u8> {
+        let mut reply = vec![0x49, pid, count];
+        reply.extend_from_slice(data);
+        reply
+    }
+
+    fn padded(text: &str, len: usize) -> Vec<u8> {
+        let mut bytes = text.as_bytes().to_vec();
+        bytes.resize(len, 0);
+        bytes
+    }
+
+    #[test]
+    fn builds_the_request() {
+        assert_eq!(vehicle_info(0x02), [0x09, 0x02]);
+    }
+
+    #[test]
+    fn decodes_the_supported_bitmap() {
+        // PIDs 02, 04, 06 and 0A
+        let supported = decode_supported_info(&[0x49, 0x00, 0x54, 0x40, 0x00, 0x00]).unwrap();
+        assert_eq!(
+            supported.iter().collect::<Vec<_>>(),
+            [0x02, 0x04, 0x06, 0x0A]
+        );
+    }
+
+    #[test]
+    fn decodes_the_vin() {
+        assert_eq!(
+            decode_vin(&reply(0x02, 1, b"1D4GP00R55B123456")),
+            Ok("1D4GP00R55B123456")
+        );
+    }
+
+    #[test]
+    fn rejects_a_vin_of_the_wrong_length_or_with_control_bytes() {
+        assert_eq!(
+            decode_vin(&reply(0x02, 1, b"1D4GP00R55B12345")),
+            Err(Error::Malformed)
+        );
+        assert_eq!(
+            decode_vin(&reply(0x02, 1, b"1D4GP00R55B12345\x00")),
+            Err(Error::Malformed)
+        );
+        assert_eq!(
+            decode_vin(&reply(0x02, 2, b"1D4GP00R55B123456")),
+            Err(Error::Malformed)
+        );
+        assert_eq!(
+            decode_vin(&reply(0x04, 1, b"1D4GP00R55B123456")),
+            Err(Error::Malformed),
+            "a CALID reply isn't a VIN reply"
+        );
+    }
+
+    #[test]
+    fn decodes_every_calibration_id_without_padding() {
+        let mut data = padded("JMB*36761500", 16);
+        data.extend(padded("JMB*47872611", 16));
+        let reply = reply(0x04, 2, &data);
+        let calids: Vec<_> = decode_calids(&reply)
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(calids, ["JMB*36761500", "JMB*47872611"]);
+    }
+
+    #[test]
+    fn rejects_calids_that_dont_match_their_count_or_arent_text() {
+        assert_eq!(
+            decode_calids(&reply(0x04, 2, &padded("JMB*36761500", 16))).err(),
+            Some(Error::Malformed)
+        );
+        let mut data = padded("JMB*36761500", 16);
+        data[3] = 0xFF;
+        let reply = reply(0x04, 1, &data);
+        let first = decode_calids(&reply).unwrap().next();
+        assert_eq!(first, Some(Err(Error::Malformed)));
+    }
+
+    #[test]
+    fn decodes_calibration_verification_numbers_as_hex() {
+        let cvns: Vec<_> = decode_cvns(&reply(
+            0x06,
+            2,
+            &[0x17, 0x91, 0xBC, 0x82, 0x00, 0x00, 0x0A, 0xFF],
+        ))
+        .unwrap()
+        .map(|cvn| cvn.to_string())
+        .collect();
+        assert_eq!(cvns, ["1791BC82", "00000AFF"]);
+        assert_eq!(
+            decode_cvns(&reply(0x06, 1, &[0x17, 0x91])).err(),
+            Some(Error::Malformed)
+        );
+    }
+
+    #[test]
+    fn decodes_the_ecu_name() {
+        let mut data = padded("ECM", 4);
+        data.push(b'-');
+        data.extend(padded("EngineControl", 15));
+        assert_eq!(
+            decode_ecu_name(&reply(0x0A, 1, &data)),
+            Ok(EcuName {
+                acronym: "ECM",
+                name: "EngineControl"
+            })
+        );
+        assert_eq!(
+            decode_ecu_name(&reply(0x0A, 1, &data[..19])),
+            Err(Error::Malformed)
+        );
+    }
+}
