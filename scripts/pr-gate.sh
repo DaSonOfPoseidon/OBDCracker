@@ -12,6 +12,8 @@ base=${BASE:-origin/main}
 # Reads paths on stdin and prints the area each one belongs to.
 areas_of() {
 	while read -r path; do
+		# Each kind of area is matched on its own, so a path gets every area it belongs to
+		# (a crate's README.md is both its crate and docs).
 		case $path in
 		crates/obdcracker-core/*) echo core ;;
 		crates/obdcracker-safety/*) echo safety ;;
@@ -19,12 +21,12 @@ areas_of() {
 		crates/obdcracker-sim/*) echo sim ;;
 		crates/obdcracker-cli/*) echo cli ;;
 		crates/obdcracker/*) echo facade ;;
-		*.md | docs/*) echo docs ;;
-		.github/* | scripts/*) echo ci ;;
 		esac
-		# Cargo and tool config is CI too, including each crate's manifest, on top of its crate.
 		case $path in
-		*.toml | Cargo.lock) echo ci ;;
+		*.md | docs/*) echo docs ;;
+		esac
+		case $path in
+		.github/* | scripts/* | *.toml | Cargo.lock) echo ci ;;
 		esac
 	done | sort -u
 }
