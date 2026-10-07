@@ -53,6 +53,7 @@ proptest! {
                 },
                 Step::WaitForFlowControl => prop_assert!(false, "sender waits but receiver sent no flow control"),
                 Step::Done => break,
+                Step::Aborted => prop_assert!(false, "transfer aborted"),
             }
         }
         prop_assert_eq!(got, Some(payload));

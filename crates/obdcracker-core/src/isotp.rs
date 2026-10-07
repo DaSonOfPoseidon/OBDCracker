@@ -281,6 +281,8 @@ pub enum Step {
     WaitForFlowControl,
     /// The whole payload has been sent.
     Done,
+    /// The receiver refused the transfer with an overflow flow control; it wasn't all sent.
+    Aborted,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -290,6 +292,7 @@ enum SendState {
     // How many consecutive frames are left in this block; None means no limit.
     Sending(Option<u8>),
     Done,
+    Aborted,
 }
 
 /// Splits one payload into ISO-TP frames, following the receiver's flow control. IO-free: the
@@ -327,6 +330,7 @@ impl<'a> Segmenter<'a> {
             SendState::Waiting => Step::WaitForFlowControl,
             SendState::Sending(left) => Step::Send(self.consecutive(left)),
             SendState::Done => Step::Done,
+            SendState::Aborted => Step::Aborted,
         }
     }
 
@@ -343,7 +347,7 @@ impl<'a> Segmenter<'a> {
             }
             FlowStatus::Wait => Ok(()),
             FlowStatus::Overflow => {
-                self.state = SendState::Done;
+                self.state = SendState::Aborted;
                 Err(Error::Overflow)
             }
         }

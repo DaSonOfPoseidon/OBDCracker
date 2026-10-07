@@ -275,6 +275,8 @@ mod segment {
             }),
             Err(Error::Overflow)
         );
+        // A refused transfer must not look like a finished one
+        assert_eq!(seg.step(), Step::Aborted);
     }
 
     #[test]
@@ -593,6 +595,7 @@ mod reassemble {
                 },
                 Step::WaitForFlowControl => panic!("receiver didn't send flow control"),
                 Step::Done => break,
+                Step::Aborted => panic!("transfer aborted"),
             }
         }
         got.expect("no complete payload")

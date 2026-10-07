@@ -49,6 +49,8 @@ impl<W: Write> Transport for DryRun<W> {
                     .flow_control(ASSUMED_FLOW_CONTROL)
                     .map_err(|e| Error::Adapter(e.to_string()))?,
                 Step::Done => return Ok(()),
+                // The assumed flow control never refuses, so a dry run can't get here.
+                Step::Aborted => return Err(Error::Adapter("transfer aborted".into())),
             }
         }
     }
