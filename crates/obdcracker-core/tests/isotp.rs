@@ -457,6 +457,19 @@ mod reassemble {
     }
 
     #[test]
+    fn short_consecutive_frame_before_the_end_aborts_the_transfer() {
+        let mut buf = [0; 64];
+        let mut rx = Reassembler::new(&mut buf, Addressing::Normal);
+        rx.feed(&VIN_FRAMES[0]).unwrap();
+        // 5 payload bytes where 7 are required, and the transfer isn't finished
+        assert_eq!(
+            rx.feed(&[0x21, 0x47, 0x50, 0x30, 0x30, 0x52]),
+            Err(Error::BadLength)
+        );
+        assert_eq!(rx.feed(&VIN_FRAMES[2]), Err(Error::UnexpectedFrame));
+    }
+
+    #[test]
     fn frames_for_another_extended_address_dont_abort_the_transfer() {
         // Toyota body modules share the 0x758 reply ID; each frame starts with its sender's address
         let mut buf = [0; 16];

@@ -505,6 +505,12 @@ impl<'b> Reassembler<'b> {
                     self.state = ReceiveState::Idle;
                     return Err(Error::WrongSequence);
                 }
+                // Every consecutive frame but the last must be full (ISO 15765-2).
+                let full = CAN_DLC - 1 - self.addressing.header_len();
+                if data.len() < full && filled + data.len() < len {
+                    self.state = ReceiveState::Idle;
+                    return Err(Error::BadLength);
+                }
                 let take = data.len().min(len - filled);
                 self.buf[filled..filled + take].copy_from_slice(&data[..take]);
                 let filled = filled + take;
