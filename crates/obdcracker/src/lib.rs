@@ -38,3 +38,8 @@ pub use obdcracker_safety as safety;
 #[cfg(feature = "sim")]
 pub use obdcracker_sim as sim;
 pub use obdcracker_transport as transport;
+
+// Compiles the README's Rust examples as doctests, so they can't drift from the API.
+#[cfg(doctest)]
+#[doc = include_str!("../../../README.md")]
+struct ReadmeDoctests;

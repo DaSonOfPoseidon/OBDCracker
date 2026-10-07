@@ -47,13 +47,24 @@ obdcracker = { git = "https://github.com/DaSonOfPoseidon/OBDCracker" }
 # obdcracker = { git = "...", features = ["sim"] }  # simulated ECUs for your own tests
 ```
 
-```rust
+```rust,no_run
+use std::error::Error;
+use std::time::Duration;
+
+use obdcracker::core::obd;
 use obdcracker::safety::{Policy, Target};
 use obdcracker::transport::{Audited, DryRun, Transport};
 
-let vin = Policy::read_only().approve(Target::ObdFunctional, &[0x09, 0x02])?;
-let mut adapter = Audited::open("session.audit.jsonl".as_ref(), DryRun::new(std::io::stdout()), "dry-run")?;
-adapter.send(&vin)?; // prints "7DF 02 09 02"
+fn main() -> Result<(), Box<dyn Error>> {
+    let vin = Policy::read_only().approve(Target::ObdFunctional, &obd::vehicle_info(0x02))?;
+    let adapter = DryRun::new(std::io::stdout());
+    let mut adapter = Audited::open("session.audit.jsonl".as_ref(), adapter, "dry-run")?;
+    adapter.send(&vin)?; // prints "7DF 02 09 02"
+    if let Ok(reply) = adapter.recv(Duration::from_secs(1)) {
+        println!("VIN {}", obd::decode_vin(&reply.payload)?);
+    }
+    Ok(())
+}
 ```
 
 The safety policy applies to importers too. Every transport takes only `Approved` requests, and there is no

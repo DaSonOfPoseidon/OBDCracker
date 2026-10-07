@@ -55,6 +55,27 @@ pub enum Rejection {
     WrongTarget,
 }
 
+impl std::fmt::Display for Rejection {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Locked(tier) => {
+                let tier = match tier {
+                    Tier::Read => "read",
+                    Tier::ClearDtc => "clear-DTC",
+                    Tier::Coding => "coding",
+                    Tier::Flash => "flash",
+                };
+                write!(f, "refused: the {tier} tier is locked")
+            }
+            Self::Banned => f.write_str("refused: flash-tier requests are banned"),
+            Self::NotAllowed => f.write_str("refused: not on the allowlist, or malformed"),
+            Self::WrongTarget => f.write_str("refused: wrong target for this request"),
+        }
+    }
+}
+
+impl std::error::Error for Rejection {}
+
 /// A request that passed the policy. Only this crate can create one.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Approved {

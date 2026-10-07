@@ -54,7 +54,7 @@ fn main() -> ExitCode {
     let request = match Policy::read_only().approve(target, &payload) {
         Ok(request) => request,
         Err(rejection) => {
-            eprintln!("refused by the safety policy: {rejection:?}");
+            eprintln!("safety policy {rejection}");
             return ExitCode::FAILURE;
         }
     };
