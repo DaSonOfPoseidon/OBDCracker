@@ -33,10 +33,37 @@ from developers being careful:
 New capabilities are developed test-first: golden-frame unit tests, then property tests and fuzzing of response parsers,
 then a simulated ECU (`obdcracker-sim`), then a dry run on the car, and only then a live session.
 
+## Using it as a library
+
+OBDCracker is meant to be imported. Add the `obdcracker` crate, which re-exports the others:
+
+```toml
+[dependencies]
+obdcracker = { git = "https://github.com/DaSonOfPoseidon/OBDCracker" }
+# obdcracker = { git = "...", features = ["sim"] }  # simulated ECUs for your own tests
+```
+
+```rust
+use obdcracker::safety::{Policy, Target};
+use obdcracker::transport::{Audited, DryRun, Transport};
+
+let vin = Policy::read_only().approve(Target::ObdFunctional, &[0x09, 0x02])?;
+let mut adapter = Audited::open("session.audit.jsonl".as_ref(), DryRun::new(std::io::stdout()), "dry-run")?;
+adapter.send(&vin)?; // prints "7DF 02 09 02"
+```
+
+The safety policy applies to importers too. Every transport takes only `Approved` requests, and there is no
+raw-frame escape hatch, so no program built on these crates can send something the policy refuses. Higher tiers will be
+unlocked by cargo features plus a runtime unlock, and flashing stays banned until its design doc exists. If you need raw
+CAN for something else, use your own driver alongside this one.
+
+The crates will be published to crates.io once the M1 codec API settles. Until then, depend on the git repo.
+
 ## Layout
 
 | Crate | Role |
 |---|---|
+| `obdcracker` | Facade for importers: re-exports the crates below (`sim` behind a feature) |
 | `obdcracker-core` | Pure `no_std` codecs: CAN, ISO-TP, VW TP2.0, OBD-II, UDS, KWP2000 |
 | `obdcracker-safety` | Tiered policy and `Approved` |
 | `obdcracker-transport` | `Transport` trait and adapter backends |
