@@ -26,8 +26,25 @@ duplicate. Include:
 - a suggested fix
 - the milestone it blocks, if any
 
-Label it `bug`, `documentation` or `enhancement`. Only fix it in the same change if it blocks your task, and then
-reference it in the commit (`fixes #N`).
+Label it `bug`, `documentation` or `enhancement`, and tag what it impacts:
+
+- **Every area it affects:** `area:core`, `area:safety`, `area:transport`, `area:sim`, `area:cli`, `area:facade`
+  (the `obdcracker` crate), `area:docs` (any `*.md` or `docs/`), `area:ci` (workflows, `scripts/`, Cargo and tool
+  config).
+- **The milestone it blocks,** if any: `milestone:M1` to `milestone:M7`.
+
+Only fix it in the same change if it blocks your task, and then reference it in the commit (`fixes #N`).
+
+## Before opening a pull request
+
+No issue tagged with what the PR touches may be open. Run:
+
+```sh
+scripts/pr-gate.sh M2   # the milestone the PR is for; leave it out if none
+```
+
+It works out the areas from the files changed since `origin/main`, lists every open issue labelled with one of those
+areas or with the milestone, and fails if there are any. Fix or close them first.
 
 ## Commits
 
