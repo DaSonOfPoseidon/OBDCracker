@@ -139,8 +139,13 @@ impl core::error::Error for Error {}
 pub fn positive(request_sid: u8, reply: &[u8]) -> Result<&[u8], Error> {
     let (&sid, rest) = reply.split_first().ok_or(Error::TooShort)?;
     if sid == NEGATIVE {
-        let [refused, code, ..] = *rest else {
-            return Err(Error::TooShort);
+        // Exactly `7F <service ID> <code>` (ISO 14229-1)
+        let [refused, code] = *rest else {
+            return Err(if rest.len() < 2 {
+                Error::TooShort
+            } else {
+                Error::Malformed
+            });
         };
         if refused != request_sid {
             return Err(Error::WrongService(sid));

@@ -67,6 +67,15 @@ fn rejects_replies_for_another_service_or_too_short() {
 }
 
 #[test]
+fn negative_reply_is_exactly_three_bytes() {
+    // A trailing byte must not pass as a valid response-pending
+    assert_eq!(
+        positive(0x19, &[0x7F, 0x19, 0x78, 0xAA]),
+        Err(Error::Malformed)
+    );
+}
+
+#[test]
 fn codec_errors_work_with_the_question_mark_operator() {
     fn decode() -> Result<(), Box<dyn std::error::Error>> {
         positive(0x22, &[0x7F, 0x22, 0x33])?;
