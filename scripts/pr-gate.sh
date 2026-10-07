@@ -43,8 +43,12 @@ git fetch -q origin
 # --no-renames lists a moved file at both its old and new paths, so both areas count.
 areas=$(git diff --name-only --no-renames "$base"...HEAD | areas_of)
 
-# `fixes #N` as a whole word, so "prefixes #3" doesn't count.
-fixed=$(git log --format=%s "$base"..HEAD | grep -oiE '(^|[^[:alnum:]_])fixes #[0-9]+' | grep -oE '#[0-9]+' | tr -d '#' | sort -u | tr '\n' ',' | sed 's/,$//')
+# Issues the branch's commit subjects say they fix: the word "fixes" followed by a word that is
+# exactly #N. Splitting into words means "prefixes #3", "fixes #3rd" and "fixes #5_more" don't
+# count, and back-to-back references ("fixes #1 fixes #2") are all found.
+fixed=$(git log --format=%s "$base"..HEAD | tr -c '[:alnum:]_#\n' ' ' |
+	awk '{ for (i = 1; i < NF; i++) if (tolower($i) == "fixes" && $(i + 1) ~ /^#[0-9]+$/) print substr($(i + 1), 2) }' |
+	sort -un | tr '\n' ',' | sed 's/,$//')
 milestone=$(echo "${1:-}" | tr -d 'Mm')
 case $milestone in
 '' | *[!0-9]*) [ -n "$1" ] && { echo "usage: $0 [M<n>]" >&2; exit 2; } ;;
