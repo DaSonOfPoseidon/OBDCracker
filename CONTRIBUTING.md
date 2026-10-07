@@ -52,6 +52,16 @@ It works out the areas from the files changed since `origin/main`, lists the blo
 any. Fix or close them first. An issue a commit on the branch fixes (`fixes #N` in the subject) doesn't count, since it
 closes when the PR merges.
 
+## Reviews
+
+Codex reviews every push to a pull request. Before a PR can be approved:
+
+- Answer every finding. Either fix it (with a test first, in its own commit) and reply on the thread with the commit,
+  or reply explaining why it doesn't apply. A real problem outside the PR's scope becomes a tagged issue instead.
+- Push, then wait for Codex to review the new head commit. Repeat until a review of the head commit has no new
+  findings.
+- CI must be green on the head commit, and `scripts/pr-gate.sh` must still pass.
+
 ## Commits
 
 - **One logical step per commit.** A new test and the code that makes it pass go together; an unrelated cleanup goes
