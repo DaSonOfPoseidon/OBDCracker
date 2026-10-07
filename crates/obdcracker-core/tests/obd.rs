@@ -299,6 +299,13 @@ mod vehicle_info {
     }
 
     #[test]
+    fn calid_of_only_padding_is_malformed() {
+        let reply = reply(0x04, 1, &[0; 16]);
+        let first = decode_calids(&reply).unwrap().next();
+        assert_eq!(first, Some(Err(Error::Malformed)));
+    }
+
+    #[test]
     fn calid_and_cvn_replies_carry_at_least_one_item() {
         assert_eq!(
             decode_calids(&reply(0x04, 0, &[])).err(),

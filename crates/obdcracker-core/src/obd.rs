@@ -308,7 +308,16 @@ impl<'a> Iterator for Calids<'a> {
     type Item = Result<&'a str, Error>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        self.0.next().map(|calid| text(calid))
+        // A CALID of nothing but padding identifies nothing
+        self.0.next().map(|calid| {
+            text(calid).and_then(|id| {
+                if id.is_empty() {
+                    Err(Error::Malformed)
+                } else {
+                    Ok(id)
+                }
+            })
+        })
     }
 }
 
