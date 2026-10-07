@@ -260,9 +260,14 @@ fn info(reply: &[u8], pid: u8) -> Result<(usize, &[u8]), Error> {
     Ok((usize::from(*count), data))
 }
 
-// Printable ASCII after trimming the trailing 0x00 padding.
+// Printable ASCII after trimming the trailing 0x00 padding. J1979 requires these fields, so
+// one that's nothing but padding is malformed.
 fn text(bytes: &[u8]) -> Result<&str, Error> {
-    let end = bytes.iter().rposition(|&b| b != 0).map_or(0, |i| i + 1);
+    let end = bytes
+        .iter()
+        .rposition(|&b| b != 0)
+        .ok_or(Error::Malformed)?
+        + 1;
     printable(&bytes[..end])
 }
 
@@ -299,8 +304,8 @@ pub fn decode_calids(reply: &[u8]) -> Result<Calids<'_>, Error> {
     Ok(Calids(data.as_chunks::<CALID_LEN>().0.iter()))
 }
 
-/// The calibration IDs in a mode 09 PID 04 reply. One that isn't printable text yields
-/// [`Error::Malformed`].
+/// The calibration IDs in a mode 09 PID 04 reply. One that isn't printable text, or is only
+/// padding, yields [`Error::Malformed`].
 #[derive(Debug, Clone)]
 pub struct Calids<'a>(slice::Iter<'a, [u8; CALID_LEN]>);
 
@@ -308,16 +313,7 @@ impl<'a> Iterator for Calids<'a> {
     type Item = Result<&'a str, Error>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        // A CALID of nothing but padding identifies nothing
-        self.0.next().map(|calid| {
-            text(calid).and_then(|id| {
-                if id.is_empty() {
-                    Err(Error::Malformed)
-                } else {
-                    Ok(id)
-                }
-            })
-        })
+        self.0.next().map(|calid| text(calid))
     }
 }
 

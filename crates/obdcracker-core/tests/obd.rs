@@ -334,4 +334,20 @@ mod vehicle_info {
             Err(Error::Malformed)
         );
     }
+
+    #[test]
+    fn ecu_name_of_only_padding_is_malformed() {
+        let mut no_acronym = vec![0; 4];
+        no_acronym.push(b'-');
+        no_acronym.extend(padded("EngineControl", 15));
+        let mut no_name = padded("ECM", 4);
+        no_name.push(b'-');
+        no_name.extend([0; 15]);
+        for data in [no_acronym, no_name] {
+            assert_eq!(
+                decode_ecu_name(&reply(0x0A, 1, &data)),
+                Err(Error::Malformed)
+            );
+        }
+    }
 }
