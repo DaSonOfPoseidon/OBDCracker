@@ -34,6 +34,38 @@ impl Addressing {
     }
 }
 
+/// The data bytes of one CAN frame, unpadded; the adapter pads to 8 bytes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CanData {
+    data: [u8; CAN_DLC],
+    len: usize,
+}
+
+impl CanData {
+    fn new(addressing: Addressing) -> Self {
+        let mut frame = Self {
+            data: [0; CAN_DLC],
+            len: 0,
+        };
+        if let Addressing::Extended(addr) = addressing {
+            frame.push(&[addr]);
+        }
+        frame
+    }
+
+    // Callers never push past 8 bytes: every frame type's layout is sized to fit.
+    fn push(&mut self, bytes: &[u8]) {
+        self.data[self.len..self.len + bytes.len()].copy_from_slice(bytes);
+        self.len += bytes.len();
+    }
+
+    /// The frame's data bytes: address byte (if extended), PCI, then payload.
+    #[must_use]
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.data[..self.len]
+    }
+}
+
 /// Whether the receiver of a multi-frame transfer is ready for more.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FlowStatus {
@@ -55,6 +87,21 @@ pub struct FlowControl {
     pub block_size: u8,
     /// The minimum gap between consecutive frames.
     pub st_min: Duration,
+}
+
+impl FlowControl {
+    /// The flow control frame's data bytes.
+    #[must_use]
+    pub fn encode(&self, addressing: Addressing) -> CanData {
+        let status = match self.status {
+            FlowStatus::ContinueToSend => 0,
+            FlowStatus::Wait => 1,
+            FlowStatus::Overflow => 2,
+        };
+        let mut frame = CanData::new(addressing);
+        frame.push(&[0x30 | status, self.block_size, encode_st_min(self.st_min)]);
+        frame
+    }
 }
 
 /// One ISO-TP frame, with the payload bytes borrowed from the CAN data.
@@ -92,6 +139,10 @@ pub enum Error {
     BadLength,
     /// The frame type or flow status is reserved, or needs CAN FD.
     Unsupported,
+    /// The receiver refused the transfer because it's too long for its buffer.
+    Overflow,
+    /// A frame arrived that doesn't fit the transfer's current state.
+    UnexpectedFrame,
 }
 
 impl fmt::Display for Error {
@@ -101,6 +152,8 @@ impl fmt::Display for Error {
             Self::WrongAddress(addr) => write!(f, "ISO-TP frame is for address {addr:02X}"),
             Self::BadLength => f.write_str("ISO-TP length field doesn't match the data"),
             Self::Unsupported => f.write_str("ISO-TP frame type is reserved or needs CAN FD"),
+            Self::Overflow => f.write_str("ISO-TP receiver's buffer is too small for the transfer"),
+            Self::UnexpectedFrame => f.write_str("ISO-TP frame doesn't fit the transfer"),
         }
     }
 }
@@ -181,33 +234,145 @@ fn decode_st_min(byte: u8) -> Duration {
     }
 }
 
-/// The data of one single frame: the PCI byte (0x0 nibble, then the length) followed by up to 7
-/// payload bytes. Unpadded; the adapter pads to 8 bytes.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct SingleFrame {
-    data: [u8; 8],
-    len: usize,
-}
-
-impl SingleFrame {
-    /// The frame's data bytes, PCI byte first.
-    #[must_use]
-    pub fn as_bytes(&self) -> &[u8] {
-        &self.data[..self.len]
+// Rounds up to the next value STmin can express, so the gap is never shorter than asked.
+fn encode_st_min(st_min: Duration) -> u8 {
+    let micros = st_min.as_micros();
+    match micros {
+        0 => 0,
+        1..=900 => 0xF0 + u8::try_from(micros.div_ceil(100)).unwrap_or(9),
+        _ => u8::try_from(micros.div_ceil(1000)).map_or(0x7F, |ms| ms.min(0x7F)),
     }
 }
 
-/// Wraps a payload of 1 to 7 bytes in a single frame. Longer payloads need multi-frame transfer.
+/// What the sender should do next.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Step {
+    /// Put this frame on the bus. Keep [`Segmenter::st_min`] between consecutive frames.
+    Send(CanData),
+    /// Wait for the receiver's flow control frame and pass it to [`Segmenter::flow_control`].
+    WaitForFlowControl,
+    /// The whole payload has been sent.
+    Done,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SendState {
+    Start,
+    Waiting,
+    // How many consecutive frames are left in this block; None means no limit.
+    Sending(Option<u8>),
+    Done,
+}
+
+/// Splits one payload into ISO-TP frames, following the receiver's flow control. IO-free: the
+/// caller sends each frame and feeds back the flow control frames it receives.
+#[derive(Debug, Clone)]
+pub struct Segmenter<'a> {
+    payload: &'a [u8],
+    addressing: Addressing,
+    offset: usize,
+    seq: u8,
+    st_min: Duration,
+    state: SendState,
+}
+
+impl<'a> Segmenter<'a> {
+    /// Starts a transfer of 1 to 4095 bytes.
+    pub fn new(payload: &'a [u8], addressing: Addressing) -> Result<Self, Error> {
+        if payload.is_empty() || payload.len() > MAX_PAYLOAD {
+            return Err(Error::BadLength);
+        }
+        Ok(Self {
+            payload,
+            addressing,
+            offset: 0,
+            seq: 0,
+            st_min: Duration::ZERO,
+            state: SendState::Start,
+        })
+    }
+
+    /// The next thing to do: send a frame, wait for flow control, or stop.
+    pub fn step(&mut self) -> Step {
+        match self.state {
+            SendState::Start => Step::Send(self.first()),
+            SendState::Waiting => Step::WaitForFlowControl,
+            SendState::Sending(left) => Step::Send(self.consecutive(left)),
+            SendState::Done => Step::Done,
+        }
+    }
+
+    /// Applies a flow control frame received while waiting for one.
+    pub fn flow_control(&mut self, fc: FlowControl) -> Result<(), Error> {
+        if self.state != SendState::Waiting {
+            return Err(Error::UnexpectedFrame);
+        }
+        match fc.status {
+            FlowStatus::ContinueToSend => {
+                self.st_min = fc.st_min;
+                self.state = SendState::Sending((fc.block_size != 0).then_some(fc.block_size));
+                Ok(())
+            }
+            FlowStatus::Wait => Ok(()),
+            FlowStatus::Overflow => {
+                self.state = SendState::Done;
+                Err(Error::Overflow)
+            }
+        }
+    }
+
+    /// The minimum gap the receiver asked for between consecutive frames.
+    #[must_use]
+    pub fn st_min(&self) -> Duration {
+        self.st_min
+    }
+
+    fn first(&mut self) -> CanData {
+        let mut frame = CanData::new(self.addressing);
+        let len = self.payload.len();
+        if len <= self.addressing.max_single_frame() {
+            // len <= 7, so it fits the PCI nibble
+            frame.push(&[len.to_le_bytes()[0]]);
+            frame.push(self.payload);
+            self.state = SendState::Done;
+        } else {
+            let [low, high, ..] = len.to_le_bytes();
+            let chunk = CAN_DLC - 2 - self.addressing.header_len();
+            frame.push(&[0x10 | high, low]);
+            frame.push(&self.payload[..chunk]);
+            self.offset = chunk;
+            self.state = SendState::Waiting;
+        }
+        frame
+    }
+
+    fn consecutive(&mut self, left: Option<u8>) -> CanData {
+        self.seq = (self.seq + 1) & 0x0F;
+        let chunk =
+            (CAN_DLC - 1 - self.addressing.header_len()).min(self.payload.len() - self.offset);
+        let mut frame = CanData::new(self.addressing);
+        frame.push(&[0x20 | self.seq]);
+        frame.push(&self.payload[self.offset..self.offset + chunk]);
+        self.offset += chunk;
+        self.state = if self.offset == self.payload.len() {
+            SendState::Done
+        } else {
+            match left {
+                Some(1) => SendState::Waiting,
+                Some(n) => SendState::Sending(Some(n - 1)),
+                None => SendState::Sending(None),
+            }
+        };
+        frame
+    }
+}
+
+/// Wraps a payload of 1 to 7 bytes in a single frame. Longer payloads need [`Segmenter`].
 #[must_use]
-pub fn single_frame(payload: &[u8]) -> Option<SingleFrame> {
-    let len = u8::try_from(payload.len())
-        .ok()
-        .filter(|len| (1..=7).contains(len))?;
-    let mut data = [0; 8];
-    data[0] = len;
-    data[1..=payload.len()].copy_from_slice(payload);
-    Some(SingleFrame {
-        data,
-        len: payload.len() + 1,
-    })
+pub fn single_frame(payload: &[u8]) -> Option<CanData> {
+    let mut seg = Segmenter::new(payload, Addressing::Normal).ok()?;
+    match seg.step() {
+        Step::Send(frame) if seg.step() == Step::Done => Some(frame),
+        _ => None,
+    }
 }

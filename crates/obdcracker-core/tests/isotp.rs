@@ -171,3 +171,157 @@ mod parse {
         }
     }
 }
+
+mod segment {
+    use core::time::Duration;
+
+    use obdcracker_core::isotp::{Addressing, Error, FlowControl, FlowStatus, Segmenter, Step};
+
+    const CTS: FlowControl = FlowControl {
+        status: FlowStatus::ContinueToSend,
+        block_size: 0,
+        st_min: Duration::ZERO,
+    };
+
+    fn sent(step: Step) -> Vec<u8> {
+        match step {
+            Step::Send(frame) => frame.as_bytes().to_vec(),
+            other => panic!("expected a frame, got {other:?}"),
+        }
+    }
+
+    // 0x22 with four DIDs: F187, F189, F190, F191
+    const FOUR_DIDS: [u8; 9] = [0x22, 0xF1, 0x87, 0xF1, 0x89, 0xF1, 0x90, 0xF1, 0x91];
+
+    #[test]
+    fn short_payload_is_one_single_frame() {
+        let mut seg = Segmenter::new(&[0x09, 0x02], Addressing::Normal).unwrap();
+        assert_eq!(sent(seg.step()), [0x02, 0x09, 0x02]);
+        assert_eq!(seg.step(), Step::Done);
+    }
+
+    #[test]
+    fn long_payload_waits_for_flow_control_after_the_first_frame() {
+        let mut seg = Segmenter::new(&FOUR_DIDS, Addressing::Normal).unwrap();
+        assert_eq!(
+            sent(seg.step()),
+            [0x10, 0x09, 0x22, 0xF1, 0x87, 0xF1, 0x89, 0xF1]
+        );
+        assert_eq!(seg.step(), Step::WaitForFlowControl);
+        seg.flow_control(CTS).unwrap();
+        assert_eq!(sent(seg.step()), [0x21, 0x90, 0xF1, 0x91]);
+        assert_eq!(seg.step(), Step::Done);
+    }
+
+    #[test]
+    fn block_size_makes_it_wait_again() {
+        let payload: Vec<u8> = (0..6 + 7 * 3).collect();
+        let mut seg = Segmenter::new(&payload, Addressing::Normal).unwrap();
+        sent(seg.step());
+        seg.flow_control(FlowControl {
+            block_size: 2,
+            ..CTS
+        })
+        .unwrap();
+        assert_eq!(sent(seg.step())[0], 0x21);
+        assert_eq!(sent(seg.step())[0], 0x22);
+        assert_eq!(seg.step(), Step::WaitForFlowControl);
+        seg.flow_control(CTS).unwrap();
+        assert_eq!(sent(seg.step())[0], 0x23);
+        assert_eq!(seg.step(), Step::Done);
+    }
+
+    #[test]
+    fn wait_keeps_waiting_and_overflow_aborts() {
+        let mut seg = Segmenter::new(&FOUR_DIDS, Addressing::Normal).unwrap();
+        sent(seg.step());
+        seg.flow_control(FlowControl {
+            status: FlowStatus::Wait,
+            ..CTS
+        })
+        .unwrap();
+        assert_eq!(seg.step(), Step::WaitForFlowControl);
+        assert_eq!(
+            seg.flow_control(FlowControl {
+                status: FlowStatus::Overflow,
+                ..CTS
+            }),
+            Err(Error::Overflow)
+        );
+    }
+
+    #[test]
+    fn flow_control_when_not_waiting_is_an_error() {
+        let mut seg = Segmenter::new(&[0x09, 0x02], Addressing::Normal).unwrap();
+        assert_eq!(seg.flow_control(CTS), Err(Error::UnexpectedFrame));
+    }
+
+    #[test]
+    fn reports_the_separation_time_to_keep() {
+        let mut seg = Segmenter::new(&FOUR_DIDS, Addressing::Normal).unwrap();
+        sent(seg.step());
+        seg.flow_control(FlowControl {
+            st_min: Duration::from_millis(5),
+            ..CTS
+        })
+        .unwrap();
+        assert_eq!(seg.st_min(), Duration::from_millis(5));
+    }
+
+    #[test]
+    fn sequence_number_wraps_after_fifteen() {
+        let payload = vec![0xAB; 6 + 7 * 17];
+        let mut seg = Segmenter::new(&payload, Addressing::Normal).unwrap();
+        sent(seg.step());
+        seg.flow_control(CTS).unwrap();
+        let seqs: Vec<u8> = (0..17).map(|_| sent(seg.step())[0]).collect();
+        assert_eq!(seqs[14], 0x2F);
+        assert_eq!(seqs[15], 0x20);
+        assert_eq!(seqs[16], 0x21);
+        assert_eq!(seg.step(), Step::Done);
+    }
+
+    #[test]
+    fn extended_addressing_prefixes_every_frame() {
+        let toyota = Addressing::Extended(0x40);
+        let mut seg = Segmenter::new(&[0x21, 0x01], toyota).unwrap();
+        assert_eq!(sent(seg.step()), [0x40, 0x02, 0x21, 0x01]);
+
+        let mut seg = Segmenter::new(&[1, 2, 3, 4, 5, 6, 7], toyota).unwrap();
+        assert_eq!(sent(seg.step()), [0x40, 0x10, 0x07, 1, 2, 3, 4, 5]);
+        seg.flow_control(CTS).unwrap();
+        assert_eq!(sent(seg.step()), [0x40, 0x21, 6, 7]);
+    }
+
+    #[test]
+    fn refuses_empty_and_oversized_payloads() {
+        assert_eq!(
+            Segmenter::new(&[], Addressing::Normal).err(),
+            Some(Error::BadLength)
+        );
+        assert_eq!(
+            Segmenter::new(&[0; 4096], Addressing::Normal).err(),
+            Some(Error::BadLength)
+        );
+        assert!(Segmenter::new(&[0; 4095], Addressing::Normal).is_ok());
+    }
+
+    #[test]
+    fn flow_control_encodes_back_to_its_frame() {
+        let fc = FlowControl {
+            status: FlowStatus::ContinueToSend,
+            block_size: 8,
+            st_min: Duration::from_millis(20),
+        };
+        assert_eq!(fc.encode(Addressing::Normal).as_bytes(), [0x30, 0x08, 0x14]);
+        let fc = FlowControl {
+            status: FlowStatus::Overflow,
+            block_size: 0,
+            st_min: Duration::from_micros(300),
+        };
+        assert_eq!(
+            fc.encode(Addressing::Extended(0xF1)).as_bytes(),
+            [0xF1, 0x32, 0x00, 0xF3]
+        );
+    }
+}
