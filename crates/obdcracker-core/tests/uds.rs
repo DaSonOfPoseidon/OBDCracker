@@ -84,6 +84,11 @@ mod read_data_by_identifier {
     }
 
     #[test]
+    fn multi_identifier_decode_needs_at_least_one_did() {
+        assert_eq!(decode_dids(&[0x62], &[]).err(), Some(Error::Malformed));
+    }
+
+    #[test]
     fn identification_text_drops_padding() {
         assert_eq!(decode_text(b"4G0907589F  \0\0"), Ok("4G0907589F"));
         assert_eq!(decode_text(b"0003"), Ok("0003"));

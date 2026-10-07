@@ -69,8 +69,13 @@ pub fn decode_dids<'a, 'l>(
     reply: &'a [u8],
     layout: &'l [(u16, usize)],
 ) -> Result<DidValues<'a, 'l>, Error> {
+    let rest = positive(READ_DATA_BY_IDENTIFIER, reply)?;
+    // A positive reply always carries at least one DID
+    if layout.is_empty() {
+        return Err(Error::Malformed);
+    }
     Ok(DidValues {
-        rest: positive(READ_DATA_BY_IDENTIFIER, reply)?,
+        rest,
         layout: layout.iter(),
         failed: false,
     })
