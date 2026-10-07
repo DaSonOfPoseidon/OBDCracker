@@ -75,6 +75,12 @@ Before a PR can be approved:
   findings.
 - CI must be green on the head commit, and `scripts/pr-gate.sh` must still pass.
 
+Branch protection enforces the Codex part with the `codex-review` status
+(`scripts/codex-status.sh`, run by `.github/workflows/codex-review.yml`). It passes only once Codex
+has completed a review of the head commit and every Codex thread is resolved. So resolve each
+thread once its finding is fixed, or answered with why it doesn't apply. Check it locally with
+`DRY_RUN=1 scripts/codex-status.sh <pr>`.
+
 ## Commits
 
 - **One logical step per commit.** A new test and the code that makes it pass go together; an unrelated cleanup goes
