@@ -149,6 +149,9 @@ pub enum Error {
     WrongSequence,
     /// A separation time over 127 ms, which a flow control frame can't express.
     StMinTooLong,
+    /// A single frame's payload is longer than the receive buffer. Unlike [`Error::Overflow`],
+    /// there's no transfer to refuse, so send nothing.
+    BufferTooSmall,
 }
 
 impl fmt::Display for Error {
@@ -162,6 +165,7 @@ impl fmt::Display for Error {
             Self::UnexpectedFrame => f.write_str("ISO-TP frame doesn't fit the transfer"),
             Self::WrongSequence => f.write_str("ISO-TP consecutive frame arrived out of order"),
             Self::StMinTooLong => f.write_str("ISO-TP separation time is over 127 ms"),
+            Self::BufferTooSmall => f.write_str("ISO-TP single frame is longer than the buffer"),
         }
     }
 }
@@ -467,8 +471,9 @@ impl<'b> Reassembler<'b> {
 
     /// Takes the data bytes of the next CAN frame from the sender.
     ///
-    /// [`Error::Overflow`] means the payload won't fit the buffer: send a flow control frame
-    /// with [`FlowStatus::Overflow`] so the sender stops.
+    /// [`Error::Overflow`] means a multi-frame payload won't fit the buffer: send a flow control
+    /// frame with [`FlowStatus::Overflow`] so the sender stops. A single frame that won't fit is
+    /// [`Error::BufferTooSmall`], and needs no reply.
     pub fn feed(&mut self, bytes: &[u8]) -> Result<Progress<'_>, Error> {
         let frame = match Frame::parse(bytes, self.addressing) {
             Ok(frame) => frame,
@@ -482,7 +487,10 @@ impl<'b> Reassembler<'b> {
         match frame {
             Frame::Single(data) => {
                 self.state = ReceiveState::Idle;
-                let dest = self.buf.get_mut(..data.len()).ok_or(Error::Overflow)?;
+                let dest = self
+                    .buf
+                    .get_mut(..data.len())
+                    .ok_or(Error::BufferTooSmall)?;
                 dest.copy_from_slice(data);
                 Ok(Progress::Complete(&self.buf[..data.len()]))
             }

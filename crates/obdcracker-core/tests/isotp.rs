@@ -537,6 +537,17 @@ mod reassemble {
     }
 
     #[test]
+    fn single_frame_too_long_for_the_buffer_is_not_an_overflow() {
+        // Overflow means "send an overflow flow control", which a single frame never takes
+        let mut buf = [0; 2];
+        let mut rx = Reassembler::new(&mut buf, Addressing::Normal);
+        assert_eq!(
+            rx.feed(&[0x03, 0x41, 0x0D, 0x32]),
+            Err(Error::BufferTooSmall)
+        );
+    }
+
+    #[test]
     fn refuses_a_transfer_longer_than_the_buffer() {
         let mut buf = [0; 16];
         let mut rx = Reassembler::new(&mut buf, Addressing::Normal);
