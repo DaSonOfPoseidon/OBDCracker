@@ -9,19 +9,36 @@ cd "$(dirname "$0")/.."
 repo=DaSonOfPoseidon/OBDCracker
 base=${BASE:-origin/main}
 
+# Reads paths on stdin and prints the area each one belongs to.
+areas_of() {
+	while read -r path; do
+		case $path in
+		crates/obdcracker-core/*) echo core ;;
+		crates/obdcracker-safety/*) echo safety ;;
+		crates/obdcracker-transport/*) echo transport ;;
+		crates/obdcracker-sim/*) echo sim ;;
+		crates/obdcracker-cli/*) echo cli ;;
+		crates/obdcracker/*) echo facade ;;
+		*.md | docs/*) echo docs ;;
+		.github/* | scripts/*) echo ci ;;
+		esac
+		# Cargo and tool config is CI too, including each crate's manifest, on top of its crate.
+		case $path in
+		*.toml | Cargo.lock) echo ci ;;
+		esac
+	done | sort -u
+}
+
+# `--areas-of <path>...` prints the areas for those paths, to check the mapping.
+if [ "$1" = --areas-of ]; then
+	shift
+	printf '%s\n' "$@" | areas_of | tr '\n' ' '
+	echo
+	exit 0
+fi
+
 git fetch -q origin
-areas=$(git diff --name-only "$base"...HEAD | while read -r path; do
-	case $path in
-	crates/obdcracker-core/*) echo core ;;
-	crates/obdcracker-safety/*) echo safety ;;
-	crates/obdcracker-transport/*) echo transport ;;
-	crates/obdcracker-sim/*) echo sim ;;
-	crates/obdcracker-cli/*) echo cli ;;
-	crates/obdcracker/*) echo facade ;;
-	*.md | docs/*) echo docs ;;
-	.github/* | scripts/* | Cargo.toml | Cargo.lock | *.toml) echo ci ;;
-	esac
-done | sort -u)
+areas=$(git diff --name-only "$base"...HEAD | areas_of)
 
 fixed=$(git log --format=%s "$base"..HEAD | grep -oiE 'fixes #[0-9]+' | grep -oE '[0-9]+' | sort -u | tr '\n' ',' | sed 's/,$//')
 milestone=$(echo "${1:-}" | tr -d 'Mm')
