@@ -92,16 +92,17 @@ pub struct FlowControl {
 
 impl FlowControl {
     /// The flow control frame's data bytes.
-    #[must_use]
-    pub fn encode(&self, addressing: Addressing) -> CanData {
+    ///
+    /// [`Error::StMinTooLong`] if the separation time is over 127 ms, the longest `STmin` can say.
+    pub fn encode(&self, addressing: Addressing) -> Result<CanData, Error> {
         let status = match self.status {
             FlowStatus::ContinueToSend => 0,
             FlowStatus::Wait => 1,
             FlowStatus::Overflow => 2,
         };
         let mut frame = CanData::new(addressing);
-        frame.push(&[0x30 | status, self.block_size, encode_st_min(self.st_min)]);
-        frame
+        frame.push(&[0x30 | status, self.block_size, encode_st_min(self.st_min)?]);
+        Ok(frame)
     }
 }
 
@@ -146,6 +147,8 @@ pub enum Error {
     UnexpectedFrame,
     /// A consecutive frame arrived out of order, so bytes are missing.
     WrongSequence,
+    /// A separation time over 127 ms, which a flow control frame can't express.
+    StMinTooLong,
 }
 
 impl fmt::Display for Error {
@@ -158,6 +161,7 @@ impl fmt::Display for Error {
             Self::Overflow => f.write_str("ISO-TP receiver's buffer is too small for the transfer"),
             Self::UnexpectedFrame => f.write_str("ISO-TP frame doesn't fit the transfer"),
             Self::WrongSequence => f.write_str("ISO-TP consecutive frame arrived out of order"),
+            Self::StMinTooLong => f.write_str("ISO-TP separation time is over 127 ms"),
         }
     }
 }
@@ -250,12 +254,16 @@ fn decode_st_min(byte: u8) -> Duration {
 }
 
 // Rounds up to the next value STmin can express, so the gap is never shorter than asked.
-fn encode_st_min(st_min: Duration) -> u8 {
+fn encode_st_min(st_min: Duration) -> Result<u8, Error> {
     let micros = st_min.as_micros();
     match micros {
-        0 => 0,
-        1..=900 => 0xF0 + u8::try_from(micros.div_ceil(100)).unwrap_or(9),
-        _ => u8::try_from(micros.div_ceil(1000)).map_or(0x7F, |ms| ms.min(0x7F)),
+        0 => Ok(0),
+        // 1..=900 µs is 1..=9 hundreds of microseconds
+        1..=900 => Ok(0xF0 + u8::try_from(micros.div_ceil(100)).unwrap_or(9)),
+        _ => u8::try_from(micros.div_ceil(1000))
+            .ok()
+            .filter(|&ms| ms <= 0x7F)
+            .ok_or(Error::StMinTooLong),
     }
 }
 
@@ -445,13 +453,15 @@ impl<'b> Reassembler<'b> {
 
     /// Asks the sender for this block size and separation time instead. The status is always
     /// sent as continue-to-send.
-    #[must_use]
-    pub fn with_flow_control(mut self, flow_control: FlowControl) -> Self {
+    ///
+    /// [`Error::StMinTooLong`] if the separation time can't be sent; see [`FlowControl::encode`].
+    pub fn with_flow_control(mut self, flow_control: FlowControl) -> Result<Self, Error> {
+        encode_st_min(flow_control.st_min)?;
         self.flow_control = FlowControl {
             status: FlowStatus::ContinueToSend,
             ..flow_control
         };
-        self
+        Ok(self)
     }
 
     /// Takes the data bytes of the next CAN frame from the sender.

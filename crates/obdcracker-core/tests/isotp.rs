@@ -177,7 +177,9 @@ mod parse {
 mod segment {
     use core::time::Duration;
 
-    use obdcracker_core::isotp::{Addressing, Error, FlowControl, FlowStatus, Segmenter, Step};
+    use obdcracker_core::isotp::{
+        Addressing, Error, FlowControl, FlowStatus, Reassembler, Segmenter, Step,
+    };
 
     const CTS: FlowControl = FlowControl {
         status: FlowStatus::ContinueToSend,
@@ -328,20 +330,55 @@ mod segment {
     }
 
     #[test]
+    fn refuses_a_separation_time_flow_control_cant_express() {
+        let fc = |st_min| FlowControl { st_min, ..CTS };
+        assert_eq!(
+            fc(Duration::from_millis(128)).encode(Addressing::Normal),
+            Err(Error::StMinTooLong)
+        );
+        assert_eq!(
+            fc(Duration::from_millis(127))
+                .encode(Addressing::Normal)
+                .unwrap()
+                .as_bytes(),
+            [0x30, 0x00, 0x7F]
+        );
+        // Between 900 µs and 1 ms rounds up to 1 ms, never down
+        assert_eq!(
+            fc(Duration::from_micros(950))
+                .encode(Addressing::Normal)
+                .unwrap()
+                .as_bytes(),
+            [0x30, 0x00, 0x01]
+        );
+        let mut buf = [0; 8];
+        assert_eq!(
+            Reassembler::new(&mut buf, Addressing::Normal)
+                .with_flow_control(fc(Duration::from_secs(1)))
+                .err()
+                .map(|_| ()),
+            Some(())
+        );
+    }
+
+    #[test]
     fn flow_control_encodes_back_to_its_frame() {
         let fc = FlowControl {
             status: FlowStatus::ContinueToSend,
             block_size: 8,
             st_min: Duration::from_millis(20),
         };
-        assert_eq!(fc.encode(Addressing::Normal).as_bytes(), [0x30, 0x08, 0x14]);
+        assert_eq!(
+            fc.encode(Addressing::Normal).unwrap().as_bytes(),
+            [0x30, 0x08, 0x14]
+        );
         let fc = FlowControl {
             status: FlowStatus::Overflow,
             block_size: 0,
             st_min: Duration::from_micros(300),
         };
         assert_eq!(
-            fc.encode(Addressing::Extended(0xF1)).as_bytes(),
+            fc.encode(Addressing::Extended(0xF1)).unwrap().as_bytes(),
             [0xF1, 0x32, 0x00, 0xF3]
         );
     }
@@ -409,7 +446,9 @@ mod reassemble {
             ..CTS
         };
         let mut buf = [0; 64];
-        let mut rx = Reassembler::new(&mut buf, Addressing::Normal).with_flow_control(fc);
+        let mut rx = Reassembler::new(&mut buf, Addressing::Normal)
+            .with_flow_control(fc)
+            .unwrap();
         assert_eq!(
             rx.feed(&[0x10, 0x1B, 0, 0, 0, 0, 0, 0]),
             Ok(Progress::SendFlowControl(fc))

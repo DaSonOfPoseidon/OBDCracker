@@ -42,7 +42,7 @@ proptest! {
         let fc = FlowControl { status: FlowStatus::ContinueToSend, block_size, st_min: Duration::ZERO };
         let mut seg = Segmenter::new(&payload, addressing).unwrap();
         let mut buf = vec![0; 6000];
-        let mut rx = Reassembler::new(&mut buf, addressing).with_flow_control(fc);
+        let mut rx = Reassembler::new(&mut buf, addressing).with_flow_control(fc).unwrap();
         let mut got = None;
         loop {
             match seg.step() {
@@ -61,7 +61,7 @@ proptest! {
     #[test]
     fn flow_control_encodes_and_parses_back(block_size in any::<u8>(), st_min_byte in 0u8..=0x7F, addressing in any_addressing()) {
         let fc = FlowControl { status: FlowStatus::Wait, block_size, st_min: Duration::from_millis(u64::from(st_min_byte)) };
-        let encoded = fc.encode(addressing);
+        let encoded = fc.encode(addressing).unwrap();
         prop_assert_eq!(Frame::parse(encoded.as_bytes(), addressing), Ok(Frame::FlowControl(fc)));
     }
 }
