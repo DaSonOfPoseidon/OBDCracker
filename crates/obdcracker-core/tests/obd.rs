@@ -221,6 +221,24 @@ mod vehicle_info {
     }
 
     #[test]
+    fn rejects_characters_a_vin_never_contains() {
+        // SAE J1979: digits and upper case letters except I, O and Q
+        for bad in [
+            b"1D4GP00R55B12345I",
+            b"1D4GP00R55B12345O",
+            b"1D4GP00R55B12345Q",
+            b"1d4gp00r55b123456",
+        ] {
+            assert_eq!(
+                decode_vin(&reply(0x02, 1, bad)),
+                Err(Error::Malformed),
+                "{}",
+                String::from_utf8_lossy(bad)
+            );
+        }
+    }
+
+    #[test]
     fn decodes_every_calibration_id_without_padding() {
         let mut data = padded("JMB*36761500", 16);
         data.extend(padded("JMB*47872611", 16));

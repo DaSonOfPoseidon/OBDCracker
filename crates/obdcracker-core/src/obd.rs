@@ -267,10 +267,15 @@ pub fn decode_supported_info(reply: &[u8]) -> Result<SupportedPids, Error> {
     Ok(SupportedPids::new(0x00, [a, b, c, d]))
 }
 
+// SAE J1979: digits and upper case letters except I, O and Q, which look like 1 and 0.
+fn is_vin_char(b: u8) -> bool {
+    (b.is_ascii_digit() || b.is_ascii_uppercase()) && !matches!(b, b'I' | b'O' | b'Q')
+}
+
 /// Decodes the mode 09 PID 02 reply: the 17-character VIN.
 pub fn decode_vin(reply: &[u8]) -> Result<&str, Error> {
     let (count, data) = info(reply, 0x02)?;
-    if count != 1 || data.len() != VIN_LEN || !data.iter().all(u8::is_ascii_alphanumeric) {
+    if count != 1 || data.len() != VIN_LEN || !data.iter().all(|&b| is_vin_char(b)) {
         return Err(Error::Malformed);
     }
     text(data)
