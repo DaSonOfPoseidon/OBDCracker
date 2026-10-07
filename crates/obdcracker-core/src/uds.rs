@@ -3,10 +3,21 @@
 //! The request builders return payload bytes, which still have to pass the safety policy
 //! before they can be sent. Each decoder takes one module's reassembled reply.
 
+use core::fmt;
+use core::slice;
+
+use crate::obd::Dtc;
 use crate::response::{Error, positive, printable};
 
 /// The `ReadDataByIdentifier` service.
 pub const READ_DATA_BY_IDENTIFIER: u8 = 0x22;
+
+/// The `ReadDTCInformation` service.
+pub const READ_DTC_INFORMATION: u8 = 0x19;
+
+const REPORT_NUMBER_BY_STATUS_MASK: u8 = 0x01;
+const REPORT_DTC_BY_STATUS_MASK: u8 = 0x02;
+const REPORT_SUPPORTED_DTC: u8 = 0x0A;
 
 /// Standard identification data identifiers (ISO 14229-1 annex C). Manufacturer DIDs come from
 /// vehicle profiles.
@@ -70,7 +81,7 @@ pub fn decode_dids<'a, 'l>(
 #[derive(Debug, Clone)]
 pub struct DidValues<'a, 'l> {
     rest: &'a [u8],
-    layout: core::slice::Iter<'l, (u16, usize)>,
+    layout: slice::Iter<'l, (u16, usize)>,
     failed: bool,
 }
 
@@ -117,4 +128,189 @@ pub fn decode_text(data: &[u8]) -> Result<&str, Error> {
         .rposition(|&b| b != 0 && b != b' ')
         .map_or(0, |i| i + 1);
     printable(&data[..end])
+}
+
+/// A request for how many DTCs match a status mask (`ReadDTCInformation` 0x01).
+#[must_use]
+pub fn dtc_count_by_status_mask(mask: u8) -> [u8; 3] {
+    [READ_DTC_INFORMATION, REPORT_NUMBER_BY_STATUS_MASK, mask]
+}
+
+/// A request for every DTC matching a status mask (`ReadDTCInformation` 0x02).
+#[must_use]
+pub fn dtcs_by_status_mask(mask: u8) -> [u8; 3] {
+    [READ_DTC_INFORMATION, REPORT_DTC_BY_STATUS_MASK, mask]
+}
+
+/// A request for every DTC the module can store, whatever its status (`ReadDTCInformation` 0x0A).
+#[must_use]
+pub fn supported_dtcs() -> [u8; 2] {
+    [READ_DTC_INFORMATION, REPORT_SUPPORTED_DTC]
+}
+
+/// A DTC's status byte (ISO 14229-1 D.2), one flag per bit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct DtcStatus(pub u8);
+
+impl DtcStatus {
+    fn bit(self, n: u8) -> bool {
+        self.0 & (1 << n) != 0
+    }
+
+    /// Bit 0: the most recent test failed.
+    #[must_use]
+    pub fn test_failed(self) -> bool {
+        self.bit(0)
+    }
+
+    /// Bit 1: a test failed during the current operation cycle.
+    #[must_use]
+    pub fn test_failed_this_operation_cycle(self) -> bool {
+        self.bit(1)
+    }
+
+    /// Bit 2: pending, failed in the current or last operation cycle.
+    #[must_use]
+    pub fn pending(self) -> bool {
+        self.bit(2)
+    }
+
+    /// Bit 3: confirmed, failed often enough to be stored.
+    #[must_use]
+    pub fn confirmed(self) -> bool {
+        self.bit(3)
+    }
+
+    /// Bit 4: the test hasn't completed since DTCs were last cleared.
+    #[must_use]
+    pub fn test_not_completed_since_last_clear(self) -> bool {
+        self.bit(4)
+    }
+
+    /// Bit 5: the test has failed at least once since DTCs were last cleared.
+    #[must_use]
+    pub fn test_failed_since_last_clear(self) -> bool {
+        self.bit(5)
+    }
+
+    /// Bit 6: the test hasn't completed during the current operation cycle.
+    #[must_use]
+    pub fn test_not_completed_this_operation_cycle(self) -> bool {
+        self.bit(6)
+    }
+
+    /// Bit 7: the module asks for a warning lamp (such as the MIL).
+    #[must_use]
+    pub fn warning_indicator_requested(self) -> bool {
+        self.bit(7)
+    }
+}
+
+/// A three-byte UDS DTC: the two-byte SAE J2012 code and a failure type byte, shown as
+/// `P0401-00`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct UdsDtc(u32);
+
+impl UdsDtc {
+    /// Wraps the DTC's three bytes, held in the low 24 bits.
+    #[must_use]
+    pub fn new(code: u32) -> Self {
+        Self(code & 0x00FF_FFFF)
+    }
+
+    /// The DTC's three bytes, in the low 24 bits.
+    #[must_use]
+    pub fn code(self) -> u32 {
+        self.0
+    }
+
+    /// The two-byte code, the same as OBD-II mode 03 reports.
+    #[must_use]
+    pub fn obd_dtc(self) -> Dtc {
+        let [_, high, low, _] = self.0.to_be_bytes();
+        Dtc::new(u16::from_be_bytes([high, low]))
+    }
+
+    /// The failure type byte: what kind of fault (such as circuit short to ground).
+    #[must_use]
+    pub fn failure_type(self) -> u8 {
+        self.0.to_be_bytes()[3]
+    }
+}
+
+impl fmt::Display for UdsDtc {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}-{:02X}", self.obd_dtc(), self.failure_type())
+    }
+}
+
+/// The reply to a DTC count request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DtcCount {
+    /// Which status bits the module supports.
+    pub availability: DtcStatus,
+    /// The DTC format the module uses (0x01 is ISO 14229-1).
+    pub format: u8,
+    /// How many DTCs match the mask.
+    pub count: u16,
+}
+
+// The data after a ReadDTCInformation reply's echoed subfunction, which must be one of `subs`.
+fn dtc_reply<'a>(reply: &'a [u8], subs: &[u8]) -> Result<&'a [u8], Error> {
+    let [sub, rest @ ..] = positive(READ_DTC_INFORMATION, reply)? else {
+        return Err(Error::TooShort);
+    };
+    if !subs.contains(sub) {
+        return Err(Error::Malformed);
+    }
+    Ok(rest)
+}
+
+/// Decodes the reply to [`dtc_count_by_status_mask`].
+pub fn decode_dtc_count(reply: &[u8]) -> Result<DtcCount, Error> {
+    let rest = dtc_reply(reply, &[REPORT_NUMBER_BY_STATUS_MASK])?;
+    let [availability, format, high, low] = *rest else {
+        return Err(Error::Malformed);
+    };
+    Ok(DtcCount {
+        availability: DtcStatus(availability),
+        format,
+        count: u16::from_be_bytes([high, low]),
+    })
+}
+
+/// One DTC and its status.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DtcRecord {
+    /// The DTC.
+    pub dtc: UdsDtc,
+    /// Its status flags.
+    pub status: DtcStatus,
+}
+
+/// Decodes the reply to [`dtcs_by_status_mask`] or [`supported_dtcs`]: the status bits the
+/// module supports, and each DTC with its status.
+pub fn decode_dtcs(reply: &[u8]) -> Result<(DtcStatus, DtcRecords<'_>), Error> {
+    let rest = dtc_reply(reply, &[REPORT_DTC_BY_STATUS_MASK, REPORT_SUPPORTED_DTC])?;
+    let (&availability, records) = rest.split_first().ok_or(Error::TooShort)?;
+    let (records, partial) = records.as_chunks::<4>();
+    if !partial.is_empty() {
+        return Err(Error::Malformed);
+    }
+    Ok((DtcStatus(availability), DtcRecords(records.iter())))
+}
+
+/// The DTC records in a `ReadDTCInformation` reply.
+#[derive(Debug, Clone)]
+pub struct DtcRecords<'a>(slice::Iter<'a, [u8; 4]>);
+
+impl Iterator for DtcRecords<'_> {
+    type Item = DtcRecord;
+
+    fn next(&mut self) -> Option<DtcRecord> {
+        self.0.next().map(|&[a, b, c, status]| DtcRecord {
+            dtc: UdsDtc(u32::from_be_bytes([0, a, b, c])),
+            status: DtcStatus(status),
+        })
+    }
 }

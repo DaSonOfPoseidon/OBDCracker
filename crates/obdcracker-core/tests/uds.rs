@@ -105,3 +105,96 @@ mod read_data_by_identifier {
         );
     }
 }
+
+mod read_dtc_information {
+    use obdcracker_core::obd::Dtc;
+    use obdcracker_core::response::Error;
+    use obdcracker_core::uds::{
+        DtcCount, DtcRecord, DtcStatus, UdsDtc, decode_dtc_count, decode_dtcs,
+        dtc_count_by_status_mask, dtcs_by_status_mask, supported_dtcs,
+    };
+
+    #[test]
+    fn builds_the_requests() {
+        assert_eq!(dtc_count_by_status_mask(0xFF), [0x19, 0x01, 0xFF]);
+        assert_eq!(dtcs_by_status_mask(0x08), [0x19, 0x02, 0x08]);
+        assert_eq!(supported_dtcs(), [0x19, 0x0A]);
+    }
+
+    #[test]
+    fn decodes_the_dtc_count() {
+        assert_eq!(
+            decode_dtc_count(&[0x59, 0x01, 0xFF, 0x01, 0x00, 0x03]),
+            Ok(DtcCount {
+                availability: DtcStatus(0xFF),
+                format: 0x01,
+                count: 3
+            })
+        );
+        assert_eq!(
+            decode_dtc_count(&[0x59, 0x01, 0xFF, 0x01, 0x00]),
+            Err(Error::Malformed)
+        );
+    }
+
+    #[test]
+    fn decodes_dtcs_by_status_mask() {
+        // P0401-00 confirmed with the warning lamp on; U0100-00 pending
+        let reply = [
+            0x59, 0x02, 0xFF, 0x04, 0x01, 0x00, 0x88, 0xC1, 0x00, 0x00, 0x24,
+        ];
+        let (availability, records) = decode_dtcs(&reply).unwrap();
+        assert_eq!(availability, DtcStatus(0xFF));
+        let records: Vec<DtcRecord> = records.collect();
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[0].dtc, UdsDtc::new(0x04_01_00));
+        assert_eq!(records[0].dtc.to_string(), "P0401-00");
+        assert!(records[0].status.confirmed());
+        assert!(records[0].status.warning_indicator_requested());
+        assert!(!records[0].status.pending());
+        assert_eq!(records[1].dtc.to_string(), "U0100-00");
+        assert!(records[1].status.pending());
+        assert!(records[1].status.test_failed_since_last_clear());
+        assert!(!records[1].status.confirmed());
+    }
+
+    #[test]
+    fn three_byte_dtc_splits_into_the_obd_code_and_failure_type() {
+        let dtc = UdsDtc::new(0x04_01_1C);
+        assert_eq!(dtc.obd_dtc(), Dtc::new(0x0401));
+        assert_eq!(dtc.failure_type(), 0x1C);
+        assert_eq!(dtc.code(), 0x04_01_1C);
+    }
+
+    #[test]
+    fn decodes_supported_dtcs_in_the_same_record_format() {
+        let (_, records) = decode_dtcs(&[0x59, 0x0A, 0x7F, 0x04, 0x01, 0x00, 0x00]).unwrap();
+        assert_eq!(records.count(), 1);
+    }
+
+    #[test]
+    fn rejects_partial_records_and_other_subfunctions() {
+        assert_eq!(
+            decode_dtcs(&[0x59, 0x02, 0xFF, 0x04, 0x01, 0x00]).err(),
+            Some(Error::Malformed)
+        );
+        assert_eq!(
+            decode_dtcs(&[0x59, 0x01, 0xFF, 0x01, 0x00, 0x03]).err(),
+            Some(Error::Malformed)
+        );
+        assert_eq!(decode_dtcs(&[0x59, 0x02]).err(), Some(Error::TooShort));
+    }
+
+    #[test]
+    fn status_bits_follow_iso_14229() {
+        let status = DtcStatus(0b0101_0101);
+        assert!(status.test_failed());
+        assert!(!status.test_failed_this_operation_cycle());
+        assert!(status.pending());
+        assert!(!status.confirmed());
+        assert!(status.test_not_completed_since_last_clear());
+        assert!(!status.test_failed_since_last_clear());
+        assert!(status.test_not_completed_this_operation_cycle());
+        assert!(!status.warning_indicator_requested());
+    }
+}
