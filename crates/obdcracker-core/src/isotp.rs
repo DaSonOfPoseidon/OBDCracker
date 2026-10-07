@@ -502,13 +502,3 @@ impl<'b> Reassembler<'b> {
         }
     }
 }
-
-/// Wraps a payload of 1 to 7 bytes in a single frame. Longer payloads need [`Segmenter`].
-#[must_use]
-pub fn single_frame(payload: &[u8]) -> Option<CanData> {
-    let mut seg = Segmenter::new(payload, Addressing::Normal).ok()?;
-    match seg.step() {
-        Step::Send(frame) if seg.step() == Step::Done => Some(frame),
-        _ => None,
-    }
-}

@@ -20,12 +20,19 @@ fn writes_the_can_frame_instead_of_sending_it() {
 }
 
 #[test]
-fn refuses_requests_that_need_multiple_frames() {
+fn prints_first_and_consecutive_frames_of_a_long_request() {
+    // Four DIDs need two frames. With no ECU to send flow control, the dry run assumes
+    // continue-to-send.
     let long = Policy::read_only()
         .approve(
             Target::Physical(0x7E0),
             &[0x22, 0xF1, 0x87, 0xF1, 0x89, 0xF1, 0x90, 0xF1, 0x91],
         )
         .unwrap();
-    assert!(DryRun::new(Vec::new()).send(&long).is_err());
+    let mut dry = DryRun::new(Vec::new());
+    dry.send(&long).unwrap();
+    assert_eq!(
+        String::from_utf8(dry.into_inner()).unwrap(),
+        "7E0 10 09 22 F1 87 F1 89 F1\n7E0 21 90 F1 91\n"
+    );
 }
