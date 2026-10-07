@@ -133,7 +133,8 @@ decode them. Without a profile the tool falls back to generic OBD-II.
 ## Development
 
 ```sh
-cargo fmt --check && cargo clippy --all-targets -- -D warnings && cargo test
+cargo fmt --check && cargo clippy --all-targets --all-features -- -D warnings && cargo test --all-features
+cargo build -p obdcracker-core --target thumbv7em-none-eabihf  # obdcracker-core must stay no_std
 ```
 
 You need either a local `rustup` (the version is pinned in `rust-toolchain.toml`) or Docker: `scripts/cargo.sh <args>` runs
