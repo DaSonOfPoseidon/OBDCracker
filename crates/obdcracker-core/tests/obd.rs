@@ -192,6 +192,18 @@ mod vehicle_info {
     }
 
     #[test]
+    fn supported_bitmap_reply_is_exactly_four_bytes() {
+        assert_eq!(
+            decode_supported_info(&[0x49, 0x00, 0x54, 0x40, 0x00, 0x00, 0xAA]).err(),
+            Some(Error::Malformed)
+        );
+        assert_eq!(
+            decode_supported_info(&[0x49, 0x00, 0x54, 0x40, 0x00]).err(),
+            Some(Error::Malformed)
+        );
+    }
+
+    #[test]
     fn decodes_the_vin() {
         assert_eq!(
             decode_vin(&reply(0x02, 1, b"1D4GP00R55B123456")),

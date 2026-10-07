@@ -261,7 +261,7 @@ fn text(bytes: &[u8]) -> Result<&str, Error> {
 /// Decodes the mode 09 PID 00 reply: which vehicle information PIDs 01 to 20 are supported.
 pub fn decode_supported_info(reply: &[u8]) -> Result<SupportedPids, Error> {
     let rest = positive(VEHICLE_INFO, reply)?;
-    let [0x00, a, b, c, d, ..] = *rest else {
+    let [0x00, a, b, c, d] = *rest else {
         return Err(Error::Malformed);
     };
     Ok(SupportedPids::new(0x00, [a, b, c, d]))
