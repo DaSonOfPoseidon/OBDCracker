@@ -89,6 +89,16 @@ mod read_data_by_identifier {
     }
 
     #[test]
+    fn multi_identifier_layout_needs_a_length_for_every_did() {
+        // Every DID carries at least one data byte, as for a single-DID read
+        let layout = [(did::VIN, 0)];
+        assert_eq!(
+            decode_dids(&reply(did::VIN, b""), &layout).err(),
+            Some(Error::Malformed)
+        );
+    }
+
+    #[test]
     fn identification_text_drops_padding() {
         assert_eq!(decode_text(b"4G0907589F  \0\0"), Ok("4G0907589F"));
         assert_eq!(decode_text(b"0003"), Ok("0003"));

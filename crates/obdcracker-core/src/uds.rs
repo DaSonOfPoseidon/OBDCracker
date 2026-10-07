@@ -65,13 +65,14 @@ pub fn decode_did(reply: &[u8], did: u16) -> Result<&[u8], Error> {
 
 /// Decodes the reply to a multi-DID read. The reply doesn't say where each DID's data ends, so
 /// `layout` gives each DID and its data length, in request order (from the vehicle profile).
+/// An empty layout, or a length of 0, is [`Error::Malformed`].
 pub fn decode_dids<'a, 'l>(
     reply: &'a [u8],
     layout: &'l [(u16, usize)],
 ) -> Result<DidValues<'a, 'l>, Error> {
     let rest = positive(READ_DATA_BY_IDENTIFIER, reply)?;
-    // A positive reply always carries at least one DID
-    if layout.is_empty() {
+    // A positive reply carries at least one DID, and each DID at least one data byte.
+    if layout.is_empty() || layout.iter().any(|&(_, len)| len == 0) {
         return Err(Error::Malformed);
     }
     Ok(DidValues {
