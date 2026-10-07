@@ -143,6 +143,8 @@ pub enum Error {
     Overflow,
     /// A frame arrived that doesn't fit the transfer's current state.
     UnexpectedFrame,
+    /// A consecutive frame arrived out of order, so bytes are missing.
+    WrongSequence,
 }
 
 impl fmt::Display for Error {
@@ -154,6 +156,7 @@ impl fmt::Display for Error {
             Self::Unsupported => f.write_str("ISO-TP frame type is reserved or needs CAN FD"),
             Self::Overflow => f.write_str("ISO-TP receiver's buffer is too small for the transfer"),
             Self::UnexpectedFrame => f.write_str("ISO-TP frame doesn't fit the transfer"),
+            Self::WrongSequence => f.write_str("ISO-TP consecutive frame arrived out of order"),
         }
     }
 }
@@ -364,6 +367,139 @@ impl<'a> Segmenter<'a> {
             }
         };
         frame
+    }
+}
+
+/// What the receiver should do after a frame.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Progress<'b> {
+    /// The whole payload has arrived.
+    Complete(&'b [u8]),
+    /// Send this flow control frame to the sender, then keep feeding frames.
+    SendFlowControl(FlowControl),
+    /// Keep feeding frames.
+    Pending,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReceiveState {
+    Idle,
+    Receiving {
+        len: usize,
+        filled: usize,
+        next_seq: u8,
+        in_block: u8,
+    },
+}
+
+/// Rebuilds one payload from ISO-TP frames into a caller-provided buffer, telling the caller
+/// when to send flow control. IO-free and allocation-free.
+///
+/// A new single or first frame always starts a new payload, abandoning any unfinished one, as
+/// ISO 15765-2 requires. After an error the receiver is idle and waits for the next one.
+#[derive(Debug)]
+pub struct Reassembler<'b> {
+    buf: &'b mut [u8],
+    addressing: Addressing,
+    flow_control: FlowControl,
+    state: ReceiveState,
+}
+
+impl<'b> Reassembler<'b> {
+    /// Receives payloads of up to `buf.len()` bytes. Asks for every consecutive frame at once
+    /// (block size 0) with no separation time.
+    pub fn new(buf: &'b mut [u8], addressing: Addressing) -> Self {
+        Self {
+            buf,
+            addressing,
+            flow_control: FlowControl {
+                status: FlowStatus::ContinueToSend,
+                block_size: 0,
+                st_min: Duration::ZERO,
+            },
+            state: ReceiveState::Idle,
+        }
+    }
+
+    /// Asks the sender for this block size and separation time instead. The status is always
+    /// sent as continue-to-send.
+    #[must_use]
+    pub fn with_flow_control(mut self, flow_control: FlowControl) -> Self {
+        self.flow_control = FlowControl {
+            status: FlowStatus::ContinueToSend,
+            ..flow_control
+        };
+        self
+    }
+
+    /// Takes the data bytes of the next CAN frame from the sender.
+    ///
+    /// [`Error::Overflow`] means the payload won't fit the buffer: send a flow control frame
+    /// with [`FlowStatus::Overflow`] so the sender stops.
+    pub fn feed(&mut self, bytes: &[u8]) -> Result<Progress<'_>, Error> {
+        let frame = Frame::parse(bytes, self.addressing)?;
+        match frame {
+            Frame::Single(data) => {
+                self.state = ReceiveState::Idle;
+                let dest = self.buf.get_mut(..data.len()).ok_or(Error::Overflow)?;
+                dest.copy_from_slice(data);
+                Ok(Progress::Complete(&self.buf[..data.len()]))
+            }
+            Frame::First { len, data } => {
+                self.state = ReceiveState::Idle;
+                let len = usize::from(len);
+                if len > self.buf.len() {
+                    return Err(Error::Overflow);
+                }
+                // Parsing guarantees len exceeds a single frame, so the first frame's data fits.
+                self.buf[..data.len()].copy_from_slice(data);
+                self.state = ReceiveState::Receiving {
+                    len,
+                    filled: data.len(),
+                    next_seq: 1,
+                    in_block: 0,
+                };
+                Ok(Progress::SendFlowControl(self.flow_control))
+            }
+            Frame::Consecutive { seq, data } => {
+                let ReceiveState::Receiving {
+                    len,
+                    filled,
+                    next_seq,
+                    in_block,
+                } = self.state
+                else {
+                    return Err(Error::UnexpectedFrame);
+                };
+                if seq != next_seq {
+                    self.state = ReceiveState::Idle;
+                    return Err(Error::WrongSequence);
+                }
+                let take = data.len().min(len - filled);
+                self.buf[filled..filled + take].copy_from_slice(&data[..take]);
+                let filled = filled + take;
+                if filled == len {
+                    self.state = ReceiveState::Idle;
+                    return Ok(Progress::Complete(&self.buf[..len]));
+                }
+                // Block size 0 means one unlimited block, so the count never matters (and wraps).
+                let in_block = in_block.wrapping_add(1);
+                let block_done =
+                    self.flow_control.block_size != 0 && in_block == self.flow_control.block_size;
+                self.state = ReceiveState::Receiving {
+                    len,
+                    filled,
+                    next_seq: (seq + 1) & 0x0F,
+                    in_block: if block_done { 0 } else { in_block },
+                };
+                Ok(if block_done {
+                    Progress::SendFlowControl(self.flow_control)
+                } else {
+                    Progress::Pending
+                })
+            }
+            Frame::FlowControl(_) => Err(Error::UnexpectedFrame),
+        }
     }
 }
 

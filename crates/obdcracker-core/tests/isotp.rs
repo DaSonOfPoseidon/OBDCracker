@@ -325,3 +325,145 @@ mod segment {
         );
     }
 }
+
+mod reassemble {
+    use core::time::Duration;
+
+    use obdcracker_core::isotp::{
+        Addressing, Error, FlowControl, FlowStatus, Progress, Reassembler, Segmenter, Step,
+    };
+
+    const CTS: FlowControl = FlowControl {
+        status: FlowStatus::ContinueToSend,
+        block_size: 0,
+        st_min: Duration::ZERO,
+    };
+
+    // A mode 09 PID 02 reply from 7E8: 49 02 01 then the 17-character VIN, padded with 0x55
+    const VIN_FRAMES: [[u8; 8]; 3] = [
+        [0x10, 0x14, 0x49, 0x02, 0x01, 0x31, 0x44, 0x34],
+        [0x21, 0x47, 0x50, 0x30, 0x30, 0x52, 0x35, 0x35],
+        [0x22, 0x42, 0x31, 0x32, 0x33, 0x34, 0x35, 0x36],
+    ];
+
+    #[test]
+    fn reassembles_a_vin_reply() {
+        let mut buf = [0; 64];
+        let mut rx = Reassembler::new(&mut buf, Addressing::Normal);
+        assert_eq!(rx.feed(&VIN_FRAMES[0]), Ok(Progress::SendFlowControl(CTS)));
+        assert_eq!(rx.feed(&VIN_FRAMES[1]), Ok(Progress::Pending));
+        let Ok(Progress::Complete(payload)) = rx.feed(&VIN_FRAMES[2]) else {
+            panic!("expected a complete payload");
+        };
+        assert_eq!(&payload[..3], [0x49, 0x02, 0x01]);
+        assert_eq!(&payload[3..], b"1D4GP00R55B123456");
+    }
+
+    #[test]
+    fn single_frame_completes_at_once() {
+        let mut buf = [0; 8];
+        let mut rx = Reassembler::new(&mut buf, Addressing::Normal);
+        assert_eq!(
+            rx.feed(&[0x03, 0x41, 0x0D, 0x32, 0x55, 0x55, 0x55, 0x55]),
+            Ok(Progress::Complete(&[0x41, 0x0D, 0x32]))
+        );
+    }
+
+    #[test]
+    fn drops_padding_after_the_last_consecutive_frame() {
+        let mut buf = [0; 16];
+        let mut rx = Reassembler::new(&mut buf, Addressing::Normal);
+        rx.feed(&[0x10, 0x08, 1, 2, 3, 4, 5, 6]).unwrap();
+        assert_eq!(
+            rx.feed(&[0x21, 7, 8, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA]),
+            Ok(Progress::Complete(&[1, 2, 3, 4, 5, 6, 7, 8]))
+        );
+    }
+
+    #[test]
+    fn asks_for_flow_control_after_each_block() {
+        let fc = FlowControl {
+            block_size: 2,
+            st_min: Duration::from_millis(10),
+            ..CTS
+        };
+        let mut buf = [0; 64];
+        let mut rx = Reassembler::new(&mut buf, Addressing::Normal).with_flow_control(fc);
+        assert_eq!(
+            rx.feed(&[0x10, 0x1B, 0, 0, 0, 0, 0, 0]),
+            Ok(Progress::SendFlowControl(fc))
+        );
+        assert_eq!(rx.feed(&[0x21, 0, 0, 0, 0, 0, 0, 0]), Ok(Progress::Pending));
+        assert_eq!(
+            rx.feed(&[0x22, 0, 0, 0, 0, 0, 0, 0]),
+            Ok(Progress::SendFlowControl(fc))
+        );
+        assert!(matches!(
+            rx.feed(&[0x23, 0, 0, 0, 0, 0, 0, 0]),
+            Ok(Progress::Complete(p)) if p.len() == 27
+        ));
+    }
+
+    #[test]
+    fn wrong_sequence_number_aborts_and_a_new_first_frame_restarts() {
+        let mut buf = [0; 64];
+        let mut rx = Reassembler::new(&mut buf, Addressing::Normal);
+        rx.feed(&VIN_FRAMES[0]).unwrap();
+        assert_eq!(rx.feed(&VIN_FRAMES[2]), Err(Error::WrongSequence));
+        assert_eq!(rx.feed(&VIN_FRAMES[1]), Err(Error::UnexpectedFrame));
+        rx.feed(&VIN_FRAMES[0]).unwrap();
+        rx.feed(&VIN_FRAMES[1]).unwrap();
+        assert!(matches!(rx.feed(&VIN_FRAMES[2]), Ok(Progress::Complete(_))));
+    }
+
+    #[test]
+    fn refuses_a_transfer_longer_than_the_buffer() {
+        let mut buf = [0; 16];
+        let mut rx = Reassembler::new(&mut buf, Addressing::Normal);
+        assert_eq!(rx.feed(&VIN_FRAMES[0]), Err(Error::Overflow));
+        assert_eq!(rx.feed(&VIN_FRAMES[1]), Err(Error::UnexpectedFrame));
+    }
+
+    #[test]
+    fn flow_control_and_stray_consecutive_frames_are_unexpected() {
+        let mut buf = [0; 16];
+        let mut rx = Reassembler::new(&mut buf, Addressing::Normal);
+        assert_eq!(rx.feed(&[0x30, 0, 0]), Err(Error::UnexpectedFrame));
+        assert_eq!(rx.feed(&[0x21, 1, 2]), Err(Error::UnexpectedFrame));
+    }
+
+    #[test]
+    fn round_trips_through_the_segmenter_with_extended_addressing() {
+        let payload: Vec<u8> = (0..=255).collect();
+        assert_eq!(round_trip(&payload, Addressing::Extended(0x40)), payload);
+    }
+
+    #[test]
+    fn round_trips_the_longest_payload() {
+        // 585 consecutive frames in one block of unlimited size
+        let payload: Vec<u8> = (0..4095u16).map(|i| (i % 251).to_le_bytes()[0]).collect();
+        assert_eq!(round_trip(&payload, Addressing::Normal), payload);
+    }
+
+    fn round_trip(payload: &[u8], addressing: Addressing) -> Vec<u8> {
+        let mut seg = Segmenter::new(payload, addressing).unwrap();
+        let mut buf = [0; 4095];
+        let mut rx = Reassembler::new(&mut buf, addressing);
+        let mut got = None;
+        loop {
+            match seg.step() {
+                Step::Send(frame) => match rx.feed(frame.as_bytes()).unwrap() {
+                    Progress::SendFlowControl(fc) => {
+                        assert_eq!(seg.step(), Step::WaitForFlowControl);
+                        seg.flow_control(fc).unwrap();
+                    }
+                    Progress::Complete(p) => got = Some(p.to_vec()),
+                    Progress::Pending => {}
+                },
+                Step::WaitForFlowControl => panic!("receiver didn't send flow control"),
+                Step::Done => break,
+            }
+        }
+        got.expect("no complete payload")
+    }
+}
