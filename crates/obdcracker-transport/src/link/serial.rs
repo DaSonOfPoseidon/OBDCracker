@@ -30,8 +30,10 @@ impl SerialLink {
 
 impl Link for SerialLink {
     fn write_all(&mut self, bytes: &[u8], _driver: Driver) -> io::Result<()> {
-        self.port.write_all(bytes)?;
-        self.port.flush()
+        // No flush: it waits for the OS to finish transmitting, with no timeout, so an adapter
+        // that stops draining could block it forever. The adapter's answer shows the line got
+        // there.
+        self.port.write_all(bytes)
     }
 
     fn read(&mut self, buf: &mut [u8], timeout: Duration, _driver: Driver) -> io::Result<usize> {
