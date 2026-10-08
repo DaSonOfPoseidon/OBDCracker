@@ -2,7 +2,6 @@
 
 use std::collections::BTreeMap;
 
-use obdcracker_core::isotp::MAX_SHORT_PAYLOAD;
 use obdcracker_core::response::Nrc;
 
 /// A module's diagnostic session.
@@ -175,9 +174,6 @@ impl Ecu {
                 reply.push(status);
             }
         }
-        if reply.len() > MAX_SHORT_PAYLOAD {
-            return negative(0x19, Nrc::ResponseTooLong);
-        }
         reply
     }
 
@@ -204,9 +200,6 @@ impl Ecu {
         // ISO 14229-1: unsupported DIDs are left out; if none is supported, the request is refused.
         if !found {
             return one(negative(0x22, Nrc::RequestOutOfRange));
-        }
-        if reply.len() > MAX_SHORT_PAYLOAD {
-            return one(negative(0x22, Nrc::ResponseTooLong));
         }
         let mut replies = vec![negative(0x22, Nrc::ResponsePending); usize::from(pending)];
         replies.push(reply);
