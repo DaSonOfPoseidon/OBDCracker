@@ -63,8 +63,9 @@ Each entry names the class, what to check, and where it bit us.
 - **Match a reply to its request by what it echoes**, not only the service ID: the PID (mode 09), a requested PID
   (mode 01), a requested DID (0x22) or the subfunction. A late reply to an earlier request has the same SID
   (`response::answers`).
-- **The suppress-positive-response bit (bit 7) is not echoed** for 0x10 and 0x3E. 0x19 has no such bit, so compare its
-  subfunction exactly.
+- **The suppress-positive-response bit (bit 7) is not echoed.** It applies to every UDS service with a subfunction,
+  0x19 included: compare the echo with bits 6 to 0, and send a refusal even when the bit is set. Check claims about
+  the standard against a source before writing them down; this entry first said 0x19 had no such bit (PR #11).
 - **Don't confuse a transport limit with a protocol limit.** 4095 bytes is ISO-TP's short first-frame length, not a
   UDS maximum; the 32-bit escape carries more.
 
