@@ -26,9 +26,9 @@ proptest! {
         }
         for event in &events {
             if let Event::Line(line) = event {
-                // Lossy UTF-8 can turn one byte into three, but never more.
-                prop_assert!(!line.is_empty() && line.len() <= MAX_LINE * 3);
-                prop_assert!(!line.contains(['\r', '\n', '>', '\0']));
+                prop_assert!(!line.is_empty() && line.chars().count() <= MAX_LINE);
+                prop_assert!(!line.contains(['\r', '\n', '>']));
+                prop_assert!(line.chars().all(|c| c == ' ' || c.is_ascii_graphic() || c == char::REPLACEMENT_CHARACTER), "{line:?}");
                 check(&parse_line(line))?;
             }
         }

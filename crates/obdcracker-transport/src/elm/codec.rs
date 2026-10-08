@@ -11,7 +11,7 @@ pub const MAX_LINE: usize = 96;
 /// Something the adapter printed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Event {
-    /// One non-empty line, without its line ending.
+    /// One non-empty line, without its line ending: printable ASCII and U+FFFD only.
     Line(String),
     /// The `>` prompt: the adapter has finished and waits for the next command.
     Prompt,
@@ -22,9 +22,14 @@ pub enum Event {
 /// Splits the adapter's output into [`Event`]s. Lines end at a carriage return or a line feed,
 /// empty lines are skipped, NUL bytes are dropped (the datasheet warns the ELM327 may insert
 /// them), and `>` is the prompt. Memory use is bounded by [`MAX_LINE`].
+///
+/// Every byte that isn't printable ASCII becomes U+FFFD, so a line is always safe to print:
+/// an adapter (or anyone who can reach a Wi-Fi one) can't send terminal escape sequences.
 #[derive(Debug, Default)]
 pub struct LineSplitter {
-    line: Vec<u8>,
+    line: String,
+    // Bytes in `line`; a replacement character takes three in the string.
+    len: usize,
     overlong: bool,
 }
 
@@ -40,12 +45,20 @@ impl LineSplitter {
                     events.push(Event::Prompt);
                 }
                 _ if self.overlong => {}
-                _ if self.line.len() == MAX_LINE => {
+                _ if self.len == MAX_LINE => {
                     self.line.clear();
+                    self.len = 0;
                     self.overlong = true;
                     events.push(Event::Overlong);
                 }
-                _ => self.line.push(byte),
+                _ => {
+                    self.line.push(if byte == b' ' || byte.is_ascii_graphic() {
+                        char::from(byte)
+                    } else {
+                        char::REPLACEMENT_CHARACTER
+                    });
+                    self.len += 1;
+                }
             }
         }
     }
@@ -53,16 +66,15 @@ impl LineSplitter {
     /// Drops a partial line, such as after the adapter was interrupted.
     pub fn clear(&mut self) {
         self.line.clear();
+        self.len = 0;
         self.overlong = false;
     }
 
     fn end_line(&mut self, events: &mut Vec<Event>) {
         if !self.line.is_empty() {
-            events.push(Event::Line(
-                String::from_utf8_lossy(&self.line).into_owned(),
-            ));
-            self.line.clear();
+            events.push(Event::Line(std::mem::take(&mut self.line)));
         }
+        self.len = 0;
         self.overlong = false;
     }
 }

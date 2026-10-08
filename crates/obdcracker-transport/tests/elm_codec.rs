@@ -81,11 +81,16 @@ mod splitter {
         );
     }
 
+    // Adapter text ends up on the user's terminal, so it must not carry escape sequences or
+    // other control characters (anyone in range of a Wi-Fi adapter can send them).
     #[test]
-    fn non_ascii_bytes_still_make_a_line() {
-        let events = split(&[b"\xFF\xFE\r"]);
-        assert_eq!(events.len(), 1);
-        assert!(matches!(&events[0], Event::Line(_)));
+    fn replaces_everything_but_printable_ascii() {
+        assert_eq!(
+            split(&[b"\x1B[2J\x07ELM\x7F\xE2\x80\xAE\tv1\r"]),
+            [line(
+                "\u{FFFD}[2J\u{FFFD}ELM\u{FFFD}\u{FFFD}\u{FFFD}\u{FFFD}\u{FFFD}v1"
+            )]
+        );
     }
 }
 
