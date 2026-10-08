@@ -323,13 +323,20 @@ mod misbehaving {
     }
 
     #[test]
-    fn an_overlong_line_is_an_adapter_error() {
+    fn an_overlong_reply_line_fails_closed() {
         let mut elm = connect(car());
         elm.send(&approve(Target::ObdFunctional, &[0x09, 0x02]))
             .unwrap();
         elm.link_mut().flood = Some(vec![b'7'; 1000]);
         let err = elm.recv(Duration::from_secs(1)).unwrap_err();
         assert!(matches!(err, Error::Adapter(_)), "{err}");
+        elm.link_mut().flood = None;
+        let written = elm.link().written.len();
+        assert!(
+            elm.send(&approve(Target::ObdFunctional, &[0x09, 0x02]))
+                .is_err()
+        );
+        assert_eq!(elm.link().written.len(), written);
     }
 
     #[test]
@@ -431,6 +438,44 @@ mod misbehaving {
         );
         assert_eq!(elm.link().written.len(), written);
         assert_eq!(elm.link().elm.sent, []);
+    }
+
+    #[test]
+    fn an_overlong_line_while_finishing_the_last_request_fails_closed() {
+        // It can't be read, so it could have hidden a reset.
+        let mut elm = connect(car());
+        elm.send(&approve(Target::ObdFunctional, &[0x09, 0x02]))
+            .unwrap();
+        elm.recv(Duration::from_secs(1)).unwrap();
+        let mut overlong = vec![b'7'; 200];
+        overlong.push(b'\r');
+        elm.link_mut().inject = overlong;
+        let written = elm.link().written.len();
+        let err = elm
+            .send(&approve(Target::ObdFunctional, &[0x09, 0x02]))
+            .unwrap_err();
+        assert!(err.to_string().contains("overlong"), "{err}");
+        assert_eq!(elm.link().written.len(), written);
+    }
+
+    // Protocol 6 is set without automatic search, so searching means the adapter lost that
+    // setting, and a search sends probe frames nobody approved.
+    #[test]
+    fn a_protocol_search_fails_closed() {
+        for output in [&b"SEARCHING...\r"[..], b"UNABLE TO CONNECT\r"] {
+            let mut elm = connect(car());
+            elm.send(&approve(Target::ObdFunctional, &[0x09, 0x02]))
+                .unwrap();
+            elm.link_mut().inject = output.to_vec();
+            assert!(elm.recv(Duration::from_secs(1)).is_err(), "{output:?}");
+            let written = elm.link().written.len();
+            assert!(
+                elm.send(&approve(Target::ObdFunctional, &[0x09, 0x02]))
+                    .is_err(),
+                "{output:?}"
+            );
+            assert_eq!(elm.link().written.len(), written, "{output:?}");
+        }
     }
 
     #[test]

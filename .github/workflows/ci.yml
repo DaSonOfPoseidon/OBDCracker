@@ -54,5 +54,5 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - uses: astral-sh/setup-uv@v6
       # Run as a separate process only: its licence (CC BY-NC-SA 4.0) keeps it out of the repo.
-      - run: uv tool install ELM327-emulator==4.0.0
+      - run: uv tool install "ELM327-emulator>=4.0,<5"
       - run: cargo test -p obdcracker-transport --test elm_emulator -- --ignored

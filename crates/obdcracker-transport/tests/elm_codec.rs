@@ -220,7 +220,13 @@ mod statuses {
 
     #[test]
     fn some_statuses_mean_the_adapter_lost_its_settings() {
-        for status in [Status::LvReset, Status::LpAlert, Status::Internal(0x94)] {
+        for status in [
+            Status::LvReset,
+            Status::LpAlert,
+            Status::Internal(0x94),
+            Status::Searching,
+            Status::UnableToConnect,
+        ] {
             assert!(status.loses_settings() && status.is_failure(), "{status}");
         }
         for status in [
@@ -236,7 +242,6 @@ mod statuses {
     #[test]
     fn only_errors_are_failures() {
         assert!(!Status::NoData.is_failure());
-        assert!(!Status::Searching.is_failure());
         assert!(!Status::Stopped.is_failure());
         assert!(Status::CanError.is_failure());
         assert!(Status::Unknown.is_failure());

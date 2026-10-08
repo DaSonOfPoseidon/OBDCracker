@@ -68,8 +68,9 @@ const LONGEST_WAIT: Duration = Duration::from_secs(3600);
 ///
 /// If the adapter doesn't finish a command or request in time, refuses a setting, prints
 /// something unexpected or an overlong line, says it reset (`LV RESET`, `ERRxx`, `LP ALERT`,
-/// a banner), or the link fails, its state is unknown, and every later call fails without
-/// writing anything: connect again.
+/// a banner) or is searching for a protocol (`SEARCHING...`, `UNABLE TO CONNECT`), or the link
+/// fails, its state is unknown, and every later call fails without writing anything: connect
+/// again.
 #[derive(Debug)]
 pub struct Elm<L> {
     link: L,
@@ -280,7 +281,10 @@ impl<L: Link> Elm<L> {
                 Some(Event::Line(text)) => {
                     self.reply_line(&text)?;
                 }
-                Some(Event::Overlong) => {}
+                // It can't be read, so it could hide a reset.
+                Some(Event::Overlong) => {
+                    return Err(self.break_down("the adapter printed an overlong line".into()));
+                }
             }
         }
         self.busy = false;
@@ -406,10 +410,9 @@ impl<L: Link> Transport for Elm<L> {
                     self.busy = false;
                     return Err(Error::Timeout);
                 }
+                // It can't be read, so it could hide a reset.
                 Some(Event::Overlong) => {
-                    return Err(Error::Adapter(
-                        "the adapter printed an overlong line".into(),
-                    ));
+                    return Err(self.break_down("the adapter printed an overlong line".into()));
                 }
                 Some(Event::Line(text)) => match self.reply_line(&text)? {
                     Line::Frame(frame) => {

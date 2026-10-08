@@ -139,22 +139,27 @@ pub enum Status {
 }
 
 impl Status {
-    /// Whether the adapter has reset, or is about to, so its settings are back at their
-    /// defaults: `LV RESET`, `LP ALERT` and any `ERRxx` (`ERR94` needs a full reset, which
-    /// restores the defaults; datasheet p. 79).
+    /// Whether the adapter has lost the settings a driver gave it: it has reset or is about to
+    /// (`LV RESET`, `LP ALERT`, any `ERRxx`; `ERR94` needs a full reset, which restores the
+    /// defaults, datasheet p. 79), or it is searching for a protocol (`SEARCHING...`, and
+    /// `UNABLE TO CONNECT` after a search failed), which a driver that sets one never asks for.
     #[must_use]
     pub fn loses_settings(self) -> bool {
-        matches!(self, Self::LvReset | Self::LpAlert | Self::Internal(_))
+        matches!(
+            self,
+            Self::LvReset
+                | Self::LpAlert
+                | Self::Internal(_)
+                | Self::Searching
+                | Self::UnableToConnect
+        )
     }
 
     /// Whether this means the command failed or the adapter is in trouble. `NO DATA`,
-    /// `SEARCHING...`, `STOPPED` and `ACT ALERT` aren't failures.
+    /// `STOPPED` and `ACT ALERT` aren't failures.
     #[must_use]
     pub fn is_failure(self) -> bool {
-        !matches!(
-            self,
-            Self::NoData | Self::Searching | Self::Stopped | Self::ActAlert
-        )
+        !matches!(self, Self::NoData | Self::Stopped | Self::ActAlert)
     }
 }
 
