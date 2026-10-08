@@ -220,3 +220,46 @@ proptest! {
         let _ = Profile::from_toml(&text);
     }
 }
+
+const TOYOTA_BODY: &str = r#"
+name = "body modules behind one gateway ID"
+bitrate = 500000
+
+[[module]]
+name = "body"
+request_id = 0x750
+response_id = 0x758
+protocol = "kwp2000"
+extended_address = 0x40
+
+[[module]]
+name = "door"
+request_id = 0x750
+response_id = 0x758
+protocol = "kwp2000"
+extended_address = 0x90
+"#;
+
+#[test]
+fn extended_addressing_lets_modules_share_can_ids() {
+    let profile = Profile::from_toml(TOYOTA_BODY).unwrap();
+    assert_eq!(profile.modules.len(), 2);
+}
+
+#[test]
+fn rejects_two_modules_with_the_same_id_and_sub_address() {
+    let toml = TOYOTA_BODY.replace("0x90", "0x40");
+    assert_eq!(
+        Profile::from_toml(&toml).unwrap_err(),
+        ProfileError::DuplicateId(0x750)
+    );
+}
+
+#[test]
+fn rejects_mixing_normal_and_extended_addressing_on_one_id() {
+    let toml = TOYOTA_BODY.replace("extended_address = 0x90\n", "");
+    assert_eq!(
+        Profile::from_toml(&toml).unwrap_err(),
+        ProfileError::DuplicateId(0x750)
+    );
+}

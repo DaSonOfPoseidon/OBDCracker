@@ -15,7 +15,7 @@
 //! assert_eq!((engine.request_id, engine.response_id), (0x7E0, 0x7E8));
 //! ```
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 
 use obdcracker_core::isotp::Addressing;
@@ -113,7 +113,8 @@ pub enum ProfileError {
         /// The ID.
         id: u32,
     },
-    /// Two modules, or one module's request and response, share a CAN ID.
+    /// Two modules, or one module's request and response, share a CAN ID without each having
+    /// its own extended-address byte.
     DuplicateId(u32),
     /// Two modules share a name.
     DuplicateName(String),
@@ -189,7 +190,8 @@ impl Profile {
         if !BITRATES.contains(&self.bitrate) {
             return Err(ProfileError::Bitrate(self.bitrate));
         }
-        let mut ids = HashSet::new();
+        // A CAN ID is shared only by modules that each have their own extended-address byte.
+        let mut ids: HashMap<u32, Vec<Option<u8>>> = HashMap::new();
         let mut names = HashSet::new();
         let mut addresses = HashSet::new();
         for module in &self.modules {
@@ -200,9 +202,15 @@ impl Profile {
                         id,
                     });
                 }
-                if !ids.insert(id) {
+                let users = ids.entry(id).or_default();
+                let sub = module.extended_address;
+                if users
+                    .iter()
+                    .any(|&other| other.is_none() || sub.is_none() || other == sub)
+                {
                     return Err(ProfileError::DuplicateId(id));
                 }
+                users.push(sub);
             }
             if !names.insert(module.name.as_str()) {
                 return Err(ProfileError::DuplicateName(module.name.clone()));
