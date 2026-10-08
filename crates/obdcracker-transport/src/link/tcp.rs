@@ -2,7 +2,7 @@ use std::io::{self, Read, Write};
 use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
 use std::time::Duration;
 
-use super::{Driver, Link, LinkKind};
+use super::{Driver, Link, LinkKind, WRITE_TIMEOUT};
 
 /// A TCP connection, as Wi-Fi adapters offer (often at `192.168.0.10:35000`).
 #[derive(Debug)]
@@ -27,6 +27,8 @@ impl TcpLink {
         let stream = TcpStream::connect_timeout(&addr, timeout.max(Duration::from_millis(1)))?;
         // Commands are a few bytes each; send them at once.
         stream.set_nodelay(true)?;
+        // A peer that stops reading would otherwise block a write forever once buffers fill.
+        stream.set_write_timeout(Some(WRITE_TIMEOUT))?;
         Ok(Self { stream })
     }
 }
@@ -112,6 +114,13 @@ mod tests {
             link.read(&mut buf, Duration::ZERO, Driver::new()).unwrap(),
             0
         );
+    }
+
+    #[test]
+    fn writes_have_a_deadline() {
+        // A peer that stops reading would otherwise block a write forever once buffers fill.
+        let (link, _adapter) = pair();
+        assert_eq!(link.stream.write_timeout().unwrap(), Some(WRITE_TIMEOUT));
     }
 
     #[test]

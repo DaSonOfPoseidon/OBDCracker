@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use serial2::SerialPort;
 
-use super::{Driver, Link, LinkKind};
+use super::{Driver, Link, LinkKind, WRITE_TIMEOUT};
 
 /// A USB serial (or RS-232) port, 8 data bits, no parity, 1 stop bit.
 #[derive(Debug)]
@@ -16,9 +16,10 @@ impl SerialLink {
     /// Opens a port, such as `/dev/ttyUSB0`, `/dev/cu.usbserial-…` or `COM3`, at `baud` bits
     /// per second. `OBDLink` USB adapters use 115200; many ELM327 clones use 38400.
     pub fn open(path: impl AsRef<Path>, baud: u32) -> io::Result<Self> {
-        Ok(Self {
-            port: SerialPort::open(path, baud)?,
-        })
+        let mut port = SerialPort::open(path, baud)?;
+        // An adapter holding off the host could otherwise block a write forever.
+        port.set_write_timeout(WRITE_TIMEOUT)?;
+        Ok(Self { port })
     }
 
     /// The serial ports this computer has. Not every OS can list them.

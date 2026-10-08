@@ -18,6 +18,10 @@
 use std::io;
 use std::time::Duration;
 
+// The longest a write may block, such as to an adapter that stopped reading. A write that runs
+// out fails, which the driver treats as a broken link.
+pub(crate) const WRITE_TIMEOUT: Duration = Duration::from_secs(5);
+
 /// Proof that the caller is one of this crate's drivers, which only send approved requests.
 /// Nothing outside this crate can make one.
 #[derive(Debug)]
