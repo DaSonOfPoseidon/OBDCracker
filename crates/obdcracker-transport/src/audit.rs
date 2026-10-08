@@ -7,8 +7,10 @@ use obdcracker_safety::Approved;
 
 use crate::{Error, Response, Transport, hex};
 
-/// Wraps a transport and appends every request and reply to a JSON Lines file. Requests are logged
-/// before they are sent, so a send that crashes the program is still on record.
+/// Wraps a transport and appends every request, and every reply the transport returns, to a JSON
+/// Lines file. Requests are logged before they are sent, so a send that crashes the program is
+/// still on record. A transport may drop replies nobody read before the next request (see
+/// [`crate::elm::Elm`]); those aren't logged.
 #[derive(Debug)]
 pub struct Audited<T> {
     inner: T,
