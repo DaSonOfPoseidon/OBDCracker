@@ -105,6 +105,11 @@ mod setup {
         stn.sti = Some("STN1155 v5.6.19".into());
         let info = connect(stn).info().unwrap();
         assert_eq!(info.stn.as_deref(), Some("STN1155 v5.6.19"));
+
+        // A clone that answers STI with nothing at all isn't an STN.
+        let mut clone = connect(FakeElm::silent());
+        clone.link_mut().elm.sti = Some(String::new());
+        assert_eq!(clone.info().unwrap().stn, None);
     }
 
     #[test]

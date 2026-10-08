@@ -148,7 +148,7 @@ impl<L: Link> Elm<L> {
         let voltage = self.command("ATRV")?.join(" ");
         Ok(AdapterInfo {
             id,
-            stn: (stn != "?").then_some(stn),
+            stn: (stn != "?" && !stn.is_empty()).then_some(stn),
             voltage: (voltage != "?" && !voltage.is_empty()).then_some(voltage),
         })
     }
