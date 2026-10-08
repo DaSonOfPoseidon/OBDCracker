@@ -1,4 +1,4 @@
-//! The `obdcracker` binary end to end: dry runs, the audit log, and refusing live runs.
+//! The `obdcracker` binary end to end: dry runs, the simulated car, the audit log, and refusing live runs.
 
 use std::path::PathBuf;
 use std::process::{Command, Output};
@@ -47,10 +47,58 @@ fn audit_log_is_appended_not_replaced() {
 }
 
 #[test]
-fn refuses_to_run_without_dry_run_until_a_backend_exists() {
+fn refuses_to_run_without_dry_run_or_sim_until_a_backend_exists() {
     let log = temp_log("live");
     let out = obdcracker(&["--audit-log", log.to_str().unwrap(), "vin"]);
     assert!(!out.status.success());
-    assert!(String::from_utf8_lossy(&out.stderr).contains("--dry-run"));
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("--dry-run") && stderr.contains("--sim"),
+        "{stderr}"
+    );
     assert!(!log.exists());
+}
+
+#[test]
+fn sim_vin_prints_every_ecu_and_audits_each_frame() {
+    let log = temp_log("sim");
+    let out = obdcracker(&["--sim", "a7", "--audit-log", log.to_str().unwrap(), "vin"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout),
+        "7E8 WAUZZZ4G1EN000000\n7E9 WAUZZZ4G1EN000000\n"
+    );
+
+    let audit = std::fs::read_to_string(&log).unwrap();
+    let lines: Vec<_> = audit.lines().collect();
+    assert_eq!(lines.len(), 3, "{audit}");
+    assert!(lines[0].contains(r#""dir":"tx","id":"7DF","payload":"09 02","link":"sim""#));
+    assert!(lines[1].contains(r#""dir":"rx","id":"7E8""#));
+    assert!(lines[2].contains(r#""dir":"rx","id":"7E9""#));
+}
+
+#[test]
+fn unknown_sim_profile_is_refused() {
+    let log = temp_log("sim-unknown");
+    let out = obdcracker(&[
+        "--sim",
+        "delorean",
+        "--audit-log",
+        log.to_str().unwrap(),
+        "vin",
+    ]);
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("a7"));
+    assert!(!log.exists());
+}
+
+#[test]
+fn sim_and_dry_run_are_exclusive() {
+    let out = obdcracker(&["--sim", "a7", "--dry-run", "vin"]);
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("cannot be used with"));
 }

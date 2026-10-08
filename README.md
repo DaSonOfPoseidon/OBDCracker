@@ -32,6 +32,7 @@ from developers being careful:
   backup, and each restore path is tested end to end against the simulator (back up → write → restore → read back
   equals the original) before it touches a car.
 - `--dry-run` prints the exact frames a command would send without opening a device.
+- `--sim a7` runs a command against a simulated A7 instead of a car, through the same policy and audit log.
 - Every frame sent or received in a real session is appended to an audit log.
 
 New capabilities are developed test-first: golden-frame unit tests, then property tests and fuzzing of response parsers,
@@ -94,6 +95,7 @@ adapter's command set. The ELM driver takes any two-way byte stream, so serial, 
 | Driver | Hardware | Links | OS | Status |
 |---|---|---|---|---|
 | `mock` | none (tests) | — | all | done |
+| `sim` | none: a simulated car from a vehicle profile and a fixture (`--sim a7`) | — | all | done |
 | `elm` | ELM327 / STN (e.g. OBDLink EX, MX+, CX) | USB serial, Wi-Fi (TCP), Bluetooth LE, Bluetooth Classic | all | planned (USB serial first, then TCP) |
 | `gsusb` | CANable / candleLight (USB-C) and an OBD2-to-DB9 cable | USB | all | planned, with listen-only mode |
 | `socketcan` | any SocketCAN interface | kernel | Linux | planned |
