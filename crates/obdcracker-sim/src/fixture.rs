@@ -1,6 +1,6 @@
 // The fixture file format: what each simulated module answers. Addresses come from the profile.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 
 use serde::Deserialize;
 
@@ -97,6 +97,11 @@ fn is_hex(text: &str) -> bool {
     text.bytes().all(|b| b.is_ascii_hexdigit())
 }
 
+// SAE J1979, as obd::decode_vin checks it.
+fn is_vin_char(b: u8) -> bool {
+    (b.is_ascii_digit() || b.is_ascii_uppercase()) && !matches!(b, b'I' | b'O' | b'Q')
+}
+
 fn is_printable(text: &str) -> bool {
     text.bytes().all(|b| (0x20..0x7F).contains(&b))
 }
@@ -163,8 +168,11 @@ impl ObdFixture {
             obd.pids.insert(id, hex_bytes(data)?);
         }
         if let Some(vin) = &self.vin {
-            if vin.len() != VIN_LEN {
-                return Err(value_error("VIN must be 17 characters", vin));
+            if vin.len() != VIN_LEN || !vin.bytes().all(is_vin_char) {
+                return Err(value_error(
+                    "VIN must be 17 digits and upper case letters other than I, O and Q",
+                    vin,
+                ));
             }
             obd.info.insert(0x02, (1, padded(vin, VIN_LEN, "bad VIN")?));
         }
@@ -239,6 +247,15 @@ impl EcuFixture {
     }
 
     pub(crate) fn dids(&self) -> Result<Vec<Did>, FixtureError> {
+        let mut seen = HashSet::new();
+        for did in &self.dids {
+            if !seen.insert(did.id) {
+                return Err(FixtureError::Value(format!(
+                    "module {}: DID 0x{:04X} is listed twice",
+                    self.module, did.id
+                )));
+            }
+        }
         self.dids.iter().map(DidFixture::build).collect()
     }
 

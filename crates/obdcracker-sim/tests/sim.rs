@@ -373,6 +373,10 @@ fn fixture_errors_are_reported() {
         "[[ecu]]\nmodule = \"engine\"\n[[ecu.did]]\nid = 1\ntext = \"a\\u0001\"\n",
         "[[ecu]]\nmodule = \"engine\"\n[ecu.obd]\ndtcs = [\"P+299\"]\n",
         "[[ecu]]\nmodule = \"engine\"\n[ecu.obd.pids]\n\"+5\" = \"00\"\n",
+        // I, O and Q aren't VIN characters, and neither are lower case letters.
+        "[[ecu]]\nmodule = \"engine\"\n[ecu.obd]\nvin = \"WAUZZZ4G1EN00000O\"\n",
+        "[[ecu]]\nmodule = \"engine\"\n[ecu.obd]\nvin = \"wauzzz4g1en000000\"\n",
+        "[[ecu]]\nmodule = \"engine\"\n[[ecu.did]]\nid = 1\nhex = \"00\"\n[[ecu.did]]\nid = 1\nhex = \"01\"\n",
     ] {
         assert!(
             matches!(SimBus::new(&a7, bad), Err(FixtureError::Value(_))),
