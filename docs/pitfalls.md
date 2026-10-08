@@ -80,6 +80,12 @@ Each entry names the class, what to check, and where it bit us.
   0x78 exception (PR #9, PR #11).
 - **Functional requests get fewer refusals.** ISO 14229-1: a server doesn't send NRC 0x11, 0x12, 0x31, 0x7E or
   0x7F to a functionally addressed request; it stays silent. A simulated module must too.
+- **What an adapter prints is untrusted text that reaches a terminal.** Anyone in range of a Wi-Fi adapter can make
+  it print escape sequences. Replace control and non-ASCII characters where the text comes in
+  (`elm::codec::LineSplitter`), not at each place that prints it (M3 branch, security review).
+- **Datasheet examples aren't byte-exact.** Real ELM327s print a space after every byte, the last one included; the
+  datasheet's typeset examples don't show it. Test parsers against an implementation you didn't write
+  (ELM327-emulator), not only against fakes built from the same reading of the datasheet (M3 branch, #13).
 - **Don't confuse a transport limit with a protocol limit.** 4095 bytes is ISO-TP's short first-frame length, not a
   UDS maximum; the 32-bit escape carries more.
 
@@ -92,6 +98,8 @@ Each entry names the class, what to check, and where it bit us.
 
 - **A test that never ends gets the container OOM-killed** (1 GB cap) rather than failing cleanly. Run termination
   tests under `timeout`, and treat `SIGKILL` as "it hangs".
+- **`timeout` around `scripts/cargo.sh` stops only the Docker client.** The container goes on running the hung test.
+  Kill it with `docker kill` (find it with `docker ps --filter ancestor=rust:1-slim`).
 - **Termination needs an adversarial transport**: one that repeats forever, sends pending forever, or sleeps through
   each wait. `Mock` returns `Timeout` as soon as it's empty, so it can't show a hang, and a test that expects
   `Timeout` from it passes whether or not the limit works. Count what the transport handed out, and check that
@@ -109,6 +117,11 @@ Each entry names the class, what to check, and where it bit us.
 
 - **Gate commit and push on the checks.** Chain them with `&&`, never `;`, or a failing test still gets committed and
   pushed (PR #9, `00fdbc3`).
+- **`pkill -f <pattern>` matches the shell running it** when the pattern is in its own command line. Save the PID
+  when starting a background process and kill that.
+- **clap skips `requires` when the required argument conflicts with one that's present.** `--baud` requires
+  `--serial`, but with `--tcp` given (same group as `--serial`) clap accepted it silently. Add `conflicts_with` too,
+  and test every combination.
 - **Keep commit subjects under 72 characters.** Check before committing: once a commit is pushed, fixing its subject
   means rewriting shared history.
 - **Run clippy before committing.** Pedantic lints that caught us: `manual_is_multiple_of`, `assert!(x.is_empty())`,

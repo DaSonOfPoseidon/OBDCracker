@@ -4,7 +4,8 @@ A laptop tool that talks to a car's diagnostic bus through the OBD2 port using a
 It works with any adapter, any OS (macOS, Windows, Linux) and any manufacturer. OBD-II is the baseline every car shares,
 and manufacturer diagnostics are added as vehicle profiles. The development testbed is a 2014 Audi A7 3.0 TDI (C7).
 
-> **Status:** early scaffolding. Nothing in this repo talks to a car yet.
+> **Status:** early. The ELM327/STN driver works over USB serial and Wi-Fi (TCP) against simulated and emulated
+> adapters, but it hasn't been used on a car yet. Only read-only requests are allowed.
 
 ## Safety model
 
@@ -96,7 +97,7 @@ adapter's command set. The ELM driver takes any two-way byte stream, so serial, 
 |---|---|---|---|---|
 | `mock` | none (tests) | — | all | done |
 | `sim` | none: a simulated car from a vehicle profile and a fixture (`--sim a7`) | — | all | done |
-| `elm` | ELM327 / STN (e.g. OBDLink EX, MX+, CX) | USB serial, Wi-Fi (TCP), Bluetooth LE, Bluetooth Classic | all | planned (USB serial first, then TCP) |
+| `elm` | ELM327 / STN (e.g. OBDLink EX, MX+, CX) | USB serial, Wi-Fi (TCP); Bluetooth LE and Classic planned | all | done for USB serial and TCP; not yet tried on a car |
 | `gsusb` | CANable / candleLight (USB-C) and an OBD2-to-DB9 cable | USB | all | planned, with listen-only mode |
 | `socketcan` | any SocketCAN interface | kernel | Linux | planned |
 | `j2534` | J2534 pass-thru (Tactrix OpenPort, Toyota Mini VCI, VAS 5054A clones) | vendor DLL | Windows | later |
@@ -104,6 +105,18 @@ adapter's command set. The ELM driver takes any two-way byte stream, so serial, 
 
 Leaving a wireless adapter plugged in drains the battery and lets anyone in range connect, so the CLI warns about it, and
 the audit log records which link a session used.
+
+```sh
+obdcracker ports                                   # list serial ports
+obdcracker --serial /dev/ttyUSB0 adapter           # what the adapter is, and the battery voltage; sends nothing on the bus
+obdcracker --serial /dev/ttyUSB0 vin               # 115200 baud by default; --baud 38400 for many clones
+obdcracker --tcp 192.168.0.10:35000 vin            # a Wi-Fi adapter
+```
+
+The ELM driver only sends single-frame requests (up to 7 bytes, which covers every read), never lets the adapter search
+for a protocol, and stops if the adapter stops answering. [`docs/elm327.md`](docs/elm327.md) lists the adapter behaviour it
+relies on, with datasheet pages. It's tested against a fake adapter written from the datasheet, against the simulated A7,
+and in CI against [ELM327-emulator](https://github.com/Ircama/ELM327-emulator), an independent implementation.
 
 ## Protocols
 
