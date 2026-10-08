@@ -127,6 +127,8 @@ pub enum ProfileError {
         /// The DID.
         did: u16,
     },
+    /// The profile or a module has an empty or blank name.
+    EmptyName,
     /// No built-in profile has this name.
     UnknownBuiltin(String),
 }
@@ -150,6 +152,7 @@ impl fmt::Display for ProfileError {
             Self::DuplicateDid { module, did } => {
                 write!(f, "module {module}: DID 0x{did:04X} is listed twice")
             }
+            Self::EmptyName => f.write_str("names can't be empty"),
             Self::UnknownBuiltin(name) => write!(f, "no built-in profile named {name}"),
         }
     }
@@ -187,6 +190,9 @@ impl Profile {
     }
 
     fn validate(&self) -> Result<(), ProfileError> {
+        if self.name.trim().is_empty() || self.modules.iter().any(|m| m.name.trim().is_empty()) {
+            return Err(ProfileError::EmptyName);
+        }
         if !BITRATES.contains(&self.bitrate) {
             return Err(ProfileError::Bitrate(self.bitrate));
         }

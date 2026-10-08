@@ -263,3 +263,15 @@ fn rejects_mixing_normal_and_extended_addressing_on_one_id() {
         ProfileError::DuplicateId(0x750)
     );
 }
+
+#[test]
+fn rejects_empty_names() {
+    assert_eq!(
+        Profile::from_toml(&MINIMAL.replace("name = \"engine\"", "name = \"\"")).unwrap_err(),
+        ProfileError::EmptyName
+    );
+    assert_eq!(
+        Profile::from_toml(&MINIMAL.replace("name = \"test car\"", "name = \" \"")).unwrap_err(),
+        ProfileError::EmptyName
+    );
+}
