@@ -111,17 +111,22 @@ const LONGEST_WAIT: Duration = Duration::from_secs(3600);
 /// OBD-II IDs (0x7DF and 0x7E0..=0x7E7) its standard ones, and for any other module
 /// `30 00 00` (continue, no block limit, no gap) to the module's request ID.
 ///
-/// If the adapter goes quiet in a request without finishing it (for longer than its own timeout
-/// plus a response-pending wait, about 7 s), doesn't finish a command or request in time, refuses a setting, echoes a line
-/// other than the one written (a serial error; a misheard request has already gone on the bus by
-/// then), prints something unexpected, `STOPPED` (it never interrupts the adapter, so something
-/// else did), a frame from outside its receive filter, an overlong line, or anything at all between its prompt
-/// and the next line it's sent, says it reset (`LV RESET`, `ERRxx`,
-/// `LP ALERT`, a banner) or is searching for a protocol (`SEARCHING...`, `UNABLE TO CONNECT`),
-/// or the link fails, its state is unknown, and every later call fails without writing anything:
-/// connect again. [`Elm::connect`] also refuses an adapter whose programmable parameters turn
-/// off echo, CAN auto formatting or CAN flow control, or turn on the CAN data length display, by
-/// default.
+/// The adapter's state is unknown, and every later call fails without writing anything (connect
+/// again), if:
+/// - it doesn't finish a command in time, or stays quiet in a request for longer than its own
+///   timeout plus a response-pending wait (about 7 s, counted while the driver waits);
+/// - it refuses a setting;
+/// - it echoes a line other than the one written (a serial error; a misheard request has
+///   already gone on the bus by then);
+/// - it prints something unexpected: an overlong line, `STOPPED` (the driver never interrupts
+///   it, so something else did), a frame from outside its receive filter, or anything at all
+///   between its prompt and the next line it's sent;
+/// - it says it reset (`LV RESET`, `ERRxx`, `LP ALERT`, a banner) or is searching for a
+///   protocol (`SEARCHING...`, `UNABLE TO CONNECT`);
+/// - or the link fails.
+///
+/// [`Elm::connect`] also refuses an adapter whose programmable parameters turn off echo, CAN auto
+/// formatting or CAN flow control, or turn on the CAN data length display, by default.
 #[derive(Debug)]
 pub struct Elm<L> {
     link: L,
@@ -503,17 +508,19 @@ impl<L: Link> Elm<L> {
     }
 
     // The next thing the adapter printed during a request, or None once the deadline passes.
-    // An adapter quiet for longer than `SILENCE_LIMIT` in a request has hung.
+    // An adapter quiet for longer than `SILENCE_LIMIT` in a request has hung. Silence counts
+    // only while the driver waits: time the caller spent elsewhere left output on the link.
     fn next_request_event(&mut self, deadline: Instant) -> Result<Option<Event>, Error> {
+        let waiting_since = Instant::now();
         loop {
-            let quiet_until = self.heard + SILENCE_LIMIT;
+            let quiet_until = self.heard.max(waiting_since) + SILENCE_LIMIT;
             if let Some(event) = self.next_event(deadline.min(quiet_until))? {
                 return Ok(Some(event));
             }
             if Instant::now() >= deadline {
                 return Ok(None);
             }
-            if Instant::now() >= self.heard + SILENCE_LIMIT {
+            if Instant::now() >= quiet_until {
                 return Err(
                     self.break_down("the adapter went quiet without finishing a request".into())
                 );

@@ -576,6 +576,17 @@ mod misbehaving {
     }
 
     #[test]
+    fn a_caller_that_reads_late_doesnt_count_as_a_quiet_adapter() {
+        // Silence only counts while the driver waits; the replies are waiting on the link.
+        let mut elm = connect(car());
+        elm.send(&approve(Target::Physical(0x7E0), &[0x09, 0x02]))
+            .unwrap();
+        std::thread::sleep(Duration::from_secs(8));
+        let reply = elm.recv(Duration::from_secs(1)).unwrap();
+        assert_eq!(reply.payload, VIN);
+    }
+
+    #[test]
     fn recv_ends_at_its_deadline_while_frames_keep_arriving() {
         let mut elm = connect(car());
         elm.send(&approve(Target::ObdFunctional, &[0x09, 0x02]))
