@@ -7,5 +7,16 @@ license.workspace = true
 repository.workspace = true
 publish.workspace = true
 
+[dependencies]
+obdcracker-core.workspace = true
+obdcracker-profile.workspace = true
+obdcracker-safety.workspace = true
+obdcracker-transport.workspace = true
+serde = { version = "1.0.229", features = ["derive"] }
+toml = "1.1.6"
+
+[dev-dependencies]
+proptest = "1.11.0"
+
 [lints]
 workspace = true

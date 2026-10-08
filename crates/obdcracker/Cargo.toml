@@ -14,6 +14,7 @@ sim = ["dep:obdcracker-sim"]
 
 [dependencies]
 obdcracker-core.workspace = true
+obdcracker-profile.workspace = true
 obdcracker-safety.workspace = true
 obdcracker-transport.workspace = true
 obdcracker-sim = { workspace = true, optional = true }

@@ -82,7 +82,8 @@ The crates will be published to crates.io once the M1 codec API settles. Until t
 | `obdcracker-core` | Pure `no_std` codecs: CAN, ISO-TP, VW TP2.0, OBD-II, UDS, KWP2000 |
 | `obdcracker-safety` | Tiered policy and `Approved` |
 | `obdcracker-transport` | `Transport` trait and adapter backends |
-| `obdcracker-sim` | Simulated ECUs for tests |
+| `obdcracker-profile` | Vehicle profiles: module addresses, addressing, protocol and DIDs, as TOML data |
+| `obdcracker-sim` | Simulated ECUs for tests: a profile plus a fixture of what each module answers (built in: `a7`) |
 | `obdcracker-cli` | The `obdcracker` command-line tool |
 
 ## Adapters
@@ -123,7 +124,8 @@ or acknowledge frames.
 ## Vehicle profiles
 
 A profile is data, not code: module addresses, addressing mode, protocol per module, the identifiers to read and how to
-decode them. Without a profile the tool falls back to generic OBD-II.
+decode them. Without a profile the tool falls back to generic OBD-II. Profiles are TOML files in
+`crates/obdcracker-profile/profiles/`; a profile has no field that names a service, so it can't widen the safety policy.
 
 | Profile | Expected setup (confirmed by a read-only module scan before use) |
 |---|---|
