@@ -51,7 +51,9 @@ Each entry names the class, what to check, and where it bit us.
 - **Every wait on the bus must be bounded by something the ECU can't extend forever.** Count response-pending
   replies; accept one answer per ECU for a broadcast (J1979); ignore repeats without extending the wait. A test with a
   transport that never stops sending proves it (PR #9: an ECU repeating its VIN reply hung `exchange` forever).
-- **Keep timers per source.** Each pending ECU gets its own P2*. One global "latest deadline" lets a late ECU in.
+- **Keep timers per source.** Each pending ECU gets its own P2*. One global "latest deadline" lets a late ECU in:
+  both an ECU whose own P2* ran out, and an ECU that never went pending but answers after P2 while another ECU's
+  P2* keeps the loop open.
 - **Deadlines must shrink back** once the reason to extend them is gone (P2 again after the pending ECU answers).
 - **Match a reply to its request by what it echoes**, not only the service ID: the PID (mode 09), a requested PID
   (mode 01), a requested DID (0x22) or the subfunction. A late reply to an earlier request has the same SID
@@ -72,11 +74,17 @@ Each entry names the class, what to check, and where it bit us.
   tests under `timeout`, and treat `SIGKILL` as "it hangs".
 - **Termination needs an adversarial transport**: one that repeats forever, sends pending forever, or sleeps through
   each wait. `Mock` returns `Timeout` as soon as it's empty, so it can't show a hang.
+- **A rule change can make old tests' scenarios illegal.** When you tighten behaviour, re-read the existing tests
+  that exercise it. PR #9: dropping late replies made a P2* test's ECU go pending too late to count.
+- **Timing tests need margins and repeat runs.** Leave tens of milliseconds between events that must fall on either
+  side of a deadline, and run the test several times before trusting it.
 - **No dev-dependency cycles across the `Transport` trait.** `obdcracker-transport` tests can't use `obdcracker-sim`:
   a cycle builds two copies of the trait. Put integration tests in the downstream crate.
 
 ## Tooling and process
 
+- **Gate commit and push on the checks.** Chain them with `&&`, never `;`, or a failing test still gets committed and
+  pushed (PR #9, `00fdbc3`).
 - **Run clippy before committing.** Pedantic lints that caught us: `manual_is_multiple_of`, `assert!(x.is_empty())`,
   `cloned_ref_to_slice_refs`, and `format!` collected into a `String` (use `write!`).
 - **PR gate and milestones.** Any open issue tagged with the PR's milestone blocks it, whatever the area. Fold that
