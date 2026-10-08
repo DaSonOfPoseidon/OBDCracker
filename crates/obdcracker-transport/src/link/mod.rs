@@ -83,3 +83,9 @@ impl LinkKind {
         }
     }
 }
+
+#[cfg(feature = "serial")]
+mod serial;
+
+#[cfg(feature = "serial")]
+pub use serial::SerialLink;
