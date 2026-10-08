@@ -56,8 +56,9 @@ closes when the PR merges.
 ## Reviews
 
 Codex reviews every push to a pull request, and each review costs time and usage. So review your
-own change just as hard before pushing, and push fixes in batches rather than one at a time. Check
-each change against:
+own change just as hard before pushing, and push fixes in batches rather than one at a time. Read
+[`docs/pitfalls.md`](docs/pitfalls.md) before making a change: it lists the classes of bug reviews have
+caught here. Add a new entry when a review finds a new class. Check each change against:
 
 - **Untrusted input:** every length, count and echoed ID is checked exactly. Reject trailing bytes,
   zero counts, empty or padding-only values, and anything the standard doesn't allow.
