@@ -65,6 +65,7 @@ each change against:
 - **Conversions:** nothing rounds the unsafe way or loses a remainder before rounding.
 - **State:** after any error, nothing stale can complete or leak into the next operation.
 - **Scripts and CI:** every path, rename, word boundary and concurrent run behaves as described.
+  Lint workflow changes with actionlint (see Checks); GitHub silently refuses an invalid workflow.
 - **Your own fixes:** re-read the new code for the same problems; it's where new findings hide.
 
 Before a PR can be approved:
@@ -79,8 +80,9 @@ Branch protection enforces the Codex part with the `codex-review` status
 (`scripts/codex-status.sh`, run by `.github/workflows/codex-review.yml`). It passes only once Codex
 has completed a review of the head commit, finishing after that commit was pushed, and every Codex
 thread is resolved. So resolve each
-thread once its finding is fixed, or answered with why it doesn't apply. Check it locally with
-`DRY_RUN=1 scripts/codex-status.sh <pr>`.
+thread once its finding is fixed, or answered with why it doesn't apply. Resolving doesn't
+trigger workflows, so then re-run the check with `gh workflow run codex-review.yml -f pr=<pr>`.
+Check it locally with `DRY_RUN=1 scripts/codex-status.sh <pr>`.
 
 ## Commits
 
@@ -104,6 +106,7 @@ thread once its finding is fixed, or answered with why it doesn't apply. Check i
 ```sh
 cargo fmt --check && cargo clippy --all-targets --all-features -- -D warnings && cargo test --all-features
 cargo build -p obdcracker-core --target thumbv7em-none-eabihf  # obdcracker-core must stay no_std
+docker run --rm -v "$PWD:/repo" -w /repo rhysd/actionlint:1.7.7  # when workflows change
 ```
 
 New capabilities are written test-first. See the safety model in `README.md` before adding anything that sends a request.
