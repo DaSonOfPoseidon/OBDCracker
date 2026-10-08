@@ -387,6 +387,9 @@ fn fixture_errors_are_reported() {
         // The same code twice, in mode 03 or UDS, would be reported twice.
         "[[ecu]]\nmodule = \"engine\"\n[ecu.obd]\ndtcs = [\"P0299\", \"P0299\"]\n",
         "[[ecu]]\nmodule = \"engine\"\n[[ecu.dtc]]\ncode = 0x029900\nstatus = 0x08\n[[ecu.dtc]]\ncode = 0x029900\nstatus = 0x00\n",
+        // 0x000000 is no code, and 0xFFFFFF means every group (ISO 14229-1), not one DTC.
+        "[[ecu]]\nmodule = \"engine\"\n[[ecu.dtc]]\ncode = 0\nstatus = 0x08\n",
+        "[[ecu]]\nmodule = \"engine\"\n[[ecu.dtc]]\ncode = 0xFFFFFF\nstatus = 0x08\n",
         // PID keys that differ only in case name the same PID.
         "[[ecu]]\nmodule = \"engine\"\n[ecu.obd.pids]\n\"0c\" = \"0C 80\"\n\"0C\" = \"0C 80\"\n",
         // PID 0C is two bytes (SAE J1979), not one or three.
@@ -475,7 +478,7 @@ fn fixture_values_must_suit_the_profile_decoder() {
 #[test]
 fn uds_dtcs_must_fit_the_16_bit_count() {
     let mut fixture = String::from("[[ecu]]\nmodule = \"engine\"\n");
-    for code in 0..=u32::from(u16::MAX) {
+    for code in 1..=u32::from(u16::MAX) + 1 {
         writeln!(fixture, "[[ecu.dtc]]\ncode = {code}\nstatus = 0x08").unwrap();
     }
     assert!(matches!(

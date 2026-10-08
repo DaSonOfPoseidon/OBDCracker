@@ -299,6 +299,13 @@ impl EcuFixture {
                     dtc.code
                 )));
             }
+            // 0x000000 is no code, and 0xFFFFFF is the "all groups" value (ISO 14229-1).
+            if dtc.code == 0 || dtc.code == 0x00FF_FFFF {
+                return Err(FixtureError::Value(format!(
+                    "module {}: UDS DTC 0x{:06X} isn't a single code",
+                    self.module, dtc.code
+                )));
+            }
             if !seen.insert(dtc.code) {
                 return Err(FixtureError::Value(format!(
                     "module {}: UDS DTC 0x{:06X} is listed twice",
