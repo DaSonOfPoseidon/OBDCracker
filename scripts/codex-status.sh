@@ -8,7 +8,13 @@
 # Usage: scripts/codex-status.sh <pr>. With DRY_RUN=1 it prints the status instead of setting it.
 # Needs `gh` (authenticated, or GH_TOKEN) and REPO (defaults to this repository).
 set -eu
-pr=$1
+pr=${1:-}
+case $pr in
+'' | *[!0-9]*)
+	echo "usage: $0 <pr number>" >&2
+	exit 2
+	;;
+esac
 repo=${REPO:-DaSonOfPoseidon/OBDCracker}
 bot='chatgpt-codex-connector[bot]'
 owner=${repo%/*}
