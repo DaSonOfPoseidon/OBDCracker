@@ -12,7 +12,8 @@
 - **ECU replies are untrusted input.** Every parser returns an error on bad bytes and never panics. A property test
   that feeds it arbitrary bytes shows this.
 - **Changes land through pull requests.** Nobody pushes to `main` directly. Work on a branch, open a PR, and merge only
-  once CI is green, including the Windows and macOS builds.
+  once CI is green, including the Windows and macOS builds. PRs are squash-merged, the only merge method the repo
+  allows, so each PR becomes one commit on `main`.
 
 ## Found a problem? File an issue and keep going
 
@@ -98,6 +99,9 @@ Check it locally with `DRY_RUN=1 scripts/codex-status.sh <pr>`.
 - **No body and no trailers.** If a change needs explaining, put the explanation in code comments, docs or the issue.
   Don't add `Co-Authored-By`, `Signed-off-by` or tool/session trailers.
 - **Reference issues** at the end of the subject: `fix: escape the link name in audit log lines (fixes #2)`.
+- **The PR title is the commit on `main`.** A squash merge uses the PR title as its subject and leaves the body empty,
+  so the title follows the same rules: `feat: add ISO-TP, OBD-II and UDS codecs (M1)`. Put closing keywords
+  (`Fixes #1`) in the PR description too. GitHub closes those issues when the PR merges.
 - **Never commit** car dumps, tune files, maps or unreviewed audit logs (`.gitignore` covers the usual names), or
   secrets of any kind.
 
