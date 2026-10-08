@@ -2,6 +2,7 @@
 
 use std::collections::{BTreeMap, HashSet};
 
+use obdcracker_core::obd;
 use serde::Deserialize;
 
 use crate::FixtureError;
@@ -97,6 +98,16 @@ fn is_hex(text: &str) -> bool {
     text.bytes().all(|b| b.is_ascii_hexdigit())
 }
 
+// Whether `data` is exactly one reading of `pid`, as obd::decode_current_data reads it. A PID
+// the decoder doesn't know takes any length.
+fn decodes_exactly(pid: u8, data: &[u8]) -> bool {
+    let mut reply = vec![0x41, pid];
+    reply.extend(data);
+    obd::decode_current_data(&reply).is_ok_and(|mut readings| {
+        matches!(readings.next(), Some(Ok(_))) && readings.next().is_none()
+    })
+}
+
 // SAE J1979, as obd::decode_vin checks it.
 fn is_vin_char(b: u8) -> bool {
     (b.is_ascii_digit() || b.is_ascii_uppercase()) && !matches!(b, b'I' | b'O' | b'Q')
@@ -165,7 +176,14 @@ impl ObdFixture {
                 .ok()
                 .filter(|id| pid.len() == 2 && is_hex(pid) && !id.is_multiple_of(0x20))
                 .ok_or_else(|| value_error("bad mode 01 PID (bitmap PIDs are computed)", pid))?;
-            obd.pids.insert(id, hex_bytes(data)?);
+            let data = hex_bytes(data)?;
+            if !decodes_exactly(id, &data) {
+                return Err(value_error(
+                    "wrong data length for this PID (SAE J1979)",
+                    pid,
+                ));
+            }
+            obd.pids.insert(id, data);
         }
         if let Some(vin) = &self.vin {
             if vin.len() != VIN_LEN || !vin.bytes().all(is_vin_char) {

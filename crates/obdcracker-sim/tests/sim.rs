@@ -377,6 +377,9 @@ fn fixture_errors_are_reported() {
         "[[ecu]]\nmodule = \"engine\"\n[ecu.obd]\nvin = \"WAUZZZ4G1EN00000O\"\n",
         "[[ecu]]\nmodule = \"engine\"\n[ecu.obd]\nvin = \"wauzzz4g1en000000\"\n",
         "[[ecu]]\nmodule = \"engine\"\n[[ecu.did]]\nid = 1\nhex = \"00\"\n[[ecu.did]]\nid = 1\nhex = \"01\"\n",
+        // PID 0C is two bytes (SAE J1979), not one or three.
+        "[[ecu]]\nmodule = \"engine\"\n[ecu.obd.pids]\n\"0C\" = \"00\"\n",
+        "[[ecu]]\nmodule = \"engine\"\n[ecu.obd.pids]\n\"0C\" = \"0C 80 00\"\n",
     ] {
         assert!(
             matches!(SimBus::new(&a7, bad), Err(FixtureError::Value(_))),
@@ -387,6 +390,16 @@ fn fixture_errors_are_reported() {
         SimBus::builtin("delorean"),
         Err(FixtureError::Profile(_))
     ));
+}
+
+#[test]
+fn pids_the_decoder_doesnt_know_take_any_length() {
+    let fixture = "[[ecu]]\nmodule = \"engine\"\n[ecu.obd.pids]\n\"10\" = \"01 02 03\"\n";
+    let mut bus = SimBus::new(&Profile::builtin("a7").unwrap(), fixture).unwrap();
+    assert_eq!(
+        ask_one(&mut bus, ENGINE, &obd::current_data(0x10)),
+        [0x41, 0x10, 0x01, 0x02, 0x03]
+    );
 }
 
 #[test]
