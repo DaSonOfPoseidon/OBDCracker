@@ -117,12 +117,22 @@ fn answers_matches_the_echoed_did_or_subfunction() {
         &[0x19, 0x02, 0x08],
         &[0x59, 0x01, 0xFF, 0x00, 0x00, 0x01]
     ));
-    // ReadDTCInformation has the suppress bit too (ISO 14229-1): it isn't part of the echo.
-    assert!(answers(&[0x19, 0x82, 0x08], &[0x59, 0x02, 0xFF]));
-    assert!(!answers(&[0x19, 0x82, 0x08], &[0x59, 0x82, 0xFF]));
-    // The suppress-positive-response bit isn't echoed.
+    // A request with the suppress bit (bit 7, any subfunction service) gets no positive reply,
+    // so any positive reply is a late answer to an earlier, unsuppressed request. Refusals still
+    // answer it.
+    for (request, positive) in [
+        (&[0x10, 0x83][..], &[0x50, 0x03, 0x00, 0x32, 0x01, 0xF4][..]),
+        (&[0x19, 0x82, 0x08], &[0x59, 0x02, 0xFF]),
+        (&[0x3E, 0x80], &[0x7E, 0x00]),
+    ] {
+        assert!(!answers(request, positive), "{request:02X?}");
+        assert!(
+            answers(request, &[0x7F, request[0], 0x12]),
+            "{request:02X?}"
+        );
+    }
     assert!(answers(
-        &[0x10, 0x83],
+        &[0x10, 0x03],
         &[0x50, 0x03, 0x00, 0x32, 0x01, 0xF4]
     ));
     assert!(!answers(
