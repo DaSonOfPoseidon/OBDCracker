@@ -116,7 +116,8 @@ obdcracker --tcp 192.168.0.10:35000 vin            # a Wi-Fi adapter
 The ELM driver only sends single-frame requests (up to 7 bytes, which covers every read), never lets the adapter search
 for a protocol, and stops if the adapter stops answering. [`docs/elm327.md`](docs/elm327.md) lists the adapter behaviour it
 relies on, with datasheet pages. It's tested against a fake adapter written from the datasheet, against the simulated A7,
-and in CI against [ELM327-emulator](https://github.com/Ircama/ELM327-emulator), an independent implementation.
+and against [ELM327-emulator](https://github.com/Ircama/ELM327-emulator), an independent implementation. That last test
+is opt-in (`#[ignore]`) and runs in a CI job that doesn't block merging yet.
 
 ## Protocols
 
