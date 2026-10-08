@@ -126,7 +126,7 @@ fn a_refusal_is_a_reply_not_pending() {
     let read = approve(Target::Physical(0x7E0), &[0x22, 0xF1, 0x90]);
     let refusal = reply(0x7E8, &[0x7F, 0x22, 0x31]);
     let got = exchange(
-        &mut mock(&[refusal.clone()]),
+        &mut mock(std::slice::from_ref(&refusal)),
         &read,
         Expect::Module(0x7E8),
         FAST,
@@ -135,17 +135,30 @@ fn a_refusal_is_a_reply_not_pending() {
 }
 
 #[test]
-fn pending_for_another_service_is_a_reply() {
-    // `7F 19 78` doesn't answer a 0x22 request, so it isn't a reason to keep waiting.
+fn replies_to_another_service_are_ignored() {
+    // A late answer to an earlier request (or its response-pending) isn't this request's reply.
     let read = approve(Target::Physical(0x7E0), &[0x22, 0xF1, 0x90]);
-    let other = reply(0x7E8, &[0x7F, 0x19, 0x78]);
-    let got = exchange(
-        &mut mock(&[other.clone()]),
-        &read,
-        Expect::Module(0x7E8),
-        FAST,
+    let stale = [
+        reply(0x7E8, &[0x7F, 0x19, 0x78]),
+        reply(0x7E8, &[0x59, 0x02, 0xFF]),
+        reply(0x7E8, &[]),
+    ];
+    assert_eq!(
+        exchange(&mut mock(&stale), &read, Expect::Module(0x7E8), FAST),
+        Err(Error::Timeout)
     );
-    assert_eq!(got, Ok(vec![other]));
+    let mut replies = stale.to_vec();
+    replies.push(reply(0x7E8, F190));
+    let got = exchange(&mut mock(&replies), &read, Expect::Module(0x7E8), FAST).unwrap();
+    assert_eq!(got, [reply(0x7E8, F190)]);
+}
+
+#[test]
+fn functional_request_ignores_replies_to_another_service() {
+    let replies = [reply(0x7E8, &[0x41, 0x0C, 0x0C, 0x80]), reply(0x7E9, VIN)];
+    let vin = approve(Target::ObdFunctional, &[0x09, 0x02]);
+    let got = exchange(&mut mock(&replies), &vin, Expect::ObdEcus, FAST).unwrap();
+    assert_eq!(got, [reply(0x7E9, VIN)]);
 }
 
 #[test]

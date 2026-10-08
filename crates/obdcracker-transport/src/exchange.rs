@@ -52,8 +52,10 @@ impl Default for Timing {
 
 /// Sends one request and returns its replies, oldest first.
 ///
-/// Replies from CAN IDs that `expect` doesn't accept are dropped. A response-pending reply
-/// (`7F <service> 78`) to this request is dropped too, and extends the wait to P2*.
+/// Replies from CAN IDs that `expect` doesn't accept are dropped, and so are replies that don't
+/// answer this request's service, such as a late reply to an earlier request. (An [`crate::Audited`]
+/// transport still logs them.) A response-pending reply (`7F <service> 78`) to this request is
+/// dropped too, and extends the wait to P2*.
 ///
 /// - [`Expect::ObdEcus`] returns every reply that arrived, which may be none.
 /// - [`Expect::Module`] returns the module's one reply, or [`Error::Timeout`] if it didn't answer
@@ -82,7 +84,7 @@ pub fn exchange<T: Transport + ?Sized>(
             Err(Error::Timeout) => break,
             Err(e) => return Err(e),
         };
-        if !expect.accepts(reply.source) {
+        if !expect.accepts(reply.source) || !sid.is_some_and(|sid| answers(sid, &reply.payload)) {
             continue;
         }
         if sid.is_some_and(|sid| is_pending(sid, &reply.payload)) {
@@ -106,6 +108,19 @@ pub fn exchange<T: Transport + ?Sized>(
         Expect::ObdEcus => Ok(replies),
     }
 }
+
+// Whether `reply` answers service `sid`, positively or not. Anything else is a late reply to an
+// earlier request.
+fn answers(sid: u8, reply: &[u8]) -> bool {
+    match reply {
+        [NEGATIVE, refused, ..] => *refused == sid,
+        [first, ..] => *first == sid.wrapping_add(POSITIVE_OFFSET),
+        [] => false,
+    }
+}
+
+const NEGATIVE: u8 = 0x7F;
+const POSITIVE_OFFSET: u8 = 0x40;
 
 fn is_pending(sid: u8, reply: &[u8]) -> bool {
     matches!(
