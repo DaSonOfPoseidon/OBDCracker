@@ -88,6 +88,14 @@ Each entry names the class, what to check, and where it bit us.
   as unknown state and stop, **everywhere output is read**: replies, answers to setup commands, and output you're
   only draining to get to the next prompt. The first fix checked replies only; the review gate found the drain
   (M3 branch). Output you can't read counts too: an overlong line could hide any of these (M3 branch, Codex).
+- **Check for output the device shouldn't have sent before writing to it,** including what's already buffered past
+  the prompt you stopped at. A reset that arrives right after a prompt is otherwise only seen after the next request
+  went out (M3 branch, Codex).
+- **Don't ask for an answer that looks like a failure.** `ATI` answers with the same banner a reset prints, so a
+  reset during `info` looked like an answer. Take such values once, when they can't be confused (the reset banner),
+  and treat them as failures everywhere else (M3 branch, Codex).
+- **A truncated answer must not pass as a complete one.** Accepting any well-formed subset of `AT PPS` let a cut-off
+  summary skip the parameters that mattered. Require every entry you check (M3 branch, Codex).
 - **One flipped bit on a serial line can turn a command into a bus frame.** An ELM327 sends any line of hex digits to
   the bus, ignoring spaces and control characters, so `ATE0` with its `T` flipped to `D` is the request `AD E0`.
   "Contains a non-hex letter" isn't enough: no single flip of any byte, the carriage return included, may leave a line
