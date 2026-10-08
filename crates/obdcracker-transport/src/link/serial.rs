@@ -33,7 +33,7 @@ impl Link for SerialLink {
         self.port.flush()
     }
 
-    fn read(&mut self, buf: &mut [u8], timeout: Duration) -> io::Result<usize> {
+    fn read(&mut self, buf: &mut [u8], timeout: Duration, _driver: Driver) -> io::Result<usize> {
         self.port.set_read_timeout(timeout)?;
         match self.port.read(buf) {
             // A port with nothing more to read has gone, such as an unplugged adapter.
@@ -73,7 +73,9 @@ mod tests {
         let (mut link, adapter) = pair();
         adapter.write_all(b"OK\r>").unwrap();
         let mut buf = [0; 16];
-        let n = link.read(&mut buf, Duration::from_secs(1)).unwrap();
+        let n = link
+            .read(&mut buf, Duration::from_secs(1), Driver::new())
+            .unwrap();
         assert_eq!(&buf[..n], b"OK\r>");
     }
 
@@ -82,7 +84,11 @@ mod tests {
         let (mut link, _adapter) = pair();
         let mut buf = [0; 16];
         let start = std::time::Instant::now();
-        assert_eq!(link.read(&mut buf, Duration::from_millis(50)).unwrap(), 0);
+        assert_eq!(
+            link.read(&mut buf, Duration::from_millis(50), Driver::new())
+                .unwrap(),
+            0
+        );
         assert!(start.elapsed() >= Duration::from_millis(40));
     }
 

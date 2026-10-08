@@ -45,6 +45,8 @@ const KEPT_DEFAULTS: &[(u8, u8, &str)] = &[
     (0x09, 0x00, "echo"),
     (0x24, 0x00, "CAN auto formatting"),
     (0x25, 0x00, "CAN flow control"),
+    // Off, or every frame line has its data length between the CAN ID and the data
+    (0x29, 0xFF, "CAN data length display"),
 ];
 
 /// The longest the adapter waits for a reply, or for more replies after one: `AT ST FF`.
@@ -56,6 +58,8 @@ const DRAIN_LIMIT: Duration = Duration::from_secs(2);
 // How long a reset may take, and how many to try: the first may only interrupt the adapter.
 const RESET_WAIT: Duration = Duration::from_secs(3);
 const RESET_TRIES: usize = 2;
+// How long to look for output the adapter shouldn't have printed before writing to it.
+const IDLE_CHECK: Duration = Duration::from_millis(1);
 // How long an AT command may take.
 const COMMAND_WAIT: Duration = Duration::from_secs(2);
 // How long the adapter may take to finish a request before the next one: its own timeout after
@@ -81,11 +85,13 @@ const LONGEST_WAIT: Duration = Duration::from_secs(3600);
 ///
 /// If the adapter doesn't finish a command or request in time, refuses a setting, echoes a line
 /// other than the one written (a serial error; a misheard request has already gone on the bus by
-/// then), prints something unexpected or an overlong line, says it reset (`LV RESET`, `ERRxx`,
+/// then), prints something unexpected, an overlong line, or anything at all between its prompt
+/// and the next line it's sent, says it reset (`LV RESET`, `ERRxx`,
 /// `LP ALERT`, a banner) or is searching for a protocol (`SEARCHING...`, `UNABLE TO CONNECT`),
 /// or the link fails, its state is unknown, and every later call fails without writing anything:
 /// connect again. [`Elm::connect`] also refuses an adapter whose programmable parameters turn
-/// off echo, CAN auto formatting or CAN flow control by default.
+/// off echo, CAN auto formatting or CAN flow control, or turn on the CAN data length display, by
+/// default.
 #[derive(Debug)]
 pub struct Elm<L> {
     link: L,
@@ -99,6 +105,8 @@ pub struct Elm<L> {
     echo: Option<String>,
     // Why the adapter can't be trusted any more.
     broken: Option<String>,
+    // What it printed when it was reset, such as `ELM327 v1.4b`.
+    banner: String,
     senders: Vec<(u32, Reassembler<Vec<u8>>)>,
 }
 
@@ -114,8 +122,8 @@ enum Flow {
 /// What an adapter says about itself. Reading it puts nothing on the bus.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AdapterInfo {
-    /// The `ATI` answer, such as `ELM327 v1.4b`. Clones often claim a version they don't fully
-    /// implement.
+    /// The banner the adapter printed when it was reset, the same as its `ATI` answer, such as
+    /// `ELM327 v1.4b`. Clones often claim a version they don't fully implement.
     pub id: String,
     /// The `STI` answer from an STN chip (`OBDLink` adapters), such as `STN1155 v5.6.19`, or
     /// `None` for a plain ELM327.
@@ -139,6 +147,7 @@ impl<L: Link> Elm<L> {
             busy: false,
             echo: None,
             broken: None,
+            banner: String::new(),
             senders: Vec::new(),
         };
         elm.drain_stale()?;
@@ -162,8 +171,11 @@ impl<L: Link> Elm<L> {
     }
 
     /// Asks the adapter what it is and what voltage it sees.
+    ///
+    /// The ID is the banner from the reset: asking again with `ATI` would make a reset now look
+    /// like an answer.
     pub fn info(&mut self) -> Result<AdapterInfo, Error> {
-        let id = self.command("ATI")?.join(" ");
+        let id = self.banner.clone();
         let stn = self.command("STI")?.join(" ");
         let voltage = self.command("ATRV")?.join(" ");
         Ok(AdapterInfo {
@@ -183,8 +195,8 @@ impl<L: Link> Elm<L> {
         &self.link
     }
 
-    /// The link to the adapter. A [`Link`] can't be written to outside this crate, so this
-    /// can't be used to send anything.
+    /// The link to the adapter. A [`Link`] can't be written to or read from outside this crate,
+    /// so this can't be used to send anything or to hide the adapter's output from the driver.
     pub fn link_mut(&mut self) -> &mut L {
         &mut self.link
     }
@@ -208,11 +220,16 @@ impl<L: Link> Elm<L> {
             self.events.clear();
             self.write(b"ATZ\r")?;
             let deadline = Instant::now() + RESET_WAIT;
-            let mut banner = false;
+            let mut banner = None;
             while let Some(event) = self.next_event(deadline)? {
                 match event {
-                    Event::Line(line) if line.starts_with("ELM327") => banner = true,
-                    Event::Prompt if banner => return Ok(()),
+                    Event::Line(line) if line.starts_with("ELM327") => banner = Some(line),
+                    Event::Prompt => {
+                        if let Some(banner) = banner.take() {
+                            self.banner = banner;
+                            return Ok(());
+                        }
+                    }
                     _ => {}
                 }
             }
@@ -224,7 +241,7 @@ impl<L: Link> Elm<L> {
     }
 
     // Fails if a programmable parameter changed a default the setup relies on. An adapter without
-    // them (`?`) is at the factory defaults; one with fewer than a v2.0 doesn't have the rest.
+    // them (`?`) is at the factory defaults.
     fn check_defaults(&mut self) -> Result<(), Error> {
         let lines = self.command("ATPPS")?;
         if lines.iter().map(String::as_str).eq(["?"]) {
@@ -256,8 +273,9 @@ impl<L: Link> Elm<L> {
                 }
             }
         }
-        if seen.is_empty() {
-            return Err(self.break_down("no answer to ATPPS".into()));
+        // Every ELM327 with `PPS` has these; a summary without them was cut short.
+        if let Some((pp, ..)) = KEPT_DEFAULTS.iter().find(|(pp, ..)| !seen.contains(pp)) {
+            return Err(self.break_down(format!("ATPPS didn't list PP {pp:02X}")));
         }
         Ok(())
     }
@@ -302,8 +320,8 @@ impl<L: Link> Elm<L> {
                     {
                         return Err(self.break_down(format!("the adapter said {status}")));
                     }
-                    // Only ATI answers with the banner; anywhere else it means a reset.
-                    if command != "ATI" && line.starts_with("ELM327") {
+                    // The banner means a reset; `info` never asks for it.
+                    if line.starts_with("ELM327") {
                         return Err(self.break_down(format!("the adapter reset: {line}")));
                     }
                     lines.push(line);
@@ -337,7 +355,7 @@ impl<L: Link> Elm<L> {
             )));
         }
         if !self.busy {
-            return Ok(());
+            return self.check_idle();
         }
         // The rest of the last request's replies are dropped, but a reset among them still
         // counts.
@@ -362,7 +380,28 @@ impl<L: Link> Elm<L> {
         }
         self.busy = false;
         self.senders.clear();
-        Ok(())
+        self.check_idle()
+    }
+
+    // The adapter prints nothing between its prompt and the next line it's sent, so anything
+    // already read past the prompt, or waiting on the link, could be a reset.
+    fn check_idle(&mut self) -> Result<(), Error> {
+        let mut buf = [0; 256];
+        let n = self.read(&mut buf, IDLE_CHECK)?;
+        let mut events = Vec::new();
+        self.splitter.push(&buf[..n], &mut events);
+        self.events.extend(events);
+        let what = match self.events.pop_front() {
+            Some(Event::Line(line)) => line,
+            Some(Event::Prompt) => ">".into(),
+            Some(Event::Overlong) => "an overlong line".into(),
+            None => match self.splitter.partial() {
+                Some(Some(line)) => line.to_owned(),
+                Some(None) => "an overlong line".into(),
+                None => return Ok(()),
+            },
+        };
+        Err(self.break_down(format!("the adapter printed {what} while idle")))
     }
 
     fn break_down(&mut self, why: String) -> Error {
@@ -381,7 +420,7 @@ impl<L: Link> Elm<L> {
     fn read(&mut self, buf: &mut [u8], timeout: Duration) -> Result<usize, Error> {
         let kind = self.link.kind().name();
         self.link
-            .read(buf, timeout)
+            .read(buf, timeout, Driver::new())
             .map_err(|e| self.break_down(format!("{kind} link: {e}")))
     }
 

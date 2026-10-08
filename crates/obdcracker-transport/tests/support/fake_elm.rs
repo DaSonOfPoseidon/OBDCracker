@@ -48,6 +48,8 @@ pub struct FakeElm {
     pub pps: Option<Vec<String>>,
     /// Bytes printed right after the next line's echo, before its answer.
     pub after_echo: Vec<u8>,
+    /// Bytes printed right after the next prompt, as an adapter that resets while idle would.
+    pub after_prompt: Vec<u8>,
 }
 
 // What `AT PPS` prints for a v2.0 ELM327 with every parameter off (datasheet p. 57).
@@ -107,6 +109,7 @@ impl FakeElm {
             pp: Vec::new(),
             pps: None,
             after_echo: Vec::new(),
+            after_prompt: Vec::new(),
         }
     }
 
@@ -166,6 +169,7 @@ impl FakeElm {
     fn prompt(&mut self) {
         self.output.push_back(b'\r');
         self.output.push_back(b'>');
+        self.output.extend(std::mem::take(&mut self.after_prompt));
     }
 
     // The adapter echoes what it received, as it received it, once the line ends.
@@ -448,7 +452,7 @@ impl Link for FakeLink {
         Ok(())
     }
 
-    fn read(&mut self, buf: &mut [u8], _timeout: Duration) -> io::Result<usize> {
+    fn read(&mut self, buf: &mut [u8], _timeout: Duration, _driver: Driver) -> io::Result<usize> {
         if self.closed {
             return Err(io::ErrorKind::BrokenPipe.into());
         }

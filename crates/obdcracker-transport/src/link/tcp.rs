@@ -37,7 +37,7 @@ impl Link for TcpLink {
         self.stream.flush()
     }
 
-    fn read(&mut self, buf: &mut [u8], timeout: Duration) -> io::Result<usize> {
+    fn read(&mut self, buf: &mut [u8], timeout: Duration, _driver: Driver) -> io::Result<usize> {
         // A zero timeout means "block forever" to the OS, so wait at least a millisecond.
         self.stream
             .set_read_timeout(Some(timeout.max(Duration::from_millis(1))))?;
@@ -91,7 +91,9 @@ mod tests {
         let (mut link, mut adapter) = pair();
         adapter.write_all(b"OK\r>").unwrap();
         let mut buf = [0; 16];
-        let n = link.read(&mut buf, Duration::from_secs(1)).unwrap();
+        let n = link
+            .read(&mut buf, Duration::from_secs(1), Driver::new())
+            .unwrap();
         assert_eq!(&buf[..n], b"OK\r>");
     }
 
@@ -100,9 +102,16 @@ mod tests {
         let (mut link, _adapter) = pair();
         let mut buf = [0; 16];
         let start = Instant::now();
-        assert_eq!(link.read(&mut buf, Duration::from_millis(50)).unwrap(), 0);
+        assert_eq!(
+            link.read(&mut buf, Duration::from_millis(50), Driver::new())
+                .unwrap(),
+            0
+        );
         assert!(start.elapsed() >= Duration::from_millis(40));
-        assert_eq!(link.read(&mut buf, Duration::ZERO).unwrap(), 0);
+        assert_eq!(
+            link.read(&mut buf, Duration::ZERO, Driver::new()).unwrap(),
+            0
+        );
     }
 
     #[test]
@@ -111,7 +120,7 @@ mod tests {
         drop(adapter);
         let mut buf = [0; 16];
         assert_eq!(
-            link.read(&mut buf, Duration::from_secs(1))
+            link.read(&mut buf, Duration::from_secs(1), Driver::new())
                 .unwrap_err()
                 .kind(),
             io::ErrorKind::UnexpectedEof

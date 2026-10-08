@@ -64,6 +64,16 @@ impl LineSplitter {
         }
     }
 
+    /// The line received so far, if a line has started: the text, or `None` for an overlong one.
+    #[must_use]
+    pub fn partial(&self) -> Option<Option<&str>> {
+        if self.overlong {
+            Some(None)
+        } else {
+            (!self.line.is_empty()).then_some(Some(self.line.as_str()))
+        }
+    }
+
     /// Drops a partial line, such as after the adapter was interrupted.
     pub fn clear(&mut self) {
         self.line.clear();

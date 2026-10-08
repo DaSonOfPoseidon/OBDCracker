@@ -153,11 +153,13 @@ mod setup {
 
     #[test]
     fn fails_closed_when_a_programmable_parameter_changes_a_default_it_relies_on() {
-        // CAN auto formatting and flow control are on after a reset unless PP 24 or 25 says
-        // otherwise; the setup doesn't send the commands for them.
-        for pp in [0x24, 0x25] {
+        // CAN auto formatting and flow control are on, and the data length isn't shown, after a
+        // reset unless PP 24, 25 or 29 says otherwise; the setup doesn't send the commands for
+        // them.
+        // PP 29 would put the data length between the CAN ID and the data of every frame.
+        for (pp, value) in [(0x24, 0xFF), (0x25, 0xFF), (0x29, 0x00)] {
             let mut elm = FakeElm::silent();
-            elm.pp.push((pp, 0xFF));
+            elm.pp.push((pp, value));
             let err = Elm::connect(FakeLink::new(elm)).unwrap_err();
             assert!(err.to_string().contains(&format!("PP {pp:02X}")), "{err}");
         }
@@ -167,16 +169,18 @@ mod setup {
     fn accepts_programmable_parameters_that_keep_the_defaults_it_relies_on() {
         let mut elm = FakeElm::silent();
         // PP 01 turns headers on by default, which the setup does anyway.
-        elm.pp = vec![(0x01, 0x00), (0x09, 0x00), (0x24, 0x00), (0x25, 0x00)];
+        elm.pp = vec![
+            (0x01, 0x00),
+            (0x09, 0x00),
+            (0x24, 0x00),
+            (0x25, 0x00),
+            (0x29, 0xFF),
+        ];
         connect(elm);
         // A clone without programmable parameters is at the factory defaults.
         let mut clone = FakeElm::silent();
         clone.unsupported.push("ATPPS".into());
         connect(clone);
-        // An older ELM327 has fewer of them.
-        let mut old = FakeElm::silent();
-        old.pps = Some(vec!["00:FF F  01:FF F  02:FF F  03:32 F".into()]);
-        connect(old);
     }
 
     #[test]
@@ -190,6 +194,9 @@ mod setup {
             vec!["24:00 N  24:FF N".to_owned()],
             vec!["124:00 N".to_owned()],
             vec!["+4:FF N".to_owned()],
+            // Cut short: every version with PPS lists the parameters the driver relies on.
+            vec!["00:FF F  01:FF F  02:FF F  03:32 F".to_owned()],
+            vec![],
             vec!["24:+F N".to_owned()],
         ] {
             let mut elm = FakeElm::silent();
@@ -238,6 +245,31 @@ mod setup {
         let mut clone = connect(FakeElm::silent());
         clone.link_mut().elm.sti = Some(String::new());
         assert_eq!(clone.info().unwrap().stn, None);
+    }
+
+    #[test]
+    fn info_takes_the_id_from_the_reset_banner() {
+        // Asking again with ATI would make a reset during `info` look like an answer.
+        let mut elm = connect(FakeElm::silent());
+        elm.info().unwrap();
+        assert!(
+            !commands(&elm).iter().any(|c| c == "ATI"),
+            "{:?}",
+            commands(&elm)
+        );
+    }
+
+    #[test]
+    fn a_banner_in_any_answer_is_a_reset() {
+        let mut elm = connect(car());
+        elm.link_mut().elm.after_echo = b"\rELM327 v2.0\r".to_vec();
+        assert!(elm.info().is_err());
+        let written = elm.link().written.len();
+        assert!(
+            elm.send(&approve(Target::ObdFunctional, &[0x09, 0x02]))
+                .is_err()
+        );
+        assert_eq!(elm.link().written.len(), written);
     }
 
     #[test]
@@ -639,6 +671,59 @@ mod misbehaving {
         assert_eq!(elm.link().written.len(), written);
     }
 
+    // An adapter prints nothing between its prompt and the next line it's sent, so anything
+    // it printed after the prompt, read already or not, could be a reset.
+    #[test]
+    fn output_after_a_reply_prompt_fails_closed() {
+        let mut elm = broadcasting();
+        elm.link_mut().elm.after_prompt = b"LV RESET\r".to_vec();
+        elm.send(&approve(Target::ObdFunctional, &[0x09, 0x02]))
+            .unwrap();
+        while elm.recv(Duration::from_secs(1)).is_ok() {}
+        let written = elm.link().written.len();
+        let err = elm
+            .send(&approve(Target::ObdFunctional, &[0x09, 0x02]))
+            .unwrap_err();
+        assert!(err.to_string().contains("LV RESET"), "{err}");
+        assert_eq!(elm.link().written.len(), written);
+    }
+
+    #[test]
+    fn output_after_a_drained_prompt_fails_closed() {
+        let mut elm = broadcasting();
+        elm.link_mut().elm.after_prompt = b"\rELM327 v2.0\r".to_vec();
+        elm.send(&approve(Target::ObdFunctional, &[0x09, 0x02]))
+            .unwrap();
+        // The next send drains the first request's replies, then must notice the banner.
+        let written = elm.link().written.len();
+        let err = elm
+            .send(&approve(Target::ObdFunctional, &[0x09, 0x02]))
+            .unwrap_err();
+        assert!(err.to_string().contains("ELM327"), "{err}");
+        assert_eq!(elm.link().written.len(), written);
+    }
+
+    #[test]
+    fn output_after_a_command_prompt_fails_closed() {
+        for output in [
+            &b"LV RESET\r"[..],
+            b"\rELM327 v2.0\r",
+            b"7E8 03 41 00\r",
+            b">",
+        ] {
+            let mut elm = connect(car());
+            elm.info().unwrap();
+            // The adapter answers the next command, then prints more.
+            elm.link_mut().elm.after_prompt = output.to_vec();
+            let err = elm
+                .send(&approve(Target::ObdFunctional, &[0x09, 0x02]))
+                .unwrap_err();
+            // Caught before the next command is written, not by that command's echo.
+            assert!(err.to_string().contains("while idle"), "{output:?}: {err}");
+            assert_eq!(elm.link().elm.sent, [], "{output:?}");
+        }
+    }
+
     // Protocol 6 is set without automatic search, so searching means the adapter lost that
     // setting, and a search sends probe frames nobody approved.
     #[test]
@@ -740,7 +825,7 @@ impl Link for Scripted {
         Ok(())
     }
 
-    fn read(&mut self, buf: &mut [u8], timeout: Duration) -> io::Result<usize> {
+    fn read(&mut self, buf: &mut [u8], timeout: Duration, driver: Driver) -> io::Result<usize> {
         if !self.output.is_empty() {
             let n = buf.len().min(self.output.len());
             buf[..n].copy_from_slice(&self.output[..n]);
@@ -755,7 +840,7 @@ impl Link for Scripted {
         if self.writes > 1
             && let Some(then) = &mut self.then
         {
-            return then.read(buf, timeout);
+            return then.read(buf, timeout, driver);
         }
         std::thread::sleep(timeout.min(Duration::from_millis(20)));
         Ok(0)

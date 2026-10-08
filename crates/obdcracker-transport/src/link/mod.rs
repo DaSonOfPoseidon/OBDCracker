@@ -2,9 +2,10 @@
 //! driver such as [`crate::elm::Elm`] runs over any of them.
 //!
 //! Anyone can implement [`Link`] for their own byte stream, but only a driver in this crate can
-//! write to one: [`Link::write_all`] takes a [`Driver`] token that nothing else can make. An
-//! adapter turns some of what it's sent into CAN frames, so writing to a link directly would
-//! skip the safety policy.
+//! write to or read from one: [`Link::write_all`] and [`Link::read`] take a [`Driver`] token that
+//! nothing else can make. An adapter turns some of what it's sent into CAN frames, so writing to
+//! a link directly would skip the safety policy, and reading from one could swallow a sign that
+//! the adapter reset, which the driver needs to see.
 //!
 //! ```compile_fail
 //! use obdcracker_transport::link::{Driver, Link};
@@ -33,8 +34,9 @@ pub trait Link {
     /// Writes every byte, or fails. Only a driver can call it.
     fn write_all(&mut self, bytes: &[u8], driver: Driver) -> io::Result<()>;
     /// Waits up to `timeout` for bytes and reads what has arrived into `buf`. Returns how many
-    /// bytes were read: 0 means none arrived in time. A closed stream is an error.
-    fn read(&mut self, buf: &mut [u8], timeout: Duration) -> io::Result<usize>;
+    /// bytes were read: 0 means none arrived in time. A closed stream is an error. Only a driver
+    /// can call it.
+    fn read(&mut self, buf: &mut [u8], timeout: Duration, driver: Driver) -> io::Result<usize>;
     /// How the adapter is connected.
     fn kind(&self) -> LinkKind;
 }
@@ -44,8 +46,8 @@ impl<L: Link + ?Sized> Link for Box<L> {
         (**self).write_all(bytes, driver)
     }
 
-    fn read(&mut self, buf: &mut [u8], timeout: Duration) -> io::Result<usize> {
-        (**self).read(buf, timeout)
+    fn read(&mut self, buf: &mut [u8], timeout: Duration, driver: Driver) -> io::Result<usize> {
+        (**self).read(buf, timeout, driver)
     }
 
     fn kind(&self) -> LinkKind {
