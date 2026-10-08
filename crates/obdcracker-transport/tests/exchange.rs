@@ -403,9 +403,11 @@ fn each_pending_ecu_gets_only_its_own_p2_star() {
     let ms = Duration::from_millis;
     let mut adapter = Timed(vec![
         (ms(0), reply(0x7E8, &[0x7F, 0x09, 0x78])),
-        (ms(60), reply(0x7E9, &[0x7F, 0x09, 0x78])),
+        // Both go pending within P2; 0x7E9 renews its P2* at about 90 ms.
+        (ms(5), reply(0x7E9, &[0x7F, 0x09, 0x78])),
+        (ms(85), reply(0x7E9, &[0x7F, 0x09, 0x78])),
         // 0x7E8's P2* ended at about 100 ms, so its answer at about 140 ms is too late.
-        (ms(80), reply(0x7E8, VIN)),
+        (ms(50), reply(0x7E8, VIN)),
         (ms(10), reply(0x7E9, VIN)),
     ]);
     let vin = approve(Target::ObdFunctional, &[0x09, 0x02]);
