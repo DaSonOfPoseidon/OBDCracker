@@ -97,7 +97,7 @@ adapter's command set. The ELM driver takes any two-way byte stream, so serial, 
 |---|---|---|---|---|
 | `mock` | none (tests) | — | all | done |
 | `sim` | none: a simulated car from a vehicle profile and a fixture (`--sim a7`) | — | all | done |
-| `elm` | ELM327 / STN (e.g. OBDLink EX, MX+, CX) | USB serial, Wi-Fi (TCP); Bluetooth LE and Classic planned | all | done for USB serial and TCP; not yet tried on a car |
+| `elm` | ELM327 v2.0+ / STN (e.g. OBDLink EX, MX+, CX) | USB serial, Wi-Fi (TCP); Bluetooth LE and Classic planned | all | done for USB serial and TCP; not yet tried on a car |
 | `gsusb` | CANable / candleLight (USB-C) and an OBD2-to-DB9 cable | USB | all | planned, with listen-only mode |
 | `socketcan` | any SocketCAN interface | kernel | Linux | planned |
 | `j2534` | J2534 pass-thru (Tactrix OpenPort, Toyota Mini VCI, VAS 5054A clones) | vendor DLL | Windows | later |
