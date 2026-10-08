@@ -51,6 +51,9 @@ pub enum FixtureError {
     UnsupportedModule(String),
     /// A value doesn't fit its format, such as a VIN that isn't 17 characters.
     Value(String),
+    /// The module has OBD-II data but isn't on an OBD-II ID pair (requests 0x7E0..=0x7E7,
+    /// replies at the request ID + 8).
+    NotObd(String),
     /// A DID that is neither a standard identification DID (0xF180..=0xF19F) nor listed for the
     /// module in its profile.
     UnknownDid {
@@ -73,6 +76,10 @@ impl fmt::Display for FixtureError {
                 "module {name}: only UDS modules with normal addressing can be simulated"
             ),
             Self::Value(message) => write!(f, "invalid fixture value: {message}"),
+            Self::NotObd(name) => write!(
+                f,
+                "module {name} has OBD-II data but isn't on an OBD-II ID pair (0x7E0..=0x7E7 / +8)"
+            ),
             Self::UnknownDid { module, did } => write!(
                 f,
                 "module {module}: DID 0x{did:04X} isn't standard or in the profile"
@@ -129,10 +136,16 @@ impl SimBus {
                     did: did.id,
                 });
             }
+            let obd = spec.obd()?;
+            let obd_ids = (0x7E0..=0x7E7).contains(&module.request_id)
+                && module.response_id == module.request_id + 8;
+            if obd.is_some() && !obd_ids {
+                return Err(FixtureError::NotObd(spec.module));
+            }
             ecus.push(Ecu {
                 request_id: module.request_id,
                 response_id: module.response_id,
-                obd: spec.obd()?,
+                obd,
                 dids,
                 dtcs: spec.dtcs()?,
                 dtc_format: spec.dtc_format,

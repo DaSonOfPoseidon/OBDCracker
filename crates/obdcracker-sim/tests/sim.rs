@@ -430,6 +430,16 @@ fn replies_longer_than_the_short_isotp_length_are_sent_whole() {
 }
 
 #[test]
+fn only_obd_ids_can_have_obd_data() {
+    // The gateway answers on 0x77A, outside 0x7E8..=0x7EF, so it can't be an OBD-II ECU.
+    let fixture = "[[ecu]]\nmodule = \"gateway\"\n[ecu.obd]\nvin = \"WAUZZZ4G1EN000000\"\n";
+    assert_eq!(
+        SimBus::new(&Profile::builtin("a7").unwrap(), fixture).unwrap_err(),
+        FixtureError::NotObd("gateway".into())
+    );
+}
+
+#[test]
 fn modules_the_sim_cannot_address_are_refused() {
     let profile = Profile::from_toml(
         "name = \"x\"\nbitrate = 500000\n[[module]]\nname = \"body\"\nrequest_id = 0x750\n\
