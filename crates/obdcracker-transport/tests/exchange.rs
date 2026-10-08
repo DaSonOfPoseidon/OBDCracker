@@ -359,11 +359,31 @@ fn the_largest_pending_limit_still_ends_the_wait() {
         ..FAST
     };
     let read = approve(Target::Physical(0x7E0), &[0x22, 0xF1, 0x90]);
-    let replies = vec![reply(0x7E8, PENDING); usize::from(u16::MAX) + 1];
+    // A module that never stops sending response-pending: only the limit ends the wait.
+    let mut ecu = Counted(Repeating(reply(0x7E8, PENDING)), 0);
     assert_eq!(
-        exchange(&mut mock(&replies), &read, Expect::Module(0x7E8), timing),
+        exchange(&mut ecu, &read, Expect::Module(0x7E8), timing),
         Err(Error::Timeout)
     );
+    assert_eq!(ecu.1, usize::from(u16::MAX) + 1);
+}
+
+// Counts the replies another transport hands out.
+#[derive(Debug)]
+struct Counted<T>(T, usize);
+
+impl<T: Transport> Transport for Counted<T> {
+    fn send(&mut self, request: &Approved) -> Result<(), Error> {
+        self.0.send(request)
+    }
+
+    fn recv(&mut self, timeout: Duration) -> Result<Response, Error> {
+        let reply = self.0.recv(timeout);
+        if reply.is_ok() {
+            self.1 += 1;
+        }
+        reply
+    }
 }
 
 #[test]
