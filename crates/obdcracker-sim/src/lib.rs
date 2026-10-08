@@ -27,7 +27,8 @@ use std::fmt;
 use std::time::Duration;
 
 use obdcracker_core::isotp::Addressing;
-use obdcracker_profile::{Profile, ProfileError, Protocol};
+use obdcracker_core::uds;
+use obdcracker_profile::{Decode, Profile, ProfileError, Protocol};
 use obdcracker_safety::{Approved, Target};
 use obdcracker_transport::{Error, Response, Transport};
 
@@ -41,7 +42,7 @@ pub use ecu::{Ecu, Fault, Session};
 pub enum FixtureError {
     /// The fixture isn't valid TOML, has an unknown field, or a field has the wrong type.
     Toml(String),
-    /// The vehicle profile is invalid or unknown.
+    /// The vehicle profile is invalid (including one built by hand) or unknown.
     Profile(ProfileError),
     /// The fixture names a module the profile doesn't have.
     UnknownModule(String),
@@ -113,6 +114,7 @@ const STANDARD_DIDS: std::ops::RangeInclusive<u16> = 0xF180..=0xF19F;
 impl SimBus {
     /// Builds the modules `fixture` describes, at the addresses `profile` gives them.
     pub fn new(profile: &Profile, fixture: &str) -> Result<Self, FixtureError> {
+        profile.validate()?;
         let file: fixture::FixtureFile =
             toml::from_str(fixture).map_err(|e| FixtureError::Toml(e.to_string()))?;
         let mut ecus: Vec<Ecu> = Vec::new();
@@ -128,13 +130,23 @@ impl SimBus {
                 return Err(FixtureError::DuplicateModule(spec.module));
             }
             let dids = spec.dids()?;
-            if let Some(did) = dids.iter().find(|did| {
-                !STANDARD_DIDS.contains(&did.id) && !module.dids.iter().any(|d| d.id == did.id)
-            }) {
-                return Err(FixtureError::UnknownDid {
-                    module: spec.module,
-                    did: did.id,
-                });
+            for did in &dids {
+                let def = module.dids.iter().find(|d| d.id == did.id);
+                if def.is_none() && !STANDARD_DIDS.contains(&did.id) {
+                    return Err(FixtureError::UnknownDid {
+                        module: spec.module,
+                        did: did.id,
+                    });
+                }
+                // A value must decode the way the profile says to show it.
+                if def.is_some_and(|d| d.decode == Decode::Text)
+                    && uds::decode_text(&did.data).is_err()
+                {
+                    return Err(FixtureError::Value(format!(
+                        "module {}: DID 0x{:04X} is text in the profile",
+                        spec.module, did.id
+                    )));
+                }
             }
             let obd = spec.obd()?;
             let obd_ids = (0x7E0..=0x7E7).contains(&module.request_id)

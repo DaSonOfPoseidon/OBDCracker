@@ -5,7 +5,7 @@ use std::time::Duration;
 use obdcracker_core::obd::{self, Unit, Value};
 use obdcracker_core::response::{Error as ReplyError, Nrc};
 use obdcracker_core::uds::{self, DtcFormat};
-use obdcracker_profile::Profile;
+use obdcracker_profile::{Profile, ProfileError};
 use obdcracker_safety::{Policy, Target};
 use obdcracker_sim::{Fault, FixtureError, Session, SimBus};
 use obdcracker_transport::{Error, Expect, Response, Timing, Transport, exchange};
@@ -437,6 +437,27 @@ fn only_obd_ids_can_have_obd_data() {
         SimBus::new(&Profile::builtin("a7").unwrap(), fixture).unwrap_err(),
         FixtureError::NotObd("gateway".into())
     );
+}
+
+#[test]
+fn profiles_built_by_hand_are_validated() {
+    let mut a7 = Profile::builtin("a7").unwrap();
+    // Two modules on one request ID would both answer it.
+    a7.modules[1].request_id = 0x7E0;
+    assert!(matches!(
+        SimBus::new(&a7, "[[ecu]]\nmodule = \"engine\"\n"),
+        Err(FixtureError::Profile(ProfileError::DuplicateId(0x7E0)))
+    ));
+}
+
+#[test]
+fn fixture_values_must_suit_the_profile_decoder() {
+    // The A7 profile declares 0xF197 (system name) as text.
+    let fixture = "[[ecu]]\nmodule = \"engine\"\n[[ecu.did]]\nid = 0xF197\nhex = \"FF 00 01\"\n";
+    assert!(matches!(
+        SimBus::new(&Profile::builtin("a7").unwrap(), fixture),
+        Err(FixtureError::Value(_))
+    ));
 }
 
 #[test]
