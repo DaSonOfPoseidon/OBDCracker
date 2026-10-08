@@ -19,6 +19,7 @@ use std::collections::{HashMap, HashSet};
 use std::fmt;
 
 use obdcracker_core::isotp::Addressing;
+use obdcracker_core::uds;
 use serde::Deserialize;
 
 /// One car's profile.
@@ -127,7 +128,15 @@ pub enum ProfileError {
         /// The DID.
         did: u16,
     },
-    /// The profile or a module has an empty or blank name.
+    /// A module lists a standard DID with another format than ISO 14229-1 gives it (see
+    /// [`standard_decode`]).
+    StandardDidFormat {
+        /// The module.
+        module: String,
+        /// The DID.
+        did: u16,
+    },
+    /// The profile, a module or a DID has an empty or blank name.
     EmptyName,
     /// No built-in profile has this name.
     UnknownBuiltin(String),
@@ -152,6 +161,10 @@ impl fmt::Display for ProfileError {
             Self::DuplicateDid { module, did } => {
                 write!(f, "module {module}: DID 0x{did:04X} is listed twice")
             }
+            Self::StandardDidFormat { module, did } => write!(
+                f,
+                "module {module}: DID 0x{did:04X} is text in ISO 14229-1, so its decode must be text"
+            ),
             Self::EmptyName => f.write_str("names can't be empty"),
             Self::UnknownBuiltin(name) => write!(f, "no built-in profile named {name}"),
         }
@@ -159,6 +172,26 @@ impl fmt::Display for ProfileError {
 }
 
 impl std::error::Error for ProfileError {}
+
+/// The ISO 14229-1 identification DIDs, which every module may have without a profile entry.
+pub const STANDARD_DIDS: std::ops::RangeInclusive<u16> = 0xF180..=0xF19F;
+
+/// How ISO 14229-1 says a standard identification DID is shown: [`Decode::Text`] for the VIN and
+/// the part, software, hardware, system and ODX names. `None` for a DID that can hold any bytes
+/// (dates, sessions, and so on) or isn't a standard one.
+#[must_use]
+pub fn standard_decode(did: u16) -> Option<Decode> {
+    const TEXT: [u16; 7] = [
+        uds::did::SPARE_PART_NUMBER,
+        uds::did::SOFTWARE_NUMBER,
+        uds::did::SOFTWARE_VERSION,
+        uds::did::VIN,
+        uds::did::HARDWARE_NUMBER,
+        0xF197, // system name or engine type
+        uds::did::ODX_FILE,
+    ];
+    TEXT.contains(&did).then_some(Decode::Text)
+}
 
 const BITRATES: [u32; 2] = [250_000, 500_000];
 const DIAGNOSTIC_IDS: std::ops::RangeInclusive<u32> = 0x700..=0x7FF;
@@ -230,6 +263,15 @@ impl Profile {
             }
             let mut dids = HashSet::new();
             for did in &module.dids {
+                if did.name.trim().is_empty() {
+                    return Err(ProfileError::EmptyName);
+                }
+                if standard_decode(did.id).is_some_and(|decode| decode != did.decode) {
+                    return Err(ProfileError::StandardDidFormat {
+                        module: module.name.clone(),
+                        did: did.id,
+                    });
+                }
                 if !dids.insert(did.id) {
                     return Err(ProfileError::DuplicateDid {
                         module: module.name.clone(),

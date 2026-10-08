@@ -1,7 +1,7 @@
 //! Parsing and validating vehicle profiles, and the built-in A7 profile.
 
 use obdcracker_core::isotp::Addressing;
-use obdcracker_profile::{Decode, Profile, ProfileError, Protocol};
+use obdcracker_profile::{Decode, Profile, ProfileError, Protocol, standard_decode};
 use obdcracker_safety::{Policy, Target};
 use proptest::prelude::*;
 
@@ -147,7 +147,7 @@ fn rejects_duplicate_names_and_vag_addresses() {
 #[test]
 fn rejects_duplicate_dids_in_a_module() {
     let toml =
-        format!("{MINIMAL}\n[[module.did]]\nid = 0xF190\nname = \"again\"\ndecode = \"hex\"\n");
+        format!("{MINIMAL}\n[[module.did]]\nid = 0xF190\nname = \"again\"\ndecode = \"text\"\n");
     assert_eq!(
         Profile::from_toml(&toml).unwrap_err(),
         ProfileError::DuplicateDid {
@@ -274,4 +274,42 @@ fn rejects_empty_names() {
         Profile::from_toml(&MINIMAL.replace("name = \"test car\"", "name = \" \"")).unwrap_err(),
         ProfileError::EmptyName
     );
+    for blank in ["", "  "] {
+        let toml = MINIMAL.replace("name = \"VIN\"", &format!("name = \"{blank}\""));
+        assert_eq!(
+            Profile::from_toml(&toml).unwrap_err(),
+            ProfileError::EmptyName,
+            "{blank:?}"
+        );
+    }
+}
+
+#[test]
+fn standard_dids_keep_their_iso_format() {
+    // F190 is the VIN and F187 the spare part number: text in ISO 14229-1, whatever a profile says.
+    for (did, decode) in [(0xF190, "hex"), (0xF187, "hex"), (0xF19E, "hex")] {
+        let toml = MINIMAL.replace(
+            "id = 0xF190\nname = \"VIN\"\ndecode = \"text\"",
+            &format!("id = {did}\nname = \"x\"\ndecode = \"{decode}\""),
+        );
+        assert_eq!(
+            Profile::from_toml(&toml).unwrap_err(),
+            ProfileError::StandardDidFormat {
+                module: "engine".into(),
+                did
+            },
+            "0x{did:04X}"
+        );
+    }
+    // Standard DIDs without a fixed format, such as F18B (manufacturing date), can be either.
+    for decode in ["hex", "text"] {
+        let toml = MINIMAL.replace(
+            "id = 0xF190\nname = \"VIN\"\ndecode = \"text\"",
+            &format!("id = 0xF18B\nname = \"date\"\ndecode = \"{decode}\""),
+        );
+        assert!(Profile::from_toml(&toml).is_ok(), "{decode}");
+    }
+    assert_eq!(standard_decode(0xF190), Some(Decode::Text));
+    assert_eq!(standard_decode(0xF18B), None);
+    assert_eq!(standard_decode(0x0600), None);
 }
