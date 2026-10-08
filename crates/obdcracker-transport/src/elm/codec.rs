@@ -218,7 +218,9 @@ fn parse_status(line: &str) -> Option<Status> {
 }
 
 // "7E8 06 41 00 BE 3F A8 13": a 3-digit ID and 1 to 8 bytes, each separated by one space.
+// ELM327s print a space after the last byte too, so one trailing space is allowed.
 fn parse_frame(line: &str) -> Option<CanFrame> {
+    let line = line.strip_suffix(' ').unwrap_or(line);
     let mut tokens = line.split(' ');
     let id = tokens.next()?;
     if id.len() != 3 || !id.bytes().all(|b| b.is_ascii_hexdigit()) {

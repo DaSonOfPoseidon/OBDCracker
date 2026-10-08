@@ -119,6 +119,13 @@ mod frames {
         assert!(matches!(parse_line("7E8"), Line::Text(_)));
     }
 
+    // ELM327s (and the independent ELM327-emulator) print a space after every byte, the last
+    // one included.
+    #[test]
+    fn accepts_one_trailing_space() {
+        assert_eq!(frame("7E8 03 41 0D 32 ").data(), [0x03, 0x41, 0x0D, 0x32]);
+    }
+
     #[test]
     fn accepts_lower_case_hex() {
         assert_eq!(frame("7e8 03 41 0d 32").data(), [0x03, 0x41, 0x0D, 0x32]);
@@ -136,7 +143,7 @@ mod frames {
     #[test]
     fn rejects_malformed_bytes() {
         for text in [
-            "7E8 1", "7E8 012", "7E8 +1", "+E8 01", "7E8 0G", "7E8  01", "7E8 01 ", " 7E8 01",
+            "7E8 1", "7E8 012", "7E8 +1", "+E8 01", "7E8 0G", "7E8  01", "7E8 01  ", " 7E8 01",
             "7E801", "7E8\t01",
         ] {
             assert!(matches!(parse_line(text), Line::Text(_)), "{text:?}");
