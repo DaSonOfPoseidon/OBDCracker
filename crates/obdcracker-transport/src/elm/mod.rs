@@ -84,6 +84,11 @@ const LONGEST_WAIT: Duration = Duration::from_secs(3600);
 /// (`OBDLink` adapters, which call themselves v1.4b). Older chips refuse it, and
 /// [`Elm::connect`] fails.
 ///
+/// Replies still arriving when the next request is sent are dropped: checked for signs of a
+/// reset, but not returned, so an [`crate::Audited`] wrapper doesn't log them. Call
+/// [`Transport::recv`] until it times out to get them all. Returning them later would let a
+/// late reply to a repeated request pass for a fresh one.
+///
 /// Requests must fit one CAN frame: up to 7 bytes. That covers the OBD-II reads and UDS 0x22
 /// with up to 3 DIDs, but not every request the policy allows (0x22 with 4 DIDs is 9 bytes).
 /// Longer ones are refused before anything is written. Multi-frame replies are reassembled
@@ -400,19 +405,31 @@ impl<L: Link> Elm<L> {
     // The adapter prints nothing between its prompt and the next line it's sent, so anything
     // already read past the prompt, or waiting on the link, could be a reset.
     fn check_idle(&mut self) -> Result<(), Error> {
+        // Read until the deadline whatever arrives: a stray NUL (datasheet p. 8) makes no event
+        // but may come just ahead of a reset. A reset whose first byte is still on its way at
+        // the deadline can't be seen before writing; the checks on the reply catch it then (a
+        // reset adapter has headers off, and may say SEARCHING...).
+        let deadline = Instant::now() + IDLE_CHECK;
         let mut buf = [0; 256];
-        let n = self.read(&mut buf, IDLE_CHECK)?;
         let mut events = Vec::new();
-        self.splitter.push(&buf[..n], &mut events);
-        self.events.extend(events);
+        while self.events.is_empty() && self.splitter.partial().is_none() {
+            let Some(left) = deadline
+                .checked_duration_since(Instant::now())
+                .filter(|left| !left.is_zero())
+            else {
+                return Ok(());
+            };
+            let n = self.read(&mut buf, left)?;
+            self.splitter.push(&buf[..n], &mut events);
+            self.events.extend(events.drain(..));
+        }
         let what = match self.events.pop_front() {
             Some(Event::Line(line)) => line,
             Some(Event::Prompt) => ">".into(),
             Some(Event::Overlong) => "an overlong line".into(),
             None => match self.splitter.partial() {
                 Some(Some(line)) => line.to_owned(),
-                Some(None) => "an overlong line".into(),
-                None => return Ok(()),
+                _ => "an overlong line".into(),
             },
         };
         Err(self.break_down(format!("the adapter printed {what} while idle")))

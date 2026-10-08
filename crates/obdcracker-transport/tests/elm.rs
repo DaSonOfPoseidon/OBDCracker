@@ -731,6 +731,25 @@ mod misbehaving {
     }
 
     #[test]
+    fn a_stray_nul_doesnt_cut_the_idle_check_short() {
+        // The adapter may insert NULs (datasheet p. 8). One arriving alone mustn't end the
+        // check before the reset behind it.
+        let mut elm = broadcasting();
+        elm.link_mut().elm.after_prompt = b"\rELM327 v2.0\r".to_vec();
+        elm.link_mut().chunk = 1;
+        elm.send(&approve(Target::ObdFunctional, &[0x09, 0x02]))
+            .unwrap();
+        while elm.recv(Duration::from_secs(1)).is_ok() {}
+        elm.link_mut().inject = vec![0];
+        let written = elm.link().written.len();
+        let err = elm
+            .send(&approve(Target::ObdFunctional, &[0x09, 0x02]))
+            .unwrap_err();
+        assert!(err.to_string().contains("while idle"), "{err}");
+        assert_eq!(elm.link().written.len(), written);
+    }
+
+    #[test]
     fn output_after_a_command_prompt_fails_closed() {
         for output in [
             &b"LV RESET\r"[..],
