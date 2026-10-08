@@ -176,8 +176,9 @@ pub(crate) fn printable(bytes: &[u8]) -> Result<&str, Error> {
 /// for: the PID (mode 09), one of the requested PIDs (mode 01, which leaves out unsupported ones),
 /// one of the requested DIDs (`ReadDataByIdentifier`), or the subfunction without its
 /// suppress-positive-response bit (`DiagnosticSessionControl`, `TesterPresent`) or as sent
-/// (`ReadDTCInformation`). A negative reply echoes only the service ID, so any `7F <service> <code>` for
-/// the request's service answers it. Other services are matched by service ID alone.
+/// (`ReadDTCInformation`). A negative reply echoes only the service ID, so any
+/// `7F <service> <code>` for the request's service answers it. Other services are matched by
+/// service ID alone.
 #[must_use]
 pub fn answers(request: &[u8], reply: &[u8]) -> bool {
     let Some((&sid, asked)) = request.split_first() else {

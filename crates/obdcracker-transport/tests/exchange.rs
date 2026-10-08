@@ -343,3 +343,32 @@ fn huge_timings_do_not_overflow_the_clock() {
     let got = exchange(&mut mock(&replies), &read, Expect::Module(0x7E8), timing).unwrap();
     assert_eq!(got, [reply(0x7E8, F190)]);
 }
+
+// An ECU stuck repeating the same answer.
+#[derive(Debug)]
+struct Repeating(Response);
+
+impl Transport for Repeating {
+    fn send(&mut self, _request: &Approved) -> Result<(), Error> {
+        Ok(())
+    }
+
+    fn recv(&mut self, _timeout: Duration) -> Result<Response, Error> {
+        Ok(self.0.clone())
+    }
+}
+
+#[test]
+fn a_repeating_ecu_cannot_keep_a_broadcast_open() {
+    // J1979: each ECU answers a broadcast once, so repeats are dropped and don't extend the wait.
+    let vin = approve(Target::ObdFunctional, &[0x09, 0x02]);
+    let mut adapter = Repeating(reply(0x7E8, VIN));
+    let start = Instant::now();
+    let got = exchange(&mut adapter, &vin, Expect::ObdEcus, FAST).unwrap();
+    assert_eq!(got, [reply(0x7E8, VIN)]);
+    assert!(
+        start.elapsed() < Duration::from_secs(1),
+        "{:?}",
+        start.elapsed()
+    );
+}

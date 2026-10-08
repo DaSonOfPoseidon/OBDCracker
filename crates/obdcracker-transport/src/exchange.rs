@@ -58,7 +58,7 @@ impl Default for Timing {
 /// is dropped too, and gives that module P2* to answer; once it has, a broadcast goes back to
 /// waiting for a P2 quiet period.
 ///
-/// - [`Expect::ObdEcus`] returns every reply that arrived, which may be none.
+/// - [`Expect::ObdEcus`] returns each ECU's first reply, which may be none; repeats are dropped.
 /// - [`Expect::Module`] returns the module's one reply, or [`Error::Timeout`] if it didn't answer
 ///   in time. A request with the suppress-positive-response bit set gets no reply when it
 ///   succeeds, so it times out here.
@@ -109,6 +109,9 @@ pub fn exchange<T: Transport + ?Sized>(
         }
         match expect {
             Expect::Module(_) => return Ok(vec![reply]),
+            // J1979: each ECU answers a broadcast once. Repeats are dropped and don't extend the
+            // wait, so an ECU stuck repeating itself can't keep the exchange open.
+            Expect::ObdEcus if replies.iter().any(|r: &Response| r.source == reply.source) => {}
             Expect::ObdEcus => {
                 replies.push(reply);
                 quiet = after(timing.p2);
