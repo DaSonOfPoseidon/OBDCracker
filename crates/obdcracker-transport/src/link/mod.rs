@@ -86,6 +86,8 @@ impl LinkKind {
 
 #[cfg(feature = "serial")]
 mod serial;
+mod tcp;
 
 #[cfg(feature = "serial")]
 pub use serial::SerialLink;
+pub use tcp::TcpLink;
