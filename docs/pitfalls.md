@@ -91,7 +91,9 @@ Each entry names the class, what to check, and where it bit us.
 - **Check for output the device shouldn't have sent before writing to it,** including what's already buffered past
   the prompt you stopped at, on every write path. A reset that arrives right after a prompt is otherwise only seen
   after the next request went out. The first fix covered writes after `ready()` but not the request written right
-  after the header commands (M3 branch, Codex).
+  after the header commands (M3 branch, Codex). Read until the deadline, not until the first read: bytes that make
+  no event (a stray NUL) aren't silence. And write down the window no check can close (a reset still in flight when
+  you write), so reviews stop at the limit instead of chasing variants.
 - **Don't ask for an answer that looks like a failure.** `ATI` answers with the same banner a reset prints, so a
   reset during `info` looked like an answer. Take such values once, when they can't be confused (the reset banner),
   and treat them as failures everywhere else (M3 branch, Codex).
