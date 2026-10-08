@@ -138,8 +138,11 @@ pub struct Elm<L> {
     busy: bool,
     // The request line the adapter hasn't echoed yet.
     echo: Option<String>,
-    // When the adapter last printed anything.
-    heard: Instant,
+    // How long the driver has waited since the adapter last printed anything. Time the caller
+    // spends elsewhere doesn't count; waits across calls add up.
+    quiet: Duration,
+    // Bytes read from the adapter so far, to tell whether a wait heard anything.
+    heard: u64,
     // Why the adapter can't be trusted any more.
     broken: Option<String>,
     // What it printed when it was reset, such as `ELM327 v1.4b`.
@@ -183,7 +186,8 @@ impl<L: Link> Elm<L> {
             flow: None,
             busy: false,
             echo: None,
-            heard: Instant::now(),
+            quiet: Duration::ZERO,
+            heard: 0,
             broken: None,
             banner: String::new(),
             senders: Vec::new(),
@@ -499,31 +503,38 @@ impl<L: Link> Elm<L> {
                 return Ok(None);
             };
             let n = self.read(&mut buf, left)?;
-            if n > 0 {
-                self.heard = Instant::now();
-            }
+            self.heard = self.heard.wrapping_add(n as u64);
             self.splitter.push(&buf[..n], &mut events);
             self.events.extend(events.drain(..));
         }
     }
 
     // The next thing the adapter printed during a request, or None once the deadline passes.
-    // An adapter quiet for longer than `SILENCE_LIMIT` in a request has hung. Silence counts
-    // only while the driver waits: time the caller spent elsewhere left output on the link.
+    // An adapter quiet for longer than `SILENCE_LIMIT` in a request has hung. Silence is the
+    // time the driver spent waiting, added up across calls, so neither a caller that reads late
+    // nor one that polls with short timeouts skews it.
     fn next_request_event(&mut self, deadline: Instant) -> Result<Option<Event>, Error> {
-        let waiting_since = Instant::now();
         loop {
-            let quiet_until = self.heard.max(waiting_since) + SILENCE_LIMIT;
-            if let Some(event) = self.next_event(deadline.min(quiet_until))? {
+            let Some(left) = SILENCE_LIMIT
+                .checked_sub(self.quiet)
+                .filter(|left| !left.is_zero())
+            else {
+                return Err(
+                    self.break_down("the adapter went quiet without finishing a request".into())
+                );
+            };
+            let (started, heard) = (Instant::now(), self.heard);
+            let event = self.next_event(deadline.min(started + left))?;
+            self.quiet = if self.heard == heard {
+                self.quiet.saturating_add(started.elapsed())
+            } else {
+                Duration::ZERO
+            };
+            if let Some(event) = event {
                 return Ok(Some(event));
             }
             if Instant::now() >= deadline {
                 return Ok(None);
-            }
-            if Instant::now() >= quiet_until {
-                return Err(
-                    self.break_down("the adapter went quiet without finishing a request".into())
-                );
             }
         }
     }
@@ -609,7 +620,7 @@ impl<L: Link> Transport for Elm<L> {
         let mut line = hex(payload).replace(' ', "");
         line.push('\r');
         self.write(line.as_bytes())?;
-        self.heard = Instant::now();
+        self.quiet = Duration::ZERO;
         line.pop();
         self.echo = Some(line);
         self.busy = true;

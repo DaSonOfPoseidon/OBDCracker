@@ -576,6 +576,24 @@ mod misbehaving {
     }
 
     #[test]
+    fn short_receives_add_up_to_a_quiet_adapter() {
+        // Waiting is what counts, across calls: polling in 1 s steps mustn't hide a hang.
+        let mut elm = connect(car());
+        elm.link_mut().elm.hang_after_request = true;
+        elm.send(&approve(Target::Physical(0x7E0), &[0x09, 0x02]))
+            .unwrap();
+        let start = Instant::now();
+        let err = loop {
+            match elm.recv(Duration::from_secs(1)) {
+                Ok(_) | Err(Error::Timeout) => {}
+                Err(err) => break err,
+            }
+            assert!(start.elapsed() < Duration::from_secs(15), "never tripped");
+        };
+        assert!(err.to_string().contains("quiet"), "{err}");
+    }
+
+    #[test]
     fn a_caller_that_reads_late_doesnt_count_as_a_quiet_adapter() {
         // Silence only counts while the driver waits; the replies are waiting on the link.
         let mut elm = connect(car());
