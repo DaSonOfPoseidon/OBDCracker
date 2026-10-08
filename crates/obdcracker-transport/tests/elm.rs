@@ -443,6 +443,18 @@ mod requests {
     }
 
     #[test]
+    fn p2_star_also_outlasts_printing_the_longest_reply() {
+        // After response-pending the final reply can be the longest one too.
+        let lines = 1 + (4095 - 6_u32).div_ceil(7);
+        let printing = Duration::from_secs_f64(f64::from(lines * 29 * 10) / 9600.0);
+        let p2_star = Elm::<FakeLink>::timing().p2_star;
+        assert!(
+            p2_star > obdcracker_transport::Timing::default().p2_star + printing,
+            "{p2_star:?} vs {printing:?}"
+        );
+    }
+
+    #[test]
     fn refuses_a_request_longer_than_one_frame_and_writes_nothing() {
         let mut elm = connect(car());
         let written = elm.link().written.len();
@@ -749,6 +761,20 @@ mod misbehaving {
             .unwrap_err();
         assert!(err.to_string().contains("while idle"), "{err}");
         assert_eq!(elm.link().written.len(), written);
+    }
+
+    #[test]
+    fn an_answer_too_long_for_any_command_fails_closed() {
+        // Thousands of short lines, as a broken or hostile adapter could send without end: the
+        // answer must stay bounded.
+        let mut elm = connect(car());
+        elm.link_mut().elm.sti = Some(vec!["A"; 10_000].join("\r"));
+        let err = elm.info().unwrap_err();
+        assert!(err.to_string().contains("too long"), "{err}");
+        assert!(
+            elm.send(&approve(Target::ObdFunctional, &[0x09, 0x02]))
+                .is_err()
+        );
     }
 
     #[test]

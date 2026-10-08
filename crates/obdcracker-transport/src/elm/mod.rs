@@ -60,6 +60,8 @@ const RESET_WAIT: Duration = Duration::from_secs(3);
 const RESET_TRIES: usize = 2;
 // How long to look for output the adapter shouldn't have printed before writing to it.
 const IDLE_CHECK: Duration = Duration::from_millis(1);
+// The most lines an answer to a command may have: `AT PPS` prints 12.
+const MAX_ANSWER_LINES: usize = 32;
 // How long an AT command may take.
 const COMMAND_WAIT: Duration = Duration::from_secs(2);
 // How long the adapter may take to print the longest reply, 4095 bytes (a first frame and 585
@@ -179,12 +181,15 @@ impl<L: Link> Elm<L> {
     /// Timing for [`crate::exchange`] through this adapter. The adapter decides when a request
     /// is over (it prints its prompt, which ends the exchange at once), so P2 only has to
     /// outlast [`ADAPTER_TIMEOUT`] plus the time to print the longest reply (4095 bytes) at
-    /// 9600 baud, about 18 s, plus the link's delay.
+    /// 9600 baud, about 18 s, plus the link's delay. P2* gets the same allowance on top of the
+    /// default, since the final reply after response-pending can be that long too.
     #[must_use]
     pub fn timing() -> Timing {
+        let default = Timing::default();
         Timing {
             p2: BUSY_WAIT,
-            ..Timing::default()
+            p2_star: default.p2_star.saturating_add(LONGEST_PRINT),
+            ..default
         }
     }
 
@@ -342,6 +347,10 @@ impl<L: Link> Elm<L> {
                     // The banner means a reset; `info` never asks for it.
                     if line.starts_with("ELM327") {
                         return Err(self.break_down(format!("the adapter reset: {line}")));
+                    }
+                    // A working adapter's answers are a few lines; don't collect a flood.
+                    if lines.len() == MAX_ANSWER_LINES {
+                        return Err(self.break_down(format!("the answer to {command} is too long")));
                     }
                     lines.push(line);
                 }
