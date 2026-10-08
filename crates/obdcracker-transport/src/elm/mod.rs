@@ -273,7 +273,9 @@ impl<L: Link> Elm<L> {
                 }
             }
         }
-        // Every ELM327 with `PPS` has these; a summary without them was cut short.
+        // A summary without one of these was cut short, or comes from a chip this driver can't
+        // vouch for. Refusing it is strict: the datasheet used here doesn't say which version
+        // added PP 29, so a genuine older chip without it is refused too.
         if let Some((pp, ..)) = KEPT_DEFAULTS.iter().find(|(pp, ..)| !seen.contains(pp)) {
             return Err(self.break_down(format!("ATPPS didn't list PP {pp:02X}")));
         }
