@@ -115,6 +115,29 @@ Each entry names the class, what to check, and where it bit us.
 - **Don't confuse a transport limit with a protocol limit.** 4095 bytes is ISO-TP's short first-frame length, not a
   UDS maximum; the 32-bit escape carries more.
 
+## Links and adapters
+
+- **Every read and write on a link needs a bound, not just the bus waits.** A peer that stops reading blocks a write
+  forever once buffers fill (set a write timeout), and some calls ignore that timeout altogether: serial2's `flush`
+  waits for the OS queue to drain with no limit. Check each I/O call's docs for what its timeout covers (M3 branch,
+  Codex).
+- **Bound what you collect, not just each piece.** Each line was capped at `MAX_LINE`, but a command's answer
+  collected lines until its deadline, so an adapter streaming `A\r` could exhaust memory in two seconds. Cap the count
+  too, and check every loop that accumulates (M3 branch, Codex).
+- **Timeouts must cover the link, not only the bus.** At 9600 baud a 4095-byte reply takes about 18 s just to print,
+  so a P2 sized for the ECU timed out mid-reply. When one timer gets the allowance, give it to every timer that can
+  wait for the same data: P2, P2* and the wait for a request to finish were fixed in three rounds instead of one
+  (M3 branch, Codex).
+- **Don't hand back stale data to make a log complete.** Replies drained before the next request aren't returned:
+  queueing them would let a late reply to a repeated request pass for a fresh one. Document what the audit log
+  records instead (M3 branch, Codex).
+- **Pin external test tools exactly, and check the pin installs from scratch.** PyPI's ELM327-emulator 4.0.0 sdist
+  reports `4.0.0.post57`, which uv refuses; it only worked locally from a cached build. CI installs a pinned git
+  commit (M3 branch).
+- **Emulators have quirks too.** ELM327-emulator prints `SEARCHING...` on the first `01 00` even with a fixed
+  protocol, which a real adapter doesn't; the test reads PID 20 instead. Note each workaround where it's made
+  (M3 branch).
+
 ## Docs vs code
 
 - **After every fix, re-read the doc comments on what changed** ("returns every reply", "capped at", "fixture
