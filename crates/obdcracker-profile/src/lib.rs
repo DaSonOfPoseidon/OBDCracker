@@ -189,7 +189,9 @@ impl Profile {
         self.modules.iter().find(|m| m.name == name)
     }
 
-    fn validate(&self) -> Result<(), ProfileError> {
+    /// Checks everything [`Profile::from_toml`] checks. Call it after building or changing a
+    /// profile by hand.
+    pub fn validate(&self) -> Result<(), ProfileError> {
         if self.name.trim().is_empty() || self.modules.iter().any(|m| m.name.trim().is_empty()) {
             return Err(ProfileError::EmptyName);
         }
