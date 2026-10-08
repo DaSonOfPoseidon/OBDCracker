@@ -572,6 +572,12 @@ proptest! {
             } else {
                 prop_assert_eq!(first, sid + 0x40);
             }
+            prop_assert!(
+                obdcracker_core::response::answers(&payload, &reply.payload),
+                "{:02X?} doesn't answer {:02X?}",
+                reply.payload,
+                payload
+            );
         }
     }
 }
