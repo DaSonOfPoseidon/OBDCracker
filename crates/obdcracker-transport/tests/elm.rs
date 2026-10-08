@@ -724,6 +724,57 @@ mod misbehaving {
         }
     }
 
+    // The driver never interrupts the adapter, so STOPPED means something else wrote to it, and
+    // the interrupting byte may start the next line it reads.
+    #[test]
+    fn an_unexplained_interruption_fails_closed() {
+        let mut elm = broadcasting();
+        elm.link_mut().elm.after_echo = b"STOPPED\r".to_vec();
+        elm.send(&approve(Target::ObdFunctional, &[0x09, 0x02]))
+            .unwrap();
+        let err = elm.recv(Duration::from_secs(1)).unwrap_err();
+        assert!(err.to_string().contains("STOPPED"), "{err}");
+        let written = elm.link().written.len();
+        assert!(
+            elm.send(&approve(Target::ObdFunctional, &[0x09, 0x02]))
+                .is_err()
+        );
+        assert_eq!(elm.link().written.len(), written);
+
+        let mut elm = connect(car());
+        elm.link_mut().elm.after_echo = b"STOPPED\r".to_vec();
+        let err = elm.info().unwrap_err();
+        assert!(err.to_string().contains("STOPPED"), "{err}");
+        assert!(
+            elm.send(&approve(Target::ObdFunctional, &[0x09, 0x02]))
+                .is_err()
+        );
+        assert_eq!(elm.link().elm.sent, []);
+    }
+
+    // The receive filter passes 0x700..=0x7FF only, so a frame from anywhere else means the
+    // adapter lost it, and may send flow control for frames it shouldn't see.
+    #[test]
+    fn a_frame_from_outside_the_receive_filter_fails_closed() {
+        for frame in [&b"6FF 02 01 00\r"[..], b"123 03 41 00 00\r"] {
+            let mut elm = broadcasting();
+            elm.link_mut().elm.after_echo = frame.to_vec();
+            elm.send(&approve(Target::ObdFunctional, &[0x09, 0x02]))
+                .unwrap();
+            let err = elm.recv(Duration::from_secs(1)).unwrap_err();
+            assert!(
+                err.to_string().contains("receive filter"),
+                "{frame:?}: {err}"
+            );
+            let written = elm.link().written.len();
+            assert!(
+                elm.send(&approve(Target::ObdFunctional, &[0x09, 0x02]))
+                    .is_err()
+            );
+            assert_eq!(elm.link().written.len(), written, "{frame:?}");
+        }
+    }
+
     // Protocol 6 is set without automatic search, so searching means the adapter lost that
     // setting, and a search sends probe frames nobody approved.
     #[test]

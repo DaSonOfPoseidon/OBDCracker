@@ -18,7 +18,7 @@ use obdcracker_safety::Approved;
 
 use crate::link::{Driver, Link, LinkKind};
 use crate::{Error, Response, Timing, Transport, hex};
-use codec::{Event, Line, LineSplitter, parse_line};
+use codec::{Event, Line, LineSplitter, Status, parse_line};
 
 // Run after the reset, in order. Each must answer OK. One flipped bit must not turn any of them
 // into a line of hex digits, so commands with a single non-hex letter (`ATE0`, `ATCAF1`,
@@ -73,6 +73,10 @@ const LONGEST_WAIT: Duration = Duration::from_secs(3600);
 
 /// An ELM327-compatible adapter on CAN (ISO 15765-4, 11-bit IDs, 500 kbit/s).
 ///
+/// The adapter must accept `AT CRA` with `X` digits: an ELM327 v2.0 or later, or an STN chip
+/// (`OBDLink` adapters, which call themselves v1.4b). Older chips refuse it, and
+/// [`Elm::connect`] fails.
+///
 /// Requests must fit one CAN frame: up to 7 bytes. That covers the OBD-II reads and UDS 0x22
 /// with up to 3 DIDs, but not every request the policy allows (0x22 with 4 DIDs is 9 bytes).
 /// Longer ones are refused before anything is written. Multi-frame replies are reassembled
@@ -85,7 +89,8 @@ const LONGEST_WAIT: Duration = Duration::from_secs(3600);
 ///
 /// If the adapter doesn't finish a command or request in time, refuses a setting, echoes a line
 /// other than the one written (a serial error; a misheard request has already gone on the bus by
-/// then), prints something unexpected, an overlong line, or anything at all between its prompt
+/// then), prints something unexpected, `STOPPED` (it never interrupts the adapter, so something
+/// else did), a frame from outside its receive filter, an overlong line, or anything at all between its prompt
 /// and the next line it's sent, says it reset (`LV RESET`, `ERRxx`,
 /// `LP ALERT`, a banner) or is searching for a protocol (`SEARCHING...`, `UNABLE TO CONNECT`),
 /// or the link fails, its state is unknown, and every later call fails without writing anything:
@@ -273,9 +278,8 @@ impl<L: Link> Elm<L> {
                 }
             }
         }
-        // A summary without one of these was cut short, or comes from a chip this driver can't
-        // vouch for. Refusing it is strict: the datasheet used here doesn't say which version
-        // added PP 29, so a genuine older chip without it is refused too.
+        // `PPS` and all of these arrived together in ELM327 v1.1 (ELM327DS v2.1, p. 90), and STN
+        // chips list them too, so a summary without one was cut short.
         if let Some((pp, ..)) = KEPT_DEFAULTS.iter().find(|(pp, ..)| !seen.contains(pp)) {
             return Err(self.break_down(format!("ATPPS didn't list PP {pp:02X}")));
         }
@@ -318,7 +322,7 @@ impl<L: Link> Elm<L> {
                 }
                 Some(Event::Line(line)) => {
                     if let Line::Status(status) = parse_line(&line)
-                        && status.loses_settings()
+                        && leaves_unknown_state(status)
                     {
                         return Err(self.break_down(format!("the adapter said {status}")));
                     }
@@ -494,6 +498,13 @@ impl<L: Link> Elm<L> {
     }
 }
 
+// Whether a status means the adapter's settings, or what it reads next, can't be trusted: it
+// lost its settings, or it was interrupted (`STOPPED`), which this driver never does, so
+// something else wrote to it and the interrupting byte may start the next line it reads.
+fn leaves_unknown_state(status: Status) -> bool {
+    status.loses_settings() || status == Status::Stopped
+}
+
 // Exactly two hex digits. `from_str_radix` alone would also take `+1`.
 fn hex_byte(text: &str) -> Option<u8> {
     if text.len() == 2 && text.bytes().all(|b| b.is_ascii_hexdigit()) {
@@ -574,9 +585,15 @@ impl<L: Link> Elm<L> {
         match parse_line(text) {
             // Its settings are gone: it may even search for a protocol on the next request,
             // sending frames nobody approved.
-            Line::Status(status) if status.loses_settings() => {
+            Line::Status(status) if leaves_unknown_state(status) => {
                 Err(self.break_down(format!("the adapter said {status}")))
             }
+            // The receive filter passes 0x700..=0x7FF only: the adapter lost it, and may be
+            // sending flow control for frames it shouldn't see.
+            Line::Frame(frame) if frame.id() < 0x700 => Err(self.break_down(format!(
+                "a frame from {:03X} got past the receive filter",
+                frame.id()
+            ))),
             // Such as a banner after a reset.
             Line::Ok | Line::Text(_) => {
                 Err(self.break_down(format!("unexpected output from the adapter: {text}")))
