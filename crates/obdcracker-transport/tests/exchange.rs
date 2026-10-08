@@ -225,3 +225,85 @@ fn adapter_errors_are_returned() {
         Err(Error::Adapter("unplugged".into()))
     );
 }
+
+#[test]
+fn a_late_reply_for_another_pid_is_ignored() {
+    // A reply to an earlier mode 09 PID 04 request has the same service byte as the VIN's.
+    let stale = reply(0x7E8, &[0x49, 0x04, 0x01, 0x41, 0x42]);
+    let vin = approve(Target::ObdFunctional, &[0x09, 0x02]);
+    let replies = [stale.clone(), reply(0x7E9, VIN)];
+    let got = exchange(&mut mock(&replies), &vin, Expect::ObdEcus, FAST).unwrap();
+    assert_eq!(got, [reply(0x7E9, VIN)]);
+
+    let read = approve(Target::Physical(0x7E0), &[0x22, 0xF1, 0x90]);
+    let replies = [reply(0x7E8, &[0x62, 0xF1, 0x87, 0x30]), reply(0x7E8, F190)];
+    let got = exchange(&mut mock(&replies), &read, Expect::Module(0x7E8), FAST).unwrap();
+    assert_eq!(got, [reply(0x7E8, F190)]);
+}
+
+// Plays back replies, then sleeps through each wait it's given and times out.
+#[derive(Debug)]
+struct Script {
+    replies: Vec<Response>,
+    asked_for: Vec<Duration>,
+}
+
+impl Transport for Script {
+    fn send(&mut self, _request: &Approved) -> Result<(), Error> {
+        Ok(())
+    }
+
+    fn recv(&mut self, timeout: Duration) -> Result<Response, Error> {
+        self.asked_for.push(timeout);
+        if self.replies.is_empty() {
+            std::thread::sleep(timeout);
+            return Err(Error::Timeout);
+        }
+        Ok(self.replies.remove(0))
+    }
+}
+
+#[test]
+fn broadcast_goes_back_to_p2_once_the_pending_ecu_answers() {
+    let timing = Timing {
+        p2: Duration::from_millis(10),
+        p2_star: Duration::from_secs(5),
+        max_pending: 3,
+    };
+    let mut adapter = Script {
+        replies: vec![reply(0x7E8, &[0x7F, 0x09, 0x78]), reply(0x7E8, VIN)],
+        asked_for: Vec::new(),
+    };
+    let vin = approve(Target::ObdFunctional, &[0x09, 0x02]);
+    let start = Instant::now();
+    let got = exchange(&mut adapter, &vin, Expect::ObdEcus, timing).unwrap();
+    assert_eq!(got, [reply(0x7E8, VIN)]);
+    assert!(
+        start.elapsed() < Duration::from_secs(1),
+        "{:?}",
+        start.elapsed()
+    );
+    assert!(adapter.asked_for.last().unwrap() <= &timing.p2);
+}
+
+#[test]
+fn broadcast_keeps_waiting_for_an_ecu_still_pending() {
+    let timing = Timing {
+        p2: Duration::from_millis(10),
+        p2_star: Duration::from_millis(200),
+        max_pending: 3,
+    };
+    let mut adapter = Script {
+        replies: vec![reply(0x7E8, &[0x7F, 0x09, 0x78]), reply(0x7E9, VIN)],
+        asked_for: Vec::new(),
+    };
+    let vin = approve(Target::ObdFunctional, &[0x09, 0x02]);
+    let start = Instant::now();
+    let got = exchange(&mut adapter, &vin, Expect::ObdEcus, timing).unwrap();
+    assert_eq!(got, [reply(0x7E9, VIN)]);
+    assert!(
+        start.elapsed() >= Duration::from_millis(150),
+        "{:?}",
+        start.elapsed()
+    );
+}

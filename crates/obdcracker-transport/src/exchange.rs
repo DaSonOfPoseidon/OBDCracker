@@ -53,9 +53,10 @@ impl Default for Timing {
 /// Sends one request and returns its replies, oldest first.
 ///
 /// Replies from CAN IDs that `expect` doesn't accept are dropped, and so are replies that don't
-/// answer this request's service, such as a late reply to an earlier request. (An [`crate::Audited`]
-/// transport still logs them.) A response-pending reply (`7F <service> 78`) to this request is
-/// dropped too, and extends the wait to P2*.
+/// answer this request (see [`response::answers`]), such as a late reply to an earlier one. (An
+/// [`crate::Audited`] transport still logs them.) A response-pending reply (`7F <service> 78`)
+/// is dropped too, and gives that module P2* to answer; once it has, a broadcast goes back to
+/// waiting for a P2 quiet period.
 ///
 /// - [`Expect::ObdEcus`] returns every reply that arrived, which may be none.
 /// - [`Expect::Module`] returns the module's one reply, or [`Error::Timeout`] if it didn't answer
@@ -71,35 +72,46 @@ pub fn exchange<T: Transport + ?Sized>(
     timing: Timing,
 ) -> Result<Vec<Response>, Error> {
     transport.send(request)?;
-    let sid = request.payload().first().copied();
-    let mut deadline = Instant::now() + timing.p2;
+    let asked = request.payload();
+    let sid = asked.first().copied();
+    // A broadcast stops once no reply has come for P2 and no ECU is still within its P2*.
+    let mut quiet = Instant::now() + timing.p2;
+    let mut still_pending: Vec<(u32, Instant)> = Vec::new();
     let mut pending = 0u16;
     let mut replies = Vec::new();
-    while let Some(left) = deadline
-        .checked_duration_since(Instant::now())
-        .filter(|left| !left.is_zero())
-    {
+    loop {
+        let deadline = still_pending
+            .iter()
+            .map(|&(_, until)| until)
+            .fold(quiet, Instant::max);
+        let Some(left) = deadline
+            .checked_duration_since(Instant::now())
+            .filter(|left| !left.is_zero())
+        else {
+            break;
+        };
         let reply = match transport.recv(left) {
             Ok(reply) => reply,
             Err(Error::Timeout) => break,
             Err(e) => return Err(e),
         };
-        if !expect.accepts(reply.source) || !sid.is_some_and(|sid| answers(sid, &reply.payload)) {
+        if !expect.accepts(reply.source) || !response::answers(asked, &reply.payload) {
             continue;
         }
+        still_pending.retain(|&(source, _)| source != reply.source);
         if sid.is_some_and(|sid| is_pending(sid, &reply.payload)) {
             pending += 1;
             if pending > timing.max_pending {
                 return Err(Error::Timeout);
             }
-            deadline = deadline.max(Instant::now() + timing.p2_star);
+            still_pending.push((reply.source, Instant::now() + timing.p2_star));
             continue;
         }
         match expect {
             Expect::Module(_) => return Ok(vec![reply]),
             Expect::ObdEcus => {
                 replies.push(reply);
-                deadline = deadline.max(Instant::now() + timing.p2);
+                quiet = Instant::now() + timing.p2;
             }
         }
     }
@@ -108,19 +120,6 @@ pub fn exchange<T: Transport + ?Sized>(
         Expect::ObdEcus => Ok(replies),
     }
 }
-
-// Whether `reply` answers service `sid`, positively or not. Anything else is a late reply to an
-// earlier request.
-fn answers(sid: u8, reply: &[u8]) -> bool {
-    match reply {
-        [NEGATIVE, refused, ..] => *refused == sid,
-        [first, ..] => *first == sid.wrapping_add(POSITIVE_OFFSET),
-        [] => false,
-    }
-}
-
-const NEGATIVE: u8 = 0x7F;
-const POSITIVE_OFFSET: u8 = 0x40;
 
 fn is_pending(sid: u8, reply: &[u8]) -> bool {
     matches!(
