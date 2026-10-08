@@ -425,3 +425,22 @@ fn an_ecu_that_answered_cannot_reopen_the_wait_with_pending() {
     let got = exchange(&mut mock(&replies), &vin, Expect::ObdEcus, timing);
     assert_eq!(got, Ok(vec![reply(0x7E8, VIN)]));
 }
+
+#[test]
+fn another_ecus_pending_does_not_extend_p2_for_the_rest() {
+    let timing = Timing {
+        p2: Duration::from_millis(20),
+        p2_star: Duration::from_millis(300),
+        max_pending: 5,
+    };
+    let ms = Duration::from_millis;
+    let mut adapter = Timed(vec![
+        (ms(0), reply(0x7E8, &[0x7F, 0x09, 0x78])),
+        // 0x7E9 never went pending, and P2 ended long before this.
+        (ms(100), reply(0x7E9, VIN)),
+        (ms(10), reply(0x7E8, VIN)),
+    ]);
+    let vin = approve(Target::ObdFunctional, &[0x09, 0x02]);
+    let got = exchange(&mut adapter, &vin, Expect::ObdEcus, timing).unwrap();
+    assert_eq!(got, [reply(0x7E8, VIN)]);
+}

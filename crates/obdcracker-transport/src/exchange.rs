@@ -56,7 +56,8 @@ impl Default for Timing {
 /// answer this request (see [`response::answers`]), such as a late reply to an earlier one. (An
 /// [`crate::Audited`] transport still logs them.) A response-pending reply (`7F <service> 78`)
 /// is dropped too, and gives that module P2* to answer; once it has, a broadcast goes back to
-/// waiting for a P2 quiet period. Replies from a module whose P2* has run out are dropped.
+/// waiting for a P2 quiet period. Replies from a module whose P2* has run out are dropped, and so
+/// are replies after the P2 quiet period from a module that didn't send response-pending.
 ///
 /// - [`Expect::ObdEcus`] returns each ECU's first reply, which may be none; repeats are dropped.
 /// - [`Expect::Module`] returns the module's one reply, or [`Error::Timeout`] if it didn't answer
@@ -111,7 +112,10 @@ pub fn exchange<T: Transport + ?Sized>(
         // J1979: each ECU answers a broadcast once. Anything more from an ECU that has answered
         // is dropped and doesn't extend the wait, so a stuck ECU can't keep the exchange open.
         let answered = replies.iter().any(|r: &Response| r.source == reply.source);
-        if timed_out.contains(&reply.source) || answered {
+        // Only a module that sent response-pending earned P2*; any other must answer within P2,
+        // even while another module's P2* keeps the exchange open.
+        let late = now > quiet && !still_pending.iter().any(|&(s, _)| s == reply.source);
+        if timed_out.contains(&reply.source) || answered || late {
             continue;
         }
         still_pending.retain(|&(source, _)| source != reply.source);
