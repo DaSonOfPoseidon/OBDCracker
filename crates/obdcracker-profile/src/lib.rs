@@ -117,7 +117,7 @@ pub enum ProfileError {
     /// Two modules, or one module's request and response, share a CAN ID without each having
     /// its own extended-address byte.
     DuplicateId(u32),
-    /// Two modules share a name, ignoring case and surrounding spaces.
+    /// Two modules share a name, ignoring case.
     DuplicateName(String),
     /// Two modules share a VAG address.
     DuplicateVagAddress(u8),
@@ -138,6 +138,8 @@ pub enum ProfileError {
     },
     /// The profile, a module or a DID has an empty or blank name.
     EmptyName,
+    /// A name starts or ends with spaces, so a lookup by its visible text wouldn't find it.
+    PaddedName(String),
     /// No built-in profile has this name.
     UnknownBuiltin(String),
 }
@@ -166,6 +168,7 @@ impl fmt::Display for ProfileError {
                 "module {module}: DID 0x{did:04X} is text in ISO 14229-1, so its decode must be text"
             ),
             Self::EmptyName => f.write_str("names can't be empty"),
+            Self::PaddedName(name) => write!(f, "name {name:?} starts or ends with spaces"),
             Self::UnknownBuiltin(name) => write!(f, "no built-in profile named {name}"),
         }
     }
@@ -225,8 +228,18 @@ impl Profile {
     /// Checks everything [`Profile::from_toml`] checks. Call it after building or changing a
     /// profile by hand.
     pub fn validate(&self) -> Result<(), ProfileError> {
-        if self.name.trim().is_empty() || self.modules.iter().any(|m| m.name.trim().is_empty()) {
-            return Err(ProfileError::EmptyName);
+        let names = std::iter::once(&self.name).chain(
+            self.modules
+                .iter()
+                .flat_map(|m| std::iter::once(&m.name).chain(m.dids.iter().map(|did| &did.name))),
+        );
+        for name in names {
+            if name.trim().is_empty() {
+                return Err(ProfileError::EmptyName);
+            }
+            if name.trim() != name {
+                return Err(ProfileError::PaddedName(name.clone()));
+            }
         }
         if !BITRATES.contains(&self.bitrate) {
             return Err(ProfileError::Bitrate(self.bitrate));
@@ -253,8 +266,8 @@ impl Profile {
                 }
                 users.push(sub);
             }
-            // Names that differ only in case or surrounding spaces count as the same.
-            if !names.insert(module.name.trim().to_lowercase()) {
+            // Names that differ only in case count as the same.
+            if !names.insert(module.name.to_lowercase()) {
                 return Err(ProfileError::DuplicateName(module.name.clone()));
             }
             if let Some(address) = module.vag_address
@@ -264,9 +277,6 @@ impl Profile {
             }
             let mut dids = HashSet::new();
             for did in &module.dids {
-                if did.name.trim().is_empty() {
-                    return Err(ProfileError::EmptyName);
-                }
                 if standard_decode(did.id).is_some_and(|decode| decode != did.decode) {
                     return Err(ProfileError::StandardDidFormat {
                         module: module.name.clone(),
