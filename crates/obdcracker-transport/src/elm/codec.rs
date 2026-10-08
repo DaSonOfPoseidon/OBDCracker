@@ -143,7 +143,9 @@ impl Status {
     /// Whether the adapter has lost the settings a driver gave it: it has reset or is about to
     /// (`LV RESET`, `LP ALERT`, any `ERRxx`; `ERR94` needs a full reset, which restores the
     /// defaults, datasheet p. 79), or it is searching for a protocol (`SEARCHING...`, and
-    /// `UNABLE TO CONNECT` after a search failed), which a driver that sets one never asks for.
+    /// `UNABLE TO CONNECT`, which means the adapter "tried all of the available protocols",
+    /// datasheet p. 80), which a driver that sets one never asks for. Its other use, a failed
+    /// ISO 14230 initiation (p. 19), doesn't apply to CAN, which has none.
     #[must_use]
     pub fn loses_settings(self) -> bool {
         matches!(
