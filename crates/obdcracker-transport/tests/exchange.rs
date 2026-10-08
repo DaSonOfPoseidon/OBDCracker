@@ -372,3 +372,56 @@ fn a_repeating_ecu_cannot_keep_a_broadcast_open() {
         start.elapsed()
     );
 }
+
+// Replies that arrive after a delay, then silence until the wait ends.
+#[derive(Debug)]
+struct Timed(Vec<(Duration, Response)>);
+
+impl Transport for Timed {
+    fn send(&mut self, _request: &Approved) -> Result<(), Error> {
+        Ok(())
+    }
+
+    fn recv(&mut self, timeout: Duration) -> Result<Response, Error> {
+        if self.0.is_empty() {
+            std::thread::sleep(timeout);
+            return Err(Error::Timeout);
+        }
+        let (delay, reply) = self.0.remove(0);
+        std::thread::sleep(delay);
+        Ok(reply)
+    }
+}
+
+#[test]
+fn each_pending_ecu_gets_only_its_own_p2_star() {
+    let timing = Timing {
+        p2: Duration::from_millis(10),
+        p2_star: Duration::from_millis(100),
+        max_pending: 5,
+    };
+    let ms = Duration::from_millis;
+    let mut adapter = Timed(vec![
+        (ms(0), reply(0x7E8, &[0x7F, 0x09, 0x78])),
+        (ms(60), reply(0x7E9, &[0x7F, 0x09, 0x78])),
+        // 0x7E8's P2* ended at about 100 ms, so its answer at about 140 ms is too late.
+        (ms(80), reply(0x7E8, VIN)),
+        (ms(10), reply(0x7E9, VIN)),
+    ]);
+    let vin = approve(Target::ObdFunctional, &[0x09, 0x02]);
+    let got = exchange(&mut adapter, &vin, Expect::ObdEcus, timing).unwrap();
+    assert_eq!(got, [reply(0x7E9, VIN)]);
+}
+
+#[test]
+fn an_ecu_that_answered_cannot_reopen_the_wait_with_pending() {
+    let timing = Timing {
+        max_pending: 1,
+        ..FAST
+    };
+    let pending = reply(0x7E8, &[0x7F, 0x09, 0x78]);
+    let replies = [reply(0x7E8, VIN), pending.clone(), pending.clone(), pending];
+    let vin = approve(Target::ObdFunctional, &[0x09, 0x02]);
+    let got = exchange(&mut mock(&replies), &vin, Expect::ObdEcus, timing);
+    assert_eq!(got, Ok(vec![reply(0x7E8, VIN)]));
+}

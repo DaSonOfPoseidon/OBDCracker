@@ -56,7 +56,7 @@ impl Default for Timing {
 /// answer this request (see [`response::answers`]), such as a late reply to an earlier one. (An
 /// [`crate::Audited`] transport still logs them.) A response-pending reply (`7F <service> 78`)
 /// is dropped too, and gives that module P2* to answer; once it has, a broadcast goes back to
-/// waiting for a P2 quiet period.
+/// waiting for a P2 quiet period. Replies from a module whose P2* has run out are dropped.
 ///
 /// - [`Expect::ObdEcus`] returns each ECU's first reply, which may be none; repeats are dropped.
 /// - [`Expect::Module`] returns the module's one reply, or [`Error::Timeout`] if it didn't answer
@@ -77,6 +77,7 @@ pub fn exchange<T: Transport + ?Sized>(
     // A broadcast stops once no reply has come for P2 and no ECU is still within its P2*.
     let mut quiet = after(timing.p2);
     let mut still_pending: Vec<(u32, Instant)> = Vec::new();
+    let mut timed_out: Vec<u32> = Vec::new();
     let mut pending = 0u16;
     let mut replies = Vec::new();
     loop {
@@ -98,6 +99,21 @@ pub fn exchange<T: Transport + ?Sized>(
         if !expect.accepts(reply.source) || !response::answers(asked, &reply.payload) {
             continue;
         }
+        // A module that let its P2* run out is done: its late replies don't count.
+        let now = Instant::now();
+        still_pending.retain(|&(source, until)| {
+            let expired = until <= now;
+            if expired {
+                timed_out.push(source);
+            }
+            !expired
+        });
+        // J1979: each ECU answers a broadcast once. Anything more from an ECU that has answered
+        // is dropped and doesn't extend the wait, so a stuck ECU can't keep the exchange open.
+        let answered = replies.iter().any(|r: &Response| r.source == reply.source);
+        if timed_out.contains(&reply.source) || answered {
+            continue;
+        }
         still_pending.retain(|&(source, _)| source != reply.source);
         if sid.is_some_and(|sid| is_pending(sid, &reply.payload)) {
             if pending == timing.max_pending {
@@ -109,9 +125,6 @@ pub fn exchange<T: Transport + ?Sized>(
         }
         match expect {
             Expect::Module(_) => return Ok(vec![reply]),
-            // J1979: each ECU answers a broadcast once. Repeats are dropped and don't extend the
-            // wait, so an ECU stuck repeating itself can't keep the exchange open.
-            Expect::ObdEcus if replies.iter().any(|r: &Response| r.source == reply.source) => {}
             Expect::ObdEcus => {
                 replies.push(reply);
                 quiet = after(timing.p2);
