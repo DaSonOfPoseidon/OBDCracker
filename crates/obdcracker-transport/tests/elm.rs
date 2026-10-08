@@ -36,6 +36,16 @@ fn car() -> FakeElm {
     }))
 }
 
+// Connected to `car()`, with the header and flow control already set for broadcasts, so the
+// next broadcast writes only the request.
+fn broadcasting() -> Elm<FakeLink> {
+    let mut elm = connect(car());
+    elm.send(&approve(Target::ObdFunctional, &[0x09, 0x02]))
+        .unwrap();
+    while elm.recv(Duration::from_secs(1)).is_ok() {}
+    elm
+}
+
 fn commands(elm: &Elm<FakeLink>) -> &[String] {
     &elm.link().elm.commands
 }
@@ -49,12 +59,12 @@ mod setup {
         assert_eq!(
             commands(&elm),
             [
-                "ATZ", "ATE0", "ATL0", "ATS1", "ATH1", "ATSP6", "ATCAF1", "ATCFC1", "ATR1",
-                "ATCF700", "ATCM700", "ATAT1", "ATSTFF"
+                "ATZ", "ATPPS", "ATL0", "ATS1", "ATH1", "ATSP6", "ATR1", "ATCRA7XX", "ATAT1",
+                "ATSTFF"
             ]
         );
         let settings = &elm.link().elm.settings;
-        assert!(!settings.echo && settings.headers && settings.spaces && !settings.linefeeds);
+        assert!(settings.echo && settings.headers && settings.spaces && !settings.linefeeds);
         assert_eq!(settings.protocol.as_deref(), Some("6"));
         assert!(
             elm.link().elm.sent.is_empty(),
@@ -62,12 +72,128 @@ mod setup {
         );
     }
 
+    // Every line the driver writes other than a request: the reset, the setup, `info`, and the
+    // header and flow control settings for each kind of target.
+    fn every_command() -> Vec<String> {
+        let mut elm = connect(car());
+        elm.info().unwrap();
+        for target in [
+            Target::ObdFunctional,
+            Target::Physical(0x7E0),
+            Target::Physical(0x714),
+            Target::Physical(0x7E1),
+        ] {
+            elm.send(&approve(target, &[0x09, 0x02])).unwrap();
+            while elm.recv(Duration::from_secs(1)).is_ok() {}
+        }
+        commands(&elm)
+            .iter()
+            .filter(|c| !c.bytes().all(|b| b.is_ascii_hexdigit()))
+            .cloned()
+            .collect()
+    }
+
     #[test]
-    fn every_setup_command_contains_a_letter_that_isnt_hex() {
-        // An ELM327 sends any all-hex line to the bus, so a mangled AT command must never be one.
-        let elm = connect(FakeElm::silent());
-        for command in commands(&elm) {
-            assert!(command.bytes().any(|b| !b.is_ascii_hexdigit()), "{command}");
+    fn no_single_bit_error_turns_a_command_into_a_bus_request() {
+        // An ELM327 sends any line of hex digits to the bus, ignoring spaces and control
+        // characters, so a bit flipped on a serial line must never leave one. A flipped carriage
+        // return joins the command to the next line.
+        let commands = every_command();
+        for expected in [
+            "ATZ",
+            "ATPPS",
+            "STI",
+            "ATSH714",
+            "ATFCSD300000",
+            "ATFCSM1",
+            "ATFCSM0",
+        ] {
+            assert!(
+                commands.iter().any(|c| c == expected),
+                "{expected}: {commands:?}"
+            );
+        }
+        for command in &commands {
+            let line = format!("{command}\r");
+            for index in 0..line.len() {
+                for bit in 0..8 {
+                    let mut bytes = line.clone().into_bytes();
+                    bytes[index] ^= 1 << bit;
+                    bytes.extend(b"ATI\r");
+                    let mut elm = FakeElm::silent();
+                    elm.settings.protocol = Some("6".into());
+                    // One byte at a time, reading everything, so nothing counts as an interrupt.
+                    for byte in bytes {
+                        elm.write(&[byte]);
+                        elm.read(usize::MAX);
+                    }
+                    assert_eq!(
+                        elm.sent,
+                        [],
+                        "{command} with bit {bit} of byte {index} flipped"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn fails_closed_on_an_adapter_that_doesnt_echo() {
+        // The echo is how the driver knows the adapter heard what it wrote.
+        for pps in [true, false] {
+            let mut elm = FakeElm::silent();
+            elm.pp.push((0x09, 0xFF));
+            if !pps {
+                elm.unsupported.push("ATPPS".into());
+            }
+            let err = Elm::connect(FakeLink::new(elm)).unwrap_err();
+            assert!(err.to_string().contains("echo"), "{err}");
+        }
+    }
+
+    #[test]
+    fn fails_closed_when_a_programmable_parameter_changes_a_default_it_relies_on() {
+        // CAN auto formatting and flow control are on after a reset unless PP 24 or 25 says
+        // otherwise; the setup doesn't send the commands for them.
+        for pp in [0x24, 0x25] {
+            let mut elm = FakeElm::silent();
+            elm.pp.push((pp, 0xFF));
+            let err = Elm::connect(FakeLink::new(elm)).unwrap_err();
+            assert!(err.to_string().contains(&format!("PP {pp:02X}")), "{err}");
+        }
+    }
+
+    #[test]
+    fn accepts_programmable_parameters_that_keep_the_defaults_it_relies_on() {
+        let mut elm = FakeElm::silent();
+        // PP 01 turns headers on by default, which the setup does anyway.
+        elm.pp = vec![(0x01, 0x00), (0x09, 0x00), (0x24, 0x00), (0x25, 0x00)];
+        connect(elm);
+        // A clone without programmable parameters is at the factory defaults.
+        let mut clone = FakeElm::silent();
+        clone.unsupported.push("ATPPS".into());
+        connect(clone);
+        // An older ELM327 has fewer of them.
+        let mut old = FakeElm::silent();
+        old.pps = Some(vec!["00:FF F  01:FF F  02:FF F  03:32 F".into()]);
+        connect(old);
+    }
+
+    #[test]
+    fn fails_closed_on_a_parameter_summary_it_cant_read() {
+        for pps in [
+            vec!["OK".to_owned()],
+            vec!["24:FF".to_owned()],
+            vec!["24:FF X".to_owned()],
+            vec!["24 FF N".to_owned()],
+            vec!["24:F N".to_owned()],
+            vec!["24:00 N  24:FF N".to_owned()],
+            vec!["124:00 N".to_owned()],
+        ] {
+            let mut elm = FakeElm::silent();
+            elm.pps = Some(pps.clone());
+            let err = Elm::connect(FakeLink::new(elm)).unwrap_err();
+            assert!(err.to_string().contains("ATPPS"), "{pps:?}: {err}");
         }
     }
 
@@ -85,7 +211,7 @@ mod setup {
 
     #[test]
     fn fails_closed_when_the_adapter_lacks_a_setup_command() {
-        for missing in ["ATSP6", "ATH1", "ATCF700", "ATSTFF"] {
+        for missing in ["ATSP6", "ATH1", "ATCRA7XX", "ATSTFF"] {
             let mut elm = FakeElm::silent();
             elm.unsupported.push(missing.to_owned());
             let err = Elm::connect(FakeLink::new(elm)).unwrap_err();
@@ -217,6 +343,58 @@ mod requests {
     }
 
     #[test]
+    fn a_command_the_adapter_misheard_fails_closed() {
+        let mut elm = connect(car());
+        // ATSH7E0 arrives as ATSH5E0: a valid command, but not the header that was approved.
+        elm.link_mut().corrupt_next_write = Some((4, 0x02));
+        let err = elm
+            .send(&approve(Target::Physical(0x7E0), &[0x09, 0x02]))
+            .unwrap_err();
+        assert!(err.to_string().contains("ATSH5E0"), "{err}");
+        let written = elm.link().written.len();
+        assert!(
+            elm.send(&approve(Target::Physical(0x7E0), &[0x09, 0x02]))
+                .is_err()
+        );
+        assert_eq!(elm.link().written.len(), written);
+        assert_eq!(elm.link().elm.sent, []);
+    }
+
+    #[test]
+    fn a_request_the_adapter_misheard_fails_closed() {
+        let mut elm = connect(car());
+        elm.send(&approve(Target::Physical(0x7E0), &[0x09, 0x02]))
+            .unwrap();
+        while elm.recv(Duration::from_secs(1)).is_ok() {}
+        // 0902 arrives as 0912. The adapter has sent it by the time its echo shows that, so
+        // all the driver can do is stop.
+        elm.link_mut().corrupt_next_write = Some((2, 0x01));
+        elm.send(&approve(Target::Physical(0x7E0), &[0x09, 0x02]))
+            .unwrap();
+        let err = elm.recv(Duration::from_secs(1)).unwrap_err();
+        assert!(err.to_string().contains("0912"), "{err}");
+        let written = elm.link().written.len();
+        assert!(
+            elm.send(&approve(Target::Physical(0x7E0), &[0x09, 0x02]))
+                .is_err()
+        );
+        assert_eq!(elm.link().written.len(), written);
+    }
+
+    #[test]
+    fn a_reply_without_the_echo_fails_closed() {
+        let mut elm = connect(car());
+        elm.send(&approve(Target::Physical(0x7E0), &[0x09, 0x02]))
+            .unwrap();
+        while elm.recv(Duration::from_secs(1)).is_ok() {}
+        elm.link_mut().elm.settings.echo = false;
+        elm.send(&approve(Target::Physical(0x7E0), &[0x09, 0x02]))
+            .unwrap();
+        let err = elm.recv(Duration::from_secs(1)).unwrap_err();
+        assert!(err.to_string().contains("echo"), "{err}");
+    }
+
+    #[test]
     fn refuses_a_request_longer_than_one_frame_and_writes_nothing() {
         let mut elm = connect(car());
         let written = elm.link().written.len();
@@ -314,7 +492,8 @@ mod misbehaving {
         let mut elm = connect(car());
         elm.send(&approve(Target::ObdFunctional, &[0x09, 0x02]))
             .unwrap();
-        // Replace the adapter's output with an endless stream of first frames.
+        // After the echo, replace the adapter's output with an endless stream of first frames.
+        elm.link_mut().inject = b"0902\r".to_vec();
         elm.link_mut().flood = Some(b"7E8 10 14 49 02 01 57 41 55\r".to_vec());
         let start = Instant::now();
         assert_eq!(elm.recv(Duration::from_millis(200)), Err(Error::Timeout));
@@ -366,10 +545,10 @@ mod misbehaving {
             b"ELM327 v2.0\r",
             b"BUS INIT: ...\r",
         ] {
-            let mut elm = connect(car());
+            let mut elm = broadcasting();
+            elm.link_mut().elm.after_echo = output.to_vec();
             elm.send(&approve(Target::ObdFunctional, &[0x09, 0x02]))
                 .unwrap();
-            elm.link_mut().inject = output.to_vec();
             assert!(elm.recv(Duration::from_secs(1)).is_err());
             let written = elm.link().written.len();
             let err = elm
@@ -387,7 +566,7 @@ mod misbehaving {
     fn an_adapter_that_reset_while_answering_a_command_fails_closed() {
         for output in [&b"LV RESET\r"[..], b"ERR94\r", b"LP ALERT\r"] {
             let mut elm = connect(car());
-            elm.link_mut().inject = output.to_vec();
+            elm.link_mut().elm.after_echo = output.to_vec();
             assert!(elm.info().is_err(), "{output:?}");
             let written = elm.link().written.len();
             assert!(
@@ -425,8 +604,8 @@ mod misbehaving {
     #[test]
     fn a_reset_while_setting_the_header_fails_closed() {
         let mut elm = connect(car());
-        // The adapter resets just as it answers ATSH: a banner comes before the OK.
-        elm.link_mut().inject = b"\rELM327 v2.0\r".to_vec();
+        // The adapter resets just as it answers ATSH: a banner comes after the echo, before the OK.
+        elm.link_mut().elm.after_echo = b"\rELM327 v2.0\r".to_vec();
         assert!(
             elm.send(&approve(Target::Physical(0x7E0), &[0x09, 0x02]))
                 .is_err()
@@ -463,10 +642,10 @@ mod misbehaving {
     #[test]
     fn a_protocol_search_fails_closed() {
         for output in [&b"SEARCHING...\r"[..], b"UNABLE TO CONNECT\r"] {
-            let mut elm = connect(car());
+            let mut elm = broadcasting();
+            elm.link_mut().elm.after_echo = output.to_vec();
             elm.send(&approve(Target::ObdFunctional, &[0x09, 0x02]))
                 .unwrap();
-            elm.link_mut().inject = output.to_vec();
             assert!(elm.recv(Duration::from_secs(1)).is_err(), "{output:?}");
             let written = elm.link().written.len();
             assert!(
@@ -480,10 +659,10 @@ mod misbehaving {
 
     #[test]
     fn a_bus_error_leaves_the_adapter_usable() {
-        let mut elm = connect(car());
+        let mut elm = broadcasting();
+        elm.link_mut().elm.after_echo = b"CAN ERROR\r".to_vec();
         elm.send(&approve(Target::ObdFunctional, &[0x09, 0x02]))
             .unwrap();
-        elm.link_mut().inject = b"CAN ERROR\r".to_vec();
         assert!(elm.recv(Duration::from_secs(1)).is_err());
         elm.send(&approve(Target::ObdFunctional, &[0x09, 0x02]))
             .unwrap();

@@ -1,8 +1,9 @@
 //! What an ELM327 prints, split into lines and classified. Pure and IO-free: everything here
 //! treats the adapter's output as untrusted input.
 //!
-//! The formats follow the ELM327 datasheet (ELM327DS v2.0), with echo off, headers on and
-//! spaces on (`ATE0`, `ATH1`, `ATS1`), which is how [`super::Elm`] sets the adapter up.
+//! The formats follow the ELM327 datasheet (ELM327DS v2.0), with headers and spaces on (`ATH1`,
+//! `ATS1`), which is how [`super::Elm`] sets the adapter up. Echo stays on; [`super::Elm`]
+//! checks each echoed line itself.
 
 /// The longest line kept, in bytes. A frame line with headers and spaces on is 27 characters,
 /// and one marked `<DATA ERROR` is under 40; anything longer isn't from a working adapter.

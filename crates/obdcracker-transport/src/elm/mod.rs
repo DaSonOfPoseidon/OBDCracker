@@ -2,10 +2,11 @@
 //!
 //! The adapter takes text commands: `AT` commands configure it, and a line of hex digits is a
 //! request it puts on the bus. [`Elm`] only ever writes a fixed set of `AT` commands and the
-//! hex of [`Approved`] requests. Every `AT` command contains a letter that isn't a hex digit, so
-//! no mangled command can turn into a bus frame, and it never writes a bare carriage return,
-//! which repeats the adapter's last command. Behaviour is from the ELM327 datasheet (ELM327DS
-//! v2.0); see `docs/elm327.md`.
+//! hex of [`Approved`] requests. No single bit flipped on the way, which a serial line can do,
+//! turns one of those commands into a line of hex digits, and the adapter's echo of every line
+//! is checked against what was written. It never writes a bare carriage return, which repeats
+//! the adapter's last command. Behaviour is from the ELM327 datasheet (ELM327DS v2.0); see
+//! `docs/elm327.md`.
 
 pub mod codec;
 
@@ -19,20 +20,28 @@ use crate::link::{Driver, Link, LinkKind};
 use crate::{Error, Response, Timing, Transport, hex};
 use codec::{Event, Line, LineSplitter, parse_line};
 
-// Run after the reset, in order. Each must answer OK.
+// Run after the reset, in order. Each must answer OK. One flipped bit must not turn any of them
+// into a line of hex digits, so commands with a single non-hex letter (`ATE0`, `ATCAF1`,
+// `ATCF700`) are out. Echo stays on, and CAN auto formatting and flow control stay at their
+// defaults (on), which `check_defaults` makes sure no programmable parameter changed.
 const SETUP: &[&str] = &[
-    // Echo, linefeeds off; spaces and headers on, so every frame shows its CAN ID and PCI byte
-    "ATE0", "ATL0", "ATS1", "ATH1",
+    // Linefeeds off; spaces and headers on, so every frame shows its CAN ID and PCI byte
+    "ATL0", "ATS1", "ATH1",
     // ISO 15765-4 CAN, 11-bit IDs, 500 kbit/s. Never automatic search: it sends probe frames
     // that no policy approved and no audit log records.
-    "ATSP6",
-    // The adapter adds and strips PCI bytes when sending, and sends flow control frames
-    "ATCAF1", "ATCFC1", // Wait for replies after every request
+    "ATSP6", // Wait for replies after every request
     "ATR1",
     // Show every 11-bit reply ID from 0x700 to 0x7FF; `exchange` picks the ones that count
-    "ATCF700", "ATCM700",
-    // Adaptive timing, capped at the longest timeout (0xFF x 4 ms)
+    "ATCRA7XX", // Adaptive timing, capped at the longest timeout (0xFF x 4 ms)
     "ATAT1", "ATSTFF",
+];
+
+// Programmable parameters that would change a default the setup relies on (datasheet pp. 57-61):
+// the number, its default value, and what it sets.
+const KEPT_DEFAULTS: &[(u8, u8, &str)] = &[
+    (0x09, 0x00, "echo"),
+    (0x24, 0x00, "CAN auto formatting"),
+    (0x25, 0x00, "CAN flow control"),
 ];
 
 /// The longest the adapter waits for a reply, or for more replies after one: `AT ST FF`.
@@ -66,11 +75,13 @@ const LONGEST_WAIT: Duration = Duration::from_secs(3600);
 /// OBD-II IDs (0x7DF and 0x7E0..=0x7E7) its standard ones, and for any other module
 /// `30 00 00` (continue, no block limit, no gap) to the module's request ID.
 ///
-/// If the adapter doesn't finish a command or request in time, refuses a setting, prints
-/// something unexpected or an overlong line, says it reset (`LV RESET`, `ERRxx`, `LP ALERT`,
-/// a banner) or is searching for a protocol (`SEARCHING...`, `UNABLE TO CONNECT`), or the link
-/// fails, its state is unknown, and every later call fails without writing anything: connect
-/// again.
+/// If the adapter doesn't finish a command or request in time, refuses a setting, echoes a line
+/// other than the one written (a serial error; a misheard request has already gone on the bus by
+/// then), prints something unexpected or an overlong line, says it reset (`LV RESET`, `ERRxx`,
+/// `LP ALERT`, a banner) or is searching for a protocol (`SEARCHING...`, `UNABLE TO CONNECT`),
+/// or the link fails, its state is unknown, and every later call fails without writing anything:
+/// connect again. [`Elm::connect`] also refuses an adapter whose programmable parameters turn
+/// off echo, CAN auto formatting or CAN flow control by default.
 #[derive(Debug)]
 pub struct Elm<L> {
     link: L,
@@ -80,6 +91,8 @@ pub struct Elm<L> {
     flow: Option<Flow>,
     // A request is out and the adapter hasn't printed its prompt yet.
     busy: bool,
+    // The request line the adapter hasn't echoed yet.
+    echo: Option<String>,
     // Why the adapter can't be trusted any more.
     broken: Option<String>,
     senders: Vec<(u32, Reassembler<Vec<u8>>)>,
@@ -120,11 +133,13 @@ impl<L: Link> Elm<L> {
             header: None,
             flow: None,
             busy: false,
+            echo: None,
             broken: None,
             senders: Vec::new(),
         };
         elm.drain_stale()?;
         elm.reset()?;
+        elm.check_defaults()?;
         for command in SETUP {
             elm.expect_ok(command)?;
         }
@@ -204,7 +219,49 @@ impl<L: Link> Elm<L> {
         ))
     }
 
-    // Sends an AT or ST command and returns its answer, without the echo.
+    // Fails if a programmable parameter changed a default the setup relies on. An adapter without
+    // them (`?`) is at the factory defaults; one with fewer than a v2.0 doesn't have the rest.
+    fn check_defaults(&mut self) -> Result<(), Error> {
+        let lines = self.command("ATPPS")?;
+        if lines.iter().map(String::as_str).eq(["?"]) {
+            return Ok(());
+        }
+        let mut seen = Vec::new();
+        for line in &lines {
+            let mut words = line.split_whitespace();
+            while let Some(word) = words.next() {
+                let entry = word.split_once(':').and_then(|(pp, value)| {
+                    let on = match words.next()? {
+                        "N" => true,
+                        "F" => false,
+                        _ => return None,
+                    };
+                    let pp = (pp.len() == 2).then(|| u8::from_str_radix(pp, 16).ok())??;
+                    let value =
+                        (value.len() == 2).then(|| u8::from_str_radix(value, 16).ok())??;
+                    Some((pp, value, on))
+                });
+                let Some((pp, value, on)) = entry.filter(|(pp, ..)| !seen.contains(pp)) else {
+                    return Err(self.break_down(format!("unexpected answer to ATPPS: {line}")));
+                };
+                seen.push(pp);
+                if let Some((_, default, what)) = KEPT_DEFAULTS.iter().find(|(p, ..)| *p == pp)
+                    && on
+                    && value != *default
+                {
+                    return Err(self.break_down(format!(
+                        "PP {pp:02X} changes the default {what}; turn it off with AT PP {pp:02X} OFF"
+                    )));
+                }
+            }
+        }
+        if seen.is_empty() {
+            return Err(self.break_down("no answer to ATPPS".into()));
+        }
+        Ok(())
+    }
+
+    // Sends an AT or ST command and returns its answer, after checking the echo.
     fn command(&mut self, command: &str) -> Result<Vec<String>, Error> {
         // An all-hex line is a bus request, which only `send` may write.
         if command.bytes().all(|b| b.is_ascii_hexdigit()) {
@@ -214,10 +271,14 @@ impl<L: Link> Elm<L> {
         self.write(format!("{command}\r").as_bytes())?;
         let deadline = Instant::now() + COMMAND_WAIT;
         let mut lines = Vec::new();
+        let mut echoed = false;
         loop {
             match self.next_event(deadline)? {
                 None => {
                     return Err(self.break_down(format!("no answer to {command}")));
+                }
+                Some(Event::Prompt) if !echoed => {
+                    return Err(self.break_down(format!("the adapter didn't echo {command}")));
                 }
                 Some(Event::Prompt) => break,
                 // The rest of the answer may still be coming, so the next command can't tell
@@ -225,7 +286,15 @@ impl<L: Link> Elm<L> {
                 Some(Event::Overlong) => {
                     return Err(self.break_down(format!("overlong answer to {command}")));
                 }
-                Some(Event::Line(line)) if line.eq_ignore_ascii_case(command) => {}
+                // The adapter heard something else, and may have acted on it.
+                Some(Event::Line(line)) if !echoed => {
+                    if !line.eq_ignore_ascii_case(command) {
+                        return Err(self.break_down(format!(
+                            "the adapter echoed {line} instead of {command}"
+                        )));
+                    }
+                    echoed = true;
+                }
                 Some(Event::Line(line)) => {
                     if let Line::Status(status) = parse_line(&line)
                         && status.loses_settings()
@@ -277,7 +346,10 @@ impl<L: Link> Elm<L> {
                 None => {
                     return Err(self.break_down("the adapter didn't finish a request".into()));
                 }
-                Some(Event::Prompt) => break,
+                Some(Event::Prompt) => {
+                    self.prompt_after_request()?;
+                    break;
+                }
                 Some(Event::Line(text)) => {
                     self.reply_line(&text)?;
                 }
@@ -395,6 +467,8 @@ impl<L: Link> Transport for Elm<L> {
         let mut line = hex(payload).replace(' ', "");
         line.push('\r');
         self.write(line.as_bytes())?;
+        line.pop();
+        self.echo = Some(line);
         self.busy = true;
         self.senders.clear();
         Ok(())
@@ -407,6 +481,7 @@ impl<L: Link> Transport for Elm<L> {
             match self.next_event(deadline)? {
                 None => return Err(Error::Timeout),
                 Some(Event::Prompt) => {
+                    self.prompt_after_request()?;
                     self.busy = false;
                     return Err(Error::Timeout);
                 }
@@ -414,13 +489,14 @@ impl<L: Link> Transport for Elm<L> {
                 Some(Event::Overlong) => {
                     return Err(self.break_down("the adapter printed an overlong line".into()));
                 }
+                // `None` is the echo.
                 Some(Event::Line(text)) => match self.reply_line(&text)? {
-                    Line::Frame(frame) => {
+                    Some(Line::Frame(frame)) => {
                         if let Some(reply) = self.feed(frame.id(), frame.data()) {
                             return Ok(reply);
                         }
                     }
-                    Line::Status(status) if status.is_failure() => {
+                    Some(Line::Status(status)) if status.is_failure() => {
                         return Err(Error::Adapter(format!("the adapter said {status}")));
                     }
                     _ => {}
@@ -431,20 +507,38 @@ impl<L: Link> Transport for Elm<L> {
 }
 
 impl<L: Link> Elm<L> {
-    // Classifies a line printed after a request. Anything that means the adapter lost its
-    // settings, or that isn't a reply at all, leaves it in an unknown state.
-    fn reply_line(&mut self, text: &str) -> Result<Line, Error> {
+    // Classifies a line printed after a request: `None` for its echo. Anything that means the
+    // adapter lost its settings or misheard the request, or that isn't a reply at all, leaves
+    // it in an unknown state.
+    fn reply_line(&mut self, text: &str) -> Result<Option<Line>, Error> {
+        if let Some(request) = self.echo.take() {
+            // By now the adapter has sent whatever it heard; all that's left is to stop.
+            if !text.eq_ignore_ascii_case(&request) {
+                return Err(
+                    self.break_down(format!("the adapter echoed {text} instead of {request}"))
+                );
+            }
+            return Ok(None);
+        }
         match parse_line(text) {
             // Its settings are gone: it may even search for a protocol on the next request,
             // sending frames nobody approved.
             Line::Status(status) if status.loses_settings() => {
                 Err(self.break_down(format!("the adapter said {status}")))
             }
-            // Such as a banner after a reset, or echo turned back on.
+            // Such as a banner after a reset.
             Line::Ok | Line::Text(_) => {
                 Err(self.break_down(format!("unexpected output from the adapter: {text}")))
             }
-            line => Ok(line),
+            line => Ok(Some(line)),
+        }
+    }
+
+    // The adapter finished a request; it must have echoed it first.
+    fn prompt_after_request(&mut self) -> Result<(), Error> {
+        match self.echo.take() {
+            Some(request) => Err(self.break_down(format!("the adapter didn't echo {request}"))),
+            None => Ok(()),
         }
     }
 

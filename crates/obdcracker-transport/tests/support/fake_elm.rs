@@ -21,6 +21,8 @@ pub const BANNER: &str = "ELM327 v2.0";
 pub struct FakeElm {
     responder: Responder,
     input: Vec<u8>,
+    // The line as received, for the echo.
+    raw: Vec<u8>,
     output: VecDeque<u8>,
     last: Option<String>,
     /// The settings an `ATZ` resets.
@@ -39,7 +41,21 @@ pub struct FakeElm {
     pub repeats: usize,
     /// Leave the prompt off after a bus request, as an adapter that hangs would.
     pub hang_after_request: bool,
+    /// Programmable parameters turned on, and their values (datasheet pp. 57-61). The rest are
+    /// off, at their factory values.
+    pub pp: Vec<(u8, u8)>,
+    /// What `AT PPS` prints instead of the parameter summary.
+    pub pps: Option<Vec<String>>,
+    /// Bytes printed right after the next line's echo, before its answer.
+    pub after_echo: Vec<u8>,
 }
+
+// What `AT PPS` prints for a v2.0 ELM327 with every parameter off (datasheet p. 57).
+const PP_FACTORY: [u8; 0x30] = [
+    0xFF, 0xFF, 0xFF, 0x32, 0x01, 0xFF, 0xF1, 0x09, 0xFF, 0x00, 0x0A, 0xFF, 0x68, 0x0D, 0x9A, 0xD5,
+    0x0D, 0x00, 0xFF, 0x32, 0x50, 0x0A, 0xFF, 0x6D, 0x00, 0x62, 0xFF, 0xFF, 0x03, 0x0F, 0xFF, 0xFF,
+    0xFF, 0xFF, 0xFF, 0xFF, 0x00, 0x00, 0x00, 0xFF, 0xFF, 0xFF, 0x38, 0x02, 0xE0, 0x04, 0x80, 0x0A,
+];
 
 /// The adapter settings an `ATZ` restores to their defaults.
 #[allow(clippy::struct_excessive_bools)]
@@ -77,6 +93,7 @@ impl FakeElm {
         Self {
             responder,
             input: Vec::new(),
+            raw: Vec::new(),
             output: VecDeque::new(),
             last: None,
             settings: Settings::default(),
@@ -87,6 +104,9 @@ impl FakeElm {
             interrupted: 0,
             repeats: 0,
             hang_after_request: false,
+            pp: Vec::new(),
+            pps: None,
+            after_echo: Vec::new(),
         }
     }
 
@@ -112,11 +132,15 @@ impl FakeElm {
                         .into_iter()
                         .map(char::from)
                         .collect();
-                    self.run(&line);
+                    let raw = std::mem::take(&mut self.raw);
+                    self.run(&line, &raw);
                 }
-                // Spaces and control characters are ignored (datasheet p. 8).
-                b' ' | 0..=0x1F => {}
-                _ => self.input.push(byte),
+                // Spaces and control characters are ignored (datasheet p. 8), but echoed.
+                b' ' | 0..=0x1F => self.raw.push(byte),
+                _ => {
+                    self.raw.push(byte);
+                    self.input.push(byte);
+                }
             }
         }
     }
@@ -144,7 +168,8 @@ impl FakeElm {
         self.output.push_back(b'>');
     }
 
-    fn run(&mut self, line: &str) {
+    // The adapter echoes what it received, as it received it, once the line ends.
+    fn run(&mut self, line: &str, raw: &[u8]) {
         let line = if line.is_empty() {
             // A bare carriage return repeats the last command (datasheet p. 8).
             self.repeats += 1;
@@ -159,8 +184,14 @@ impl FakeElm {
         self.commands.push(line.clone());
         self.last = Some(line.clone());
         if self.settings.echo {
-            self.print(&line);
+            if raw.is_empty() {
+                self.print(&line);
+            } else {
+                self.output.extend(raw);
+                self.output.push_back(b'\r');
+            }
         }
+        self.output.extend(std::mem::take(&mut self.after_echo));
         if self.unsupported.contains(&line) {
             self.print("?");
             self.prompt();
@@ -181,6 +212,10 @@ impl FakeElm {
         let ok = match cmd {
             "Z" => {
                 self.settings = Settings::default();
+                // PP 09 sets the default echo (datasheet p. 59).
+                if let Some(&(_, value)) = self.pp.iter().find(|(pp, _)| *pp == 0x09) {
+                    self.settings.echo = value == 0x00;
+                }
                 self.last = None;
                 self.print("");
                 self.print(BANNER);
@@ -190,6 +225,10 @@ impl FakeElm {
             "I" => {
                 self.print(BANNER);
                 self.prompt();
+                return;
+            }
+            "PPS" => {
+                self.print_pps();
                 return;
             }
             "RV" => {
@@ -213,7 +252,7 @@ impl FakeElm {
                 self.settings.headers = cmd == "H1";
                 true
             }
-            "CAF1" | "CFC1" | "R1" | "AT1" | "STFF" | "CF700" | "CM700" => true,
+            "R1" | "AT1" | "STFF" | "CRA7XX" => true,
             "FCSM0" => {
                 self.settings.fc_mode = 0;
                 true
@@ -254,6 +293,34 @@ impl FakeElm {
         self.prompt();
     }
 
+    // `AT PPS`: four parameters a line, as `nn:vv N` (on) or `nn:vv F` (off).
+    fn print_pps(&mut self) {
+        let lines = self.pps.clone().unwrap_or_else(|| {
+            PP_FACTORY
+                .chunks(4)
+                .enumerate()
+                .map(|(row, values)| {
+                    let line: Vec<String> = values
+                        .iter()
+                        .enumerate()
+                        .map(|(i, &factory)| {
+                            let pp = u8::try_from(row * 4 + i).unwrap();
+                            match self.pp.iter().find(|(on, _)| *on == pp) {
+                                Some(&(_, value)) => format!("{pp:02X}:{value:02X} N"),
+                                None => format!("{pp:02X}:{factory:02X} F"),
+                            }
+                        })
+                        .collect();
+                    line.join("     ")
+                })
+                .collect()
+        });
+        for line in lines {
+            self.print(&line);
+        }
+        self.prompt();
+    }
+
     fn request(&mut self, hex_text: &str) {
         let bytes = match parse_hex(hex_text) {
             // With CAN auto formatting on, a request is one single frame: 1 to 7 bytes.
@@ -264,12 +331,14 @@ impl FakeElm {
                 return;
             }
         };
+        // Recorded even without a protocol: a real adapter would then search for one, sending
+        // probe frames.
+        self.sent.push((self.settings.header, bytes.clone()));
         if self.settings.protocol.as_deref() != Some("6") {
             self.print("CAN ERROR");
             self.prompt();
             return;
         }
-        self.sent.push((self.settings.header, bytes.clone()));
         let replies = (self.responder)(self.settings.header, &bytes);
         if replies.is_empty() {
             self.print("NO DATA");
@@ -337,7 +406,8 @@ pub struct FakeLink {
     pub chunk: usize,
     /// Every byte the host wrote.
     pub written: Vec<u8>,
-    /// When set, every read returns these bytes instead of the adapter's output, forever.
+    /// When set, every read returns these bytes instead of the adapter's output, forever, once
+    /// `inject` is used up.
     pub flood: Option<Vec<u8>>,
     /// How many reads the flood answered.
     pub flooded: usize,
@@ -345,6 +415,8 @@ pub struct FakeLink {
     pub closed: bool,
     /// Bytes the next read returns before the adapter's own output.
     pub inject: Vec<u8>,
+    /// Flips these bits of this byte of the next write, as a noisy serial line would.
+    pub corrupt_next_write: Option<(usize, u8)>,
 }
 
 impl FakeLink {
@@ -357,6 +429,7 @@ impl FakeLink {
             flooded: 0,
             closed: false,
             inject: Vec::new(),
+            corrupt_next_write: None,
         }
     }
 }
@@ -367,7 +440,11 @@ impl Link for FakeLink {
             return Err(io::ErrorKind::BrokenPipe.into());
         }
         self.written.extend_from_slice(bytes);
-        self.elm.write(bytes);
+        let mut bytes = bytes.to_vec();
+        if let Some((index, bits)) = self.corrupt_next_write.take() {
+            bytes[index] ^= bits;
+        }
+        self.elm.write(&bytes);
         Ok(())
     }
 
@@ -375,16 +452,16 @@ impl Link for FakeLink {
         if self.closed {
             return Err(io::ErrorKind::BrokenPipe.into());
         }
-        if let Some(flood) = &self.flood {
-            self.flooded += 1;
-            let n = buf.len().min(flood.len());
-            buf[..n].copy_from_slice(&flood[..n]);
-            return Ok(n);
-        }
         if !self.inject.is_empty() {
             let n = buf.len().min(self.inject.len());
             buf[..n].copy_from_slice(&self.inject[..n]);
             self.inject.drain(..n);
+            return Ok(n);
+        }
+        if let Some(flood) = &self.flood {
+            self.flooded += 1;
+            let n = buf.len().min(flood.len());
+            buf[..n].copy_from_slice(&flood[..n]);
             return Ok(n);
         }
         let bytes = self.elm.read(self.chunk.min(buf.len()));
