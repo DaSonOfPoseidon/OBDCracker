@@ -124,7 +124,10 @@ fn reads_through_an_independent_elm327() {
     obd::decode_ecu_name(&name.payload).unwrap();
     let dtcs = read(&mut elm, target, &obd::stored_dtcs(), expect);
     obd::decode_stored_dtcs(&dtcs.payload).unwrap();
-    let supported = read(&mut elm, target, &obd::current_data(0x00), expect);
+    // Not PID 00: the emulator answers the first 01 00 with SEARCHING... unless it was sent
+    // ATTP, even with a fixed protocol set, which a real adapter doesn't (datasheet p. 36), and
+    // the driver stops at SEARCHING....
+    let supported = read(&mut elm, target, &obd::current_data(0x20), expect);
     obd::decode_current_data(&supported.payload).unwrap();
     let data = read(&mut elm, target, &[0x01, 0x05, 0x0C, 0x0D], expect);
     assert_eq!(obd::decode_current_data(&data.payload).unwrap().count(), 3);
