@@ -525,6 +525,8 @@ impl<L: Link> Transport for Elm<L> {
         }
         self.ready()?;
         self.set_target(request.target().can_id())?;
+        // A setting command's prompt may have been followed by a reset.
+        self.check_idle()?;
         // The adapter ignores spaces, but leaving them out keeps the line short.
         let mut line = hex(payload).replace(' ', "");
         line.push('\r');

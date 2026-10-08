@@ -704,6 +704,19 @@ mod misbehaving {
     }
 
     #[test]
+    fn output_after_the_header_prompt_fails_closed() {
+        // Changing to 0x7E0 from broadcasts takes one command, ATSH7E0, and then the request.
+        let mut elm = broadcasting();
+        elm.link_mut().elm.after_prompt = b"LV RESET\r".to_vec();
+        let err = elm
+            .send(&approve(Target::Physical(0x7E0), &[0x09, 0x02]))
+            .unwrap_err();
+        assert!(err.to_string().contains("while idle"), "{err}");
+        assert_eq!(commands(&elm).last().map(String::as_str), Some("ATSH7E0"));
+        assert_eq!(elm.link().elm.sent, [(0x7DF, vec![0x09, 0x02])]);
+    }
+
+    #[test]
     fn output_after_a_command_prompt_fails_closed() {
         for output in [
             &b"LV RESET\r"[..],
