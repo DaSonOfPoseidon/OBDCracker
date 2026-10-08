@@ -8,6 +8,7 @@ use obdcracker_safety::Approved;
 
 mod audit;
 mod dry_run;
+pub mod elm;
 mod exchange;
 mod mock;
 
