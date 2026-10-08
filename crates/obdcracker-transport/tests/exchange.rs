@@ -122,6 +122,26 @@ fn physical_request_waits_through_response_pending() {
 }
 
 #[test]
+fn a_suppressed_request_gets_its_answer_after_response_pending() {
+    // ISO 14229-1: response-pending obliges the final positive reply despite the suppress bit.
+    let read = approve(Target::Physical(0x7E0), &[0x19, 0x82, 0x08]);
+    let answer = reply(0x7E8, &[0x59, 0x02, 0xFF]);
+    let replies = [reply(0x7E8, &[0x7F, 0x19, 0x78]), answer.clone()];
+    let got = exchange(&mut mock(&replies), &read, Expect::Module(0x7E8), FAST);
+    assert_eq!(got, Ok(vec![answer.clone()]));
+    // Without response-pending first, a positive reply is a late answer to an earlier request.
+    assert_eq!(
+        exchange(
+            &mut mock(std::slice::from_ref(&answer)),
+            &read,
+            Expect::Module(0x7E8),
+            FAST
+        ),
+        Err(Error::Timeout)
+    );
+}
+
+#[test]
 fn a_refusal_is_a_reply_not_pending() {
     let read = approve(Target::Physical(0x7E0), &[0x22, 0xF1, 0x90]);
     let refusal = reply(0x7E8, &[0x7F, 0x22, 0x31]);

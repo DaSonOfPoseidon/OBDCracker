@@ -1,6 +1,8 @@
 //! Positive and negative responses shared by OBD-II on CAN and UDS (ISO 14229-1, ISO 15765-4).
 
-use obdcracker_core::response::{Error, NegativeResponse, Nrc, answers, positive};
+use obdcracker_core::response::{
+    Error, NegativeResponse, Nrc, answers, answers_after_pending, positive,
+};
 
 #[test]
 fn positive_reply_returns_the_bytes_after_the_service_id() {
@@ -140,6 +142,46 @@ fn answers_matches_the_echoed_did_or_subfunction() {
         &[0x50, 0x01, 0x00, 0x32, 0x01, 0xF4]
     ));
     assert!(answers(&[0x3E, 0x00], &[0x7E, 0x00]));
+}
+
+#[test]
+fn after_response_pending_a_suppressed_request_gets_its_positive_reply() {
+    // ISO 14229-1: a module that sent response-pending must send the final positive reply,
+    // even with the suppress bit set.
+    for (request, positive, other) in [
+        (
+            &[0x10, 0x83][..],
+            &[0x50, 0x03, 0x00, 0x32, 0x01, 0xF4][..],
+            &[0x50, 0x01, 0x00, 0x32, 0x01, 0xF4][..],
+        ),
+        (
+            &[0x19, 0x82, 0x08],
+            &[0x59, 0x02, 0xFF],
+            &[0x59, 0x01, 0xFF],
+        ),
+        (&[0x3E, 0x80], &[0x7E, 0x00], &[0x7E, 0x01]),
+    ] {
+        assert!(answers_after_pending(request, positive), "{request:02X?}");
+        assert!(!answers_after_pending(request, other), "{request:02X?}");
+        assert!(
+            answers_after_pending(request, &[0x7F, request[0], 0x12]),
+            "{request:02X?}"
+        );
+    }
+    // Everything else matches as `answers` does.
+    assert!(answers_after_pending(
+        &[0x22, 0xF1, 0x90],
+        &[0x62, 0xF1, 0x90, 0x57]
+    ));
+    assert!(!answers_after_pending(
+        &[0x22, 0xF1, 0x90],
+        &[0x62, 0xF1, 0x87, 0x30]
+    ));
+    assert!(!answers_after_pending(
+        &[0x22, 0xF1, 0x90],
+        &[0x7F, 0x19, 0x78]
+    ));
+    assert!(!answers_after_pending(&[], &[0x62, 0xF1, 0x90]));
 }
 
 #[test]

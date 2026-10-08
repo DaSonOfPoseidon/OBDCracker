@@ -22,6 +22,7 @@ proptest! {
     #[test]
     fn answers_never_panics(request in any_reply(), reply in any_reply()) {
         let _ = obdcracker_core::response::answers(&request, &reply);
+        let _ = obdcracker_core::response::answers_after_pending(&request, &reply);
     }
 
     #[test]

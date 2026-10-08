@@ -62,7 +62,8 @@ impl Default for Timing {
 ///   answered or run out of time.
 /// - [`Expect::Module`] returns the module's answer, or [`Error::Timeout`] if it didn't answer
 ///   in time. A request with the suppress-positive-response bit set gets no reply when it
-///   succeeds, so it times out here.
+///   succeeds, so it times out here, unless the module sent response-pending first: then
+///   ISO 14229-1 requires the positive reply.
 ///
 /// More response-pending replies than [`Timing::max_pending`] give [`Error::Timeout`], and an
 /// adapter error is returned as soon as it happens. P2 and P2* are capped at one hour.
@@ -99,7 +100,16 @@ pub fn exchange<T: Transport + ?Sized>(
             Err(Error::Timeout) => break,
             Err(e) => return Err(e),
         };
-        if !expect.accepts(reply.source) || !response::answers(asked, &reply.payload) {
+        if !expect.accepts(reply.source) {
+            continue;
+        }
+        // After response-pending, even a suppressed request gets its positive reply.
+        let answers = if pending_until.iter().any(|&(s, _)| s == reply.source) {
+            response::answers_after_pending
+        } else {
+            response::answers
+        };
+        if !answers(asked, &reply.payload) {
             continue;
         }
         let now = Instant::now();
