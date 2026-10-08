@@ -1,5 +1,6 @@
 //! The simulated A7 answering through the `Transport` trait, decoded with the M1 codecs.
 
+use std::fmt::Write as _;
 use std::time::Duration;
 
 use obdcracker_core::obd::{self, Unit, Value};
@@ -377,6 +378,11 @@ fn fixture_errors_are_reported() {
         "[[ecu]]\nmodule = \"engine\"\n[ecu.obd]\nvin = \"WAUZZZ4G1EN00000O\"\n",
         "[[ecu]]\nmodule = \"engine\"\n[ecu.obd]\nvin = \"wauzzz4g1en000000\"\n",
         "[[ecu]]\nmodule = \"engine\"\n[[ecu.did]]\nid = 1\nhex = \"00\"\n[[ecu.did]]\nid = 1\nhex = \"01\"\n",
+        // The same code twice, in mode 03 or UDS, would be reported twice.
+        "[[ecu]]\nmodule = \"engine\"\n[ecu.obd]\ndtcs = [\"P0299\", \"P0299\"]\n",
+        "[[ecu]]\nmodule = \"engine\"\n[[ecu.dtc]]\ncode = 0x029900\nstatus = 0x08\n[[ecu.dtc]]\ncode = 0x029900\nstatus = 0x00\n",
+        // PID keys that differ only in case name the same PID.
+        "[[ecu]]\nmodule = \"engine\"\n[ecu.obd.pids]\n\"0c\" = \"0C 80\"\n\"0C\" = \"0C 80\"\n",
         // PID 0C is two bytes (SAE J1979), not one or three.
         "[[ecu]]\nmodule = \"engine\"\n[ecu.obd.pids]\n\"0C\" = \"00\"\n",
         "[[ecu]]\nmodule = \"engine\"\n[ecu.obd.pids]\n\"0C\" = \"0C 80 00\"\n",
@@ -456,6 +462,18 @@ fn fixture_values_must_suit_the_profile_decoder() {
     let fixture = "[[ecu]]\nmodule = \"engine\"\n[[ecu.did]]\nid = 0xF197\nhex = \"FF 00 01\"\n";
     assert!(matches!(
         SimBus::new(&Profile::builtin("a7").unwrap(), fixture),
+        Err(FixtureError::Value(_))
+    ));
+}
+
+#[test]
+fn uds_dtcs_must_fit_the_16_bit_count() {
+    let mut fixture = String::from("[[ecu]]\nmodule = \"engine\"\n");
+    for code in 0..=u32::from(u16::MAX) {
+        writeln!(fixture, "[[ecu.dtc]]\ncode = {code}\nstatus = 0x08").unwrap();
+    }
+    assert!(matches!(
+        SimBus::new(&Profile::builtin("a7").unwrap(), &fixture),
         Err(FixtureError::Value(_))
     ));
 }

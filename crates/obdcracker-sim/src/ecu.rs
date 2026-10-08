@@ -165,6 +165,7 @@ impl Ecu {
             .filter(|&(_, status)| sub == 0x0A || status & mask != 0);
         let mut reply = vec![0x59, sub, STATUS_AVAILABILITY];
         if sub == 0x01 {
+            // The fixture holds at most u16::MAX DTCs
             let count = u16::try_from(matching.count()).unwrap_or(u16::MAX);
             reply.push(self.dtc_format);
             reply.extend(count.to_be_bytes());

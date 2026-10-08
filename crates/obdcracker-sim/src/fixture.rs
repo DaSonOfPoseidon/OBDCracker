@@ -183,7 +183,9 @@ impl ObdFixture {
                     pid,
                 ));
             }
-            obd.pids.insert(id, data);
+            if obd.pids.insert(id, data).is_some() {
+                return Err(value_error("mode 01 PID listed twice", pid));
+            }
         }
         if let Some(vin) = &self.vin {
             if vin.len() != VIN_LEN || !vin.bytes().all(is_vin_char) {
@@ -227,11 +229,13 @@ impl ObdFixture {
         if self.dtcs.len() > usize::from(u8::MAX) {
             return Err(FixtureError::Value("too many OBD DTCs".into()));
         }
-        obd.dtcs = self
-            .dtcs
-            .iter()
-            .map(|dtc| dtc_code(dtc))
-            .collect::<Result<_, _>>()?;
+        for dtc in &self.dtcs {
+            let code = dtc_code(dtc)?;
+            if obd.dtcs.contains(&code) {
+                return Err(value_error("OBD DTC listed twice", dtc));
+            }
+            obd.dtcs.push(code);
+        }
         Ok(obd)
     }
 }
@@ -278,18 +282,28 @@ impl EcuFixture {
     }
 
     pub(crate) fn dtcs(&self) -> Result<Vec<(u32, u8)>, FixtureError> {
-        self.dtcs
-            .iter()
-            .map(|dtc| {
-                if dtc.code > 0x00FF_FFFF {
-                    Err(FixtureError::Value(format!(
-                        "UDS DTC 0x{:X} is longer than 3 bytes",
-                        dtc.code
-                    )))
-                } else {
-                    Ok((dtc.code, dtc.status))
-                }
-            })
-            .collect()
+        // The DTC count reply (0x19 0x01) has a 16-bit count.
+        if self.dtcs.len() > usize::from(u16::MAX) {
+            return Err(FixtureError::Value(format!(
+                "module {}: more UDS DTCs than a 16-bit count holds",
+                self.module
+            )));
+        }
+        let mut seen = HashSet::new();
+        for dtc in &self.dtcs {
+            if dtc.code > 0x00FF_FFFF {
+                return Err(FixtureError::Value(format!(
+                    "UDS DTC 0x{:X} is longer than 3 bytes",
+                    dtc.code
+                )));
+            }
+            if !seen.insert(dtc.code) {
+                return Err(FixtureError::Value(format!(
+                    "module {}: UDS DTC 0x{:06X} is listed twice",
+                    self.module, dtc.code
+                )));
+            }
+        }
+        Ok(self.dtcs.iter().map(|dtc| (dtc.code, dtc.status)).collect())
     }
 }
