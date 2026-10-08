@@ -64,8 +64,10 @@ Each entry names the class, what to check, and where it bit us.
   (mode 01), a requested DID (0x22) or the subfunction. A late reply to an earlier request has the same SID
   (`response::answers`).
 - **The suppress-positive-response bit (bit 7) is not echoed.** It applies to every UDS service with a subfunction,
-  0x19 included: compare the echo with bits 6 to 0, and send a refusal even when the bit is set. Check claims about
-  the standard against a source before writing them down; this entry first said 0x19 had no such bit (PR #11).
+  0x19 included. A request with the bit set gets no positive reply, so only a refusal answers it; masking the bit
+  off instead lets a late positive reply to an earlier, unsuppressed request through. A refusal is still sent when
+  the bit is set. Check claims about the standard against a source before writing them down; this entry first said
+  0x19 had no such bit (PR #11).
 - **Don't confuse a transport limit with a protocol limit.** 4095 bytes is ISO-TP's short first-frame length, not a
   UDS maximum; the 32-bit escape carries more.
 
