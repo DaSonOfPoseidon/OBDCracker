@@ -15,6 +15,9 @@ Each entry names the class, what to check, and where it bit us.
   duplicate-PID findings in later rounds.
 - **Re-read your own fixes** for the same class. A fix for one ECU's P2* deadline (PR #9) still let an ECU that had
   already answered reopen the wait.
+- **On the third patch to the same logic, stop and rebuild it from the standard.** `exchange`'s broadcast timing took
+  four rounds of patches to a home-made "quiet period" (PR #9). ISO 15765-4's own model (P2 from the request, P2* per
+  pending module, a module is done once it answers) closed every hole at once.
 - **Try the edge values** for every input a caller, file or ECU controls: 0, 1, the maximum, one past it, empty,
   blank, duplicated, wrong case, malformed.
 
@@ -31,6 +34,8 @@ Each entry names the class, what to check, and where it bit us.
   mode 01 PID widths, text DIDs. Round-trip through `obdcracker-core` rather than re-implementing the rule.
 - **Respect the wire format's limits.** A count stored in a `u8` (mode 03, mode 09) or a `u16` (UDS DTC count) caps
   the list. Reject the input; don't saturate with `unwrap_or(MAX)`, which makes two replies contradict each other.
+- **Standard data has a format even without a profile entry.** F190 must be a VIN, and F187/F188/F189/F191/F197/F19E
+  must be text (ISO 14229-1). Skipping validation because there's no `DidDef` let `hex = "FF"` pass as a VIN.
 - **Cross-check related sources.** Fixture vs profile: every DID is standard or in the profile, values match the
   profile's `decode`, and OBD-II data only sits on OBD-II ID pairs (0x7E0..=0x7E7 → +8).
 - **Public fields bypass the parser.** Anything with `pub` fields can be built or edited by hand, so consumers must
@@ -53,7 +58,7 @@ Each entry names the class, what to check, and where it bit us.
   transport that never stops sending proves it (PR #9: an ECU repeating its VIN reply hung `exchange` forever).
 - **Keep timers per source.** Each pending ECU gets its own P2*. One global "latest deadline" lets a late ECU in:
   both an ECU whose own P2* ran out, and an ECU that never went pending but answers after P2 while another ECU's
-  P2* keeps the loop open.
+  P2* keeps the loop open, or after a pending ECU's answer restarted a shared timer.
 - **Deadlines must shrink back** once the reason to extend them is gone (P2 again after the pending ECU answers).
 - **Match a reply to its request by what it echoes**, not only the service ID: the PID (mode 09), a requested PID
   (mode 01), a requested DID (0x22) or the subfunction. A late reply to an earlier request has the same SID
