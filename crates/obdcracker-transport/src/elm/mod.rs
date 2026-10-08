@@ -68,15 +68,25 @@ const COMMAND_WAIT: Duration = Duration::from_secs(2);
 // consecutive frames, each a line of up to 29 characters), at 9600 baud, the slowest an ELM327
 // starts at (datasheet p. 7), 10 bits a character: about 18 s.
 const LONGEST_PRINT: Duration = Duration::from_millis(586 * 29 * 10 * 1000 / 9600 + 1);
-// How long the adapter may take to finish a request: its own timeout for the first reply, the
-// time to print the longest one, and time for the link. A working adapter ends every request
-// with its prompt long before this.
-const BUSY_WAIT: Duration = ADAPTER_TIMEOUT
-    .saturating_add(LONGEST_PRINT)
-    .saturating_add(Duration::from_secs(1));
 // The most modules whose multi-frame replies are reassembled at once. Frames from more are
 // dropped.
 const MAX_SENDERS: usize = 16;
+// The time to print the longest reply from every one of them.
+const LONGEST_PRINT_ALL: Duration = LONGEST_PRINT.saturating_mul(16);
+const _: () = assert!(MAX_SENDERS == 16, "update LONGEST_PRINT_ALL");
+// The longest a request may run: the adapter's timeout for the first reply, the time to print
+// the longest reply from every module (about 5 minutes at 9600 baud), and time for the link.
+// Only an adapter that keeps printing gets near it: a working one ends each request with its
+// prompt, and one that goes quiet is caught by `SILENCE_LIMIT`.
+const LONGEST_REQUEST: Duration = ADAPTER_TIMEOUT
+    .saturating_add(LONGEST_PRINT_ALL)
+    .saturating_add(Duration::from_secs(1));
+// The longest the adapter stays quiet during a request: its own timeout, plus the default P2*
+// (5 s) that v2.1 and STN chips wait after a response-pending reply (ELM327DS v2.1, p. 90),
+// plus time for the link. Any longer and it has hung.
+const SILENCE_LIMIT: Duration = ADAPTER_TIMEOUT
+    .saturating_add(Duration::from_secs(5))
+    .saturating_add(Duration::from_secs(1));
 // The longest any single receive waits, so a huge timeout can't overflow the clock.
 const LONGEST_WAIT: Duration = Duration::from_secs(3600);
 
@@ -101,7 +111,8 @@ const LONGEST_WAIT: Duration = Duration::from_secs(3600);
 /// OBD-II IDs (0x7DF and 0x7E0..=0x7E7) its standard ones, and for any other module
 /// `30 00 00` (continue, no block limit, no gap) to the module's request ID.
 ///
-/// If the adapter doesn't finish a command or request in time, refuses a setting, echoes a line
+/// If the adapter goes quiet in a request without finishing it (for longer than its own timeout
+/// plus a response-pending wait, about 7 s), doesn't finish a command or request in time, refuses a setting, echoes a line
 /// other than the one written (a serial error; a misheard request has already gone on the bus by
 /// then), prints something unexpected, `STOPPED` (it never interrupts the adapter, so something
 /// else did), a frame from outside its receive filter, an overlong line, or anything at all between its prompt
@@ -122,6 +133,8 @@ pub struct Elm<L> {
     busy: bool,
     // The request line the adapter hasn't echoed yet.
     echo: Option<String>,
+    // When the adapter last printed anything.
+    heard: Instant,
     // Why the adapter can't be trusted any more.
     broken: Option<String>,
     // What it printed when it was reset, such as `ELM327 v1.4b`.
@@ -165,6 +178,7 @@ impl<L: Link> Elm<L> {
             flow: None,
             busy: false,
             echo: None,
+            heard: Instant::now(),
             broken: None,
             banner: String::new(),
             senders: Vec::new(),
@@ -179,16 +193,17 @@ impl<L: Link> Elm<L> {
     }
 
     /// Timing for [`crate::exchange`] through this adapter. The adapter decides when a request
-    /// is over (it prints its prompt, which ends the exchange at once), so P2 only has to
-    /// outlast [`ADAPTER_TIMEOUT`] plus the time to print the longest reply (4095 bytes) at
-    /// 9600 baud, about 18 s, plus the link's delay. P2* gets the same allowance on top of the
-    /// default, since the final reply after response-pending can be that long too.
+    /// is over: it prints its prompt, which ends the exchange at once. So P2 is only an outer
+    /// bound: [`ADAPTER_TIMEOUT`] plus the time to print the longest reply (4095 bytes) from
+    /// each of up to 16 modules at 9600 baud, about 5 minutes. P2* gets the same print
+    /// allowance on top of the default. An adapter that goes quiet in a request without
+    /// finishing it fails within seconds instead (see [`Elm`]).
     #[must_use]
     pub fn timing() -> Timing {
         let default = Timing::default();
         Timing {
-            p2: BUSY_WAIT,
-            p2_star: default.p2_star.saturating_add(LONGEST_PRINT),
+            p2: LONGEST_REQUEST,
+            p2_star: default.p2_star.saturating_add(LONGEST_PRINT_ALL),
             ..default
         }
     }
@@ -387,9 +402,9 @@ impl<L: Link> Elm<L> {
         }
         // The rest of the last request's replies are dropped, but a reset among them still
         // counts.
-        let deadline = Instant::now() + BUSY_WAIT;
+        let deadline = Instant::now() + LONGEST_REQUEST;
         loop {
-            match self.next_event(deadline)? {
+            match self.next_request_event(deadline)? {
                 None => {
                     return Err(self.break_down("the adapter didn't finish a request".into()));
                 }
@@ -479,8 +494,30 @@ impl<L: Link> Elm<L> {
                 return Ok(None);
             };
             let n = self.read(&mut buf, left)?;
+            if n > 0 {
+                self.heard = Instant::now();
+            }
             self.splitter.push(&buf[..n], &mut events);
             self.events.extend(events.drain(..));
+        }
+    }
+
+    // The next thing the adapter printed during a request, or None once the deadline passes.
+    // An adapter quiet for longer than `SILENCE_LIMIT` in a request has hung.
+    fn next_request_event(&mut self, deadline: Instant) -> Result<Option<Event>, Error> {
+        loop {
+            let quiet_until = self.heard + SILENCE_LIMIT;
+            if let Some(event) = self.next_event(deadline.min(quiet_until))? {
+                return Ok(Some(event));
+            }
+            if Instant::now() >= deadline {
+                return Ok(None);
+            }
+            if Instant::now() >= self.heard + SILENCE_LIMIT {
+                return Err(
+                    self.break_down("the adapter went quiet without finishing a request".into())
+                );
+            }
         }
     }
 
@@ -565,6 +602,7 @@ impl<L: Link> Transport for Elm<L> {
         let mut line = hex(payload).replace(' ', "");
         line.push('\r');
         self.write(line.as_bytes())?;
+        self.heard = Instant::now();
         line.pop();
         self.echo = Some(line);
         self.busy = true;
@@ -576,7 +614,7 @@ impl<L: Link> Transport for Elm<L> {
         self.ready_to_receive()?;
         let deadline = Instant::now() + timeout.min(LONGEST_WAIT);
         loop {
-            match self.next_event(deadline)? {
+            match self.next_request_event(deadline)? {
                 None => return Err(Error::Timeout),
                 Some(Event::Prompt) => {
                     self.prompt_after_request()?;

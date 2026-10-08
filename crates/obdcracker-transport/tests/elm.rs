@@ -435,9 +435,10 @@ mod requests {
         // starts at), 8-N-1, that's 10 bits a character.
         let lines = 1 + (4095 - 6_u32).div_ceil(7);
         let printing = Duration::from_secs_f64(f64::from(lines * 29 * 10) / 9600.0);
+        // Up to 16 modules can each send one, all printed before the prompt.
         let p2 = Elm::<FakeLink>::timing().p2;
         assert!(
-            p2 > obdcracker_transport::elm::ADAPTER_TIMEOUT + printing,
+            p2 > obdcracker_transport::elm::ADAPTER_TIMEOUT + printing * 16,
             "{p2:?} vs {printing:?}"
         );
     }
@@ -449,7 +450,7 @@ mod requests {
         let printing = Duration::from_secs_f64(f64::from(lines * 29 * 10) / 9600.0);
         let p2_star = Elm::<FakeLink>::timing().p2_star;
         assert!(
-            p2_star > obdcracker_transport::Timing::default().p2_star + printing,
+            p2_star > obdcracker_transport::Timing::default().p2_star + printing * 16,
             "{p2_star:?} vs {printing:?}"
         );
     }
@@ -545,6 +546,33 @@ mod misbehaving {
                 .is_err()
         );
         assert_eq!(elm.link().written.len(), written);
+    }
+
+    // The adapter never stays quiet in a request for longer than its own timeout (plus a
+    // response-pending wait), so a long P2 mustn't make the caller wait out a hung one.
+    #[test]
+    fn an_adapter_that_goes_quiet_mid_request_fails_closed_without_waiting_out_p2() {
+        let mut elm = connect(car());
+        elm.link_mut().elm.hang_after_request = true;
+        elm.send(&approve(Target::ObdFunctional, &[0x09, 0x02]))
+            .unwrap();
+        let start = Instant::now();
+        let err = loop {
+            match elm.recv(Duration::from_secs(120)) {
+                Ok(_) => {}
+                Err(err) => break err,
+            }
+        };
+        assert!(err.to_string().contains("quiet"), "{err}");
+        assert!(
+            start.elapsed() < Duration::from_secs(10),
+            "{:?}",
+            start.elapsed()
+        );
+        assert!(
+            elm.send(&approve(Target::ObdFunctional, &[0x09, 0x02]))
+                .is_err()
+        );
     }
 
     #[test]
