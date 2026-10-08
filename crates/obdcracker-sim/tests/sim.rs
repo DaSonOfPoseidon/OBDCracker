@@ -377,6 +377,8 @@ fn fixture_errors_are_reported() {
         "[[ecu]]\nmodule = \"engine\"\n[[ecu.did]]\nid = 1\nhex = \"+F\"\n",
         "[[ecu]]\nmodule = \"engine\"\n[[ecu.did]]\nid = 1\ntext = \"a\\u0001\"\n",
         "[[ecu]]\nmodule = \"engine\"\n[ecu.obd]\ndtcs = [\"P+299\"]\n",
+        // 0000 is mode 03's padding (SAE J1979), not a code.
+        "[[ecu]]\nmodule = \"engine\"\n[ecu.obd]\ndtcs = [\"P0000\"]\n",
         "[[ecu]]\nmodule = \"engine\"\n[ecu.obd.pids]\n\"+5\" = \"00\"\n",
         // I, O and Q aren't VIN characters, and neither are lower case letters.
         "[[ecu]]\nmodule = \"engine\"\n[ecu.obd]\nvin = \"WAUZZZ4G1EN00000O\"\n",

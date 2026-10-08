@@ -146,7 +146,7 @@ fn padded(text: &str, len: usize, what: &str) -> Result<Vec<u8>, FixtureError> {
     Ok(bytes)
 }
 
-// An SAE J2012 code such as `P0299` as its two bytes.
+// An SAE J2012 code such as `P0299` as its two bytes. P0000 is refused.
 fn dtc_code(text: &str) -> Result<u16, FixtureError> {
     let bad = || value_error("bad DTC", text);
     let mut chars = text.chars();
@@ -162,10 +162,12 @@ fn dtc_code(text: &str) -> Result<u16, FixtureError> {
         return Err(bad());
     }
     let low = u16::from_str_radix(digits, 16).map_err(|_| bad())?;
-    if low > 0x3FFF {
+    let code = system << 14 | low;
+    // 0x0000 (P0000) is the padding mode 03 replies use, not a code (SAE J1979).
+    if low > 0x3FFF || code == 0 {
         return Err(bad());
     }
-    Ok(system << 14 | low)
+    Ok(code)
 }
 
 impl ObdFixture {
