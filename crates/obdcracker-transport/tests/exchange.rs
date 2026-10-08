@@ -192,6 +192,31 @@ fn too_many_pending_replies_time_out() {
     );
 }
 
+#[test]
+fn an_ecu_over_the_pending_limit_does_not_lose_the_others_answers() {
+    let vin = approve(Target::ObdFunctional, &[0x09, 0x02]);
+    let mut replies = vec![reply(0x7E9, VIN)];
+    replies.extend(vec![reply(0x7E8, &[0x7F, 0x09, 0x78]); 4]);
+    replies.push(reply(0x7E8, VIN));
+    let got = exchange(&mut mock(&replies), &vin, Expect::ObdEcus, FAST).unwrap();
+    assert_eq!(got, [reply(0x7E9, VIN)]);
+}
+
+#[test]
+fn the_pending_limit_is_per_ecu() {
+    // Each ECU goes pending 3 times (the limit), 6 in all, then both answer.
+    let vin = approve(Target::ObdFunctional, &[0x09, 0x02]);
+    let mut replies = Vec::new();
+    for _ in 0..3 {
+        replies.push(reply(0x7E8, &[0x7F, 0x09, 0x78]));
+        replies.push(reply(0x7E9, &[0x7F, 0x09, 0x78]));
+    }
+    replies.push(reply(0x7E8, VIN));
+    replies.push(reply(0x7E9, VIN));
+    let got = exchange(&mut mock(&replies), &vin, Expect::ObdEcus, FAST).unwrap();
+    assert_eq!(got, [reply(0x7E8, VIN), reply(0x7E9, VIN)]);
+}
+
 // A module that sends response-pending once, then nothing.
 #[derive(Debug, Default)]
 struct PendingThenSilent {

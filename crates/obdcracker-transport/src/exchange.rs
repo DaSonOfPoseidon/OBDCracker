@@ -34,8 +34,8 @@ pub struct Timing {
     /// How long a module has to answer after a response-pending reply: 5 s by default. Each
     /// response-pending reply restarts it.
     pub p2_star: Duration,
-    /// The most response-pending replies to wait through for one request, so a module that
-    /// never stops sending them can't stall the caller: 20 by default.
+    /// The most response-pending replies to wait through from each module for one request, so
+    /// a module that never stops sending them can't stall the caller: 20 by default.
     pub max_pending: u16,
 }
 
@@ -65,8 +65,9 @@ impl Default for Timing {
 ///   succeeds, so it times out here, unless the module sent response-pending first: then
 ///   ISO 14229-1 requires the positive reply.
 ///
-/// More response-pending replies than [`Timing::max_pending`] give [`Error::Timeout`], and an
-/// adapter error is returned as soon as it happens. P2 and P2* are capped at one hour.
+/// A module that sends more response-pending replies than [`Timing::max_pending`] is done
+/// without an answer: [`Expect::Module`] gives [`Error::Timeout`], and [`Expect::ObdEcus`] keeps
+/// the other ECUs' answers. An adapter error is returned as soon as it happens. P2 and P2* are capped at one hour.
 pub fn exchange<T: Transport + ?Sized>(
     transport: &mut T,
     request: &Approved,
@@ -82,7 +83,8 @@ pub fn exchange<T: Transport + ?Sized>(
     let mut pending_until: Vec<(u32, Instant)> = Vec::new();
     // Modules that answered or ran out of time: nothing more from them counts.
     let mut done: Vec<u32> = Vec::new();
-    let mut pending = 0u16;
+    // How many response-pending replies each module has sent.
+    let mut pending: Vec<(u32, u16)> = Vec::new();
     let mut replies = Vec::new();
     loop {
         let deadline = pending_until
@@ -126,10 +128,25 @@ pub fn exchange<T: Transport + ?Sized>(
         }
         pending_until.retain(|&(source, _)| source != reply.source);
         if sid.is_some_and(|sid| is_pending(sid, &reply.payload)) {
-            if pending == timing.max_pending {
-                return Err(Error::Timeout);
+            let index = pending
+                .iter()
+                .position(|&(s, _)| s == reply.source)
+                .unwrap_or_else(|| {
+                    pending.push((reply.source, 0));
+                    pending.len() - 1
+                });
+            let count = &mut pending[index].1;
+            // A module over the limit is done, without an answer.
+            if *count == timing.max_pending {
+                match expect {
+                    Expect::Module(_) => return Err(Error::Timeout),
+                    Expect::ObdEcus => {
+                        done.push(reply.source);
+                        continue;
+                    }
+                }
             }
-            pending += 1;
+            *count += 1;
             pending_until.push((reply.source, after(timing.p2_star)));
             continue;
         }
