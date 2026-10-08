@@ -2,7 +2,8 @@
 #
 # The expected layout, from public VAG UDS references. It hasn't been read from the car yet:
 # the M5 read-only module scan confirms or corrects every entry before it's used live.
-# Standard identification DIDs (F187, F189, F190, ...) need no entry; these are the VAG extras.
+# Standard identification DIDs (0xF180..=0xF19F) need no entry. F197 (system name) is listed to
+# name it; the rest are VAG extras.
 
 name = "2014 Audi A7 3.0 TDI (C7)"
 bitrate = 500000

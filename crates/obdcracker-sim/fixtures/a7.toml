@@ -59,7 +59,7 @@ id = 0x0600
 hex = "01 23 45 67 89 AB"
 session = "extended"
 
-# P0299-00 underboost, confirmed; P0113-00, stored but not confirmed
+# P0299-00 underboost, confirmed; P0113-00 with no status bits set, so only 0x19 0x0A lists it
 [[ecu.dtc]]
 code = 0x029900
 status = 0x08
