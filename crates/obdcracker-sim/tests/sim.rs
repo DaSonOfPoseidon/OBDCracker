@@ -8,7 +8,7 @@ use obdcracker_core::uds::{self, DtcFormat};
 use obdcracker_profile::Profile;
 use obdcracker_safety::{Policy, Target};
 use obdcracker_sim::{Fault, FixtureError, Session, SimBus};
-use obdcracker_transport::{Error, Response, Transport};
+use obdcracker_transport::{Error, Expect, Response, Timing, Transport, exchange};
 use proptest::prelude::*;
 
 const ENGINE: Target = Target::Physical(0x7E0);
@@ -286,6 +286,33 @@ fn slow_did_sends_response_pending_first() {
     assert!(nrc(payloads[0], 0x22).is_pending());
     assert!(nrc(payloads[1], 0x22).is_pending());
     assert!(uds::decode_did(payloads[2], 0xF190).is_ok());
+}
+
+#[test]
+fn exchange_collects_the_vin_from_every_obd_ecu() {
+    let vin = Policy::read_only()
+        .approve(Target::ObdFunctional, &obd::vehicle_info(0x02))
+        .unwrap();
+    let replies = exchange(&mut a7(), &vin, Expect::ObdEcus, Timing::default()).unwrap();
+    let vins: Vec<_> = replies
+        .iter()
+        .map(|r| (r.source, obd::decode_vin(&r.payload).unwrap()))
+        .collect();
+    assert_eq!(
+        vins,
+        [(0x7E8, "WAUZZZ4G1EN000000"), (0x7E9, "WAUZZZ4G1EN000000")]
+    );
+}
+
+#[test]
+fn exchange_waits_through_a_slow_did() {
+    let mut bus = SimBus::new(&Profile::builtin("a7").unwrap(), PENDING).unwrap();
+    let read = Policy::read_only()
+        .approve(ENGINE, &uds::read_did(0xF190))
+        .unwrap();
+    let replies = exchange(&mut bus, &read, Expect::Module(0x7E8), Timing::default()).unwrap();
+    assert_eq!(replies.len(), 1);
+    assert!(uds::decode_did(&replies[0].payload, 0xF190).is_ok());
 }
 
 #[test]
