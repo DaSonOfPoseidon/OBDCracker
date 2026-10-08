@@ -127,7 +127,9 @@ Each entry names the class, what to check, and where it bit us.
 - **Timeouts must cover the link, not only the bus.** At 9600 baud a 4095-byte reply takes about 18 s just to print,
   so a P2 sized for the ECU timed out mid-reply. When one timer gets the allowance, give it to every timer that can
   wait for the same data: P2, P2* and the wait for a request to finish were fixed in three rounds instead of one
-  (M3 branch, Codex).
+  (M3 branch, Codex). The fourth round (several modules' replies) showed the model was wrong: when the device says
+  when it's done (the ELM prompt), bound silence, not total time. The driver now fails an adapter quiet for longer
+  than its own timeout allows, and keeps a total limit only for one that never stops printing.
 - **Don't hand back stale data to make a log complete.** Replies drained before the next request aren't returned:
   queueing them would let a late reply to a repeated request pass for a fresh one. Document what the audit log
   records instead (M3 branch, Codex).
