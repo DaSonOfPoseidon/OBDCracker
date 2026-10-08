@@ -64,7 +64,7 @@ impl Default for Timing {
 ///   succeeds, so it times out here.
 ///
 /// More response-pending replies than [`Timing::max_pending`] give [`Error::Timeout`], and an
-/// adapter error is returned as soon as it happens.
+/// adapter error is returned as soon as it happens. P2 and P2* are capped at one hour.
 pub fn exchange<T: Transport + ?Sized>(
     transport: &mut T,
     request: &Approved,
@@ -75,7 +75,7 @@ pub fn exchange<T: Transport + ?Sized>(
     let asked = request.payload();
     let sid = asked.first().copied();
     // A broadcast stops once no reply has come for P2 and no ECU is still within its P2*.
-    let mut quiet = Instant::now() + timing.p2;
+    let mut quiet = after(timing.p2);
     let mut still_pending: Vec<(u32, Instant)> = Vec::new();
     let mut pending = 0u16;
     let mut replies = Vec::new();
@@ -100,18 +100,18 @@ pub fn exchange<T: Transport + ?Sized>(
         }
         still_pending.retain(|&(source, _)| source != reply.source);
         if sid.is_some_and(|sid| is_pending(sid, &reply.payload)) {
-            pending += 1;
-            if pending > timing.max_pending {
+            if pending == timing.max_pending {
                 return Err(Error::Timeout);
             }
-            still_pending.push((reply.source, Instant::now() + timing.p2_star));
+            pending += 1;
+            still_pending.push((reply.source, after(timing.p2_star)));
             continue;
         }
         match expect {
             Expect::Module(_) => return Ok(vec![reply]),
             Expect::ObdEcus => {
                 replies.push(reply);
-                quiet = Instant::now() + timing.p2;
+                quiet = after(timing.p2);
             }
         }
     }
@@ -119,6 +119,13 @@ pub fn exchange<T: Transport + ?Sized>(
         Expect::Module(_) => Err(Error::Timeout),
         Expect::ObdEcus => Ok(replies),
     }
+}
+
+// The longest any single wait lasts, so a huge timing can't overflow the clock.
+const LONGEST_WAIT: Duration = Duration::from_secs(3600);
+
+fn after(wait: Duration) -> Instant {
+    Instant::now() + wait.min(LONGEST_WAIT)
 }
 
 fn is_pending(sid: u8, reply: &[u8]) -> bool {

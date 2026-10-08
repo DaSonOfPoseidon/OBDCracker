@@ -307,3 +307,39 @@ fn broadcast_keeps_waiting_for_an_ecu_still_pending() {
         start.elapsed()
     );
 }
+
+#[test]
+fn the_largest_pending_limit_still_ends_the_wait() {
+    let timing = Timing {
+        max_pending: u16::MAX,
+        ..FAST
+    };
+    let read = approve(Target::Physical(0x7E0), &[0x22, 0xF1, 0x90]);
+    let replies = vec![reply(0x7E8, PENDING); usize::from(u16::MAX) + 1];
+    assert_eq!(
+        exchange(&mut mock(&replies), &read, Expect::Module(0x7E8), timing),
+        Err(Error::Timeout)
+    );
+}
+
+#[test]
+fn exactly_max_pending_replies_are_waited_through() {
+    let read = approve(Target::Physical(0x7E0), &[0x22, 0xF1, 0x90]);
+    let mut replies = vec![reply(0x7E8, PENDING); usize::from(FAST.max_pending)];
+    replies.push(reply(0x7E8, F190));
+    let got = exchange(&mut mock(&replies), &read, Expect::Module(0x7E8), FAST).unwrap();
+    assert_eq!(got, [reply(0x7E8, F190)]);
+}
+
+#[test]
+fn huge_timings_do_not_overflow_the_clock() {
+    let timing = Timing {
+        p2: Duration::MAX,
+        p2_star: Duration::MAX,
+        max_pending: 1,
+    };
+    let read = approve(Target::Physical(0x7E0), &[0x22, 0xF1, 0x90]);
+    let replies = [reply(0x7E8, PENDING), reply(0x7E8, F190)];
+    let got = exchange(&mut mock(&replies), &read, Expect::Module(0x7E8), timing).unwrap();
+    assert_eq!(got, [reply(0x7E8, F190)]);
+}
