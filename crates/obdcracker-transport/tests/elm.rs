@@ -740,6 +740,8 @@ mod misbehaving {
         elm.send(&approve(Target::ObdFunctional, &[0x09, 0x02]))
             .unwrap();
         while elm.recv(Duration::from_secs(1)).is_ok() {}
+        // Two reads inside the 1 ms check: the NUL alone, then the whole banner.
+        elm.link_mut().chunk = 64;
         elm.link_mut().inject = vec![0];
         let written = elm.link().written.len();
         let err = elm
