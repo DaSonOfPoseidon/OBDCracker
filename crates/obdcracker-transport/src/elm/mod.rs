@@ -66,7 +66,8 @@ const LONGEST_WAIT: Duration = Duration::from_secs(3600);
 
 /// An ELM327-compatible adapter on CAN (ISO 15765-4, 11-bit IDs, 500 kbit/s).
 ///
-/// Requests must fit one CAN frame: up to 7 bytes, which covers every read-only request.
+/// Requests must fit one CAN frame: up to 7 bytes. That covers the OBD-II reads and UDS 0x22
+/// with up to 3 DIDs, but not every request the policy allows (0x22 with 4 DIDs is 9 bytes).
 /// Longer ones are refused before anything is written. Multi-frame replies are reassembled
 /// here, per module, from the frames the adapter prints, for up to 16 modules per request;
 /// frames from any more are dropped, so those modules' replies time out.
