@@ -141,7 +141,8 @@ impl SimBus {
                 let fits = if did.id == uds::did::VIN {
                     did.data.len() == 17 && did.data.iter().all(|&b| fixture::is_vin_char(b))
                 } else {
-                    !text || uds::decode_text(&did.data).is_ok()
+                    // Text that is only padding decodes as empty.
+                    !text || uds::decode_text(&did.data).is_ok_and(|text| !text.is_empty())
                 };
                 if !fits {
                     return Err(FixtureError::Value(format!(

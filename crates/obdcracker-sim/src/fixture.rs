@@ -136,9 +136,9 @@ fn hex_bytes(text: &str) -> Result<Vec<u8>, FixtureError> {
     Ok(bytes)
 }
 
-// `text` as bytes, 0x00-padded to `len`. Must be printable ASCII and fit.
+// `text` as bytes, 0x00-padded to `len`. Must be printable ASCII, not blank, and fit.
 fn padded(text: &str, len: usize, what: &str) -> Result<Vec<u8>, FixtureError> {
-    if text.is_empty() || text.len() > len || !is_printable(text) {
+    if text.trim().is_empty() || text.len() > len || !is_printable(text) {
         return Err(value_error(what, text));
     }
     let mut bytes = text.as_bytes().to_vec();
@@ -245,13 +245,13 @@ impl ObdFixture {
 impl DidFixture {
     fn build(&self) -> Result<Did, FixtureError> {
         let data = match (&self.text, &self.hex) {
-            (Some(text), None) if !text.is_empty() && is_printable(text) => {
+            (Some(text), None) if !text.trim().is_empty() && is_printable(text) => {
                 text.as_bytes().to_vec()
             }
             (None, Some(hex)) => hex_bytes(hex)?,
             _ => {
                 return Err(FixtureError::Value(format!(
-                    "DID 0x{:04X} needs one non-empty printable text or hex value",
+                    "DID 0x{:04X} needs one non-blank printable text or hex value",
                     self.id
                 )));
             }

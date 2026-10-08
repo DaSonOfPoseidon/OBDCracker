@@ -390,6 +390,11 @@ fn fixture_errors_are_reported() {
         // 0x000000 is no code, and 0xFFFFFF means every group (ISO 14229-1), not one DTC.
         "[[ecu]]\nmodule = \"engine\"\n[[ecu.dtc]]\ncode = 0\nstatus = 0x08\n",
         "[[ecu]]\nmodule = \"engine\"\n[[ecu.dtc]]\ncode = 0xFFFFFF\nstatus = 0x08\n",
+        // Values that are only spaces or padding are empty.
+        "[[ecu]]\nmodule = \"engine\"\n[[ecu.did]]\nid = 1\ntext = \"   \"\n",
+        "[[ecu]]\nmodule = \"engine\"\n[[ecu.did]]\nid = 0xF187\nhex = \"20 20\"\n",
+        "[[ecu]]\nmodule = \"engine\"\n[[ecu.did]]\nid = 0xF197\nhex = \"00\"\n",
+        "[[ecu]]\nmodule = \"engine\"\n[ecu.obd]\ncalids = [\"   \"]\ncvns = [\"00 00 00 00\"]\n",
         // PID keys that differ only in case name the same PID.
         "[[ecu]]\nmodule = \"engine\"\n[ecu.obd.pids]\n\"0c\" = \"0C 80\"\n\"0C\" = \"0C 80\"\n",
         // PID 0C is two bytes (SAE J1979), not one or three.
@@ -409,11 +414,12 @@ fn fixture_errors_are_reported() {
 
 #[test]
 fn pids_the_decoder_doesnt_know_take_any_length() {
-    let fixture = "[[ecu]]\nmodule = \"engine\"\n[ecu.obd.pids]\n\"10\" = \"01 02 03\"\n";
+    // SAE J1979 doesn't define PID 0xE1.
+    let fixture = "[[ecu]]\nmodule = \"engine\"\n[ecu.obd.pids]\n\"E1\" = \"01 02 03\"\n";
     let mut bus = SimBus::new(&Profile::builtin("a7").unwrap(), fixture).unwrap();
     assert_eq!(
-        ask_one(&mut bus, ENGINE, &obd::current_data(0x10)),
-        [0x41, 0x10, 0x01, 0x02, 0x03]
+        ask_one(&mut bus, ENGINE, &obd::current_data(0xE1)),
+        [0x41, 0xE1, 0x01, 0x02, 0x03]
     );
 }
 
