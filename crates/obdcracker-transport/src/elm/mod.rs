@@ -65,8 +65,9 @@ const LONGEST_WAIT: Duration = Duration::from_secs(3600);
 /// OBD-II IDs (0x7DF and 0x7E0..=0x7E7) its standard ones, and for any other module
 /// `30 00 00` (continue, no block limit, no gap) to the module's request ID.
 ///
-/// If the adapter doesn't finish a request in time, or the link fails, its state is unknown,
-/// and every later call fails without writing anything: connect again.
+/// If the adapter doesn't finish a command or request in time, answers a command with an
+/// overlong line, or the link fails, its state is unknown, and every later call fails without
+/// writing anything: connect again.
 #[derive(Debug)]
 pub struct Elm<L> {
     link: L,
@@ -216,8 +217,10 @@ impl<L: Link> Elm<L> {
                     return Err(self.break_down(format!("no answer to {command}")));
                 }
                 Some(Event::Prompt) => break,
+                // The rest of the answer may still be coming, so the next command can't tell
+                // where its own answer starts.
                 Some(Event::Overlong) => {
-                    return Err(Error::Adapter(format!("overlong answer to {command}")));
+                    return Err(self.break_down(format!("overlong answer to {command}")));
                 }
                 Some(Event::Line(line)) if line.eq_ignore_ascii_case(command) => {}
                 Some(Event::Line(line)) => lines.push(line),

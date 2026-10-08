@@ -328,6 +328,22 @@ mod misbehaving {
     }
 
     #[test]
+    fn an_overlong_answer_to_a_command_fails_closed() {
+        // The rest of the answer, and its prompt, may still be coming: the next command would
+        // take them for its own.
+        let mut elm = connect(car());
+        elm.link_mut().flood = Some(vec![b'7'; 1000]);
+        assert!(elm.info().is_err());
+        elm.link_mut().flood = None;
+        let written = elm.link().written.len();
+        let err = elm
+            .send(&approve(Target::ObdFunctional, &[0x09, 0x02]))
+            .unwrap_err();
+        assert!(err.to_string().contains("unknown state"), "{err}");
+        assert_eq!(elm.link().written.len(), written);
+    }
+
+    #[test]
     fn connect_gives_up_on_a_silent_link() {
         let start = Instant::now();
         let err = Elm::connect(Scripted::new(b"")).unwrap_err();
