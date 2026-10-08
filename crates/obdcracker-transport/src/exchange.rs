@@ -8,8 +8,7 @@ use crate::{Error, Response, Transport};
 /// Which replies answer a request.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Expect {
-    /// Every OBD-II ECU that answers a broadcast request: replies from 0x7E8..=0x7EF, collected
-    /// until none has arrived for P2.
+    /// Every OBD-II ECU that answers a broadcast request: replies from 0x7E8..=0x7EF.
     ObdEcus,
     /// One module's reply, from this CAN ID (the vehicle profile's response ID).
     Module(u32),
@@ -29,8 +28,8 @@ const OBD_RESPONSE_IDS: std::ops::RangeInclusive<u32> = 0x7E8..=0x7EF;
 /// How long to wait for replies, per ISO 14229-2.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Timing {
-    /// How long a module has to answer: 50 ms by default. For a broadcast request, collecting
-    /// stops once no reply has arrived for this long.
+    /// How long after the request every module has to answer or send response-pending: 50 ms by
+    /// default.
     pub p2: Duration,
     /// How long a module has to answer after a response-pending reply: 5 s by default. Each
     /// response-pending reply restarts it.
@@ -52,15 +51,16 @@ impl Default for Timing {
 
 /// Sends one request and returns its replies, oldest first.
 ///
-/// Replies from CAN IDs that `expect` doesn't accept are dropped, and so are replies that don't
-/// answer this request (see [`response::answers`]), such as a late reply to an earlier one. (An
-/// [`crate::Audited`] transport still logs them.) A response-pending reply (`7F <service> 78`)
-/// is dropped too, and gives that module P2* to answer; once it has, a broadcast goes back to
-/// waiting for a P2 quiet period. Replies from a module whose P2* has run out are dropped, and so
-/// are replies after the P2 quiet period from a module that didn't send response-pending.
+/// Timing follows ISO 15765-4: every module must answer, or send response-pending
+/// (`7F <service> 78`), within P2 of the request. A module that sent response-pending has P2*
+/// from its latest one to answer. A module that has answered, or let its P2* run out, is done.
+/// Replies that break these rules are dropped, and so are replies from CAN IDs that `expect`
+/// doesn't accept and replies that don't answer this request (see [`response::answers`]), such
+/// as a late reply to an earlier one. (An [`crate::Audited`] transport still logs them all.)
 ///
-/// - [`Expect::ObdEcus`] returns each ECU's first reply, which may be none; repeats are dropped.
-/// - [`Expect::Module`] returns the module's one reply, or [`Error::Timeout`] if it didn't answer
+/// - [`Expect::ObdEcus`] returns each ECU's answer, which may be none, once every ECU has
+///   answered or run out of time.
+/// - [`Expect::Module`] returns the module's answer, or [`Error::Timeout`] if it didn't answer
 ///   in time. A request with the suppress-positive-response bit set gets no reply when it
 ///   succeeds, so it times out here.
 ///
@@ -75,17 +75,19 @@ pub fn exchange<T: Transport + ?Sized>(
     transport.send(request)?;
     let asked = request.payload();
     let sid = asked.first().copied();
-    // A broadcast stops once no reply has come for P2 and no ECU is still within its P2*.
-    let mut quiet = after(timing.p2);
-    let mut still_pending: Vec<(u32, Instant)> = Vec::new();
-    let mut timed_out: Vec<u32> = Vec::new();
+    // Every module's first reply is due by here.
+    let first_due = after(timing.p2);
+    // Modules that sent response-pending, and when their P2* ends.
+    let mut pending_until: Vec<(u32, Instant)> = Vec::new();
+    // Modules that answered or ran out of time: nothing more from them counts.
+    let mut done: Vec<u32> = Vec::new();
     let mut pending = 0u16;
     let mut replies = Vec::new();
     loop {
-        let deadline = still_pending
+        let deadline = pending_until
             .iter()
             .map(|&(_, until)| until)
-            .fold(quiet, Instant::max);
+            .fold(first_due, Instant::max);
         let Some(left) = deadline
             .checked_duration_since(Instant::now())
             .filter(|left| !left.is_zero())
@@ -100,39 +102,31 @@ pub fn exchange<T: Transport + ?Sized>(
         if !expect.accepts(reply.source) || !response::answers(asked, &reply.payload) {
             continue;
         }
-        // A module that let its P2* run out is done: its late replies don't count.
         let now = Instant::now();
-        still_pending.retain(|&(source, until)| {
+        pending_until.retain(|&(source, until)| {
             let expired = until <= now;
             if expired {
-                timed_out.push(source);
+                done.push(source);
             }
             !expired
         });
-        // J1979: each ECU answers a broadcast once. Anything more from an ECU that has answered
-        // is dropped and doesn't extend the wait, so a stuck ECU can't keep the exchange open.
-        let answered = replies.iter().any(|r: &Response| r.source == reply.source);
-        // Only a module that sent response-pending earned P2*; any other must answer within P2,
-        // even while another module's P2* keeps the exchange open.
-        let late = now > quiet && !still_pending.iter().any(|&(s, _)| s == reply.source);
-        if timed_out.contains(&reply.source) || answered || late {
+        let was_pending = pending_until.iter().any(|&(s, _)| s == reply.source);
+        if done.contains(&reply.source) || (!was_pending && now > first_due) {
             continue;
         }
-        still_pending.retain(|&(source, _)| source != reply.source);
+        pending_until.retain(|&(source, _)| source != reply.source);
         if sid.is_some_and(|sid| is_pending(sid, &reply.payload)) {
             if pending == timing.max_pending {
                 return Err(Error::Timeout);
             }
             pending += 1;
-            still_pending.push((reply.source, after(timing.p2_star)));
+            pending_until.push((reply.source, after(timing.p2_star)));
             continue;
         }
+        done.push(reply.source);
         match expect {
             Expect::Module(_) => return Ok(vec![reply]),
-            Expect::ObdEcus => {
-                replies.push(reply);
-                quiet = after(timing.p2);
-            }
+            Expect::ObdEcus => replies.push(reply),
         }
     }
     match expect {
