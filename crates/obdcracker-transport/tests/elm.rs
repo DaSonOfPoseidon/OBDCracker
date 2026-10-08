@@ -388,6 +388,47 @@ mod misbehaving {
     }
 
     #[test]
+    fn a_reset_while_finishing_the_last_request_fails_closed() {
+        for output in [&b"LV RESET\r"[..], b"ERR94\r", b"ELM327 v2.0\r"] {
+            let mut elm = connect(car());
+            elm.send(&approve(Target::ObdFunctional, &[0x09, 0x02]))
+                .unwrap();
+            // Take one reply and leave the rest; the reset arrives while `send` waits for the
+            // adapter to finish.
+            elm.recv(Duration::from_secs(1)).unwrap();
+            elm.link_mut().inject = output.to_vec();
+            let written = elm.link().written.len();
+            let err = elm
+                .send(&approve(Target::ObdFunctional, &[0x09, 0x02]))
+                .unwrap_err();
+            assert!(
+                err.to_string()
+                    .contains(&String::from_utf8_lossy(output).trim().to_string()),
+                "{output:?}: {err}"
+            );
+            assert_eq!(elm.link().written.len(), written, "{output:?}");
+        }
+    }
+
+    #[test]
+    fn a_reset_while_setting_the_header_fails_closed() {
+        let mut elm = connect(car());
+        // The adapter resets just as it answers ATSH: a banner comes before the OK.
+        elm.link_mut().inject = b"\rELM327 v2.0\r".to_vec();
+        assert!(
+            elm.send(&approve(Target::Physical(0x7E0), &[0x09, 0x02]))
+                .is_err()
+        );
+        let written = elm.link().written.len();
+        assert!(
+            elm.send(&approve(Target::Physical(0x7E0), &[0x09, 0x02]))
+                .is_err()
+        );
+        assert_eq!(elm.link().written.len(), written);
+        assert_eq!(elm.link().elm.sent, []);
+    }
+
+    #[test]
     fn a_bus_error_leaves_the_adapter_usable() {
         let mut elm = connect(car());
         elm.send(&approve(Target::ObdFunctional, &[0x09, 0x02]))

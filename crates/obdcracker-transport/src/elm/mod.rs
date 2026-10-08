@@ -59,15 +59,17 @@ const LONGEST_WAIT: Duration = Duration::from_secs(3600);
 ///
 /// Requests must fit one CAN frame: up to 7 bytes, which covers every read-only request.
 /// Longer ones are refused before anything is written. Multi-frame replies are reassembled
-/// here, per module, from the frames the adapter prints.
+/// here, per module, from the frames the adapter prints, for up to 16 modules per request;
+/// frames from any more are dropped, so those modules' replies time out.
 ///
 /// The adapter sends ISO-TP flow control frames itself, which no audit log records: for the
 /// OBD-II IDs (0x7DF and 0x7E0..=0x7E7) its standard ones, and for any other module
 /// `30 00 00` (continue, no block limit, no gap) to the module's request ID.
 ///
-/// If the adapter doesn't finish a command or request in time, prints something unexpected
-/// or an overlong line, says it reset (`LV RESET`, `ERRxx`, `LP ALERT`), or the link fails,
-/// its state is unknown, and every later call fails without writing anything: connect again.
+/// If the adapter doesn't finish a command or request in time, refuses a setting, prints
+/// something unexpected or an overlong line, says it reset (`LV RESET`, `ERRxx`, `LP ALERT`,
+/// a banner), or the link fails, its state is unknown, and every later call fails without
+/// writing anything: connect again.
 #[derive(Debug)]
 pub struct Elm<L> {
     link: L,
@@ -229,6 +231,10 @@ impl<L: Link> Elm<L> {
                     {
                         return Err(self.break_down(format!("the adapter said {status}")));
                     }
+                    // Only ATI answers with the banner; anywhere else it means a reset.
+                    if command != "ATI" && line.starts_with("ELM327") {
+                        return Err(self.break_down(format!("the adapter reset: {line}")));
+                    }
                     lines.push(line);
                 }
             }
@@ -236,21 +242,20 @@ impl<L: Link> Elm<L> {
         Ok(lines)
     }
 
+    // Any answer but OK leaves the adapter's settings unknown: it may have reset, or kept the
+    // old header.
     fn expect_ok(&mut self, command: &str) -> Result<(), Error> {
         let lines = self.command(command)?;
         if lines.iter().map(String::as_str).eq(["OK"]) {
             return Ok(());
         }
-        // Whatever the adapter did, don't assume its header or flow control any more.
-        self.header = None;
-        self.flow = None;
-        Err(Error::Adapter(
-            if lines.iter().map(String::as_str).eq(["?"]) {
+        Err(
+            self.break_down(if lines.iter().map(String::as_str).eq(["?"]) {
                 format!("the adapter doesn't support {command}")
             } else {
                 format!("{command} failed: {}", lines.join(" / "))
-            },
-        ))
+            }),
+        )
     }
 
     // Fails if the adapter can't be trusted; otherwise waits for any request still running.
@@ -263,6 +268,8 @@ impl<L: Link> Elm<L> {
         if !self.busy {
             return Ok(());
         }
+        // The rest of the last request's replies are dropped, but a reset among them still
+        // counts.
         let deadline = Instant::now() + BUSY_WAIT;
         loop {
             match self.next_event(deadline)? {
@@ -270,7 +277,10 @@ impl<L: Link> Elm<L> {
                     return Err(self.break_down("the adapter didn't finish a request".into()));
                 }
                 Some(Event::Prompt) => break,
-                Some(_) => {}
+                Some(Event::Line(text)) => {
+                    self.reply_line(&text)?;
+                }
+                Some(Event::Overlong) => {}
             }
         }
         self.busy = false;
@@ -401,27 +411,16 @@ impl<L: Link> Transport for Elm<L> {
                         "the adapter printed an overlong line".into(),
                     ));
                 }
-                Some(Event::Line(text)) => match parse_line(&text) {
+                Some(Event::Line(text)) => match self.reply_line(&text)? {
                     Line::Frame(frame) => {
                         if let Some(reply) = self.feed(frame.id(), frame.data()) {
                             return Ok(reply);
                         }
                     }
-                    // Its settings are gone: it may even search for a protocol on the next
-                    // request, sending frames nobody approved.
-                    Line::Status(status) if status.loses_settings() => {
-                        return Err(self.break_down(format!("the adapter said {status}")));
-                    }
                     Line::Status(status) if status.is_failure() => {
                         return Err(Error::Adapter(format!("the adapter said {status}")));
                     }
-                    Line::Status(_) => {}
-                    // Such as a banner after a reset, or echo turned back on.
-                    Line::Ok | Line::Text(_) => {
-                        return Err(
-                            self.break_down(format!("unexpected output from the adapter: {text}"))
-                        );
-                    }
+                    _ => {}
                 },
             }
         }
@@ -429,6 +428,23 @@ impl<L: Link> Transport for Elm<L> {
 }
 
 impl<L: Link> Elm<L> {
+    // Classifies a line printed after a request. Anything that means the adapter lost its
+    // settings, or that isn't a reply at all, leaves it in an unknown state.
+    fn reply_line(&mut self, text: &str) -> Result<Line, Error> {
+        match parse_line(text) {
+            // Its settings are gone: it may even search for a protocol on the next request,
+            // sending frames nobody approved.
+            Line::Status(status) if status.loses_settings() => {
+                Err(self.break_down(format!("the adapter said {status}")))
+            }
+            // Such as a banner after a reset, or echo turned back on.
+            Line::Ok | Line::Text(_) => {
+                Err(self.break_down(format!("unexpected output from the adapter: {text}")))
+            }
+            line => Ok(line),
+        }
+    }
+
     // Receiving needs a request in progress; after the prompt there's nothing more to come.
     fn ready_to_receive(&mut self) -> Result<(), Error> {
         if let Some(why) = &self.broken {
