@@ -34,6 +34,7 @@
 //! ```
 
 pub use obdcracker_core as core;
+pub use obdcracker_profile as profile;
 pub use obdcracker_safety as safety;
 #[cfg(feature = "sim")]
 pub use obdcracker_sim as sim;

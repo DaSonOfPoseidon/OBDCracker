@@ -8,10 +8,12 @@ use obdcracker_safety::Approved;
 
 mod audit;
 mod dry_run;
+mod exchange;
 mod mock;
 
 pub use audit::Audited;
 pub use dry_run::DryRun;
+pub use exchange::{Expect, Timing, exchange};
 pub use mock::Mock;
 
 /// A reply from one module: the CAN ID it came from and its reassembled payload.

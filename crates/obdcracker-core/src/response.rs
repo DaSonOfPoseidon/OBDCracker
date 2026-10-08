@@ -168,3 +168,59 @@ pub(crate) fn printable(bytes: &[u8]) -> Result<&str, Error> {
     }
     core::str::from_utf8(bytes).map_err(|_| Error::Malformed)
 }
+
+/// Whether `reply` answers `request`, so a late reply to an earlier request isn't mistaken for
+/// this one's.
+///
+/// A positive reply must have the request's service ID + 0x40 and echo what the request asked
+/// for: the PID (mode 09), one of the requested PIDs (mode 01, which leaves out unsupported ones),
+/// one of the requested DIDs (`ReadDataByIdentifier`), or the subfunction
+/// (`DiagnosticSessionControl`, `ReadDTCInformation`, `TesterPresent`). A request with the
+/// suppress-positive-response bit set gets no positive reply unless the module first sent
+/// response-pending, so none answers it here (see [`answers_after_pending`]). A negative
+/// reply echoes only the service ID, so any `7F <service> <code>` for the request's service
+/// answers it. Other services are matched by service ID alone.
+#[must_use]
+pub fn answers(request: &[u8], reply: &[u8]) -> bool {
+    matches(request, reply, false)
+}
+
+/// Whether `reply` answers `request` from a module that already sent response-pending
+/// (`7F <service> 78`) for it.
+///
+/// The same as [`answers`], except that a request with the suppress-positive-response bit set
+/// is answered by its positive reply: ISO 14229-1 requires the final positive reply after
+/// response-pending even when the bit is set.
+#[must_use]
+pub fn answers_after_pending(request: &[u8], reply: &[u8]) -> bool {
+    matches(request, reply, true)
+}
+
+// `answers`, with `pending` saying whether the module sent response-pending for this request.
+fn matches(request: &[u8], reply: &[u8], pending: bool) -> bool {
+    let Some((&sid, asked)) = request.split_first() else {
+        return false;
+    };
+    match reply {
+        [NEGATIVE, refused, _] => *refused == sid,
+        [NEGATIVE, ..] => false,
+        [first, echo @ ..] if *first == sid.wrapping_add(POSITIVE_OFFSET) => match sid {
+            // OBD-II mode 01: one or more PIDs
+            0x01 => echo.first().is_some_and(|pid| asked.contains(pid)),
+            // OBD-II mode 09: one PID
+            0x09 => echo.first().is_some_and(|pid| asked.first() == Some(pid)),
+            // ReadDataByIdentifier: the first supported DID
+            0x22 => echo
+                .first_chunk::<2>()
+                .is_some_and(|did| asked.as_chunks::<2>().0.contains(did)),
+            // Subfunction services: bit 7 is the suppress-positive-response bit. It isn't echoed,
+            // and a request with it set gets a positive reply only after response-pending.
+            0x10 | 0x19 | 0x3E => match (echo.first(), asked.first()) {
+                (Some(&got), Some(&sub)) => (pending || sub & 0x80 == 0) && got == sub & 0x7F,
+                _ => false,
+            },
+            _ => true,
+        },
+        _ => false,
+    }
+}

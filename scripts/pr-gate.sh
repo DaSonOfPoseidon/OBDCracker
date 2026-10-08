@@ -19,6 +19,7 @@ areas_of() {
 		crates/obdcracker-safety/*) echo safety ;;
 		crates/obdcracker-transport/*) echo transport ;;
 		crates/obdcracker-sim/*) echo sim ;;
+		crates/obdcracker-profile/*) echo profile ;;
 		crates/obdcracker-cli/*) echo cli ;;
 		crates/obdcracker/*) echo facade ;;
 		esac
@@ -26,7 +27,8 @@ areas_of() {
 		*.md | docs/*) echo docs ;;
 		esac
 		case $path in
-		.github/* | scripts/* | *.toml | Cargo.lock) echo ci ;;
+		# Cargo and tool config, not data files such as vehicle profiles and sim fixtures.
+		.github/* | scripts/* | Cargo.toml | */Cargo.toml | Cargo.lock | deny.toml | clippy.toml | rust-toolchain.toml) echo ci ;;
 		esac
 	done | sort -u
 }

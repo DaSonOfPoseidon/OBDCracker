@@ -1,0 +1,144 @@
+# What the simulated A7's modules answer. Module addresses come from the A7 vehicle profile.
+#
+# Placeholders, not read from the car: part numbers, versions, calibration IDs and CVNs have the
+# right shape but made-up values. M4's read-only `fingerprint` session replaces them with the
+# car's real (tuned) values.
+
+[[ecu]]
+module = "engine"
+dtc_format = 0x00
+
+[ecu.obd]
+vin = "WAUZZZ4G1EN000000"
+calids = ["4G0907401A  0010"]
+cvns = ["1A 2B 3C 4D"]
+ecu_name = { acronym = "ECM", name = "EngineControl" }
+dtcs = ["P0299"]
+
+# Mode 01 PID → data bytes: coolant 90 °C, 800 rpm, 0 km/h, 14.0 V
+[ecu.obd.pids]
+"05" = "82"
+"0C" = "0C 80"
+"0D" = "00"
+"42" = "36 B0"
+
+[[ecu.did]]
+id = 0xF187
+text = "4G0907401A"
+
+[[ecu.did]]
+id = 0xF189
+text = "0010"
+
+[[ecu.did]]
+id = 0xF190
+text = "WAUZZZ4G1EN000000"
+
+[[ecu.did]]
+id = 0xF191
+text = "4G0907401"
+
+[[ecu.did]]
+id = 0xF197
+text = "V6 3.0l TDI"
+
+[[ecu.did]]
+id = 0xF19E
+text = "EV_ECM30TDI0114G0907401A"
+
+[[ecu.did]]
+id = 0xF1A3
+text = "H05"
+
+[[ecu.did]]
+id = 0xF1AA
+text = "J623"
+
+[[ecu.did]]
+id = 0x0600
+hex = "01 23 45 67 89 AB"
+session = "extended"
+
+# P0299-00 underboost, confirmed; P0113-00 with no status bits set, so only 0x19 0x0A lists it
+[[ecu.dtc]]
+code = 0x029900
+status = 0x08
+
+[[ecu.dtc]]
+code = 0x011300
+status = 0x00
+
+[[ecu]]
+module = "transmission"
+dtc_format = 0x00
+
+[ecu.obd]
+vin = "WAUZZZ4G1EN000000"
+calids = ["4G0927158   1100"]
+cvns = ["5E 6F 70 81"]
+ecu_name = { acronym = "TCM", name = "TransmissionCtl" }
+dtcs = []
+
+[[ecu.did]]
+id = 0xF187
+text = "4G0927158"
+
+[[ecu.did]]
+id = 0xF189
+text = "1100"
+
+[[ecu.did]]
+id = 0xF190
+text = "WAUZZZ4G1EN000000"
+
+[[ecu.did]]
+id = 0xF197
+text = "ZF 8HP"
+
+[[ecu.did]]
+id = 0xF1A3
+text = "H03"
+
+[[ecu]]
+module = "gateway"
+
+[[ecu.did]]
+id = 0xF187
+text = "4G0907468"
+
+[[ecu.did]]
+id = 0xF189
+text = "0100"
+
+[[ecu.did]]
+id = 0xF190
+text = "WAUZZZ4G1EN000000"
+
+[[ecu.did]]
+id = 0xF197
+text = "J533 Gateway"
+
+[[ecu.did]]
+id = 0x0600
+hex = "00 10 20 30 40 50 60 70"
+session = "extended"
+
+[[ecu]]
+module = "instruments"
+
+[[ecu.did]]
+id = 0xF187
+text = "4G8920930"
+
+[[ecu.did]]
+id = 0xF190
+text = "WAUZZZ4G1EN000000"
+
+[[ecu.did]]
+id = 0xF197
+text = "KOMBI"
+
+[[ecu.did]]
+id = 0x0600
+hex = "11 22 33 44"
+session = "extended"

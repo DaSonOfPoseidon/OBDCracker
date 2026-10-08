@@ -32,6 +32,7 @@ from developers being careful:
   backup, and each restore path is tested end to end against the simulator (back up → write → restore → read back
   equals the original) before it touches a car.
 - `--dry-run` prints the exact frames a command would send without opening a device.
+- `--sim a7` runs a command against a simulated A7 instead of a car, through the same policy and audit log.
 - Every frame sent or received in a real session is appended to an audit log.
 
 New capabilities are developed test-first: golden-frame unit tests, then property tests and fuzzing of response parsers,
@@ -82,7 +83,8 @@ The crates will be published to crates.io once the M1 codec API settles. Until t
 | `obdcracker-core` | Pure `no_std` codecs: CAN, ISO-TP, VW TP2.0, OBD-II, UDS, KWP2000 |
 | `obdcracker-safety` | Tiered policy and `Approved` |
 | `obdcracker-transport` | `Transport` trait and adapter backends |
-| `obdcracker-sim` | Simulated ECUs for tests |
+| `obdcracker-profile` | Vehicle profiles: module addresses, addressing, protocol and DIDs, as TOML data |
+| `obdcracker-sim` | Simulated ECUs for tests: a profile plus a fixture of what each module answers (built in: `a7`) |
 | `obdcracker-cli` | The `obdcracker` command-line tool |
 
 ## Adapters
@@ -93,6 +95,7 @@ adapter's command set. The ELM driver takes any two-way byte stream, so serial, 
 | Driver | Hardware | Links | OS | Status |
 |---|---|---|---|---|
 | `mock` | none (tests) | — | all | done |
+| `sim` | none: a simulated car from a vehicle profile and a fixture (`--sim a7`) | — | all | done |
 | `elm` | ELM327 / STN (e.g. OBDLink EX, MX+, CX) | USB serial, Wi-Fi (TCP), Bluetooth LE, Bluetooth Classic | all | planned (USB serial first, then TCP) |
 | `gsusb` | CANable / candleLight (USB-C) and an OBD2-to-DB9 cable | USB | all | planned, with listen-only mode |
 | `socketcan` | any SocketCAN interface | kernel | Linux | planned |
@@ -123,7 +126,8 @@ or acknowledge frames.
 ## Vehicle profiles
 
 A profile is data, not code: module addresses, addressing mode, protocol per module, the identifiers to read and how to
-decode them. Without a profile the tool falls back to generic OBD-II.
+decode them. Without a profile the tool falls back to generic OBD-II. Profiles are TOML files in
+`crates/obdcracker-profile/profiles/`; a profile has no field that names a service, so it can't widen the safety policy.
 
 | Profile | Expected setup (confirmed by a read-only module scan before use) |
 |---|---|
