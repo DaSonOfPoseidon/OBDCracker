@@ -430,24 +430,25 @@ enum ReceiveState {
 }
 
 /// Rebuilds one payload from ISO-TP frames into a caller-provided buffer, telling the caller
-/// when to send flow control. IO-free and allocation-free.
+/// when to send flow control. IO-free and allocation-free. The buffer can be borrowed
+/// (`&mut [u8]`) or owned (such as a `Vec<u8>`), so a driver can keep one per sender.
 ///
 /// A new single or first frame always starts a new payload, abandoning any unfinished one, as
 /// ISO 15765-2 requires. After an error the receiver is idle and waits for the next one, except
 /// [`Error::WrongAddress`]: with extended addressing that's another module's frame on a shared
 /// reply ID, and the transfer in progress goes on.
 #[derive(Debug)]
-pub struct Reassembler<'b> {
-    buf: &'b mut [u8],
+pub struct Reassembler<B> {
+    buf: B,
     addressing: Addressing,
     flow_control: FlowControl,
     state: ReceiveState,
 }
 
-impl<'b> Reassembler<'b> {
+impl<B: AsMut<[u8]>> Reassembler<B> {
     /// Receives payloads of up to `buf.len()` bytes. Asks for every consecutive frame at once
     /// (block size 0) with no separation time.
-    pub fn new(buf: &'b mut [u8], addressing: Addressing) -> Self {
+    pub fn new(buf: B, addressing: Addressing) -> Self {
         Self {
             buf,
             addressing,
@@ -491,21 +492,20 @@ impl<'b> Reassembler<'b> {
         match frame {
             Frame::Single(data) => {
                 self.state = ReceiveState::Idle;
-                let dest = self
-                    .buf
-                    .get_mut(..data.len())
-                    .ok_or(Error::BufferTooSmall)?;
+                let buf = self.buf.as_mut();
+                let dest = buf.get_mut(..data.len()).ok_or(Error::BufferTooSmall)?;
                 dest.copy_from_slice(data);
-                Ok(Progress::Complete(&self.buf[..data.len()]))
+                Ok(Progress::Complete(&buf[..data.len()]))
             }
             Frame::First { len, data } => {
                 self.state = ReceiveState::Idle;
                 let len = usize::try_from(len).map_err(|_| Error::Overflow)?;
-                if len > self.buf.len() {
+                let buf = self.buf.as_mut();
+                if len > buf.len() {
                     return Err(Error::Overflow);
                 }
                 // Parsing guarantees len exceeds a single frame, so the first frame's data fits.
-                self.buf[..data.len()].copy_from_slice(data);
+                buf[..data.len()].copy_from_slice(data);
                 self.state = ReceiveState::Receiving {
                     len,
                     filled: data.len(),
@@ -535,11 +535,12 @@ impl<'b> Reassembler<'b> {
                     return Err(Error::BadLength);
                 }
                 let take = data.len().min(len - filled);
-                self.buf[filled..filled + take].copy_from_slice(&data[..take]);
+                let buf = self.buf.as_mut();
+                buf[filled..filled + take].copy_from_slice(&data[..take]);
                 let filled = filled + take;
                 if filled == len {
                     self.state = ReceiveState::Idle;
-                    return Ok(Progress::Complete(&self.buf[..len]));
+                    return Ok(Progress::Complete(&buf[..len]));
                 }
                 // Block size 0 means one unlimited block, so the count never matters (and wraps).
                 let in_block = in_block.wrapping_add(1);
