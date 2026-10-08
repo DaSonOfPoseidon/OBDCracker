@@ -189,6 +189,8 @@ mod setup {
             vec!["24:F N".to_owned()],
             vec!["24:00 N  24:FF N".to_owned()],
             vec!["124:00 N".to_owned()],
+            vec!["+4:FF N".to_owned()],
+            vec!["24:+F N".to_owned()],
         ] {
             let mut elm = FakeElm::silent();
             elm.pps = Some(pps.clone());

@@ -24,15 +24,18 @@ use codec::{Event, Line, LineSplitter, parse_line};
 // into a line of hex digits, so commands with a single non-hex letter (`ATE0`, `ATCAF1`,
 // `ATCF700`) are out. Echo stays on, and CAN auto formatting and flow control stay at their
 // defaults (on), which `check_defaults` makes sure no programmable parameter changed.
+#[rustfmt::skip]
 const SETUP: &[&str] = &[
     // Linefeeds off; spaces and headers on, so every frame shows its CAN ID and PCI byte
     "ATL0", "ATS1", "ATH1",
     // ISO 15765-4 CAN, 11-bit IDs, 500 kbit/s. Never automatic search: it sends probe frames
     // that no policy approved and no audit log records.
-    "ATSP6", // Wait for replies after every request
+    "ATSP6",
+    // Wait for replies after every request
     "ATR1",
     // Show every 11-bit reply ID from 0x700 to 0x7FF; `exchange` picks the ones that count
-    "ATCRA7XX", // Adaptive timing, capped at the longest timeout (0xFF x 4 ms)
+    "ATCRA7XX",
+    // Adaptive timing, capped at the longest timeout (0xFF x 4 ms)
     "ATAT1", "ATSTFF",
 ];
 
@@ -237,10 +240,7 @@ impl<L: Link> Elm<L> {
                         "F" => false,
                         _ => return None,
                     };
-                    let pp = (pp.len() == 2).then(|| u8::from_str_radix(pp, 16).ok())??;
-                    let value =
-                        (value.len() == 2).then(|| u8::from_str_radix(value, 16).ok())??;
-                    Some((pp, value, on))
+                    Some((hex_byte(pp)?, hex_byte(value)?, on))
                 });
                 let Some((pp, value, on)) = entry.filter(|(pp, ..)| !seen.contains(pp)) else {
                     return Err(self.break_down(format!("unexpected answer to ATPPS: {line}")));
@@ -450,6 +450,15 @@ impl<L: Link> Elm<L> {
             self.flow = Some(flow);
         }
         Ok(())
+    }
+}
+
+// Exactly two hex digits. `from_str_radix` alone would also take `+1`.
+fn hex_byte(text: &str) -> Option<u8> {
+    if text.len() == 2 && text.bytes().all(|b| b.is_ascii_hexdigit()) {
+        u8::from_str_radix(text, 16).ok()
+    } else {
+        None
     }
 }
 
