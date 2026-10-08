@@ -97,6 +97,16 @@ impl Ecu {
     // Every reply to `request`, in order, after any fault is applied.
     pub(crate) fn answer(&mut self, request: &[u8], functional: bool) -> Vec<Vec<u8>> {
         let mut replies = self.handle(request, functional);
+        // ISO 14229-1: a functionally addressed request gets no "not supported" or "out of
+        // range" refusal; the module stays silent instead.
+        if functional {
+            replies.retain(|reply| {
+                !matches!(
+                    reply.as_slice(),
+                    [0x7F, _, 0x11 | 0x12 | 0x31 | 0x7E | 0x7F]
+                )
+            });
+        }
         match self.fault {
             None => {}
             Some(Fault::Silent) => replies.clear(),
@@ -285,4 +295,34 @@ fn bitmap(base: u8, pids: impl Iterator<Item = u8>, next: bool) -> u32 {
         }
     }
     bits
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::SimBus;
+
+    // The policy sends UDS only to physical IDs today, so this calls the module directly.
+    #[test]
+    fn functional_uds_requests_get_no_not_supported_refusals() {
+        let mut bus = SimBus::builtin("a7").unwrap();
+        let engine = bus.ecu_mut("engine").unwrap();
+        // ISO 14229-1: a functionally addressed request gets no NRC 0x11, 0x12, 0x31, 0x7E or
+        // 0x7F. The coding DID 0x0600 needs the extended session.
+        for request in [
+            &[0x22, 0x12, 0x34][..],
+            &[0x19, 0x04, 0x00, 0x00, 0x00, 0xFF],
+            &[0x10, 0x05],
+            &[0x22, 0x06, 0x00],
+            &[0x2E, 0x06, 0x00, 0x01],
+        ] {
+            assert_eq!(
+                engine.answer(request, true),
+                Vec::<Vec<u8>>::new(),
+                "{request:02X?}"
+            );
+            assert_eq!(engine.answer(request, false).len(), 1, "{request:02X?}");
+        }
+        // Other refusals are still sent.
+        assert_eq!(engine.answer(&[0x19, 0x02], true), [[0x7F, 0x19, 0x13]]);
+    }
 }
