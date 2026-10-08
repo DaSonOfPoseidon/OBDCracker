@@ -51,6 +51,14 @@ pub enum FixtureError {
     UnsupportedModule(String),
     /// A value doesn't fit its format, such as a VIN that isn't 17 characters.
     Value(String),
+    /// A DID that is neither a standard identification DID (0xF180..=0xF19F) nor listed for the
+    /// module in its profile.
+    UnknownDid {
+        /// The module.
+        module: String,
+        /// The DID.
+        did: u16,
+    },
 }
 
 impl fmt::Display for FixtureError {
@@ -65,6 +73,10 @@ impl fmt::Display for FixtureError {
                 "module {name}: only UDS modules with normal addressing can be simulated"
             ),
             Self::Value(message) => write!(f, "invalid fixture value: {message}"),
+            Self::UnknownDid { module, did } => write!(
+                f,
+                "module {module}: DID 0x{did:04X} isn't standard or in the profile"
+            ),
         }
     }
 }
@@ -88,6 +100,9 @@ pub struct SimBus {
     replies: VecDeque<Response>,
 }
 
+// ISO 14229-1 identification DIDs, which every module may have without a profile entry.
+const STANDARD_DIDS: std::ops::RangeInclusive<u16> = 0xF180..=0xF19F;
+
 impl SimBus {
     /// Builds the modules `fixture` describes, at the addresses `profile` gives them.
     pub fn new(profile: &Profile, fixture: &str) -> Result<Self, FixtureError> {
@@ -105,11 +120,20 @@ impl SimBus {
             if ecus.iter().any(|ecu| ecu.name == spec.module) {
                 return Err(FixtureError::DuplicateModule(spec.module));
             }
+            let dids = spec.dids()?;
+            if let Some(did) = dids.iter().find(|did| {
+                !STANDARD_DIDS.contains(&did.id) && !module.dids.iter().any(|d| d.id == did.id)
+            }) {
+                return Err(FixtureError::UnknownDid {
+                    module: spec.module,
+                    did: did.id,
+                });
+            }
             ecus.push(Ecu {
                 request_id: module.request_id,
                 response_id: module.response_id,
                 obd: spec.obd()?,
-                dids: spec.dids()?,
+                dids,
                 dtcs: spec.dtcs()?,
                 dtc_format: spec.dtc_format,
                 session: Session::Default,

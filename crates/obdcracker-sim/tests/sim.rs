@@ -403,6 +403,33 @@ fn pids_the_decoder_doesnt_know_take_any_length() {
 }
 
 #[test]
+fn fixture_dids_must_be_standard_or_in_the_profile() {
+    let a7 = Profile::builtin("a7").unwrap();
+    // 0x0601 is a typo for the profile's 0x0600 coding DID.
+    let typo = "[[ecu]]\nmodule = \"engine\"\n[[ecu.did]]\nid = 0x0601\nhex = \"00\"\n";
+    assert_eq!(
+        SimBus::new(&a7, typo).unwrap_err(),
+        FixtureError::UnknownDid {
+            module: "engine".into(),
+            did: 0x0601
+        }
+    );
+    // Standard identification DIDs (0xF180..=0xF19F) need no profile entry.
+    let standard = "[[ecu]]\nmodule = \"engine\"\n[[ecu.did]]\nid = 0xF18C\ntext = \"123\"\n";
+    assert!(SimBus::new(&a7, standard).is_ok());
+}
+
+#[test]
+fn replies_longer_than_the_short_isotp_length_are_sent_whole() {
+    let value = vec!["AB"; 5000].join(" ");
+    let fixture =
+        format!("[[ecu]]\nmodule = \"engine\"\n[[ecu.did]]\nid = 0x0600\nhex = \"{value}\"\n");
+    let mut bus = SimBus::new(&Profile::builtin("a7").unwrap(), &fixture).unwrap();
+    let reply = ask_one(&mut bus, ENGINE, &uds::read_did(0x0600));
+    assert_eq!(uds::decode_did(&reply, 0x0600).unwrap().len(), 5000);
+}
+
+#[test]
 fn modules_the_sim_cannot_address_are_refused() {
     let profile = Profile::from_toml(
         "name = \"x\"\nbitrate = 500000\n[[module]]\nname = \"body\"\nrequest_id = 0x750\n\
