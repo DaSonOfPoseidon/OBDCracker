@@ -429,6 +429,20 @@ mod requests {
     }
 
     #[test]
+    fn p2_outlasts_printing_the_longest_reply_at_the_slowest_baud_rate() {
+        // A 4095-byte reply is a first frame and 585 consecutive frames. Each prints as
+        // `7E8 21 xx xx xx xx xx xx xx \r`: 29 characters. At 9600 baud (the slowest an ELM327
+        // starts at), 8-N-1, that's 10 bits a character.
+        let lines = 1 + (4095 - 6_u32).div_ceil(7);
+        let printing = Duration::from_secs_f64(f64::from(lines * 29 * 10) / 9600.0);
+        let p2 = Elm::<FakeLink>::timing().p2;
+        assert!(
+            p2 > obdcracker_transport::elm::ADAPTER_TIMEOUT + printing,
+            "{p2:?} vs {printing:?}"
+        );
+    }
+
+    #[test]
     fn refuses_a_request_longer_than_one_frame_and_writes_nothing() {
         let mut elm = connect(car());
         let written = elm.link().written.len();

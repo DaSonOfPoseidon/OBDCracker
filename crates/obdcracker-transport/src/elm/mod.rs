@@ -62,9 +62,16 @@ const RESET_TRIES: usize = 2;
 const IDLE_CHECK: Duration = Duration::from_millis(1);
 // How long an AT command may take.
 const COMMAND_WAIT: Duration = Duration::from_secs(2);
-// How long the adapter may take to finish a request before the next one: its own timeout after
-// the last reply, plus time for the link.
-const BUSY_WAIT: Duration = Duration::from_secs(3);
+// How long the adapter may take to print the longest reply, 4095 bytes (a first frame and 585
+// consecutive frames, each a line of up to 29 characters), at 9600 baud, the slowest an ELM327
+// starts at (datasheet p. 7), 10 bits a character: about 18 s.
+const LONGEST_PRINT: Duration = Duration::from_millis(586 * 29 * 10 * 1000 / 9600 + 1);
+// How long the adapter may take to finish a request: its own timeout for the first reply, the
+// time to print the longest one, and time for the link. A working adapter ends every request
+// with its prompt long before this.
+const BUSY_WAIT: Duration = ADAPTER_TIMEOUT
+    .saturating_add(LONGEST_PRINT)
+    .saturating_add(Duration::from_secs(1));
 // The most modules whose multi-frame replies are reassembled at once. Frames from more are
 // dropped.
 const MAX_SENDERS: usize = 16;
@@ -165,12 +172,13 @@ impl<L: Link> Elm<L> {
     }
 
     /// Timing for [`crate::exchange`] through this adapter. The adapter decides when a request
-    /// is over (it prints its prompt), so P2 only has to outlast [`ADAPTER_TIMEOUT`] plus the
-    /// link's delay.
+    /// is over (it prints its prompt, which ends the exchange at once), so P2 only has to
+    /// outlast [`ADAPTER_TIMEOUT`] plus the time to print the longest reply (4095 bytes) at
+    /// 9600 baud, about 18 s, plus the link's delay.
     #[must_use]
     pub fn timing() -> Timing {
         Timing {
-            p2: ADAPTER_TIMEOUT + Duration::from_secs(1),
+            p2: BUSY_WAIT,
             ..Timing::default()
         }
     }
