@@ -219,6 +219,21 @@ mod statuses {
     }
 
     #[test]
+    fn some_statuses_mean_the_adapter_lost_its_settings() {
+        for status in [Status::LvReset, Status::LpAlert, Status::Internal(0x94)] {
+            assert!(status.loses_settings() && status.is_failure(), "{status}");
+        }
+        for status in [
+            Status::NoData,
+            Status::CanError,
+            Status::BusError,
+            Status::Unknown,
+        ] {
+            assert!(!status.loses_settings(), "{status}");
+        }
+    }
+
+    #[test]
     fn only_errors_are_failures() {
         assert!(!Status::NoData.is_failure());
         assert!(!Status::Searching.is_failure());

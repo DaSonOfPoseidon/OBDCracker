@@ -343,6 +343,8 @@ pub struct FakeLink {
     pub flooded: usize,
     /// When set, the link is gone: every write and read fails.
     pub closed: bool,
+    /// Bytes the next read returns before the adapter's own output.
+    pub inject: Vec<u8>,
 }
 
 impl FakeLink {
@@ -354,6 +356,7 @@ impl FakeLink {
             flood: None,
             flooded: 0,
             closed: false,
+            inject: Vec::new(),
         }
     }
 }
@@ -376,6 +379,12 @@ impl Link for FakeLink {
             self.flooded += 1;
             let n = buf.len().min(flood.len());
             buf[..n].copy_from_slice(&flood[..n]);
+            return Ok(n);
+        }
+        if !self.inject.is_empty() {
+            let n = buf.len().min(self.inject.len());
+            buf[..n].copy_from_slice(&self.inject[..n]);
+            self.inject.drain(..n);
             return Ok(n);
         }
         let bytes = self.elm.read(self.chunk.min(buf.len()));

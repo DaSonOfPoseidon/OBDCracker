@@ -139,6 +139,14 @@ pub enum Status {
 }
 
 impl Status {
+    /// Whether the adapter has reset, or is about to, so its settings are back at their
+    /// defaults: `LV RESET`, `LP ALERT` and any `ERRxx` (`ERR94` needs a full reset, which
+    /// restores the defaults; datasheet p. 79).
+    #[must_use]
+    pub fn loses_settings(self) -> bool {
+        matches!(self, Self::LvReset | Self::LpAlert | Self::Internal(_))
+    }
+
     /// Whether this means the command failed or the adapter is in trouble. `NO DATA`,
     /// `SEARCHING...`, `STOPPED` and `ACT ALERT` aren't failures.
     #[must_use]

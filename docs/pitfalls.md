@@ -83,6 +83,9 @@ Each entry names the class, what to check, and where it bit us.
 - **What an adapter prints is untrusted text that reaches a terminal.** Anyone in range of a Wi-Fi adapter can make
   it print escape sequences. Replace control and non-ASCII characters where the text comes in
   (`elm::codec::LineSplitter`), not at each place that prints it (M3 branch, security review).
+- **An adapter can lose its settings mid-session** (brownout, internal error). Cached state, such as the header or
+  "protocol already set", is then wrong, and a request could make it search for a protocol. Treat any sign of a reset
+  as unknown state and stop (M3 branch).
 - **Datasheet examples aren't byte-exact.** Real ELM327s print a space after every byte, the last one included; the
   datasheet's typeset examples don't show it. Test parsers against an implementation you didn't write
   (ELM327-emulator), not only against fakes built from the same reading of the datasheet (M3 branch, #13).

@@ -343,6 +343,61 @@ mod misbehaving {
         assert_eq!(elm.link().written.len(), written);
     }
 
+    // After a reset the adapter is back at its defaults (echo on, headers off, maybe automatic
+    // protocol search, which sends probe frames), so nothing more may be sent through it.
+    #[test]
+    fn an_adapter_that_reset_during_a_request_fails_closed() {
+        for output in [
+            &b"LV RESET\r"[..],
+            b"ERR94\r",
+            b"LP ALERT\r",
+            b"ELM327 v2.0\r",
+            b"BUS INIT: ...\r",
+        ] {
+            let mut elm = connect(car());
+            elm.send(&approve(Target::ObdFunctional, &[0x09, 0x02]))
+                .unwrap();
+            elm.link_mut().inject = output.to_vec();
+            assert!(elm.recv(Duration::from_secs(1)).is_err());
+            let written = elm.link().written.len();
+            let err = elm
+                .send(&approve(Target::ObdFunctional, &[0x09, 0x02]))
+                .unwrap_err();
+            assert!(
+                err.to_string().contains("unknown state"),
+                "{output:?}: {err}"
+            );
+            assert_eq!(elm.link().written.len(), written, "{output:?}");
+        }
+    }
+
+    #[test]
+    fn an_adapter_that_reset_while_answering_a_command_fails_closed() {
+        for output in [&b"LV RESET\r"[..], b"ERR94\r", b"LP ALERT\r"] {
+            let mut elm = connect(car());
+            elm.link_mut().inject = output.to_vec();
+            assert!(elm.info().is_err(), "{output:?}");
+            let written = elm.link().written.len();
+            assert!(
+                elm.send(&approve(Target::ObdFunctional, &[0x09, 0x02]))
+                    .is_err(),
+                "{output:?}"
+            );
+            assert_eq!(elm.link().written.len(), written, "{output:?}");
+        }
+    }
+
+    #[test]
+    fn a_bus_error_leaves_the_adapter_usable() {
+        let mut elm = connect(car());
+        elm.send(&approve(Target::ObdFunctional, &[0x09, 0x02]))
+            .unwrap();
+        elm.link_mut().inject = b"CAN ERROR\r".to_vec();
+        assert!(elm.recv(Duration::from_secs(1)).is_err());
+        elm.send(&approve(Target::ObdFunctional, &[0x09, 0x02]))
+            .unwrap();
+    }
+
     #[test]
     fn connect_gives_up_on_a_silent_link() {
         let start = Instant::now();

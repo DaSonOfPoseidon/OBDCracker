@@ -65,9 +65,9 @@ const LONGEST_WAIT: Duration = Duration::from_secs(3600);
 /// OBD-II IDs (0x7DF and 0x7E0..=0x7E7) its standard ones, and for any other module
 /// `30 00 00` (continue, no block limit, no gap) to the module's request ID.
 ///
-/// If the adapter doesn't finish a command or request in time, answers a command with an
-/// overlong line, or the link fails, its state is unknown, and every later call fails without
-/// writing anything: connect again.
+/// If the adapter doesn't finish a command or request in time, prints something unexpected
+/// or an overlong line, says it reset (`LV RESET`, `ERRxx`, `LP ALERT`), or the link fails,
+/// its state is unknown, and every later call fails without writing anything: connect again.
 #[derive(Debug)]
 pub struct Elm<L> {
     link: L,
@@ -223,7 +223,14 @@ impl<L: Link> Elm<L> {
                     return Err(self.break_down(format!("overlong answer to {command}")));
                 }
                 Some(Event::Line(line)) if line.eq_ignore_ascii_case(command) => {}
-                Some(Event::Line(line)) => lines.push(line),
+                Some(Event::Line(line)) => {
+                    if let Line::Status(status) = parse_line(&line)
+                        && status.loses_settings()
+                    {
+                        return Err(self.break_down(format!("the adapter said {status}")));
+                    }
+                    lines.push(line);
+                }
             }
         }
         Ok(lines)
@@ -400,14 +407,20 @@ impl<L: Link> Transport for Elm<L> {
                             return Ok(reply);
                         }
                     }
+                    // Its settings are gone: it may even search for a protocol on the next
+                    // request, sending frames nobody approved.
+                    Line::Status(status) if status.loses_settings() => {
+                        return Err(self.break_down(format!("the adapter said {status}")));
+                    }
                     Line::Status(status) if status.is_failure() => {
                         return Err(Error::Adapter(format!("the adapter said {status}")));
                     }
                     Line::Status(_) => {}
+                    // Such as a banner after a reset, or echo turned back on.
                     Line::Ok | Line::Text(_) => {
-                        return Err(Error::Adapter(format!(
-                            "unexpected output from the adapter: {text}"
-                        )));
+                        return Err(
+                            self.break_down(format!("unexpected output from the adapter: {text}"))
+                        );
                     }
                 },
             }
