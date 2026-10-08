@@ -96,6 +96,11 @@ Each entry names the class, what to check, and where it bit us.
   and treat them as failures everywhere else (M3 branch, Codex).
 - **A truncated answer must not pass as a complete one.** Accepting any well-formed subset of `AT PPS` let a cut-off
   summary skip the parameters that mattered. Require every entry you check (M3 branch, Codex).
+- **Output the driver could never have caused is evidence its assumptions broke.** `STOPPED` when the driver never
+  interrupts, or a frame from an ID the receive filter excludes, means something else wrote to the adapter or it lost
+  a setting. Stop, don't ignore it as noise (M3 branch, Codex).
+- **Check which chip version a command needs.** `AT CRA` with `X` digits is ELM327 v2.0+; most adapters say v1.4b
+  or v1.5. Look it up in the datasheet's version history before relying on a command (M3 branch).
 - **One flipped bit on a serial line can turn a command into a bus frame.** An ELM327 sends any line of hex digits to
   the bus, ignoring spaces and control characters, so `ATE0` with its `T` flipped to `D` is the request `AD E0`.
   "Contains a non-hex letter" isn't enough: no single flip of any byte, the carriage return included, may leave a line
