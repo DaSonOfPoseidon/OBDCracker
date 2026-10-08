@@ -117,9 +117,9 @@ fn answers_matches_the_echoed_did_or_subfunction() {
         &[0x19, 0x02, 0x08],
         &[0x59, 0x01, 0xFF, 0x00, 0x00, 0x01]
     ));
-    // ReadDTCInformation has no suppress bit, so bit 7 is part of the subfunction.
-    assert!(answers(&[0x19, 0x82], &[0x59, 0x82]));
-    assert!(!answers(&[0x19, 0x82], &[0x59, 0x02]));
+    // ReadDTCInformation has the suppress bit too (ISO 14229-1): it isn't part of the echo.
+    assert!(answers(&[0x19, 0x82, 0x08], &[0x59, 0x02, 0xFF]));
+    assert!(!answers(&[0x19, 0x82, 0x08], &[0x59, 0x82, 0xFF]));
     // The suppress-positive-response bit isn't echoed.
     assert!(answers(
         &[0x10, 0x83],

@@ -175,8 +175,8 @@ pub(crate) fn printable(bytes: &[u8]) -> Result<&str, Error> {
 /// A positive reply must have the request's service ID + 0x40 and echo what the request asked
 /// for: the PID (mode 09), one of the requested PIDs (mode 01, which leaves out unsupported ones),
 /// one of the requested DIDs (`ReadDataByIdentifier`), or the subfunction without its
-/// suppress-positive-response bit (`DiagnosticSessionControl`, `TesterPresent`) or as sent
-/// (`ReadDTCInformation`). A negative reply echoes only the service ID, so any
+/// suppress-positive-response bit (`DiagnosticSessionControl`, `ReadDTCInformation`,
+/// `TesterPresent`). A negative reply echoes only the service ID, so any
 /// `7F <service> <code>` for the request's service answers it. Other services are matched by
 /// service ID alone.
 #[must_use]
@@ -196,13 +196,11 @@ pub fn answers(request: &[u8], reply: &[u8]) -> bool {
             0x22 => echo
                 .first_chunk::<2>()
                 .is_some_and(|did| asked.as_chunks::<2>().0.contains(did)),
-            // Subfunction services with a suppress-positive-response bit, which isn't echoed
-            0x10 | 0x3E => match (echo.first(), asked.first()) {
+            // Subfunction services: bit 7 is the suppress-positive-response bit, not echoed
+            0x10 | 0x19 | 0x3E => match (echo.first(), asked.first()) {
                 (Some(&got), Some(&sub)) => got == sub & 0x7F,
                 _ => false,
             },
-            // ReadDTCInformation has no suppress bit: the subfunction is echoed as sent
-            0x19 => echo.first().is_some_and(|got| asked.first() == Some(got)),
             _ => true,
         },
         _ => false,

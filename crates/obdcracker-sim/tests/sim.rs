@@ -238,6 +238,10 @@ fn suppress_bit_silences_positive_replies_only() {
     assert_silent(&mut bus, ENGINE, &[0x10, 0x83]);
     assert_eq!(bus.ecu("engine").unwrap().session(), Session::Extended);
     assert_silent(&mut bus, ENGINE, &[0x3E, 0x80]);
+    assert_silent(&mut bus, ENGINE, &[0x19, 0x82, 0x08]);
+    // A refusal is sent even with the bit set.
+    let reply = ask_one(&mut bus, ENGINE, &[0x19, 0x84, 0x08]);
+    assert_eq!(nrc(&reply, 0x19), Nrc::SubFunctionNotSupported);
     assert_eq!(ask_one(&mut bus, ENGINE, &[0x3E, 0x00]), [0x7E, 0x00]);
 }
 

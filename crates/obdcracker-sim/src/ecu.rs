@@ -123,7 +123,7 @@ impl Ecu {
                 None => one(negative(sid, Nrc::ServiceNotSupported)),
             },
             0x10 => self.session_control(data),
-            0x19 => one(self.read_dtc_information(data)),
+            0x19 => self.read_dtc_information(data),
             0x22 => self.read_dids(data),
             0x3E => tester_present(data),
             _ => one(negative(sid, Nrc::ServiceNotSupported)),
@@ -148,16 +148,20 @@ impl Ecu {
         one(reply)
     }
 
-    fn read_dtc_information(&self, data: &[u8]) -> Vec<u8> {
-        let Some((&sub, args)) = data.split_first() else {
-            return negative(0x19, Nrc::IncorrectMessageLength);
+    fn read_dtc_information(&self, data: &[u8]) -> Vec<Vec<u8>> {
+        let Some((&raw, args)) = data.split_first() else {
+            return one(negative(0x19, Nrc::IncorrectMessageLength));
         };
+        let sub = raw & !SUPPRESS_POSITIVE;
         let mask = match (sub, args) {
             (0x01 | 0x02, &[mask]) => mask,
             (0x0A, []) => 0xFF,
-            (0x01 | 0x02 | 0x0A, _) => return negative(0x19, Nrc::IncorrectMessageLength),
-            _ => return negative(0x19, Nrc::SubFunctionNotSupported),
+            (0x01 | 0x02 | 0x0A, _) => return one(negative(0x19, Nrc::IncorrectMessageLength)),
+            _ => return one(negative(0x19, Nrc::SubFunctionNotSupported)),
         };
+        if raw & SUPPRESS_POSITIVE != 0 {
+            return Vec::new();
+        }
         let matching = self
             .dtcs
             .iter()
@@ -175,7 +179,7 @@ impl Ecu {
                 reply.push(status);
             }
         }
-        reply
+        one(reply)
     }
 
     fn read_dids(&self, data: &[u8]) -> Vec<Vec<u8>> {
