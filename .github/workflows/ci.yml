@@ -42,3 +42,17 @@ jobs:
       - run: rustup show
       - uses: Swatinem/rust-cache@v2
       - run: cargo build --release -p obdcracker-cli
+
+  # The ELM driver against an ELM327 implementation we didn't write (issue #13). Not required
+  # by branch protection, and it doesn't fail the run while it settles in.
+  elm-emulator:
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v5
+      - run: rustup show
+      - uses: Swatinem/rust-cache@v2
+      - uses: astral-sh/setup-uv@v6
+      # Run as a separate process only: its licence (CC BY-NC-SA 4.0) keeps it out of the repo.
+      - run: uv tool install ELM327-emulator==4.0.0
+      - run: cargo test -p obdcracker-transport --test elm_emulator -- --ignored
