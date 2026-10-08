@@ -28,7 +28,7 @@ use std::time::Duration;
 
 use obdcracker_core::isotp::Addressing;
 use obdcracker_core::uds;
-use obdcracker_profile::{Decode, Profile, ProfileError, Protocol};
+use obdcracker_profile::{Decode, Profile, ProfileError, Protocol, STANDARD_DIDS, standard_decode};
 use obdcracker_safety::{Approved, Target};
 use obdcracker_transport::{Error, Response, Transport};
 
@@ -108,20 +108,6 @@ pub struct SimBus {
     replies: VecDeque<Response>,
 }
 
-// ISO 14229-1 identification DIDs, which every module may have without a profile entry.
-const STANDARD_DIDS: std::ops::RangeInclusive<u16> = 0xF180..=0xF19F;
-
-// Standard identification DIDs that ISO 14229-1 defines as text. The rest of the range (dates,
-// sessions, and so on) can hold any bytes.
-const TEXT_DIDS: [u16; 6] = [
-    uds::did::SPARE_PART_NUMBER,
-    uds::did::SOFTWARE_NUMBER,
-    uds::did::SOFTWARE_VERSION,
-    uds::did::HARDWARE_NUMBER,
-    0xF197, // system name or engine type
-    uds::did::ODX_FILE,
-];
-
 impl SimBus {
     /// Builds the modules `fixture` describes, at the addresses `profile` gives them.
     pub fn new(profile: &Profile, fixture: &str) -> Result<Self, FixtureError> {
@@ -149,16 +135,13 @@ impl SimBus {
                         did: did.id,
                     });
                 }
-                // A value must have the format the profile, or ISO 14229-1 for a standard DID, gives.
-                let fits = match (def, did.id) {
-                    (Some(def), _) => {
-                        def.decode == Decode::Hex || uds::decode_text(&did.data).is_ok()
-                    }
-                    (None, uds::did::VIN) => {
-                        did.data.len() == 17 && did.data.iter().all(|&b| fixture::is_vin_char(b))
-                    }
-                    (None, id) if TEXT_DIDS.contains(&id) => uds::decode_text(&did.data).is_ok(),
-                    (None, _) => true,
+                // A standard DID keeps its ISO 14229-1 format even when the profile lists it.
+                let text = standard_decode(did.id) == Some(Decode::Text)
+                    || def.is_some_and(|def| def.decode == Decode::Text);
+                let fits = if did.id == uds::did::VIN {
+                    did.data.len() == 17 && did.data.iter().all(|&b| fixture::is_vin_char(b))
+                } else {
+                    !text || uds::decode_text(&did.data).is_ok()
                 };
                 if !fits {
                     return Err(FixtureError::Value(format!(

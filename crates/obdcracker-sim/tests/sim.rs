@@ -499,6 +499,21 @@ fn standard_dids_must_have_their_iso_format() {
             "0x{did:04X} {value}"
         );
     }
+    // A profile entry for a standard DID doesn't replace its ISO format.
+    let listed = Profile::from_toml(
+        "name = \"x\"\nbitrate = 500000\n[[module]]\nname = \"engine\"\nrequest_id = 0x7E0\n\
+         response_id = 0x7E8\nprotocol = \"uds\"\n[[module.did]]\nid = 0xF190\nname = \"VIN\"\n\
+         decode = \"text\"\n",
+    )
+    .unwrap();
+    let fixture = "[[ecu]]\nmodule = \"engine\"\n[[ecu.did]]\nid = 0xF190\ntext = \"abc\"\n";
+    assert!(matches!(
+        SimBus::new(&listed, fixture),
+        Err(FixtureError::Value(_))
+    ));
+    let fixture =
+        "[[ecu]]\nmodule = \"engine\"\n[[ecu.did]]\nid = 0xF190\ntext = \"WAUZZZ4G1EN000000\"\n";
+    assert!(SimBus::new(&listed, fixture).is_ok());
     // Identification DIDs without a fixed text format, such as 0xF18B (manufacturing date), take any bytes.
     let fixture = "[[ecu]]\nmodule = \"engine\"\n[[ecu.did]]\nid = 0xF18B\nhex = \"26 10 08\"\n";
     assert!(SimBus::new(&a7, fixture).is_ok());
