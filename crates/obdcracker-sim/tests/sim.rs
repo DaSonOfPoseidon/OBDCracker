@@ -479,6 +479,26 @@ fn uds_dtcs_must_fit_the_16_bit_count() {
 }
 
 #[test]
+fn standard_dids_must_have_their_iso_format() {
+    let a7 = Profile::builtin("a7").unwrap();
+    for (did, value) in [
+        (0xF190, "hex = \"FF\""),
+        (0xF190, "text = \"WAUZZZ4G1EN00000O\""),
+        (0xF187, "hex = \"FF 00\""),
+        (0xF19E, "hex = \"01\""),
+    ] {
+        let fixture = format!("[[ecu]]\nmodule = \"engine\"\n[[ecu.did]]\nid = {did}\n{value}\n");
+        assert!(
+            matches!(SimBus::new(&a7, &fixture), Err(FixtureError::Value(_))),
+            "0x{did:04X} {value}"
+        );
+    }
+    // Identification DIDs without a fixed text format, such as 0xF18B (manufacturing date), take any bytes.
+    let fixture = "[[ecu]]\nmodule = \"engine\"\n[[ecu.did]]\nid = 0xF18B\nhex = \"26 10 08\"\n";
+    assert!(SimBus::new(&a7, fixture).is_ok());
+}
+
+#[test]
 fn modules_the_sim_cannot_address_are_refused() {
     let profile = Profile::from_toml(
         "name = \"x\"\nbitrate = 500000\n[[module]]\nname = \"body\"\nrequest_id = 0x750\n\

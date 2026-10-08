@@ -109,7 +109,7 @@ fn decodes_exactly(pid: u8, data: &[u8]) -> bool {
 }
 
 // SAE J1979, as obd::decode_vin checks it.
-fn is_vin_char(b: u8) -> bool {
+pub(crate) fn is_vin_char(b: u8) -> bool {
     (b.is_ascii_digit() || b.is_ascii_uppercase()) && !matches!(b, b'I' | b'O' | b'Q')
 }
 
