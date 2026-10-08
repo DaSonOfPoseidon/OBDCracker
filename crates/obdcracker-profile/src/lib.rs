@@ -117,7 +117,7 @@ pub enum ProfileError {
     /// Two modules, or one module's request and response, share a CAN ID without each having
     /// its own extended-address byte.
     DuplicateId(u32),
-    /// Two modules share a name.
+    /// Two modules share a name, ignoring case and surrounding spaces.
     DuplicateName(String),
     /// Two modules share a VAG address.
     DuplicateVagAddress(u8),
@@ -253,7 +253,8 @@ impl Profile {
                 }
                 users.push(sub);
             }
-            if !names.insert(module.name.as_str()) {
+            // Names that differ only in case or surrounding spaces count as the same.
+            if !names.insert(module.name.trim().to_lowercase()) {
                 return Err(ProfileError::DuplicateName(module.name.clone()));
             }
             if let Some(address) = module.vag_address

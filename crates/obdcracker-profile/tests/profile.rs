@@ -135,6 +135,16 @@ fn rejects_duplicate_names_and_vag_addresses() {
         Profile::from_toml(&same_name).unwrap_err(),
         ProfileError::DuplicateName("engine".into())
     );
+    // Names that differ only in case or surrounding spaces are too easy to mix up.
+    for alias in ["Engine", " engine "] {
+        let toml = format!(
+            "{MINIMAL}\n[[module]]\nname = \"{alias}\"\nrequest_id = 0x7E1\nresponse_id = 0x7E9\nprotocol = \"uds\"\n"
+        );
+        assert_eq!(
+            Profile::from_toml(&toml).unwrap_err(),
+            ProfileError::DuplicateName(alias.into())
+        );
+    }
     let same_address = format!(
         "{MINIMAL}\n[[module]]\nname = \"tcu\"\nvag_address = 0x01\nrequest_id = 0x7E1\nresponse_id = 0x7E9\nprotocol = \"uds\"\n"
     );
