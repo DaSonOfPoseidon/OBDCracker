@@ -20,6 +20,11 @@ fn any_reply() -> impl Strategy<Value = Vec<u8>> {
 
 proptest! {
     #[test]
+    fn answers_never_panics(request in any_reply(), reply in any_reply()) {
+        let _ = obdcracker_core::response::answers(&request, &reply);
+    }
+
+    #[test]
     fn obd_decoders_never_panic(reply in any_reply()) {
         if let Ok(readings) = obd::decode_current_data(&reply) {
             readings.for_each(drop);
