@@ -87,7 +87,12 @@ Each entry names the class, what to check, and where it bit us.
   "protocol already set", is then wrong, and a request could make it search for a protocol. Treat any sign of a reset
   as unknown state and stop, **everywhere output is read**: replies, answers to setup commands, and output you're
   only draining to get to the next prompt. The first fix checked replies only; the review gate found the drain
-  (M3 branch).
+  (M3 branch). Output you can't read counts too: an overlong line could hide any of these (M3 branch, Codex).
+- **One flipped bit on a serial line can turn a command into a bus frame.** An ELM327 sends any line of hex digits to
+  the bus, ignoring spaces and control characters, so `ATE0` with its `T` flipped to `D` is the request `AD E0`.
+  "Contains a non-hex letter" isn't enough: no single flip of any byte, the carriage return included, may leave a line
+  of hex digits, and a test must flip every bit of every command. Check the echo of everything written, and rely on
+  defaults you've verified (`AT PPS`) rather than sending a risky command to set them (M3 branch, Codex).
 - **Datasheet examples aren't byte-exact.** Real ELM327s print a space after every byte, the last one included; the
   datasheet's typeset examples don't show it. Test parsers against an implementation you didn't write
   (ELM327-emulator), not only against fakes built from the same reading of the datasheet (M3 branch, #13).
@@ -111,6 +116,9 @@ Each entry names the class, what to check, and where it bit us.
   breaking the code makes the test fail.
 - **Use values the standard leaves free for "unknown" cases.** A test that a PID the decoder doesn't know takes any
   length used PID 0x10, which J1979 defines as 2 bytes; use a reserved PID.
+- **Inject faults where the real device would produce them.** Once the driver checked the echo, tests that injected a
+  reset message ahead of the echo still passed, but on the echo check instead of the reset check they were for
+  (M3 branch).
 - **A rule change can make old tests' scenarios illegal.** When you tighten behaviour, re-read the existing tests
   that exercise it. PR #9: dropping late replies made a P2* test's ECU go pending too late to count.
 - **Timing tests need margins and repeat runs.** Leave tens of milliseconds between events that must fall on either
