@@ -1,0 +1,86 @@
+# 2014 Audi A7 3.0 TDI (C7, platform 4G).
+#
+# The expected layout, from public VAG UDS references. It hasn't been read from the car yet:
+# the M5 read-only module scan confirms or corrects every entry before it's used live.
+# Standard identification DIDs (F187, F189, F190, ...) need no entry; these are the VAG extras.
+
+name = "2014 Audi A7 3.0 TDI (C7)"
+bitrate = 500000
+
+[[module]]
+name = "engine"
+vag_address = 0x01
+request_id = 0x7E0
+response_id = 0x7E8
+protocol = "uds"
+
+[[module.did]]
+id = 0xF197
+name = "system name"
+decode = "text"
+
+[[module.did]]
+id = 0xF1A3
+name = "VW ECU hardware version"
+decode = "text"
+
+[[module.did]]
+id = 0xF1AA
+name = "VW workshop system name"
+decode = "text"
+
+[[module.did]]
+id = 0x0600
+name = "VW coding value"
+decode = "hex"
+
+[[module]]
+name = "transmission"
+vag_address = 0x02
+request_id = 0x7E1
+response_id = 0x7E9
+protocol = "uds"
+
+[[module.did]]
+id = 0xF197
+name = "system name"
+decode = "text"
+
+[[module.did]]
+id = 0xF1A3
+name = "VW ECU hardware version"
+decode = "text"
+
+[[module]]
+name = "gateway"
+vag_address = 0x19
+request_id = 0x710
+response_id = 0x77A
+protocol = "uds"
+
+[[module.did]]
+id = 0xF197
+name = "system name"
+decode = "text"
+
+[[module.did]]
+id = 0x0600
+name = "VW coding value"
+decode = "hex"
+
+[[module]]
+name = "instruments"
+vag_address = 0x17
+request_id = 0x714
+response_id = 0x77E
+protocol = "uds"
+
+[[module.did]]
+id = 0xF197
+name = "system name"
+decode = "text"
+
+[[module.did]]
+id = 0x0600
+name = "VW coding value"
+decode = "hex"

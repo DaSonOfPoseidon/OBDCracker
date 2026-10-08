@@ -14,6 +14,7 @@ publish = false
 obdcracker = { path = "crates/obdcracker" }
 obdcracker-core = { path = "crates/obdcracker-core" }
 obdcracker-safety = { path = "crates/obdcracker-safety" }
+obdcracker-profile = { path = "crates/obdcracker-profile" }
 obdcracker-transport = { path = "crates/obdcracker-transport" }
 obdcracker-sim = { path = "crates/obdcracker-sim" }
 

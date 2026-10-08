@@ -19,6 +19,7 @@ areas_of() {
 		crates/obdcracker-safety/*) echo safety ;;
 		crates/obdcracker-transport/*) echo transport ;;
 		crates/obdcracker-sim/*) echo sim ;;
+		crates/obdcracker-profile/*) echo profile ;;
 		crates/obdcracker-cli/*) echo cli ;;
 		crates/obdcracker/*) echo facade ;;
 		esac
