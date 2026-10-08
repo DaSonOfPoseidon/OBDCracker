@@ -2,7 +2,8 @@
 //! (<https://github.com/Ircama/ELM327-emulator>), run as a separate process over TCP like a
 //! Wi-Fi adapter. Its licence (CC BY-NC-SA 4.0) means nothing from it is copied here.
 //!
-//! Ignored by default. To run it: `uv tool install ELM327-emulator`, then
+//! Ignored by default. To run it, install the version CI uses (`uv tool install`, see
+//! `.github/workflows/ci.yml`), then
 //! `cargo test -p obdcracker-transport --test elm_emulator -- --ignored`. Set
 //! `ELM327_EMULATOR` if the `elm` command isn't on the `PATH`.
 
