@@ -47,13 +47,24 @@ obdcracker = { git = "https://github.com/DaSonOfPoseidon/OBDCracker" }
 # obdcracker = { git = "...", features = ["sim"] }  # simulated ECUs for your own tests
 ```
 
-```rust
+```rust,no_run
+use std::error::Error;
+use std::time::Duration;
+
+use obdcracker::core::obd;
 use obdcracker::safety::{Policy, Target};
 use obdcracker::transport::{Audited, DryRun, Transport};
 
-let vin = Policy::read_only().approve(Target::ObdFunctional, &[0x09, 0x02])?;
-let mut adapter = Audited::open("session.audit.jsonl".as_ref(), DryRun::new(std::io::stdout()), "dry-run")?;
-adapter.send(&vin)?; // prints "7DF 02 09 02"
+fn main() -> Result<(), Box<dyn Error>> {
+    let vin = Policy::read_only().approve(Target::ObdFunctional, &obd::vehicle_info(0x02))?;
+    let adapter = DryRun::new(std::io::stdout());
+    let mut adapter = Audited::open("session.audit.jsonl".as_ref(), adapter, "dry-run")?;
+    adapter.send(&vin)?; // prints "7DF 02 09 02"
+    if let Ok(reply) = adapter.recv(Duration::from_secs(1)) {
+        println!("VIN {}", obd::decode_vin(&reply.payload)?);
+    }
+    Ok(())
+}
 ```
 
 The safety policy applies to importers too. Every transport takes only `Approved` requests, and there is no
@@ -99,10 +110,10 @@ the audit log records which link a session used.
 | Physical | K-line (pin 7): ISO 9141-2, ISO 14230, VW KW1281 | pre-CAN cars, a few older modules | if a profile needs it |
 | Physical | DoIP (ISO 13400, Ethernet on pins 3/11/12/13) | newer cars (around 2020+) | not yet; the transport trait leaves room |
 | Physical | CAN FD | newer cars | not yet |
-| Transport | ISO-TP (ISO 15765-2), normal and extended addressing | almost everyone; Toyota uses extended addressing | in progress (single frames done) |
+| Transport | ISO-TP (ISO 15765-2), normal and extended addressing | almost everyone; Toyota uses extended addressing | done (classic CAN, both addressing modes) |
 | Transport | VW TP2.0 | older VAG module designs | after the A7 module scan |
-| Diagnostic | OBD-II (SAE J1979) | every car | planned (M1) |
-| Diagnostic | UDS (ISO 14229) | most modules from about 2010 | planned (M1) |
+| Diagnostic | OBD-II (SAE J1979) | every car | decoding done for mode 01 (supported PIDs, load, coolant, RPM, speed, intake temp, throttle, module voltage), mode 03 DTCs, mode 09 VIN, CALID, CVN and ECU name |
+| Diagnostic | UDS (ISO 14229) | most modules from about 2010 | decoding done for 0x22 (single and multi-DID), 0x19 (0x01, 0x02, 0x0A) and negative response codes |
 | Diagnostic | KWP2000 (ISO 14230-3) over CAN | VAG TP2.0 modules, Toyota enhanced diagnostics before about 2018 | planned, with its own allowlist |
 
 The OBD port only reaches what the car's gateway passes on, which is the diagnostic bus. Internal buses (body CAN, FlexRay,
@@ -122,7 +133,8 @@ decode them. Without a profile the tool falls back to generic OBD-II.
 ## Development
 
 ```sh
-cargo fmt --check && cargo clippy --all-targets -- -D warnings && cargo test
+cargo fmt --check && cargo clippy --all-targets --all-features -- -D warnings && cargo test --all-features
+cargo build -p obdcracker-core --target thumbv7em-none-eabihf  # obdcracker-core must stay no_std
 ```
 
 You need either a local `rustup` (the version is pinned in `rust-toolchain.toml`) or Docker: `scripts/cargo.sh <args>` runs

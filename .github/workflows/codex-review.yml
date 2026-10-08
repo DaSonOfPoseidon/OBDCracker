@@ -1,0 +1,60 @@
+name: Codex review
+
+# Sets the `codex-review` status that branch protection requires before merging (see
+# scripts/codex-status.sh). It re-checks when the PR gets a new commit, when Codex posts a
+# review, and when Codex edits its summary comment, which is how it reports a finished review.
+# GitHub runs issue_comment workflows from the default branch, so that trigger uses main's copy.
+# Resolving a thread doesn't trigger workflows, so after resolving run it by hand:
+#   gh workflow run codex-review.yml -f pr=<number>
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+  pull_request_review:
+    types: [submitted]
+  issue_comment:
+    types: [created, edited]
+  workflow_dispatch:
+    inputs:
+      pr:
+        description: Pull request number
+        required: true
+
+permissions:
+  contents: read
+  issues: read
+  pull-requests: read
+  statuses: write
+
+jobs:
+  codex-status:
+    # Only Codex's own comments and reviews matter; anyone can comment on a public repo.
+    if: >-
+      github.event_name == 'pull_request' ||
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'pull_request_review' &&
+        github.event.review.user.login == 'chatgpt-codex-connector[bot]') ||
+      (github.event_name == 'issue_comment' && github.event.issue.pull_request &&
+        github.event.comment.user.login == 'chatgpt-codex-connector[bot]')
+    # The newest check of a PR supersedes older ones, since each reads the current state. This
+    # is on the job, after the filter above, so other people's comments can't cancel a check.
+    concurrency:
+      group: codex-review-${{ github.event.pull_request.number || github.event.issue.number || inputs.pr }}
+      cancel-in-progress: true
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          # main's copy of the script decides, so a PR's own changes to it don't count. (A PR
+          # that edits this workflow needs write access; fork PRs get a read-only token, which
+          # can't set statuses.)
+          ref: ${{ github.event.repository.default_branch }}
+      - run: |
+          if [ ! -x scripts/codex-status.sh ]; then
+            echo "scripts/codex-status.sh isn't on the default branch yet; skipping"
+            exit 0
+          fi
+          scripts/codex-status.sh "$PR"
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number || github.event.issue.number || inputs.pr }}

@@ -132,6 +132,42 @@ fn rejects_physical_ids_outside_the_diagnostic_range() {
     }
 }
 
+#[test]
+fn rejections_work_with_the_question_mark_operator() {
+    fn send_flash() -> Result<(), Box<dyn std::error::Error>> {
+        Policy::read_only().approve(ENGINE, &[0x10, 0x02])?;
+        Ok(())
+    }
+    assert_eq!(
+        send_flash().unwrap_err().to_string(),
+        "refused: flash-tier requests are banned"
+    );
+}
+
+#[test]
+fn rejections_say_why() {
+    for (rejection, text) in [
+        (
+            Rejection::Locked(Tier::Coding),
+            "refused: the coding tier is locked",
+        ),
+        (
+            Rejection::Locked(Tier::ClearDtc),
+            "refused: the clear-DTC tier is locked",
+        ),
+        (
+            Rejection::NotAllowed,
+            "refused: not on the allowlist, or malformed",
+        ),
+        (
+            Rejection::WrongTarget,
+            "refused: wrong target for this request",
+        ),
+    ] {
+        assert_eq!(rejection.to_string(), text);
+    }
+}
+
 fn any_target() -> impl Strategy<Value = Target> {
     prop_oneof![
         Just(Target::ObdFunctional),

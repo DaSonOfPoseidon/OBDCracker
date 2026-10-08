@@ -1,8 +1,16 @@
 name: CI
 
+# PR branches are checked once per commit through pull_request; main is checked after each merge.
 on:
   push:
+    branches: [main]
   pull_request:
+
+# A newer commit on the same PR supersedes a run still in progress. Each push to main gets its
+# own group (its run ID), because a group holds only one pending run and would drop a merge.
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   CARGO_TERM_COLOR: always
@@ -18,7 +26,11 @@ jobs:
       - run: cargo fmt --check
       - run: cargo clippy --all-targets --all-features -- -D warnings
       - run: cargo test --all-features
+      # obdcracker-core must stay no_std so dongle firmware can reuse it
+      - run: cargo build -p obdcracker-core --target thumbv7em-none-eabihf
       - uses: EmbarkStudios/cargo-deny-action@v2
+      # GitHub rejects an invalid workflow file without running it, so lint them here
+      - run: docker run --rm -v "$PWD:/repo" -w /repo rhysd/actionlint:1.7.7
 
   build:
     strategy:
