@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 2cab253f7c789cbebd2b0cf01d6e2524c7572727c6f6aa60346d2be44610d752 # shrinks to target = ObdFunctional, payload = [17, 134]

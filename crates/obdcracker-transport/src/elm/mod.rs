@@ -4,7 +4,9 @@
 //! request it puts on the bus. [`Elm`] only ever writes a fixed set of `AT` commands and the
 //! hex of [`Approved`] requests. No single bit flipped on the way, which a serial line can do,
 //! turns one of those commands into a line of hex digits, and the adapter's echo of every line
-//! is checked against what was written. It never writes a bare carriage return, which repeats
+//! is checked against what was written. A request can't be checked before the adapter sends it,
+//! so a request is refused when one flipped bit could turn it into one that changes a module's
+//! state ([`could_change_state`]). It never writes a bare carriage return, which repeats
 //! the adapter's last command. Behaviour is from the ELM327 datasheet (ELM327DS v2.0); see
 //! `docs/elm327.md`.
 
@@ -14,7 +16,7 @@ use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
 use obdcracker_core::isotp::{Addressing, MAX_SHORT_PAYLOAD, Progress, Reassembler};
-use obdcracker_safety::Approved;
+use obdcracker_safety::{Approved, could_change_state};
 
 use crate::link::{Driver, Link, LinkKind};
 use crate::{Error, Response, Timing, Transport, hex};
@@ -590,6 +592,43 @@ impl<L: Link> Elm<L> {
     }
 }
 
+// The requests one flipped bit in `line` (uppercase hex digits) could put on the bus that could
+// change a module's state, as hex. The adapter sends the hex digits it hears in pairs, ignoring
+// spaces and control characters, and takes a trailing odd digit as a response count (ELM327DS
+// pp. 8, 29). So a flip either changes a digit or drops it. A flip to a character that isn't
+// ignored gets the line refused with `?`; counting it as dropped only adds cases.
+// A flipped carriage return leaves the line unfinished, and the driver writes nothing after it.
+fn flip_hazards(line: &str) -> Vec<String> {
+    let mut hazards = Vec::new();
+    for (i, c) in line.bytes().enumerate() {
+        for bit in 0..8 {
+            let flipped = c ^ (1 << bit);
+            let heard = if flipped.is_ascii_hexdigit() {
+                if flipped.eq_ignore_ascii_case(&c) {
+                    continue;
+                }
+                format!(
+                    "{}{}{}",
+                    &line[..i],
+                    char::from(flipped).to_ascii_uppercase(),
+                    &line[i + 1..]
+                )
+            } else {
+                format!("{}{}", &line[..i], &line[i + 1..])
+            };
+            let sent = &heard[..heard.len() & !1];
+            let payload: Vec<u8> = (0..sent.len())
+                .step_by(2)
+                .filter_map(|j| hex_byte(&sent[j..j + 2]))
+                .collect();
+            if could_change_state(&payload) && !hazards.iter().any(|h| h == sent) {
+                hazards.push(sent.to_owned());
+            }
+        }
+    }
+    hazards
+}
+
 // Whether a status means the adapter's settings, or what it reads next, can't be trusted: it
 // lost its settings, or it was interrupted (`STOPPED`), which this driver never does, so
 // something else wrote to it and the interrupting byte may start the next line it reads.
@@ -615,12 +654,20 @@ impl<L: Link> Transport for Elm<L> {
                 payload.len()
             )));
         }
+        // The adapter ignores spaces, but leaving them out keeps the line short.
+        let mut line = hex(payload).replace(' ', "");
+        let hazards = flip_hazards(&line);
+        if !hazards.is_empty() {
+            return Err(Error::Adapter(format!(
+                "refused {line}: one flipped bit on the serial line could make the adapter send {}, \
+                 which could change a module's state",
+                hazards.join(" or ")
+            )));
+        }
         self.ready()?;
         self.set_target(request.target().can_id())?;
         // A setting command's prompt may have been followed by a reset.
         self.check_idle()?;
-        // The adapter ignores spaces, but leaving them out keeps the line short.
-        let mut line = hex(payload).replace(' ', "");
         line.push('\r');
         self.write(line.as_bytes())?;
         self.quiet = Duration::ZERO;

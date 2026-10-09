@@ -468,6 +468,48 @@ mod requests {
         assert_eq!(elm.link().written.len(), written);
     }
 
+    // The serial line has no checksum, and the adapter sends whatever hex digits it hears: one
+    // flipped bit can change a digit, or turn it into a control character the adapter ignores.
+    #[test]
+    fn refuses_a_request_one_flipped_bit_from_changing_a_modules_state_and_writes_nothing() {
+        for (target, payload, neighbour) in [
+            (Target::Physical(0x7E0), &[0x10, 0x03][..], "1002"), // programming session
+            (Target::Physical(0x7E0), &[0x3E, 0x00], "3D00"),     // WriteMemoryByAddress
+            (Target::ObdFunctional, &[0x01, 0x01], "1101"),       // hard reset
+            (Target::ObdFunctional, &[0x01, 0x05], "1105"),
+            (Target::ObdFunctional, &[0x01, 0x42], "1142"), // a manufacturer's reset
+            // Its first digit dropped: a manufacturer's session (C0 is 40 with the suppress bit)
+            (Target::ObdFunctional, &[0x01, 0x0C, 0x05], "10C0"),
+        ] {
+            let mut elm = connect(car());
+            let written = elm.link().written.len();
+            let err = elm.send(&approve(target, payload)).unwrap_err();
+            assert!(err.to_string().contains(neighbour), "{payload:02X?}: {err}");
+            assert_eq!(elm.link().written.len(), written, "{payload:02X?}");
+        }
+    }
+
+    #[test]
+    fn sends_the_requests_m4_needs() {
+        for (target, payload) in [
+            (Target::ObdFunctional, &[0x09, 0x02][..]),
+            (Target::ObdFunctional, &[0x09, 0x04]),
+            (Target::ObdFunctional, &[0x09, 0x06]),
+            (Target::ObdFunctional, &[0x03]),
+            (Target::ObdFunctional, &[0x01, 0x00]),
+            (Target::ObdFunctional, &[0x01, 0x0C]),
+            (
+                Target::Physical(0x7E0),
+                &[0x22, 0xF1, 0x87, 0xF1, 0x88, 0xF1, 0x89],
+            ),
+            (Target::Physical(0x7E0), &[0x22, 0xF1, 0x91, 0xF1, 0x9E]),
+        ] {
+            let mut elm = connect(car());
+            elm.send(&approve(target, payload))
+                .unwrap_or_else(|e| panic!("{payload:02X?}: {e}"));
+        }
+    }
+
     #[test]
     fn sends_a_full_seven_byte_frame() {
         let mut elm = connect(car());

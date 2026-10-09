@@ -1,6 +1,6 @@
 //! The safety policy: allowlist cases and properties that must hold for any input.
 
-use obdcracker_safety::{Policy, Rejection, Target, Tier};
+use obdcracker_safety::{Policy, Rejection, Target, Tier, could_change_state};
 use proptest::prelude::*;
 
 const ENGINE: Target = Target::Physical(0x7E0);
@@ -199,5 +199,107 @@ proptest! {
         let sub = if suppress { 0x82 } else { 0x02 };
         let result = Policy::read_only().approve(target, &[0x10, sub]);
         prop_assert_eq!(result.map(|a| a.tier()), Err(Rejection::Banned));
+    }
+}
+
+// Kept separate from the crate's own rule. Each could change a module's state if a module
+// received it: a request one flipped bit away from an approved one must never be one of these.
+const STATE_CHANGING: &[&[u8]] = &[
+    &[0x10, 0x02],             // programming session
+    &[0x10, 0x82],             // programming session, no positive response
+    &[0x10, 0x04],             // safety system session
+    &[0x10, 0x40],             // a manufacturer's session
+    &[0x10, 0x7E],             // a system supplier's session
+    &[0x11, 0x01],             // hard reset
+    &[0x11, 0x03, 0x00],       // soft reset, even with a stray byte
+    &[0x11, 0x05],             // disable rapid power shutdown
+    &[0x11, 0x42],             // a manufacturer's reset
+    &[0x28, 0x00, 0x01],       // CommunicationControl: enable rx and tx
+    &[0x28, 0x03, 0x01],       // disable rx and tx
+    &[0x2F, 0x18, 0x7F, 0x03], // IOControlByIdentifier: short-term adjustment
+    &[0x2F, 0x06, 0x00, 0x00], // return control to the ECU
+    &[0x85, 0x02],             // ControlDTCSetting off
+    &[0x85, 0x41],             // a manufacturer's DTC setting
+    &[0x04],                   // OBD-II mode 04: clear DTCs
+    &[0x04, 0x00],             // clear DTCs with a stray byte
+    &[0x14, 0xFF, 0xFF, 0xFF], // ClearDiagnosticInformation
+    &[0x14, 0xFF],             // a malformed clear
+    &[0x27, 0x01],             // SecurityAccess
+    &[0x2E, 0x00],             // a malformed WriteDataByIdentifier
+    &[0x2E, 0xF1, 0x90, 0x00], // WriteDataByIdentifier
+    &[0x31, 0x01, 0x02, 0x03], // RoutineControl start
+    &[0x31, 0x10],             // KWP2000 startRoutineByLocalIdentifier (no subfunction)
+    &[0x34, 0x00],             // RequestDownload
+    &[0x35],                   // RequestUpload
+    &[0x36, 0x01],             // TransferData
+    &[0x37],                   // RequestTransferExit
+    &[0x3D, 0x00],             // a malformed WriteMemoryByAddress
+    &[0x2C, 0x01, 0xF2, 0x00], // DynamicallyDefineDataIdentifier
+    &[0x38, 0x01],             // RequestFileTransfer
+    &[0x84, 0x00],             // SecuredDataTransmission
+    &[0x86, 0x05],             // ResponseOnEvent
+    &[0x87, 0x01, 0x05],       // LinkControl
+    &[0x30, 0x01, 0x07],       // KWP2000 inputOutputControlByLocalIdentifier
+    &[0x3B, 0x01, 0x00],       // KWP2000 writeDataByLocalIdentifier
+];
+
+// The one-flip neighbours of the requests M4 sends that leave a module alone.
+const INERT: &[&[u8]] = &[
+    &[],
+    &[0x10, 0x01],                         // default session
+    &[0x10, 0x03],                         // extended session
+    &[0x10, 0x81],                         // KWP2000 default session
+    &[0x10],                               // no session: refused with NRC 0x13
+    &[0x11, 0x00],                         // a reserved reset (01 00 with one flip)
+    &[0x11, 0x0C],                         // 01 0C with one flip
+    &[0x11],                               // no subfunction: refused with NRC 0x13
+    &[0x28, 0x06],                         // a reserved communication control
+    &[0x2F, 0x18, 0x7F, 0x18, 0x8F, 0x18], // 22 F1 87 F1 88 F1 89 with its first digit dropped
+    &[0x2F, 0x19, 0x1F, 0x19],             // 22 F1 91 F1 9E with its first digit dropped
+    &[0x2F, 0x18],                         // too short to name a control parameter
+    &[0x85, 0x03],                         // a reserved DTC setting
+    &[0x08, 0x02],                         // OBD-II mode 08: the documented exception
+    &[0x29, 0x02],                         // Authentication (ISO 14229-1:2020)
+    &[0x22, 0xF1, 0x90],
+    &[0x23, 0xF1, 0x87, 0xF1, 0x88, 0xF1, 0x89],
+    &[0x02, 0xF1, 0x87],
+    &[0x32, 0xF1, 0x87],
+    &[0x09, 0x02],
+    &[0x19, 0x02],
+    &[0x90],
+    &[0x00],
+    &[0x83],
+    &[0x3E, 0x00],
+];
+
+#[test]
+fn state_changing_requests_are_recognised() {
+    for payload in STATE_CHANGING {
+        assert!(could_change_state(payload), "{payload:02X?}");
+    }
+}
+
+#[test]
+fn inert_requests_are_recognised() {
+    for payload in INERT {
+        assert!(!could_change_state(payload), "{payload:02X?}");
+    }
+}
+
+proptest! {
+    #[test]
+    fn everything_the_policy_locks_or_bans_could_change_state(target in any_target(), payload in prop::collection::vec(any::<u8>(), 0..16)) {
+        // The policy bans ECUReset whatever its subfunction; a reserved one changes nothing.
+        let reserved_reset = payload.first() == Some(&0x11) && !matches!(payload.get(1).map(|b| b & 0x7F), Some(0x01..=0x05 | 0x40..=0x7E));
+        if !reserved_reset && let Err(Rejection::Locked(_) | Rejection::Banned) = Policy::read_only().approve(target, &payload) {
+            prop_assert!(could_change_state(&payload), "{:02X?}", payload);
+        }
+    }
+
+    #[test]
+    fn approved_reads_never_change_state(target in any_target(), payload in prop::collection::vec(any::<u8>(), 0..16)) {
+        if Policy::read_only().approve(target, &payload).is_ok() {
+            prop_assert!(!could_change_state(&payload), "{:02X?}", payload);
+        }
     }
 }

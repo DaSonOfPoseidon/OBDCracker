@@ -114,7 +114,9 @@ obdcracker --tcp 192.168.0.10:35000 vin            # a Wi-Fi adapter
 ```
 
 The ELM driver only sends single-frame requests (up to 7 bytes: the OBD-II reads, and UDS 0x22 with up to 3 DIDs), never
-lets the adapter search for a protocol, and stops if the adapter stops answering. [`docs/elm327.md`](docs/elm327.md)
+lets the adapter search for a protocol, and stops if the adapter stops answering. The serial line to the adapter has no checksum, so it
+also refuses any request that one flipped bit could turn into a reset, a session change or a write, such as `10 03`,
+`3E 00` and many multi-PID mode 01 reads; [`docs/elm327.md`](docs/elm327.md) lists what's allowed. [`docs/elm327.md`](docs/elm327.md)
 lists the adapter behaviour it relies on, with datasheet pages. It's tested against a fake adapter written from the
 datasheet, against the simulated A7, and against [ELM327-emulator](https://github.com/Ircama/ELM327-emulator), an
 independent implementation. That last test is opt-in (`#[ignore]`) and runs in a CI job that doesn't block merging yet.

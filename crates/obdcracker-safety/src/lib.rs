@@ -197,3 +197,60 @@ fn classify(payload: &[u8]) -> Option<(Tier, Kind)> {
     };
     Some(class)
 }
+
+/// Whether `payload` could change a module's state if a module received it, whatever the
+/// policy allows: everything the policy locks or bans, and services it doesn't allow that drive
+/// or silence the car.
+///
+/// For links that can corrupt a request on its way to the bus, such as an ELM327's ASCII serial
+/// line, which has no checksum: a driver refuses a request when any corruption it can't detect
+/// would turn it into one of these.
+///
+/// Services whose parameter picks the action (reset, communication control, IO control, DTC
+/// setting) count only with a parameter ISO 14229-1 defines or leaves to manufacturers; a
+/// module refuses the reserved ones (NRC 0x12 or 0x31). Writes, clears and flashing count at any
+/// length, in case a module doesn't check it, and so does every session but the default and
+/// extended ones. OBD-II mode 08 (control of an on-board system) is left out on purpose: every
+/// mode 09 request is one bit away from it, and the A7 is a diesel with no evaporative-system
+/// test for it to start.
+#[must_use]
+pub fn could_change_state(payload: &[u8]) -> bool {
+    let Some((&sid, data)) = payload.split_first() else {
+        return false;
+    };
+    // The suppress-positive-response bit doesn't change what a subfunction does. 0x40..=0x7E are
+    // the manufacturers' and system suppliers' own values.
+    let sub = data.first().map(|b| b & 0x7F);
+    match sid {
+        // DiagnosticSessionControl: anything but the default and extended sessions, compared
+        // unmasked, because KWP2000 has no suppress bit and `10 85` is its programming session
+        0x10 => !matches!(data.first(), None | Some(0x01 | 0x03 | 0x81 | 0x83)),
+        // ECUReset
+        0x11 => matches!(sub, Some(0x01..=0x05 | 0x40..=0x7E)),
+        // CommunicationControl
+        0x28 => matches!(sub, Some(0x00..=0x05 | 0x40..=0x7E)),
+        // ControlDTCSetting
+        0x85 => matches!(sub, Some(0x01 | 0x02 | 0x40..=0x7E)),
+        // IOControlByIdentifier: a 2-byte DID, then the control parameter
+        0x2F => data.get(2).is_some_and(|&parameter| parameter <= 0x03),
+        // Clearing, coding and flashing, whatever the length; then DynamicallyDefineDataIdentifier,
+        // RequestFileTransfer, SecuredDataTransmission (which can carry any request),
+        // ResponseOnEvent, LinkControl, and KWP2000's inputOutputControlByLocalIdentifier and
+        // writeDataByLocalIdentifier
+        0x04
+        | 0x14
+        | 0x27
+        | 0x2E
+        | 0x31
+        | 0x34..=0x37
+        | 0x3D
+        | 0x2C
+        | 0x38
+        | 0x84
+        | 0x86
+        | 0x87
+        | 0x30
+        | 0x3B => true,
+        _ => classify(payload).is_some_and(|(tier, _)| tier > Tier::Read),
+    }
+}
