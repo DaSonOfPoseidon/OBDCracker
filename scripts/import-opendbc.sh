@@ -5,7 +5,7 @@
 #
 #   scripts/import-opendbc.sh <make> <commit> <out.toml> <CAR>...
 #   scripts/import-opendbc.sh volkswagen 229dc7062d8986b4f954c7c97875b4ffd0044d12 \
-#       crates/obdcracker-sim/fixtures/opendbc-vag.toml AUDI_Q5_MK1 PORSCHE_MACAN_MK1
+#       crates/obdcracker-sim/fixtures/opendbc-vag.toml AUDI_Q5_MK1 AUDI_A3_MK3 PORSCHE_MACAN_MK1
 #
 # Only engine and transmission entries are imported. Add the commit to THIRD_PARTY.md.
 set -e
@@ -26,9 +26,14 @@ entries = []
 for line in open(path):
     if m := re.match(r"  CAR\.(\w+): \{", line):
         car = m.group(1)
-    elif m := re.match(r"    \(Ecu\.(\w+), (0x[0-9a-f]+), None\): \[", line):
-        key = (m.group(1), int(m.group(2), 16))
-    elif (m := re.match(r"      (b'.*'),$", line)) and car in cars and key[0] in ("engine", "transmission"):
+    elif line.startswith("    ("):
+        # Only plain (ECU, request ID, no sub-address) keys; anything else is skipped, so its
+        # replies can't be filed under the previous key.
+        m = re.fullmatch(r"    \(Ecu\.(\w+), (0x[0-9a-fA-F]+), None\): \[\n", line)
+        key = (m.group(1), int(m.group(2), 16)) if m else None
+    elif line.startswith("  }") or line.startswith("}"):
+        car = key = None
+    elif (m := re.match(r"      (b'.*'),$", line)) and car in cars and key and key[0] in ("engine", "transmission"):
         entries.append((car, key[0], key[1], ast.literal_eval(m.group(1))))
 missing = set(cars) - {e[0] for e in entries}
 if missing:
