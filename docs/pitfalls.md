@@ -47,6 +47,9 @@ Each entry names the class, what to check, and where it bit us.
   P0000 in mode 03, and 0x000000 and 0xFFFFFF ("all groups") in UDS.
 - **Names are keys.** If lookups are exact, reject names with surrounding spaces rather than trimming them in one
   place only, and treat names that differ only in case as duplicates.
+- **Escape what you write, too.** A format built by hand (JSON Lines, TOML) must escape every string it
+  interpolates, or one quote or backslash breaks the file for every reader. The audit log wrote the link name raw, so
+  a Windows port such as `\\.\COM10` made invalid JSON. Test by parsing the output back with a real parser (#2).
 - **Don't over-restrict.** Know the protocol before rejecting something: Toyota body modules legitimately share
   CAN ID 0x750 with different extended-address bytes.
 
