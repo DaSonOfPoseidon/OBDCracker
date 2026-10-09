@@ -594,6 +594,33 @@ mod misbehaving {
     }
 
     #[test]
+    fn silence_is_measured_from_the_last_byte() {
+        // A stray NUL 1 s in, then nothing until 13 s: 12 s of silence, well past the limit.
+        // Counting from the end of the wait the NUL came in would let it run on.
+        let mut elm = connect(car());
+        elm.link_mut().elm.hang_after_request = true;
+        elm.send(&approve(Target::Physical(0x7E0), &[0x09, 0x02]))
+            .unwrap();
+        let start = Instant::now();
+        elm.link_mut().scheduled = [(1, vec![0]), (13, vec![0])]
+            .into_iter()
+            .map(|(s, bytes)| (start + Duration::from_secs(s), bytes))
+            .collect();
+        let err = loop {
+            match elm.recv(Duration::from_secs(60)) {
+                Ok(_) => {}
+                Err(err) => break err,
+            }
+        };
+        assert!(err.to_string().contains("quiet"), "{err}");
+        assert!(
+            start.elapsed() < Duration::from_secs(11),
+            "{:?}",
+            start.elapsed()
+        );
+    }
+
+    #[test]
     fn a_caller_that_reads_late_doesnt_count_as_a_quiet_adapter() {
         // Silence only counts while the driver waits; the replies are waiting on the link.
         let mut elm = connect(car());

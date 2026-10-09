@@ -141,8 +141,8 @@ pub struct Elm<L> {
     // How long the driver has waited since the adapter last printed anything. Time the caller
     // spends elsewhere doesn't count; waits across calls add up.
     quiet: Duration,
-    // Bytes read from the adapter so far, to tell whether a wait heard anything.
-    heard: u64,
+    // When the last byte arrived, if since the current wait began.
+    last_byte: Option<Instant>,
     // Why the adapter can't be trusted any more.
     broken: Option<String>,
     // What it printed when it was reset, such as `ELM327 v1.4b`.
@@ -187,7 +187,7 @@ impl<L: Link> Elm<L> {
             busy: false,
             echo: None,
             quiet: Duration::ZERO,
-            heard: 0,
+            last_byte: None,
             broken: None,
             banner: String::new(),
             senders: Vec::new(),
@@ -503,7 +503,9 @@ impl<L: Link> Elm<L> {
                 return Ok(None);
             };
             let n = self.read(&mut buf, left)?;
-            self.heard = self.heard.wrapping_add(n as u64);
+            if n > 0 {
+                self.last_byte = Some(Instant::now());
+            }
             self.splitter.push(&buf[..n], &mut events);
             self.events.extend(events.drain(..));
         }
@@ -523,12 +525,13 @@ impl<L: Link> Elm<L> {
                     self.break_down("the adapter went quiet without finishing a request".into())
                 );
             };
-            let (started, heard) = (Instant::now(), self.heard);
+            let started = Instant::now();
+            self.last_byte = None;
             let event = self.next_event(deadline.min(started + left))?;
-            self.quiet = if self.heard == heard {
-                self.quiet.saturating_add(started.elapsed())
-            } else {
-                Duration::ZERO
+            // Only the silent tail counts once anything arrived.
+            self.quiet = match self.last_byte {
+                Some(at) => at.elapsed(),
+                None => self.quiet.saturating_add(started.elapsed()),
             };
             if let Some(event) = event {
                 return Ok(Some(event));

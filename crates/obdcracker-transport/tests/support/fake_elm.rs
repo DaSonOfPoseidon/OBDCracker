@@ -421,6 +421,9 @@ pub struct FakeLink {
     pub inject: Vec<u8>,
     /// Flips these bits of this byte of the next write, as a noisy serial line would.
     pub corrupt_next_write: Option<(usize, u8)>,
+    /// Bytes that arrive at these times, whatever the adapter prints. A read waits for the next
+    /// one, up to its timeout.
+    pub scheduled: VecDeque<(std::time::Instant, Vec<u8>)>,
 }
 
 impl FakeLink {
@@ -434,6 +437,7 @@ impl FakeLink {
             closed: false,
             inject: Vec::new(),
             corrupt_next_write: None,
+            scheduled: VecDeque::new(),
         }
     }
 }
@@ -452,7 +456,7 @@ impl Link for FakeLink {
         Ok(())
     }
 
-    fn read(&mut self, buf: &mut [u8], _timeout: Duration, _driver: Driver) -> io::Result<usize> {
+    fn read(&mut self, buf: &mut [u8], timeout: Duration, _driver: Driver) -> io::Result<usize> {
         if self.closed {
             return Err(io::ErrorKind::BrokenPipe.into());
         }
@@ -467,6 +471,18 @@ impl Link for FakeLink {
             let n = buf.len().min(flood.len());
             buf[..n].copy_from_slice(&flood[..n]);
             return Ok(n);
+        }
+        if let Some((at, _)) = self.scheduled.front() {
+            let now = std::time::Instant::now();
+            if *at <= now {
+                let (_, bytes) = self.scheduled.pop_front().unwrap();
+                buf[..bytes.len()].copy_from_slice(&bytes);
+                return Ok(bytes.len());
+            }
+            if !self.elm.has_output() {
+                std::thread::sleep((*at - now).min(timeout));
+                return Ok(0);
+            }
         }
         let bytes = self.elm.read(self.chunk.min(buf.len()));
         buf[..bytes.len()].copy_from_slice(&bytes);
