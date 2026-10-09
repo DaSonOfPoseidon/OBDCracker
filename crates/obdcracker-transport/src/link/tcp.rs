@@ -1,6 +1,7 @@
 use std::io::{self, Read, Write};
 use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
-use std::time::Duration;
+use std::sync::mpsc;
+use std::time::{Duration, Instant};
 
 use super::{Driver, Link, LinkKind, WRITE_TIMEOUT};
 
@@ -11,11 +12,23 @@ pub struct TcpLink {
 }
 
 impl TcpLink {
-    /// Connects to `addr`, trying each address it resolves to for up to `timeout`.
-    pub fn connect(addr: impl ToSocketAddrs, timeout: Duration) -> io::Result<Self> {
+    /// Connects to `addr`, `host:port` or `ip:port`, within `timeout` in all: looking the host
+    /// up, then trying each address it has.
+    pub fn connect(addr: &str, timeout: Duration) -> io::Result<Self> {
+        // Capped, so a huge timeout can't overflow the clock.
+        let timeout = timeout.min(Duration::from_secs(3600));
+        let deadline = Instant::now() + timeout;
         let mut last = io::Error::new(io::ErrorKind::InvalidInput, "no address to connect to");
-        for addr in addr.to_socket_addrs()? {
-            match Self::connect_one(addr, timeout) {
+        for addr in resolve_with(addr, timeout, |host| {
+            host.to_socket_addrs().map(Iterator::collect)
+        })? {
+            let Some(left) = deadline
+                .checked_duration_since(Instant::now())
+                .filter(|left| !left.is_zero())
+            else {
+                return Err(io::ErrorKind::TimedOut.into());
+            };
+            match Self::connect_one(addr, left) {
                 Ok(link) => return Ok(link),
                 Err(e) => last = e,
             }
@@ -31,6 +44,31 @@ impl TcpLink {
         stream.set_write_timeout(Some(WRITE_TIMEOUT))?;
         Ok(Self { stream })
     }
+}
+
+// The addresses `addr` names: an `ip:port` as it is, and a `host:port` looked up with `lookup`
+// on another thread, so a lookup that hangs can't hold the caller past `timeout`. The thread of
+// a lookup that runs out ends whenever the lookup does.
+fn resolve_with(
+    addr: &str,
+    timeout: Duration,
+    lookup: impl FnOnce(String) -> io::Result<Vec<SocketAddr>> + Send + 'static,
+) -> io::Result<Vec<SocketAddr>> {
+    if let Ok(addr) = addr.parse::<SocketAddr>() {
+        return Ok(vec![addr]);
+    }
+    let (tx, rx) = mpsc::channel();
+    let host = addr.to_owned();
+    std::thread::spawn(move || {
+        // The receiver may have given up already.
+        let _ = tx.send(lookup(host));
+    });
+    rx.recv_timeout(timeout).map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::TimedOut,
+            format!("looking up {addr} took too long"),
+        )
+    })?
 }
 
 impl Link for TcpLink {
@@ -73,8 +111,11 @@ mod tests {
 
     fn pair() -> (TcpLink, TcpStream) {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let link =
-            TcpLink::connect(listener.local_addr().unwrap(), Duration::from_secs(1)).unwrap();
+        let link = TcpLink::connect(
+            &listener.local_addr().unwrap().to_string(),
+            Duration::from_secs(1),
+        )
+        .unwrap();
         let (adapter, _) = listener.accept().unwrap();
         (link, adapter)
     }
@@ -117,6 +158,34 @@ mod tests {
     }
 
     #[test]
+    fn a_hostname_is_looked_up() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        TcpLink::connect(&format!("localhost:{port}"), Duration::from_secs(5)).unwrap();
+    }
+
+    #[test]
+    fn a_slow_lookup_counts_against_the_timeout() {
+        let start = Instant::now();
+        let err = resolve_with("adapter.local:35000", Duration::from_millis(100), |_| {
+            std::thread::sleep(Duration::from_secs(2));
+            Ok(Vec::new())
+        })
+        .unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::TimedOut);
+        assert!(start.elapsed() < Duration::from_secs(1));
+    }
+
+    #[test]
+    fn an_address_needs_no_lookup() {
+        let addrs = resolve_with("192.168.0.10:35000", Duration::ZERO, |_| {
+            panic!("looked up an IP address")
+        })
+        .unwrap();
+        assert_eq!(addrs, ["192.168.0.10:35000".parse().unwrap()]);
+    }
+
+    #[test]
     fn writes_have_a_deadline() {
         // A peer that stops reading would otherwise block a write forever once buffers fill.
         let (link, _adapter) = pair();
@@ -142,7 +211,7 @@ mod tests {
             .unwrap()
             .local_addr()
             .unwrap();
-        assert!(TcpLink::connect(addr, Duration::from_secs(1)).is_err());
+        assert!(TcpLink::connect(&addr.to_string(), Duration::from_secs(1)).is_err());
     }
 
     #[test]
