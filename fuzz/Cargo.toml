@@ -1,0 +1,39 @@
+# Coverage-guided fuzz targets for the parsers that read ECU replies (untrusted input).
+# Needs nightly: `cargo +nightly fuzz run <target>` from the repo root. Outside the main
+# workspace so the pinned stable toolchain never builds it.
+
+[package]
+name = "obdcracker-fuzz"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4.13"
+obdcracker-core = { path = "../crates/obdcracker-core" }
+
+[workspace]
+
+[[bin]]
+name = "isotp_reassemble"
+path = "fuzz_targets/isotp_reassemble.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "obd_replies"
+path = "fuzz_targets/obd_replies.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "uds_replies"
+path = "fuzz_targets/uds_replies.rs"
+test = false
+doc = false
+bench = false
