@@ -11,6 +11,8 @@ publish.workspace = true
 [features]
 # Simulated ECUs, for testing code built on this crate without a car
 sim = ["dep:obdcracker-sim"]
+# USB serial adapters (`transport::link::SerialLink`). TCP needs no feature.
+serial = ["obdcracker-transport/serial"]
 
 [dependencies]
 obdcracker-core.workspace = true

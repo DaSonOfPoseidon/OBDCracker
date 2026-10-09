@@ -80,8 +80,73 @@ Each entry names the class, what to check, and where it bit us.
   0x78 exception (PR #9, PR #11).
 - **Functional requests get fewer refusals.** ISO 14229-1: a server doesn't send NRC 0x11, 0x12, 0x31, 0x7E or
   0x7F to a functionally addressed request; it stays silent. A simulated module must too.
+- **What an adapter prints is untrusted text that reaches a terminal.** Anyone in range of a Wi-Fi adapter can make
+  it print escape sequences. Replace control and non-ASCII characters where the text comes in
+  (`elm::codec::LineSplitter`), not at each place that prints it (M3 branch, security review).
+- **An adapter can lose its settings mid-session** (brownout, internal error). Cached state, such as the header or
+  "protocol already set", is then wrong, and a request could make it search for a protocol. Treat any sign of a reset
+  as unknown state and stop, **everywhere output is read**: replies, answers to setup commands, and output you're
+  only draining to get to the next prompt. The first fix checked replies only; the review gate found the drain
+  (M3 branch). Output you can't read counts too: an overlong line could hide any of these (M3 branch, Codex).
+- **Check for output the device shouldn't have sent before writing to it,** including what's already buffered past
+  the prompt you stopped at, on every write path. A reset that arrives right after a prompt is otherwise only seen
+  after the next request went out. The first fix covered writes after `ready()` but not the request written right
+  after the header commands (M3 branch, Codex). Read until the deadline, not until the first read: bytes that make
+  no event (a stray NUL) aren't silence. And write down the window no check can close (a reset still in flight when
+  you write), so reviews stop at the limit instead of chasing variants.
+- **Don't ask for an answer that looks like a failure.** `ATI` answers with the same banner a reset prints, so a
+  reset during `info` looked like an answer. Take such values once, when they can't be confused (the reset banner),
+  and treat them as failures everywhere else (M3 branch, Codex).
+- **A truncated answer must not pass as a complete one.** Accepting any well-formed subset of `AT PPS` let a cut-off
+  summary skip the parameters that mattered. Require every entry you check (M3 branch, Codex).
+- **Output the driver could never have caused is evidence its assumptions broke.** `STOPPED` when the driver never
+  interrupts, or a frame from an ID the receive filter excludes, means something else wrote to the adapter or it lost
+  a setting. Stop, don't ignore it as noise (M3 branch, Codex).
+- **Check which chip version a command needs.** `AT CRA` with `X` digits is ELM327 v2.0+; most adapters say v1.4b
+  or v1.5. Look it up in the datasheet's version history before relying on a command (M3 branch).
+- **One flipped bit on a serial line can turn a command into a bus frame.** An ELM327 sends any line of hex digits to
+  the bus, ignoring spaces and control characters, so `ATE0` with its `T` flipped to `D` is the request `AD E0`.
+  "Contains a non-hex letter" isn't enough: no single flip of any byte, the carriage return included, may leave a line
+  of hex digits, and a test must flip every bit of every command. Check the echo of everything written, and rely on
+  defaults you've verified (`AT PPS`) rather than sending a risky command to set them (M3 branch, Codex).
+- **Datasheet examples aren't byte-exact.** Real ELM327s print a space after every byte, the last one included; the
+  datasheet's typeset examples don't show it. Test parsers against an implementation you didn't write
+  (ELM327-emulator), not only against fakes built from the same reading of the datasheet (M3 branch, #13).
 - **Don't confuse a transport limit with a protocol limit.** 4095 bytes is ISO-TP's short first-frame length, not a
   UDS maximum; the 32-bit escape carries more.
+
+## Links and adapters
+
+- **Every read and write on a link needs a bound, not just the bus waits.** A peer that stops reading blocks a write
+  forever once buffers fill (set a write timeout), and some calls ignore that timeout altogether: serial2's `flush`
+  waits for the OS queue to drain with no limit. Check each I/O call's docs for what its timeout covers (M3 branch,
+  Codex). A connect timeout must cover the name lookup too: `to_socket_addrs` blocks for as long as DNS takes, so
+  look the host up on another thread under the same deadline (M3 branch, Codex).
+- **Bound what you collect, not just each piece.** Each line was capped at `MAX_LINE`, but a command's answer
+  collected lines until its deadline, so an adapter streaming `A\r` could exhaust memory in two seconds. Cap the count
+  too, and check every loop that accumulates (M3 branch, Codex).
+- **Timeouts must cover the link, not only the bus.** At 9600 baud a 4095-byte reply takes about 18 s just to print,
+  so a P2 sized for the ECU timed out mid-reply. When one timer gets the allowance, give it to every timer that can
+  wait for the same data: P2, P2* and the wait for a request to finish were fixed in three rounds instead of one
+  (M3 branch, Codex). The fourth round (several modules' replies) showed the model was wrong: when the device says
+  when it's done (the ELM prompt), bound silence, not total time. The driver now fails an adapter quiet for longer
+  than its own timeout allows, and keeps a total limit only for one that never stops printing.
+- **A watchdog counts only the time you spend waiting, added up across calls.** The silence clock started at `send`,
+  so a caller that read 8 s later found a healthy adapter "hung" without reading the reply waiting on the link.
+  Restarting it on every call then let a caller polling in 1 s steps never trip it. Sum the time spent in each wait,
+  and measure the whole wait, not just the `read` inside it (a fake link returns at once) (M3 branch, review gate).
+  When bytes arrive, restart from the last byte, not from the end of the wait it came in: a wait that heard one
+  stray NUL still ended in silence, and discarding it let bytes just under twice the limit apart run forever (M3
+  branch, Codex).
+- **Don't hand back stale data to make a log complete.** Replies drained before the next request aren't returned:
+  queueing them would let a late reply to a repeated request pass for a fresh one. Document what the audit log
+  records instead (M3 branch, Codex).
+- **Pin external test tools exactly, and check the pin installs from scratch.** PyPI's ELM327-emulator 4.0.0 sdist
+  reports `4.0.0.post57`, which uv refuses; it only worked locally from a cached build. CI installs a pinned git
+  commit (M3 branch).
+- **Emulators have quirks too.** ELM327-emulator prints `SEARCHING...` on the first `01 00` even with a fixed
+  protocol, which a real adapter doesn't; the test reads PID 20 instead. Note each workaround where it's made
+  (M3 branch).
 
 ## Docs vs code
 
@@ -92,12 +157,17 @@ Each entry names the class, what to check, and where it bit us.
 
 - **A test that never ends gets the container OOM-killed** (1 GB cap) rather than failing cleanly. Run termination
   tests under `timeout`, and treat `SIGKILL` as "it hangs".
+- **`timeout` around `scripts/cargo.sh` stops only the Docker client.** The container goes on running the hung test.
+  Kill it with `docker kill` (find it with `docker ps --filter ancestor=rust:1-slim`).
 - **Termination needs an adversarial transport**: one that repeats forever, sends pending forever, or sleeps through
   each wait. `Mock` returns `Timeout` as soon as it's empty, so it can't show a hang, and a test that expects
   `Timeout` from it passes whether or not the limit works. Count what the transport handed out, and check that
   breaking the code makes the test fail.
 - **Use values the standard leaves free for "unknown" cases.** A test that a PID the decoder doesn't know takes any
   length used PID 0x10, which J1979 defines as 2 bytes; use a reserved PID.
+- **Inject faults where the real device would produce them.** Once the driver checked the echo, tests that injected a
+  reset message ahead of the echo still passed, but on the echo check instead of the reset check they were for
+  (M3 branch).
 - **A rule change can make old tests' scenarios illegal.** When you tighten behaviour, re-read the existing tests
   that exercise it. PR #9: dropping late replies made a P2* test's ECU go pending too late to count.
 - **Timing tests need margins and repeat runs.** Leave tens of milliseconds between events that must fall on either
@@ -109,6 +179,11 @@ Each entry names the class, what to check, and where it bit us.
 
 - **Gate commit and push on the checks.** Chain them with `&&`, never `;`, or a failing test still gets committed and
   pushed (PR #9, `00fdbc3`).
+- **`pkill -f <pattern>` matches the shell running it** when the pattern is in its own command line. Save the PID
+  when starting a background process and kill that.
+- **clap skips `requires` when the required argument conflicts with one that's present.** `--baud` requires
+  `--serial`, but with `--tcp` given (same group as `--serial`) clap accepted it silently. Add `conflicts_with` too,
+  and test every combination.
 - **Keep commit subjects under 72 characters.** Check before committing: once a commit is pushed, fixing its subject
   means rewriting shared history.
 - **Run clippy before committing.** Pedantic lints that caught us: `manual_is_multiple_of`, `assert!(x.is_empty())`,

@@ -2,6 +2,7 @@
 
 use std::path::PathBuf;
 use std::process::ExitCode;
+use std::time::Duration;
 
 use clap::builder::PossibleValuesParser;
 use clap::{Parser, Subcommand};
@@ -9,7 +10,14 @@ use obdcracker_core::obd;
 use obdcracker_profile::Profile;
 use obdcracker_safety::{Policy, Target};
 use obdcracker_sim::SimBus;
+use obdcracker_transport::elm::Elm;
+use obdcracker_transport::link::{Link, SerialLink, TcpLink};
 use obdcracker_transport::{Audited, DryRun, Expect, Timing, Transport, exchange, hex};
+
+// OBDLink USB adapters' rate.
+const DEFAULT_BAUD: u32 = 115_200;
+// How long to wait for a Wi-Fi adapter to accept the connection.
+const TCP_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Debug, Parser)]
 #[command(
@@ -17,12 +25,25 @@ use obdcracker_transport::{Audited, DryRun, Expect, Timing, Transport, exchange,
     about = "Talk to a car's diagnostic bus through an OBD2 adapter"
 )]
 struct Cli {
+    /// Use an ELM327/STN adapter on this serial port (e.g. /dev/ttyUSB0, COM3)
+    #[arg(long, value_name = "PORT", group = "adapter")]
+    serial: Option<PathBuf>,
+
+    /// The serial port's baud rate [default: 115200, for `OBDLink` adapters; ELM327 clones often
+    /// use 38400]
+    #[arg(long, requires = "serial", conflicts_with_all = ["tcp", "dry_run", "sim"])]
+    baud: Option<u32>,
+
+    /// Use a Wi-Fi ELM327/STN adapter at this address (e.g. 192.168.0.10:35000)
+    #[arg(long, value_name = "HOST:PORT", group = "adapter")]
+    tcp: Option<String>,
+
     /// Print the frames that would be sent without opening any adapter
-    #[arg(long)]
+    #[arg(long, group = "adapter")]
     dry_run: bool,
 
     /// Talk to a simulated car with this vehicle profile instead of an adapter
-    #[arg(long, value_name = "PROFILE", conflicts_with = "dry_run",
+    #[arg(long, value_name = "PROFILE", group = "adapter",
           value_parser = PossibleValuesParser::new(Profile::BUILTIN))]
     sim: Option<String>,
 
@@ -38,27 +59,109 @@ struct Cli {
 enum Command {
     /// Read the VIN from every emissions ECU (OBD-II mode 09 PID 02)
     Vin,
+    /// List this computer's serial ports
+    Ports,
+    /// Show what the adapter is and the voltage it sees; sends nothing on the bus
+    Adapter,
 }
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
-    if let Some(profile) = &cli.sim {
+    if let Command::Ports = cli.command {
+        return ports();
+    }
+    if let Some(port) = &cli.serial {
+        match SerialLink::open(port, cli.baud.unwrap_or(DEFAULT_BAUD)) {
+            Ok(link) => adapter(&cli, link),
+            Err(e) => {
+                eprintln!("can't open {}: {e}", port.display());
+                ExitCode::FAILURE
+            }
+        }
+    } else if let Some(addr) = &cli.tcp {
+        eprintln!(
+            "warning: a Wi-Fi adapter left plugged in drains the battery, and anyone in range can \
+             connect to it. Unplug it when you're done."
+        );
+        match TcpLink::connect(addr.as_str(), TCP_CONNECT_TIMEOUT) {
+            Ok(link) => adapter(&cli, link),
+            Err(e) => {
+                eprintln!("can't connect to {addr}: {e}");
+                ExitCode::FAILURE
+            }
+        }
+    } else if let Command::Adapter = cli.command {
+        eprintln!("`adapter` needs a real adapter: use --serial <PORT> or --tcp <HOST:PORT>");
+        ExitCode::from(2)
+    } else if let Some(profile) = &cli.sim {
         match SimBus::builtin(profile) {
-            Ok(car) => run(&cli, car, "sim"),
+            Ok(car) => run(&cli, car, "sim", Timing::default()),
             Err(e) => {
                 eprintln!("can't build the simulated car: {e}");
                 ExitCode::FAILURE
             }
         }
     } else if cli.dry_run {
-        run(&cli, DryRun::new(std::io::stdout()), "dry-run")
+        run(
+            &cli,
+            DryRun::new(std::io::stdout()),
+            "dry-run",
+            Timing::default(),
+        )
     } else {
-        eprintln!("no adapter backend is available yet; run with --dry-run or --sim <PROFILE>");
+        eprintln!(
+            "no adapter given; use --serial <PORT> or --tcp <HOST:PORT>, or try --dry-run or \
+             --sim <PROFILE>"
+        );
         ExitCode::from(2)
     }
 }
 
-fn run<T: Transport>(cli: &Cli, transport: T, link: &str) -> ExitCode {
+fn ports() -> ExitCode {
+    match SerialLink::available_ports() {
+        Ok(ports) => {
+            for port in ports {
+                println!("{}", port.display());
+            }
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("can't list serial ports: {e}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+fn adapter<L: Link>(cli: &Cli, link: L) -> ExitCode {
+    let kind = link.kind();
+    let mut elm = match Elm::connect(link) {
+        Ok(elm) => elm,
+        Err(e) => {
+            eprintln!("{e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    if let Command::Adapter = cli.command {
+        return match elm.info() {
+            Ok(info) => {
+                println!("adapter: {}", info.id);
+                if let Some(stn) = info.stn {
+                    println!("STN chip: {stn}");
+                }
+                println!("voltage: {}", info.voltage.as_deref().unwrap_or("unknown"));
+                println!("link: {}", kind.name());
+                ExitCode::SUCCESS
+            }
+            Err(e) => {
+                eprintln!("{e}");
+                ExitCode::FAILURE
+            }
+        };
+    }
+    run(cli, elm, kind.name(), Elm::<L>::timing())
+}
+
+fn run<T: Transport>(cli: &Cli, transport: T, link: &str, timing: Timing) -> ExitCode {
     let mut transport = match Audited::open(&cli.audit_log, transport, link) {
         Ok(transport) => transport,
         Err(e) => {
@@ -72,6 +175,8 @@ fn run<T: Transport>(cli: &Cli, transport: T, link: &str) -> ExitCode {
             obd::vehicle_info(0x02),
             Expect::ObdEcus,
         ),
+        // Handled before any transport is opened.
+        Command::Ports | Command::Adapter => unreachable!(),
     };
     let request = match Policy::read_only().approve(target, &payload) {
         Ok(request) => request,
@@ -80,7 +185,7 @@ fn run<T: Transport>(cli: &Cli, transport: T, link: &str) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    let replies = match exchange(&mut transport, &request, expect, Timing::default()) {
+    let replies = match exchange(&mut transport, &request, expect, timing) {
         Ok(replies) => replies,
         Err(e) => {
             eprintln!("{e}");

@@ -432,6 +432,26 @@ mod reassemble {
     }
 
     #[test]
+    fn owns_its_buffer_so_a_driver_can_keep_one_per_sender() {
+        let mut senders: Vec<(u32, Reassembler<Vec<u8>>)> = [0x7E8, 0x7E9]
+            .into_iter()
+            .map(|id| (id, Reassembler::new(vec![0; 64], Addressing::Normal)))
+            .collect();
+        for (_, rx) in &mut senders {
+            rx.feed(&VIN_FRAMES[0]).unwrap();
+        }
+        for (_, rx) in &mut senders {
+            rx.feed(&VIN_FRAMES[1]).unwrap();
+        }
+        for (_, rx) in &mut senders {
+            let Ok(Progress::Complete(payload)) = rx.feed(&VIN_FRAMES[2]) else {
+                panic!("expected a complete payload");
+            };
+            assert_eq!(&payload[3..], b"1D4GP00R55B123456");
+        }
+    }
+
+    #[test]
     fn single_frame_completes_at_once() {
         let mut buf = [0; 8];
         let mut rx = Reassembler::new(&mut buf, Addressing::Normal);

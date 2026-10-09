@@ -42,3 +42,18 @@ jobs:
       - run: rustup show
       - uses: Swatinem/rust-cache@v2
       - run: cargo build --release -p obdcracker-cli
+
+  # The ELM driver against an ELM327 implementation we didn't write (issue #13). Not required
+  # by branch protection, and it doesn't fail the run while it settles in.
+  elm-emulator:
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v5
+      - run: rustup show
+      - uses: Swatinem/rust-cache@v2
+      - uses: astral-sh/setup-uv@v6
+      # Run as a separate process only: its licence (CC BY-NC-SA 4.0) keeps it out of the repo.
+      # v4.0.0 from git: PyPI's 4.0.0 sdist says it's 4.0.0.post57, which uv refuses.
+      - run: uv tool install "elm327-emulator @ git+https://github.com/Ircama/ELM327-emulator@ff34d2f72da58c05a1b1f00d04f043e8b6c856fb"
+      - run: cargo test -p obdcracker-transport --test elm_emulator -- --ignored

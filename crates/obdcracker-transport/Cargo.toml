@@ -7,9 +7,18 @@ license.workspace = true
 repository.workspace = true
 publish.workspace = true
 
+[features]
+# USB serial adapters, such as the OBDLink EX
+serial = ["dep:serial2"]
+
 [dependencies]
 obdcracker-core.workspace = true
 obdcracker-safety.workspace = true
+serial2 = { version = "0.2.38", optional = true }
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+proptest = "1.11.0"
+serial2 = { version = "0.2.38", features = ["unix"] }

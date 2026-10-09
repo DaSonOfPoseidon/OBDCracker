@@ -15,7 +15,7 @@ obdcracker-core.workspace = true
 obdcracker-profile.workspace = true
 obdcracker-safety.workspace = true
 obdcracker-sim.workspace = true
-obdcracker-transport.workspace = true
+obdcracker-transport = { workspace = true, features = ["serial"] }
 clap = { version = "4.6.7", features = ["derive"] }
 
 [[bin]]

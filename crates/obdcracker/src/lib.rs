@@ -32,6 +32,29 @@
 //! // Flashing requests are refused at every tier.
 //! assert!(Policy::read_only().approve(Target::Physical(0x7E0), &[0x10, 0x02]).is_err());
 //! ```
+//!
+//! A real adapter is a driver over a link. An ELM327 or STN adapter (such as an `OBDLink EX`)
+//! over USB serial needs the `serial` feature; a Wi-Fi one uses TCP:
+//!
+//! ```no_run
+//! use std::time::Duration;
+//!
+//! use obdcracker::core::obd;
+//! use obdcracker::safety::{Policy, Target};
+//! use obdcracker::transport::elm::Elm;
+//! use obdcracker::transport::link::TcpLink;
+//! use obdcracker::transport::{Audited, Expect, exchange};
+//!
+//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
+//! let link = TcpLink::connect("192.168.0.10:35000", Duration::from_secs(5))?;
+//! let mut adapter = Audited::open("session.audit.jsonl".as_ref(), Elm::connect(link)?, "tcp")?;
+//! let vin = Policy::read_only().approve(Target::ObdFunctional, &obd::vehicle_info(0x02))?;
+//! for reply in exchange(&mut adapter, &vin, Expect::ObdEcus, Elm::<TcpLink>::timing())? {
+//!     println!("{:03X} {}", reply.source, obd::decode_vin(&reply.payload)?);
+//! }
+//! # Ok(())
+//! # }
+//! ```
 
 pub use obdcracker_core as core;
 pub use obdcracker_profile as profile;
