@@ -17,7 +17,9 @@ trap 'rm -rf "$tmp"' EXIT
 curl -fsSL "https://raw.githubusercontent.com/commaai/opendbc/$commit/opendbc/car/$make/fingerprints.py" \
 	-o "$tmp/fingerprints.py"
 # -I: the downloaded file is only read, never imported.
-python3 -I - "$tmp/fingerprints.py" "$make" "$commit" "$@" >"$out" <<'PY'
+# Written to a temporary file and moved into place only on success, so a failed run leaves the
+# existing fixture untouched.
+python3 -I - "$tmp/fingerprints.py" "$make" "$commit" "$@" >"$tmp/out.toml" <<'PY'
 import ast, re, sys
 
 path, make, commit, cars = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4:]
@@ -50,3 +52,4 @@ for car, ecu, request_id, data in entries:
     print(f"request_id = 0x{request_id:03X}")
     print(f'data = "{data.hex(" ").upper()}"')
 PY
+mv "$tmp/out.toml" "$out"
