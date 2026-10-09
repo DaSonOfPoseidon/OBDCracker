@@ -10,6 +10,7 @@ mod audit;
 mod dry_run;
 pub mod elm;
 mod exchange;
+pub mod fingerprint;
 pub mod link;
 mod mock;
 

@@ -34,6 +34,10 @@ from developers being careful:
   equals the original) before it touches a car.
 - `--dry-run` prints the exact frames a command would send without opening a device.
 - `--sim a7` runs a command against a simulated A7 instead of a car, through the same policy and audit log.
+- `fingerprint` identifies the engine and transmission software: calibration IDs and CVNs (OBD-II mode 09), then
+  part numbers and versions (UDS `22 F187`, `F188`, `F189`, `F191`, `F19E`), one read at a time. A tune changes the
+  CVNs, so a saved fingerprint shows later what changed. Module addresses come from `--profile`, or the OBD-II
+  engine and transmission IDs without one.
 - Every frame sent or received in a real session is appended to an audit log, along with any adapter error (such as an
   adapter mishearing a request it may already have sent).
 - **One gap: ELM327/STN adapters.** Their serial line has no checksum, and the adapter sends a request before the

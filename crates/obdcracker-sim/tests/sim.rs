@@ -194,7 +194,7 @@ fn reads_one_did() {
 #[test]
 fn reads_several_dids_in_request_order() {
     let reply = ask_one(&mut a7(), ENGINE, &[0x22, 0xF1, 0x89, 0xF1, 0x87]);
-    let values: Vec<_> = uds::decode_dids(&reply, &[(0xF189, 4), (0xF187, 10)])
+    let values: Vec<_> = uds::decode_dids(&reply, &[(0xF189, 4), (0xF187, 11)])
         .unwrap()
         .map(|value| {
             let (did, data) = value.unwrap();

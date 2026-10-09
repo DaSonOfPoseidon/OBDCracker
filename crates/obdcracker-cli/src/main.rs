@@ -7,10 +7,11 @@ use std::time::Duration;
 use clap::builder::PossibleValuesParser;
 use clap::{Parser, Subcommand};
 use obdcracker_core::obd;
-use obdcracker_profile::Profile;
+use obdcracker_profile::{Profile, Protocol};
 use obdcracker_safety::{Policy, Target};
 use obdcracker_sim::SimBus;
 use obdcracker_transport::elm::Elm;
+use obdcracker_transport::fingerprint::{self, DidValue, Fingerprint, UdsModule};
 use obdcracker_transport::link::{Link, SerialLink, TcpLink};
 use obdcracker_transport::{Audited, DryRun, Expect, Timing, Transport, exchange, hex};
 
@@ -47,6 +48,12 @@ struct Cli {
           value_parser = PossibleValuesParser::new(Profile::BUILTIN))]
     sim: Option<String>,
 
+    /// The vehicle profile that gives module addresses [default: the --sim profile, else the
+    /// OBD-II engine and transmission IDs]
+    #[arg(long, value_name = "PROFILE",
+          value_parser = PossibleValuesParser::new(Profile::BUILTIN))]
+    profile: Option<String>,
+
     /// Append every request and reply to this JSON Lines file
     #[arg(long, default_value = "obdcracker.audit.jsonl")]
     audit_log: PathBuf,
@@ -59,6 +66,9 @@ struct Cli {
 enum Command {
     /// Read the VIN from every emissions ECU (OBD-II mode 09 PID 02)
     Vin,
+    /// Identify the engine and transmission software: calibration IDs and CVNs (mode 09 PIDs 04
+    /// and 06), then part numbers and versions (UDS 0x22 F187, F188, F189, F191, F19E)
+    Fingerprint,
     /// List this computer's serial ports
     Ports,
     /// Show what the adapter is and the voltage it sees; sends nothing on the bus
@@ -169,14 +179,17 @@ fn run<T: Transport>(cli: &Cli, transport: T, link: &str, timing: Timing) -> Exi
             return ExitCode::FAILURE;
         }
     };
+    if let Command::Fingerprint = cli.command {
+        return run_fingerprint(cli, &mut transport, timing);
+    }
     let (target, payload, expect) = match cli.command {
         Command::Vin => (
             Target::ObdFunctional,
             obd::vehicle_info(0x02),
             Expect::ObdEcus,
         ),
-        // Handled before any transport is opened.
-        Command::Ports | Command::Adapter => unreachable!(),
+        // Handled before any transport is opened, or above.
+        Command::Ports | Command::Adapter | Command::Fingerprint => unreachable!(),
     };
     let request = match Policy::read_only().approve(target, &payload) {
         Ok(request) => request,
@@ -212,4 +225,95 @@ fn run<T: Transport>(cli: &Cli, transport: T, link: &str, timing: Timing) -> Exi
         }
     }
     status
+}
+
+// The engine and transmission modules from the profile, or their OBD-II IDs without one.
+fn fingerprint_modules(cli: &Cli) -> Result<Vec<UdsModule>, String> {
+    let Some(name) = cli.profile.as_ref().or(cli.sim.as_ref()) else {
+        return Ok(vec![UdsModule::obd_engine(), UdsModule::obd_transmission()]);
+    };
+    let profile = Profile::builtin(name).map_err(|e| format!("profile {name}: {e}"))?;
+    ["engine", "transmission"]
+        .into_iter()
+        .map(|wanted| {
+            let module = profile
+                .module(wanted)
+                .ok_or_else(|| format!("profile {name} has no {wanted} module"))?;
+            // Extended addressing and other protocols need support the transports don't have yet.
+            if module.protocol != Protocol::Uds || module.extended_address.is_some() {
+                return Err(format!(
+                    "profile {name}'s {wanted} module isn't plain UDS, which fingerprint needs"
+                ));
+            }
+            Ok(UdsModule {
+                name: module.name.clone(),
+                request_id: module.request_id,
+                response_id: module.response_id,
+            })
+        })
+        .collect()
+}
+
+fn run_fingerprint<T: Transport>(cli: &Cli, transport: &mut T, timing: Timing) -> ExitCode {
+    let modules = match fingerprint_modules(cli) {
+        Ok(modules) => modules,
+        Err(e) => {
+            eprintln!("{e}");
+            return ExitCode::from(2);
+        }
+    };
+    match fingerprint::fingerprint(transport, &Policy::read_only(), &modules, timing) {
+        Ok(_) if cli.dry_run => {
+            println!("dry run: nothing was sent");
+            ExitCode::SUCCESS
+        }
+        Ok(found) => {
+            print_fingerprint(&found);
+            if found.anything_answered() {
+                ExitCode::SUCCESS
+            } else {
+                eprintln!("nothing answered: check the ignition and the adapter's connection");
+                ExitCode::FAILURE
+            }
+        }
+        Err(e) => {
+            eprintln!("{e}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+fn print_fingerprint(found: &Fingerprint) {
+    if found.ecus.is_empty() {
+        println!("no ECU answered mode 09 PIDs 04 and 06");
+    }
+    for ecu in &found.ecus {
+        match &ecu.calids {
+            Ok(calids) => println!("{:03X} CALID {}", ecu.source, calids.join(", ")),
+            Err(e) => println!("{:03X} CALID ({e})", ecu.source),
+        }
+        match &ecu.cvns {
+            Ok(cvns) => {
+                let cvns: Vec<_> = cvns.iter().map(ToString::to_string).collect();
+                println!("{:03X} CVN   {}", ecu.source, cvns.join(", "));
+            }
+            Err(e) => println!("{:03X} CVN   ({e})", ecu.source),
+        }
+    }
+    for module in &found.modules {
+        for (did, value) in &module.dids {
+            match value {
+                Ok(DidValue::Text(text)) => println!(
+                    "{:03X} {} {did:04X} {text}",
+                    module.response_id, module.name
+                ),
+                // Bracketed, so binary data can't pass for text that looks like hex.
+                Ok(bytes @ DidValue::Bytes(_)) => println!(
+                    "{:03X} {} {did:04X} [{bytes}]",
+                    module.response_id, module.name
+                ),
+                Err(e) => println!("{:03X} {} {did:04X} ({e})", module.response_id, module.name),
+            }
+        }
+    }
 }
