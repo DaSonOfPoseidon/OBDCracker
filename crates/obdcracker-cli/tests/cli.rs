@@ -176,6 +176,19 @@ fn a_missing_serial_port_is_an_error() {
 // A fake ELM327 on the A7's engine and transmission, served over TCP like a Wi-Fi adapter.
 fn wifi_adapter() -> SocketAddr {
     const VIN: &[u8] = b"\x49\x02\x01WAUZZZ4G1EN000000";
+    wifi_adapter_answering(|header, request| {
+        if header == 0x7DF && request == [0x09, 0x02] {
+            vec![(0x7E8, VIN.to_vec()), (0x7E9, VIN.to_vec())]
+        } else {
+            Vec::new()
+        }
+    })
+}
+
+// A fake ELM327 served over TCP, whose bus answers each request with `answer`.
+fn wifi_adapter_answering(
+    answer: impl FnMut(u32, &[u8]) -> Vec<(u32, Vec<u8>)> + Send + 'static,
+) -> SocketAddr {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap();
     std::thread::spawn(move || {
@@ -183,13 +196,7 @@ fn wifi_adapter() -> SocketAddr {
         stream
             .set_read_timeout(Some(Duration::from_millis(10)))
             .unwrap();
-        let mut elm = FakeElm::new(Box::new(|header, request| {
-            if header == 0x7DF && request == [0x09, 0x02] {
-                vec![(0x7E8, VIN.to_vec()), (0x7E9, VIN.to_vec())]
-            } else {
-                Vec::new()
-            }
-        }));
+        let mut elm = FakeElm::new(Box::new(answer));
         let mut buf = [0; 256];
         loop {
             match stream.read(&mut buf) {
@@ -258,4 +265,120 @@ fn adapter_needs_a_real_adapter() {
     let out = obdcracker(&["--sim", "a7", "adapter"]);
     assert!(!out.status.success());
     assert!(String::from_utf8_lossy(&out.stderr).contains("--serial"));
+}
+
+const FINGERPRINT_FRAMES: [&str; 12] = [
+    "7DF 02 09 04",
+    "7DF 02 09 06",
+    "7E0 03 22 F1 87",
+    "7E0 03 22 F1 88",
+    "7E0 03 22 F1 89",
+    "7E0 03 22 F1 91",
+    "7E0 03 22 F1 9E",
+    "7E1 03 22 F1 87",
+    "7E1 03 22 F1 88",
+    "7E1 03 22 F1 89",
+    "7E1 03 22 F1 91",
+    "7E1 03 22 F1 9E",
+];
+
+#[test]
+fn dry_run_fingerprint_lists_every_frame_in_order() {
+    for profile in [None, Some("a7")] {
+        let log = temp_log("fingerprint-dry");
+        let mut args = vec!["--dry-run", "--audit-log", log.to_str().unwrap()];
+        args.extend(profile.map(|p| ["--profile", p]).into_iter().flatten());
+        args.push("fingerprint");
+        let out = obdcracker(&args);
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        let mut expected = FINGERPRINT_FRAMES.join("\n");
+        expected.push_str("\ndry run: nothing was sent\n");
+        assert_eq!(stdout, expected, "{profile:?}");
+        let audit = std::fs::read_to_string(&log).unwrap();
+        assert_eq!(audit.lines().count(), 12, "{audit}");
+        assert!(
+            audit.lines().all(|line| line.contains(r#""dir":"tx""#)),
+            "{audit}"
+        );
+    }
+}
+
+#[test]
+fn sim_fingerprint_shows_values_and_refusals() {
+    let log = temp_log("fingerprint-sim");
+    let out = obdcracker(&[
+        "--sim",
+        "a7",
+        "--audit-log",
+        log.to_str().unwrap(),
+        "fingerprint",
+    ]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    for line in [
+        "7E8 CALID 4G0907401A  0010",
+        "7E8 CVN   1A2B3C4D",
+        "7E9 CALID 4G0927158   1100",
+        "7E8 engine F187 4G0907401A",
+        "7E8 engine F19E EV_ECM30TDI0114G0907401A",
+        "7E9 transmission F189 1100",
+        "7E9 transmission F19E (service 0x22 refused: request out of range (0x31))",
+    ] {
+        assert!(
+            stdout.lines().any(|l| l == line),
+            "{line:?} missing from:\n{stdout}"
+        );
+    }
+}
+
+#[test]
+fn unknown_profile_is_refused() {
+    let out = obdcracker(&["--dry-run", "--profile", "delorean", "fingerprint"]);
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("a7"));
+}
+
+#[test]
+fn tcp_fingerprint_reads_a_multi_frame_part_number() {
+    let addr = wifi_adapter_answering(|header, request| match (header, request) {
+        (0x7DF, [0x09, 0x04]) => {
+            let mut reply = b"\x49\x04\x014G0907401A  0010".to_vec();
+            reply.resize(19, 0);
+            vec![(0x7E8, reply)]
+        }
+        (0x7E0, [0x22, 0xF1, 0x87]) => vec![(0x7E8, b"\x62\xF1\x874G0907401A ".to_vec())],
+        _ => Vec::new(),
+    });
+    let log = temp_log("fingerprint-tcp");
+    let out = obdcracker(&[
+        "--tcp",
+        &addr.to_string(),
+        "--audit-log",
+        log.to_str().unwrap(),
+        "fingerprint",
+    ]);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        stdout.contains("7E8 CALID 4G0907401A  0010\n7E8 CVN   (no reply)\n"),
+        "{stdout}"
+    );
+    assert!(stdout.contains("7E8 engine F187 4G0907401A\n"), "{stdout}");
+    assert!(
+        stdout.contains("7E9 transmission F187 (no reply)\n"),
+        "{stdout}"
+    );
 }
