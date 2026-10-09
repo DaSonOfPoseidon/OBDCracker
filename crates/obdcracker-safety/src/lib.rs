@@ -51,7 +51,8 @@ pub enum Rejection {
     Banned,
     /// Not on the allowlist, malformed, or empty.
     NotAllowed,
-    /// UDS sent to the broadcast address, or a physical ID outside 0x700..=0x7FF.
+    /// UDS sent to the broadcast address, a physical ID outside 0x700..=0x7FF, or an ID that
+    /// OBD-II ECUs answer on (0x7E8..=0x7EF).
     WrongTarget,
 }
 
@@ -147,11 +148,18 @@ enum Kind {
 }
 
 const OBD_FUNCTIONAL_ID: u32 = 0x7DF;
+// ISO 15765-4: emissions ECUs answer on 0x7E8..=0x7EF (their request ID + 8).
+const OBD_RESPONSE_IDS: core::ops::RangeInclusive<u32> = 0x7E8..=0x7EF;
 
 fn check_target(target: Target, kind: Kind) -> Result<(), Rejection> {
     match (target, kind) {
         (Target::ObdFunctional, Kind::Obd) => Ok(()),
-        (Target::Physical(id), _) if (0x700..=0x7FF).contains(&id) && id != OBD_FUNCTIONAL_ID => {
+        // Never a response ID: a request there looks like an ECU's reply to everyone listening.
+        (Target::Physical(id), _)
+            if (0x700..=0x7FF).contains(&id)
+                && id != OBD_FUNCTIONAL_ID
+                && !OBD_RESPONSE_IDS.contains(&id) =>
+        {
             Ok(())
         }
         _ => Err(Rejection::WrongTarget),
