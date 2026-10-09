@@ -34,7 +34,8 @@ from developers being careful:
   equals the original) before it touches a car.
 - `--dry-run` prints the exact frames a command would send without opening a device.
 - `--sim a7` runs a command against a simulated A7 instead of a car, through the same policy and audit log.
-- Every frame sent or received in a real session is appended to an audit log.
+- Every frame sent or received in a real session is appended to an audit log, along with any adapter error (such as an
+  adapter mishearing a request it may already have sent).
 - **One gap: ELM327/STN adapters.** Their serial line has no checksum, and the adapter sends a request before the
   driver can check its echo, so a single bit error can turn an approved read into another request, a locked or
   banned one included (a reset, clearing DTCs, one write). It can't complete a flash sequence, and the driver stops

@@ -3,8 +3,9 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
+use obdcracker_safety::Approved;
 use obdcracker_safety::{Policy, Target};
-use obdcracker_transport::{Audited, Mock, Response, Transport};
+use obdcracker_transport::{Audited, Error, Mock, Response, Transport};
 
 fn temp_log(name: &str) -> PathBuf {
     let path = std::env::temp_dir().join(format!(
@@ -94,4 +95,57 @@ fn every_line_is_valid_json_whatever_the_link_name() {
             assert_eq!(entry["link"], *link, "{line}");
         }
     }
+}
+
+// Fails every send and receive with the error it was built with.
+struct Failing(Error);
+
+impl Transport for Failing {
+    fn send(&mut self, _: &Approved) -> Result<(), Error> {
+        Err(self.0.clone())
+    }
+
+    fn recv(&mut self, _: Duration) -> Result<Response, Error> {
+        Err(self.0.clone())
+    }
+}
+
+#[test]
+fn logs_adapter_errors_as_valid_json() {
+    let log = temp_log("errors");
+    let error = Error::Adapter("the adapter echoed \"09 12\"\r\n\\ instead".to_string());
+    let mut audited = Audited::open(&log, Failing(error.clone()), "mock").unwrap();
+    let vin = Policy::read_only()
+        .approve(Target::Physical(0x7E0), &[0x09, 0x02])
+        .unwrap();
+    assert_eq!(audited.send(&vin), Err(error.clone()));
+    assert_eq!(audited.recv(Duration::from_millis(10)).unwrap_err(), error);
+
+    let audit = std::fs::read_to_string(&log).unwrap();
+    let entries: Vec<serde_json::Value> = audit
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap_or_else(|e| panic!("{line:?}: {e}")))
+        .collect();
+    // The request is logged before it's sent, then the error that sending it gave.
+    assert_eq!(entries.len(), 3, "{audit}");
+    assert_eq!(entries[0]["dir"], "tx");
+    for (entry, op) in entries[1..].iter().zip(["send", "recv"]) {
+        assert_eq!(entry["dir"], "err", "{audit}");
+        assert_eq!(entry["op"], op, "{audit}");
+        assert_eq!(entry["error"], error.to_string(), "{audit}");
+        assert_eq!(entry["link"], "mock", "{audit}");
+    }
+    assert_eq!(entries[1]["id"], "7E0", "{audit}");
+}
+
+#[test]
+fn a_timeout_isnt_an_error_worth_logging() {
+    // Every exchange ends by waiting for replies that don't come.
+    let log = temp_log("timeout");
+    let mut audited = Audited::open(&log, Mock::default(), "mock").unwrap();
+    assert_eq!(
+        audited.recv(Duration::from_millis(10)).unwrap_err(),
+        Error::Timeout
+    );
+    assert_eq!(std::fs::read_to_string(&log).unwrap(), "");
 }
