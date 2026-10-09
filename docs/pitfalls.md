@@ -120,7 +120,8 @@ Each entry names the class, what to check, and where it bit us.
 - **Every read and write on a link needs a bound, not just the bus waits.** A peer that stops reading blocks a write
   forever once buffers fill (set a write timeout), and some calls ignore that timeout altogether: serial2's `flush`
   waits for the OS queue to drain with no limit. Check each I/O call's docs for what its timeout covers (M3 branch,
-  Codex).
+  Codex). A connect timeout must cover the name lookup too: `to_socket_addrs` blocks for as long as DNS takes, so
+  look the host up on another thread under the same deadline (M3 branch, Codex).
 - **Bound what you collect, not just each piece.** Each line was capped at `MAX_LINE`, but a command's answer
   collected lines until its deadline, so an adapter streaming `A\r` could exhaust memory in two seconds. Cap the count
   too, and check every loop that accumulates (M3 branch, Codex).
@@ -133,8 +134,10 @@ Each entry names the class, what to check, and where it bit us.
 - **A watchdog counts only the time you spend waiting, added up across calls.** The silence clock started at `send`,
   so a caller that read 8 s later found a healthy adapter "hung" without reading the reply waiting on the link.
   Restarting it on every call then let a caller polling in 1 s steps never trip it. Sum the time spent in each wait,
-  reset it when anything arrives, and measure the whole wait, not just the `read` inside it (a fake link returns at
-  once) (M3 branch, review gate).
+  and measure the whole wait, not just the `read` inside it (a fake link returns at once) (M3 branch, review gate).
+  When bytes arrive, restart from the last byte, not from the end of the wait it came in: a wait that heard one
+  stray NUL still ended in silence, and discarding it let bytes just under twice the limit apart run forever (M3
+  branch, Codex).
 - **Don't hand back stale data to make a log complete.** Replies drained before the next request aren't returned:
   queueing them would let a late reply to a repeated request pass for a fresh one. Document what the audit log
   records instead (M3 branch, Codex).
