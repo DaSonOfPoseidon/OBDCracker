@@ -215,6 +215,11 @@ pub fn fingerprint<T: Transport + ?Sized>(
     let ecus = sources
         .into_iter()
         .map(|source| {
+            // How many calibration IDs the reply's framing declares, even if one of them
+            // isn't valid text, so the CVNs can still be checked against it.
+            let declared = from(&calids, source, |payload| {
+                Ok(obd::decode_calids(payload)?.count())
+            });
             let calids: Result<Vec<String>, _> = from(&calids, source, |payload| {
                 obd::decode_calids(payload)?
                     .map(|calid| calid.map(str::to_owned))
@@ -223,9 +228,9 @@ pub fn fingerprint<T: Transport + ?Sized>(
             let cvns = match from(&cvns, source, |payload| -> Result<Vec<Cvn>, _> {
                 Ok(obd::decode_cvns(payload)?.collect())
             }) {
-                Ok(cvns) => match &calids {
-                    Ok(ids) if ids.len() != cvns.len() => Err(ReadError::CountMismatch {
-                        calids: ids.len(),
+                Ok(cvns) => match declared {
+                    Ok(declared) if declared != cvns.len() => Err(ReadError::CountMismatch {
+                        calids: declared,
                         cvns: cvns.len(),
                     }),
                     _ => Ok(cvns),

@@ -279,3 +279,27 @@ fn cvns_that_dont_pair_with_the_calids_are_an_error() {
         Err(ReadError::CountMismatch { calids: 2, cvns: 1 })
     );
 }
+
+#[test]
+fn cvns_are_checked_against_the_declared_count_even_when_a_calid_is_bad() {
+    // Two well-framed calibration IDs, one with a control character, and only one CVN.
+    let mut car = Car::new(|id, request| match (id, request) {
+        (0x7DF, [0x09, 0x04]) => {
+            let mut payload = vec![0x49, 0x04, 0x02];
+            payload.extend(calid("4G0907401A  0010"));
+            payload.extend(calid("4G0907401\x1B  0020"));
+            vec![reply(0x7E8, &payload)]
+        }
+        (0x7DF, [0x09, 0x06]) => vec![reply(0x7E8, &[0x49, 0x06, 0x01, 0x1A, 0x2B, 0x3C, 0x4D])],
+        _ => Vec::new(),
+    });
+    let got = fingerprint(&mut car, &Policy::read_only(), &[], TIMING).unwrap();
+    assert_eq!(
+        got.ecus[0].calids,
+        Err(ReadError::Reply(ReplyError::Malformed))
+    );
+    assert_eq!(
+        got.ecus[0].cvns,
+        Err(ReadError::CountMismatch { calids: 2, cvns: 1 })
+    );
+}
