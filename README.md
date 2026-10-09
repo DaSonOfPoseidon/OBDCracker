@@ -35,6 +35,12 @@ from developers being careful:
 - `--dry-run` prints the exact frames a command would send without opening a device.
 - `--sim a7` runs a command against a simulated A7 instead of a car, through the same policy and audit log.
 - Every frame sent or received in a real session is appended to an audit log.
+- **One gap: ELM327/STN adapters.** Their serial line has no checksum, and the adapter sends a request before the
+  driver can check its echo, so a single bit error can turn an approved read into another request, a locked or
+  banned one included (a reset, clearing DTCs, one write). It can't complete a flash sequence, and the driver stops
+  at the first mismatched echo. It's a rare, accepted risk, reasoned in [`docs/elm327.md`](docs/elm327.md); #34
+  closes it by checking the echo before the request is sent. Prefer a USB or Wi-Fi adapter over a direct serial
+  cable.
 
 New capabilities are developed test-first: golden-frame unit tests, then property tests and fuzzing of response parsers,
 then a simulated ECU (`obdcracker-sim`), then a dry run on the car, and only then a live session.

@@ -112,6 +112,14 @@ Each entry names the class, what to check, and where it bit us.
   "Contains a non-hex letter" isn't enough: no single flip of any byte, the carriage return included, may leave a line
   of hex digits, and a test must flip every bit of every command. Check the echo of everything written, and rely on
   defaults you've verified (`AT PPS`) rather than sending a risky command to set them (M3 branch, Codex).
+- **A flipped bit can delete a character, not just change it.** The ELM327 ignores control characters and takes a
+  trailing odd digit as a response count, so a digit flipped to a control character drops out and shifts the rest of
+  the line by a nibble: `22 F1 87` becomes `2F 18 7`. When reasoning about corruption, count deletions as well as
+  substitutions, and check what the device does with the result (#19).
+- **Weigh a mitigation against what it costs.** Refusing every request with a dangerous one-bit-flip neighbour
+  (PR #31) refused most ordinary reads to guard against a bit error on the few centimetres of UART behind an adapter's
+  USB chip. Estimate how likely the failure is and what it would actually do (one frame can't flash a module), and look
+  for a fix at the source (checking the echo before the carriage return, #34), before building defences (#19).
 - **Datasheet examples aren't byte-exact.** Real ELM327s print a space after every byte, the last one included; the
   datasheet's typeset examples don't show it. Test parsers against an implementation you didn't write
   (ELM327-emulator), not only against fakes built from the same reading of the datasheet (M3 branch, #13).
