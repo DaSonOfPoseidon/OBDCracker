@@ -1,3 +1,4 @@
+use std::fmt::Write as _;
 use std::fs::{File, OpenOptions};
 use std::io::{self, Write};
 use std::path::Path;
@@ -15,6 +16,8 @@ use crate::{Error, Response, Transport, hex};
 pub struct Audited<T> {
     inner: T,
     log: File,
+    // Already escaped for a JSON string, so every line stays valid JSON whatever the link is
+    // called (Windows ports such as `\\.\COM10` contain backslashes).
     link: String,
 }
 
@@ -26,7 +29,7 @@ impl<T: Transport> Audited<T> {
         Ok(Self {
             inner,
             log,
-            link: link.into(),
+            link: json_escape(&link.into()),
         })
     }
 
@@ -55,4 +58,24 @@ impl<T: Transport> Transport for Audited<T> {
         self.record("rx", response.source, &response.payload)?;
         Ok(response)
     }
+}
+
+// Escapes `s` for the inside of a JSON string (RFC 8259, section 7): quotes, backslashes and
+// control characters U+0000 to U+001F.
+fn json_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '"' => out.push_str(r#"\""#),
+            '\\' => out.push_str(r"\\"),
+            '\n' => out.push_str(r"\n"),
+            '\r' => out.push_str(r"\r"),
+            '\t' => out.push_str(r"\t"),
+            c if c < ' ' => {
+                let _ = write!(out, "\\u{:04x}", u32::from(c));
+            }
+            c => out.push(c),
+        }
+    }
+    out
 }

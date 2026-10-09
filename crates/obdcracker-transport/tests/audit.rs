@@ -59,3 +59,39 @@ fn appends_to_an_existing_log() {
     }
     assert_eq!(std::fs::read_to_string(&log).unwrap().lines().count(), 2);
 }
+
+#[test]
+fn every_line_is_valid_json_whatever_the_link_name() {
+    let names = [
+        r#"tcp "wifi""#,
+        r"\\.\COM10",
+        "tab\there",
+        "line\nbreak",
+        "nul\0and\u{1f}and\u{7f}",
+        "ünïcode ✓",
+        "",
+    ];
+    let vin = Policy::read_only()
+        .approve(Target::ObdFunctional, &[0x09, 0x02])
+        .unwrap();
+    for (i, link) in names.iter().enumerate() {
+        let log = temp_log(&format!("escape-{i}"));
+        let mut mock = Mock::default();
+        mock.queue(Response {
+            source: 0x7E8,
+            payload: vec![0x49, 0x02, 0x01],
+        });
+        let mut audited = Audited::open(&log, mock, *link).unwrap();
+        audited.send(&vin).unwrap();
+        audited.recv(Duration::from_millis(10)).unwrap();
+
+        let audit = std::fs::read_to_string(&log).unwrap();
+        let lines: Vec<_> = audit.lines().collect();
+        assert_eq!(lines.len(), 2, "{link:?}: {audit:?}");
+        for line in lines {
+            let entry: serde_json::Value = serde_json::from_str(line)
+                .unwrap_or_else(|e| panic!("{link:?}: {line:?} isn't JSON: {e}"));
+            assert_eq!(entry["link"], *link, "{line}");
+        }
+    }
+}
