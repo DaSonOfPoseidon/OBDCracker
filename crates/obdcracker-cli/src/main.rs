@@ -269,7 +269,12 @@ fn run_fingerprint<T: Transport>(cli: &Cli, transport: &mut T, timing: Timing) -
         }
         Ok(found) => {
             print_fingerprint(&found);
-            ExitCode::SUCCESS
+            if found.anything_answered() {
+                ExitCode::SUCCESS
+            } else {
+                eprintln!("nothing answered: check the ignition and the adapter's connection");
+                ExitCode::FAILURE
+            }
         }
         Err(e) => {
             eprintln!("{e}");

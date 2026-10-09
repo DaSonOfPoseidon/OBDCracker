@@ -382,3 +382,22 @@ fn tcp_fingerprint_reads_a_multi_frame_part_number() {
         "{stdout}"
     );
 }
+
+#[test]
+fn fingerprint_fails_when_nothing_answers() {
+    let addr = wifi_adapter_answering(|_, _| Vec::new());
+    let log = temp_log("fingerprint-silent");
+    let out = obdcracker(&[
+        "--tcp",
+        &addr.to_string(),
+        "--audit-log",
+        log.to_str().unwrap(),
+        "fingerprint",
+    ]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("nothing answered"),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
