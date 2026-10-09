@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 use obdcracker_safety::{Approved, Policy, Target};
 use obdcracker_transport::elm::Elm;
 use obdcracker_transport::link::{Driver, Link, LinkKind};
-use obdcracker_transport::{Error, Expect, Response, Transport, exchange};
+use obdcracker_transport::{Audited, Error, Expect, Response, Transport, exchange};
 use support::fake_elm::{BANNER, FakeElm, FakeLink};
 
 const VIN: &[u8] = b"\x49\x02\x01WAUZZZ4G1EN000000";
@@ -413,6 +413,32 @@ mod requests {
                 .is_err()
         );
         assert_eq!(elm.link().written.len(), written);
+    }
+
+    #[test]
+    fn the_audit_log_records_a_request_the_adapter_misheard() {
+        let log = std::env::temp_dir().join(format!(
+            "obdcracker-transport-{}-misheard.jsonl",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&log);
+        let mut elm = connect(car());
+        elm.send(&approve(Target::Physical(0x7E0), &[0x09, 0x02]))
+            .unwrap();
+        while elm.recv(Duration::from_secs(1)).is_ok() {}
+        // 0902 arrives as 0912, which the adapter has sent by the time it echoes it.
+        elm.link_mut().corrupt_next_write = Some((2, 0x01));
+        let mut elm = Audited::open(&log, elm, "fake").unwrap();
+        elm.send(&approve(Target::Physical(0x7E0), &[0x09, 0x02]))
+            .unwrap();
+        let err = elm.recv(Duration::from_secs(1)).unwrap_err();
+
+        let audit = std::fs::read_to_string(&log).unwrap();
+        let last: serde_json::Value = serde_json::from_str(audit.lines().last().unwrap()).unwrap();
+        assert_eq!(last["dir"], "err", "{audit}");
+        assert_eq!(last["op"], "recv", "{audit}");
+        assert_eq!(last["error"], err.to_string(), "{audit}");
+        assert!(last["error"].as_str().unwrap().contains("0912"), "{audit}");
     }
 
     #[test]
