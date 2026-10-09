@@ -8,6 +8,9 @@ const ENGINE: Target = Target::Physical(0x7E0);
 // Kept separate from the crate's own tables, so a change to the allowlist has to change this too.
 const READ_SERVICES: [u8; 7] = [0x01, 0x03, 0x09, 0x10, 0x19, 0x22, 0x3E];
 const FLASH_SERVICES: [u8; 7] = [0x11, 0x31, 0x34, 0x35, 0x36, 0x37, 0x3D];
+// ISO 15765-4: the IDs emissions ECUs answer on (0x7E8..=0x7EF), and the request IDs they listen on.
+const OBD_RESPONSE_IDS: [u32; 8] = [0x7E8, 0x7E9, 0x7EA, 0x7EB, 0x7EC, 0x7ED, 0x7EE, 0x7EF];
+const OBD_REQUEST_IDS: [u32; 8] = [0x7E0, 0x7E1, 0x7E2, 0x7E3, 0x7E4, 0x7E5, 0x7E6, 0x7E7];
 
 fn approve(target: Target, payload: &[u8]) -> Result<Tier, Rejection> {
     Policy::read_only()
@@ -133,6 +136,30 @@ fn rejects_physical_ids_outside_the_diagnostic_range() {
 }
 
 #[test]
+fn rejects_the_ids_ecus_answer_on() {
+    for id in OBD_RESPONSE_IDS {
+        for payload in [&[0x22, 0xF1, 0x90][..], &[0x09, 0x02], &[0x3E, 0x00]] {
+            assert_eq!(
+                approve(Target::Physical(id), payload),
+                Err(Rejection::WrongTarget),
+                "{id:X}"
+            );
+        }
+    }
+}
+
+#[test]
+fn approves_reads_on_every_obd_request_id() {
+    for id in OBD_REQUEST_IDS {
+        assert_eq!(
+            approve(Target::Physical(id), &[0x22, 0xF1, 0x90]),
+            Ok(Tier::Read),
+            "{id:X}"
+        );
+    }
+}
+
+#[test]
 fn rejections_work_with_the_question_mark_operator() {
     fn send_flash() -> Result<(), Box<dyn std::error::Error>> {
         Policy::read_only().approve(ENGINE, &[0x10, 0x02])?;
@@ -173,6 +200,7 @@ fn any_target() -> impl Strategy<Value = Target> {
         Just(Target::ObdFunctional),
         any::<u32>().prop_map(Target::Physical),
         (0x700u32..=0x7FF).prop_map(Target::Physical),
+        prop::sample::select(&OBD_RESPONSE_IDS[..]).prop_map(Target::Physical),
     ]
 }
 
@@ -183,6 +211,7 @@ proptest! {
             prop_assert_eq!(approved.tier(), Tier::Read);
             prop_assert!(READ_SERVICES.contains(&payload[0]));
             prop_assert_eq!(approved.payload(), &payload[..]);
+            prop_assert!(!OBD_RESPONSE_IDS.contains(&approved.target().can_id()));
         }
     }
 
