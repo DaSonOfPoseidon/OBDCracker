@@ -30,6 +30,21 @@ pub struct UdsModule {
     pub response_id: u32,
 }
 
+impl Fingerprint {
+    /// Whether anything answered at all: a calibration ID, CVN or DID value, or a refusal.
+    /// False means the car (or the adapter's link to it) was silent.
+    #[must_use]
+    pub fn anything_answered(&self) -> bool {
+        let answered = |e: &ReadError| *e != ReadError::NoReply;
+        !self.ecus.is_empty()
+            || self
+                .modules
+                .iter()
+                .flat_map(|m| &m.dids)
+                .any(|(_, value)| value.as_ref().err().is_none_or(answered))
+    }
+}
+
 impl UdsModule {
     /// The engine ECU at its OBD-II address (request 0x7E0, reply 0x7E8, ISO 15765-4).
     #[must_use]
@@ -70,7 +85,8 @@ pub struct Calibration {
     pub source: u32,
     /// Its calibration IDs (mode 09 PID 04).
     pub calids: Result<Vec<String>, ReadError>,
-    /// Its calibration verification numbers (mode 09 PID 06), one per calibration ID.
+    /// Its calibration verification numbers (mode 09 PID 06), one per calibration ID, in the same
+    /// order. [`ReadError::CountMismatch`] if the counts differ.
     pub cvns: Result<Vec<Cvn>, ReadError>,
 }
 
@@ -93,6 +109,15 @@ pub enum ReadError {
     NoReply,
     /// The reply was a refusal or couldn't be decoded.
     Reply(response::Error),
+    /// The CVNs don't pair with the calibration IDs: J1979 gives one CVN per calibration ID, so
+    /// neither can be trusted to say which calibration a CVN checks. The raw replies are in the
+    /// audit log.
+    CountMismatch {
+        /// How many calibration IDs the ECU reported.
+        calids: usize,
+        /// How many CVNs it reported.
+        cvns: usize,
+    },
 }
 
 impl fmt::Display for ReadError {
@@ -100,6 +125,9 @@ impl fmt::Display for ReadError {
         match self {
             Self::NoReply => f.write_str("no reply"),
             Self::Reply(e) => e.fmt(f),
+            Self::CountMismatch { calids, cvns } => {
+                write!(f, "{cvns} CVNs for {calids} calibration IDs")
+            }
         }
     }
 }
@@ -167,16 +195,29 @@ pub fn fingerprint<T: Transport + ?Sized>(
     sources.dedup();
     let ecus = sources
         .into_iter()
-        .map(|source| Calibration {
-            source,
-            calids: from(&calids, source, |payload| {
+        .map(|source| {
+            let calids: Result<Vec<String>, _> = from(&calids, source, |payload| {
                 obd::decode_calids(payload)?
                     .map(|calid| calid.map(str::to_owned))
                     .collect()
-            }),
-            cvns: from(&cvns, source, |payload| {
+            });
+            let cvns = match from(&cvns, source, |payload| -> Result<Vec<Cvn>, _> {
                 Ok(obd::decode_cvns(payload)?.collect())
-            }),
+            }) {
+                Ok(cvns) => match &calids {
+                    Ok(ids) if ids.len() != cvns.len() => Err(ReadError::CountMismatch {
+                        calids: ids.len(),
+                        cvns: cvns.len(),
+                    }),
+                    _ => Ok(cvns),
+                },
+                Err(e) => Err(e),
+            };
+            Calibration {
+                source,
+                calids,
+                cvns,
+            }
         })
         .collect();
 
