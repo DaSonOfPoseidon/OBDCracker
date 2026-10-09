@@ -2,7 +2,8 @@
 #
 # Placeholders, not read from the car: part numbers, versions, calibration IDs and CVNs have the
 # right shape but made-up values. M4's read-only `fingerprint` session replaces them with the
-# car's real (tuned) values.
+# car's real (tuned) values. Part and hardware numbers are 11 bytes, space-padded, and versions
+# 4 bytes, as real VAG engines and transmissions answer (see opendbc-vag.toml).
 
 [[ecu]]
 module = "engine"
@@ -24,7 +25,7 @@ dtcs = ["P0299"]
 
 [[ecu.did]]
 id = 0xF187
-text = "4G0907401A"
+text = "4G0907401A "
 
 [[ecu.did]]
 id = 0xF189
@@ -36,7 +37,7 @@ text = "WAUZZZ4G1EN000000"
 
 [[ecu.did]]
 id = 0xF191
-text = "4G0907401"
+text = "4G0907401  "
 
 [[ecu.did]]
 id = 0xF197
@@ -81,7 +82,7 @@ dtcs = []
 
 [[ecu.did]]
 id = 0xF187
-text = "4G0927158"
+text = "4G0927158  "
 
 [[ecu.did]]
 id = 0xF189
@@ -104,7 +105,7 @@ module = "gateway"
 
 [[ecu.did]]
 id = 0xF187
-text = "4G0907468"
+text = "4G0907468  "
 
 [[ecu.did]]
 id = 0xF189
@@ -128,7 +129,7 @@ module = "instruments"
 
 [[ecu.did]]
 id = 0xF187
-text = "4G8920930"
+text = "4G8920930  "
 
 [[ecu.did]]
 id = 0xF190
