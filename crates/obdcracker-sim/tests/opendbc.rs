@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use obdcracker_core::uds::{self, did};
 use obdcracker_safety::{Approved, Policy};
-use obdcracker_transport::fingerprint::{IDENTIFICATION_DIDS, UdsModule, fingerprint};
+use obdcracker_transport::fingerprint::{DidValue, IDENTIFICATION_DIDS, UdsModule, fingerprint};
 use obdcracker_transport::{Error, Response, Timing, Transport};
 use serde::Deserialize;
 
@@ -162,13 +162,10 @@ fn fingerprint_reads_real_part_numbers() {
         let ids = &got.modules[0].dids;
         let part = ids[0].1.as_ref().unwrap();
         let version = ids[2].1.as_ref().unwrap();
-        assert_eq!(
-            part.as_str(),
-            String::from_utf8_lossy(&payload[3..14]).trim_end(),
-            "{}",
-            reply.data
-        );
-        assert_eq!(version.as_bytes(), &payload[16..20], "{}", reply.data);
+        let text =
+            |bytes: &[u8]| DidValue::Text(String::from_utf8_lossy(bytes).trim_end().to_owned());
+        assert_eq!(part, &text(&payload[3..14]), "{}", reply.data);
+        assert_eq!(version, &text(&payload[16..20]), "{}", reply.data);
         assert_eq!(got.ecus, []);
         assert_eq!(
             ids.iter().map(|&(did, _)| did).collect::<Vec<_>>(),

@@ -11,7 +11,7 @@ use obdcracker_profile::{Profile, Protocol};
 use obdcracker_safety::{Policy, Target};
 use obdcracker_sim::SimBus;
 use obdcracker_transport::elm::Elm;
-use obdcracker_transport::fingerprint::{self, Fingerprint, UdsModule};
+use obdcracker_transport::fingerprint::{self, DidValue, Fingerprint, UdsModule};
 use obdcracker_transport::link::{Link, SerialLink, TcpLink};
 use obdcracker_transport::{Audited, DryRun, Expect, Timing, Transport, exchange, hex};
 
@@ -303,8 +303,13 @@ fn print_fingerprint(found: &Fingerprint) {
     for module in &found.modules {
         for (did, value) in &module.dids {
             match value {
-                Ok(text) => println!(
+                Ok(DidValue::Text(text)) => println!(
                     "{:03X} {} {did:04X} {text}",
+                    module.response_id, module.name
+                ),
+                // Bracketed, so binary data can't pass for text that looks like hex.
+                Ok(bytes @ DidValue::Bytes(_)) => println!(
+                    "{:03X} {} {did:04X} [{bytes}]",
                     module.response_id, module.name
                 ),
                 Err(e) => println!("{:03X} {} {did:04X} ({e})", module.response_id, module.name),

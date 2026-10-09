@@ -7,7 +7,7 @@ use obdcracker_core::response;
 use obdcracker_core::uds::{self, did};
 use obdcracker_safety::{Approved, Policy, Rejection, Target};
 
-use crate::{Error, Expect, Response, Timing, Transport, exchange};
+use crate::{Error, Expect, Response, Timing, Transport, exchange, hex};
 
 /// The identification DIDs read from each module, in this order: spare part number (F187),
 /// software number (F188), software version (F189), hardware number (F191) and ODX file (F19E).
@@ -97,8 +97,27 @@ pub struct Identification {
     pub name: String,
     /// The CAN ID it answers on.
     pub response_id: u32,
-    /// Each of [`IDENTIFICATION_DIDS`] and its text, without padding.
-    pub dids: Vec<(u16, Result<String, ReadError>)>,
+    /// Each of [`IDENTIFICATION_DIDS`] and its value.
+    pub dids: Vec<(u16, Result<DidValue, ReadError>)>,
+}
+
+/// An identification DID's value. ISO 14229-1 makes these text, but some modules answer with
+/// binary data, which is kept rather than dropped.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DidValue {
+    /// Printable text, without its padding.
+    Text(String),
+    /// Data that isn't printable text, as received. Shown as hex.
+    Bytes(Vec<u8>),
+}
+
+impl fmt::Display for DidValue {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Text(text) => f.write_str(text),
+            Self::Bytes(bytes) => f.write_str(&hex(bytes)),
+        }
+    }
 }
 
 /// Why one value is missing from a fingerprint. Modules often don't support every DID, so this
@@ -233,8 +252,10 @@ pub fn fingerprint<T: Transport + ?Sized>(
             ) {
                 Ok(replies) => replies.first().map_or(Err(ReadError::NoReply), |reply| {
                     uds::decode_did(&reply.payload, did)
-                        .and_then(uds::decode_text)
-                        .map(str::to_owned)
+                        .map(|data| match uds::decode_text(data) {
+                            Ok(text) => DidValue::Text(text.to_owned()),
+                            Err(_) => DidValue::Bytes(data.to_vec()),
+                        })
                         .map_err(ReadError::Reply)
                 }),
                 Err(Error::Timeout) => Err(ReadError::NoReply),

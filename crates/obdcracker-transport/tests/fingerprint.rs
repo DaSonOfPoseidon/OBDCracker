@@ -7,7 +7,7 @@ use obdcracker_core::obd::Cvn;
 use obdcracker_core::response::{Error as ReplyError, NegativeResponse, Nrc};
 use obdcracker_safety::{Approved, Policy, Rejection};
 use obdcracker_transport::fingerprint::{
-    Calibration, FingerprintError, IDENTIFICATION_DIDS, ReadError, UdsModule, fingerprint,
+    Calibration, DidValue, FingerprintError, IDENTIFICATION_DIDS, ReadError, UdsModule, fingerprint,
 };
 use obdcracker_transport::{Error, Response, Timing, Transport, hex};
 
@@ -132,9 +132,12 @@ fn reads_calibrations_then_each_modules_dids() {
         ("engine", 0x7E8)
     );
     for (did, value) in &engine.dids {
-        assert_eq!(value.as_deref(), Ok("4G0907401A"), "{did:04X}");
+        assert_eq!(value, &Ok(DidValue::Text("4G0907401A".into())), "{did:04X}");
     }
-    assert_eq!(tcu.dids[0], (0xF187, Ok("4G0927158".to_owned())));
+    assert_eq!(
+        tcu.dids[0],
+        (0xF187, Ok(DidValue::Text("4G0927158".into())))
+    );
     let refused = Err(ReadError::Reply(ReplyError::Negative(NegativeResponse {
         sid: 0x22,
         nrc: Nrc::RequestOutOfRange,
@@ -163,14 +166,14 @@ fn a_silent_module_and_a_silent_car_lose_only_their_values() {
 
 #[test]
 fn a_bad_reply_is_reported_not_trusted() {
-    // A part number with a control character, and CALIDs of nothing but padding
+    // CALIDs of nothing but padding, and DIDs echoed with no data
     let mut car = Car::new(|id, request| match (id, request) {
         (0x7DF, [0x09, 0x04]) => {
             let mut payload = vec![0x49, 0x04, 0x01];
             payload.extend([0; 16]);
             vec![reply(0x7E8, &payload)]
         }
-        (0x7E0, [0x22, high, low]) => vec![reply(0x7E8, &[0x62, *high, *low, b'4', 0x1B, b'G'])],
+        (0x7E0, [0x22, high, low]) => vec![reply(0x7E8, &[0x62, *high, *low])],
         _ => Vec::new(),
     });
     let got = fingerprint(
@@ -188,7 +191,35 @@ fn a_bad_reply_is_reported_not_trusted() {
         got.modules[0]
             .dids
             .iter()
-            .all(|(_, v)| *v == Err(ReadError::Reply(ReplyError::Malformed)))
+            .all(|(_, v)| *v == Err(ReadError::Reply(ReplyError::TooShort)))
+    );
+}
+
+#[test]
+fn a_did_that_isnt_text_keeps_its_bytes() {
+    // Some modules answer F188 or F19E with binary data: it's kept, shown as hex, not dropped.
+    let mut car = Car::new(|id, request| match (id, request) {
+        (0x7E0, [0x22, high, low]) => vec![reply(0x7E8, &[0x62, *high, *low, b'4', 0x1B, 0xFF])],
+        _ => Vec::new(),
+    });
+    let got = fingerprint(
+        &mut car,
+        &Policy::read_only(),
+        &[UdsModule::obd_engine()],
+        TIMING,
+    )
+    .unwrap();
+    for (did, value) in &got.modules[0].dids {
+        assert_eq!(
+            value,
+            &Ok(DidValue::Bytes(vec![b'4', 0x1B, 0xFF])),
+            "{did:04X}"
+        );
+        assert_eq!(value.as_ref().unwrap().to_string(), "34 1B FF");
+    }
+    assert_eq!(
+        DidValue::Text("4G0907401A".into()).to_string(),
+        "4G0907401A"
     );
 }
 
