@@ -1,0 +1,45 @@
+name: Fuzz
+
+# Coverage-guided fuzzing of the reply parsers (issue #6). cargo-fuzz needs nightly while the repo
+# pins stable, so this runs weekly and on demand, and isn't a required check. A crash is uploaded
+# as an artifact; add it to the crate's tests as a regression test.
+on:
+  schedule:
+    - cron: "17 4 * * 1"
+  workflow_dispatch:
+    inputs:
+      seconds:
+        description: How long to fuzz each target
+        default: "300"
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  # rust-toolchain.toml pins stable; cargo-fuzz needs nightly.
+  RUSTUP_TOOLCHAIN: nightly
+
+jobs:
+  fuzz:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [isotp_reassemble, obd_replies, uds_replies]
+    steps:
+      - uses: actions/checkout@v5
+      - run: rustup toolchain install nightly --profile minimal
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: fuzz
+      - run: cargo install --locked cargo-fuzz --version 0.13.2
+      - name: Fuzz ${{ matrix.target }}
+        env:
+          SECONDS_PER_TARGET: ${{ inputs.seconds || '300' }}
+        run: cargo fuzz run "${{ matrix.target }}" -- -max_total_time="$SECONDS_PER_TARGET"
+      - if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: crash-${{ matrix.target }}
+          path: fuzz/artifacts/${{ matrix.target }}
