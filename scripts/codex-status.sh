@@ -28,9 +28,10 @@ head_ref=$(gh api "repos/$repo/pulls/$pr" --jq .head.ref)
 
 # When this exact commit was last pushed to the PR's branch, from GitHub's own push records.
 # Codex's summary names commits by a 7-character SHA, which someone could forge a collision
-# for, so a review only counts if it finished after this push.
+# for, so a review only counts if it finished after this push. A new branch's first push is
+# recorded as `branch_creation`, not `push`.
 pushed_at=$(gh api --paginate "repos/$head_repo/activity?ref=refs/heads/$head_ref" \
-	--jq ".[] | select(.activity_type == \"push\" or .activity_type == \"force_push\") | select(.after == \"$head\") | .timestamp" |
+	--jq ".[] | select(.activity_type == \"push\" or .activity_type == \"force_push\" or .activity_type == \"branch_creation\") | select(.after == \"$head\") | .timestamp" |
 	sort | tail -1 | cut -c1-19)
 
 # Codex keeps one summary comment per PR and edits it as reviews run. Its Code Review row names
