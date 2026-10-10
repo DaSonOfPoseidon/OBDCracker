@@ -38,6 +38,10 @@ from developers being careful:
   part numbers and versions (UDS `22 F187`, `F188`, `F189`, `F191`, `F19E`), one read at a time. A tune changes the
   CVNs, so a saved fingerprint shows later what changed. Module addresses come from `--profile`, or the OBD-II
   engine and transmission IDs without one.
+- `scan` reads everything the default diagnostic session allows, without changing any module's session. From each
+  emissions ECU it reads every supported mode 01 PID, mode 09 PIDs 00 and 0A, and mode 03 stored DTCs. From each
+  plain-UDS module in the profile it reads the standard identification DIDs plus the profile's own DIDs, and its DTCs
+  (`19 01 FF`, `19 02 FF`).
 - Every frame sent or received in a real session is appended to an audit log, along with any adapter error (such as an
   adapter mishearing a request it may already have sent).
 - **One gap: ELM327/STN adapters.** Their serial line has no checksum, and the adapter sends a request before the
@@ -79,6 +83,8 @@ Then, with the adapter plugged into the car and the ignition on:
 obdcracker ports                       # find the adapter's port
 obdcracker --serial <PORT> adapter     # check the adapter; sends nothing to the car
 obdcracker --serial <PORT> fingerprint
+obdcracker --dry-run --profile a7 scan # what scan would send; opens no adapter
+obdcracker --serial <PORT> --profile a7 scan
 ```
 
 ## Using it as a library

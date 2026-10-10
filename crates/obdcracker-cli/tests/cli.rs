@@ -404,3 +404,75 @@ fn fingerprint_fails_when_nothing_answers() {
         String::from_utf8_lossy(&out.stderr)
     );
 }
+
+#[test]
+fn sim_scan_reads_obd_data_and_every_profile_module() {
+    let log = temp_log("scan");
+    let out = obdcracker(&["--sim", "a7", "--audit-log", log.to_str().unwrap(), "scan"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    for line in [
+        "7E8 PID 05 90 °C",
+        "7E8 PID 0C 800 rpm",
+        "7E8 PID 42 14 V",
+        "7E8 mode 09 PIDs 02, 04, 06, 0A",
+        "7E8 ECU name ECM-EngineControl",
+        "7E8 stored DTCs P0299",
+        "7E9 PIDs (no reply)",
+        "7E9 stored DTCs (none)",
+        "7E8 engine F197 V6 3.0l TDI",
+        "7E8 engine F1AA J623",
+        "7E8 engine DTC format 00, 1 stored",
+        "7E8 engine DTC P0299-00 status 08",
+        "7E9 transmission F191 0BK927156AM",
+        "77A gateway F197 J533 Gateway",
+        "77A gateway DTCs (none)",
+        "77E instruments F197 KOMBI",
+    ] {
+        assert!(
+            stdout.lines().any(|l| l == line),
+            "{line:?} missing from:\n{stdout}"
+        );
+    }
+
+    // Read services only, never a session change, so 0600 is refused in the default session.
+    let audit = std::fs::read_to_string(&log).unwrap();
+    for line in audit.lines().filter(|l| l.contains(r#""dir":"tx""#)) {
+        assert!(
+            [
+                r#""payload":"01 "#,
+                r#""payload":"03""#,
+                r#""payload":"09 "#,
+                r#""payload":"22 "#,
+                r#""payload":"19 "#
+            ]
+            .iter()
+            .any(|prefix| line.contains(prefix)),
+            "{line}"
+        );
+    }
+    assert!(
+        stdout.contains("7E8 engine 0600 (service 0x22 refused"),
+        "{stdout}"
+    );
+}
+
+#[test]
+fn dry_run_scan_sends_nothing() {
+    let log = temp_log("scan-dry");
+    let out = obdcracker(&["--dry-run", "--audit-log", log.to_str().unwrap(), "scan"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("dry run: nothing was sent"),
+        "{}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+}

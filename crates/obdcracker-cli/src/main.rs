@@ -11,8 +11,9 @@ use obdcracker_profile::{Profile, Protocol};
 use obdcracker_safety::{Policy, Target};
 use obdcracker_sim::SimBus;
 use obdcracker_transport::elm::Elm;
-use obdcracker_transport::fingerprint::{self, DidValue, Fingerprint, UdsModule};
+use obdcracker_transport::fingerprint::{self, DidValue, Fingerprint, ReadError, UdsModule};
 use obdcracker_transport::link::{Link, SerialLink, TcpLink};
+use obdcracker_transport::scan::{self, PidValue, Scan, ScanModule};
 use obdcracker_transport::{Audited, DryRun, Expect, Timing, Transport, exchange, hex};
 
 // OBDLink USB adapters' rate.
@@ -69,6 +70,10 @@ enum Command {
     /// Identify the engine and transmission software: calibration IDs and CVNs (mode 09 PIDs 04
     /// and 06), then part numbers and versions (UDS 0x22 F187, F188, F189, F191, F19E)
     Fingerprint,
+    /// Read everything the default diagnostic session allows: every supported mode 01 PID, mode
+    /// 09 PIDs 00 and 0A and mode 03 DTCs from each emissions ECU, then each profile module's
+    /// identification and profile DIDs and its DTCs (UDS 0x22 and 0x19)
+    Scan,
     /// List this computer's serial ports
     Ports,
     /// Show what the adapter is and the voltage it sees; sends nothing on the bus
@@ -182,6 +187,9 @@ fn run<T: Transport>(cli: &Cli, transport: T, link: &str, timing: Timing) -> Exi
     if let Command::Fingerprint = cli.command {
         return run_fingerprint(cli, &mut transport, timing);
     }
+    if let Command::Scan = cli.command {
+        return run_scan(cli, &mut transport, timing);
+    }
     let (target, payload, expect) = match cli.command {
         Command::Vin => (
             Target::ObdFunctional,
@@ -189,7 +197,9 @@ fn run<T: Transport>(cli: &Cli, transport: T, link: &str, timing: Timing) -> Exi
             Expect::ObdEcus,
         ),
         // Handled before any transport is opened, or above.
-        Command::Ports | Command::Adapter | Command::Fingerprint => unreachable!(),
+        Command::Ports | Command::Adapter | Command::Fingerprint | Command::Scan => {
+            unreachable!()
+        }
     };
     let request = match Policy::read_only().approve(target, &payload) {
         Ok(request) => request,
@@ -307,19 +317,156 @@ fn print_fingerprint(found: &Fingerprint) {
         }
     }
     for module in &found.modules {
-        for (did, value) in &module.dids {
-            match value {
-                Ok(DidValue::Text(text)) => println!(
-                    "{:03X} {} {did:04X} {text}",
-                    module.response_id, module.name
-                ),
-                // Bracketed, so binary data can't pass for text that looks like hex.
-                Ok(bytes @ DidValue::Bytes(_)) => println!(
-                    "{:03X} {} {did:04X} [{bytes}]",
-                    module.response_id, module.name
-                ),
-                Err(e) => println!("{:03X} {} {did:04X} ({e})", module.response_id, module.name),
+        print_dids(module.response_id, &module.name, &module.dids);
+    }
+}
+
+fn print_dids(id: u32, name: &str, dids: &[(u16, Result<DidValue, ReadError>)]) {
+    for (did, value) in dids {
+        match value {
+            Ok(DidValue::Text(text)) => println!("{id:03X} {name} {did:04X} {text}"),
+            // Bracketed, so binary data can't pass for text that looks like hex.
+            Ok(bytes @ DidValue::Bytes(_)) => println!("{id:03X} {name} {did:04X} [{bytes}]"),
+            Err(e) => println!("{id:03X} {name} {did:04X} ({e})"),
+        }
+    }
+}
+
+// Every plain-UDS module in the profile with its profile DIDs, or the OBD-II engine and
+// transmission without a profile.
+fn scan_modules(cli: &Cli) -> Result<Vec<ScanModule>, String> {
+    let Some(name) = cli.profile.as_ref().or(cli.sim.as_ref()) else {
+        return Ok([UdsModule::obd_engine(), UdsModule::obd_transmission()]
+            .into_iter()
+            .map(|module| ScanModule {
+                module,
+                extra_dids: Vec::new(),
+            })
+            .collect());
+    };
+    let profile = Profile::builtin(name).map_err(|e| format!("profile {name}: {e}"))?;
+    let mut modules = Vec::with_capacity(profile.modules.len());
+    for module in &profile.modules {
+        // Extended addressing and other protocols need support the transports don't have yet.
+        if module.protocol != Protocol::Uds || module.extended_address.is_some() {
+            eprintln!(
+                "skipping {}: it isn't plain UDS, which scan needs",
+                module.name
+            );
+            continue;
+        }
+        modules.push(ScanModule {
+            module: UdsModule {
+                name: module.name.clone(),
+                request_id: module.request_id,
+                response_id: module.response_id,
+            },
+            extra_dids: module.dids.iter().map(|did| did.id).collect(),
+        });
+    }
+    Ok(modules)
+}
+
+fn run_scan<T: Transport>(cli: &Cli, transport: &mut T, timing: Timing) -> ExitCode {
+    let modules = match scan_modules(cli) {
+        Ok(modules) => modules,
+        Err(e) => {
+            eprintln!("{e}");
+            return ExitCode::from(2);
+        }
+    };
+    match scan::scan(transport, &Policy::read_only(), &modules, timing) {
+        Ok(_) if cli.dry_run => {
+            println!("dry run: nothing was sent");
+            ExitCode::SUCCESS
+        }
+        Ok(found) => {
+            print_scan(&found);
+            if found.anything_answered() {
+                ExitCode::SUCCESS
+            } else {
+                eprintln!("nothing answered: check the ignition and the adapter's connection");
+                ExitCode::FAILURE
             }
+        }
+        Err(e) => {
+            eprintln!("{e}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+fn print_scan(found: &Scan) {
+    if found.ecus.is_empty() {
+        println!("no ECU answered OBD-II modes 01, 03 and 09");
+    }
+    for ecu in &found.ecus {
+        let id = ecu.source;
+        match &ecu.pids {
+            Ok(pids) => {
+                for (pid, value) in pids {
+                    match value {
+                        Ok(PidValue::Quantity { value, unit }) => {
+                            println!("{id:03X} PID {pid:02X} {value} {unit}");
+                        }
+                        Ok(PidValue::Raw(bytes)) => {
+                            println!("{id:03X} PID {pid:02X} [{}]", hex(bytes));
+                        }
+                        Err(e) => println!("{id:03X} PID {pid:02X} ({e})"),
+                    }
+                }
+            }
+            Err(e) => println!("{id:03X} PIDs ({e})"),
+        }
+        match &ecu.supported_info {
+            Ok(pids) => {
+                let pids: Vec<_> = pids.iter().map(|pid| format!("{pid:02X}")).collect();
+                println!("{id:03X} mode 09 PIDs {}", pids.join(", "));
+            }
+            Err(e) => println!("{id:03X} mode 09 PIDs ({e})"),
+        }
+        match &ecu.ecu_name {
+            Ok(name) => println!("{id:03X} ECU name {name}"),
+            Err(e) => println!("{id:03X} ECU name ({e})"),
+        }
+        match &ecu.stored_dtcs {
+            Ok(dtcs) if dtcs.is_empty() => println!("{id:03X} stored DTCs (none)"),
+            Ok(dtcs) => {
+                let dtcs: Vec<_> = dtcs.iter().map(ToString::to_string).collect();
+                println!("{id:03X} stored DTCs {}", dtcs.join(", "));
+            }
+            Err(e) => println!("{id:03X} stored DTCs ({e})"),
+        }
+    }
+    for module in &found.modules {
+        let (id, name) = (module.response_id, &module.name);
+        print_dids(id, name, &module.dids);
+        let format = match &module.dtc_count {
+            Ok(count) => {
+                println!(
+                    "{id:03X} {name} DTC format {:02X}, {} stored",
+                    count.format.code(),
+                    count.count
+                );
+                Some(count.format)
+            }
+            Err(e) => {
+                println!("{id:03X} {name} DTC count ({e})");
+                None
+            }
+        };
+        match &module.dtcs {
+            Ok(dtcs) if dtcs.is_empty() => println!("{id:03X} {name} DTCs (none)"),
+            Ok(dtcs) => {
+                for record in dtcs {
+                    // The J2012 form only when the module said its DTCs are in that format.
+                    let code = format
+                        .and_then(|format| record.dtc.j2012(format))
+                        .map_or_else(|| record.dtc.to_string(), |dtc| dtc.to_string());
+                    println!("{id:03X} {name} DTC {code} status {:02X}", record.status.0);
+                }
+            }
+            Err(e) => println!("{id:03X} {name} DTCs ({e})"),
         }
     }
 }
