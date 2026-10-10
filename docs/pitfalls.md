@@ -190,6 +190,19 @@ Each entry names the class, what to check, and where it bit us.
 
 - **Gate commit and push on the checks.** Chain them with `&&`, never `;`, or a failing test still gets committed and
   pushed (PR #9, `00fdbc3`).
+- **Install scripts: check what the build will actually use.** PR #45's first draft took `command -v cc` as a working
+  toolchain (gcc without libc6-dev can't link), resolved a relative `--dir` after changing into the source tree, and
+  looked for the binary in `CARGO_HOME` while Cargo's `install.root` can send it elsewhere. Test the capability (link
+  a program), make paths absolute before any `cd`, pin outputs (`--root`), and validate an option only where it's used.
+  The second round found more of the same class: MSVC without a Windows SDK can't link, a packaged rustup can keep
+  `cargo` off PATH, and a bad `-Source` was only caught after a multi-GB install. Check every component the build
+  needs, validate all input before any system-wide change, and pass user paths to PowerShell with `-LiteralPath`
+  (`[` and `]` are wildcards to `-Path`). And don't trust whichever `cargo` is first on PATH: a system one ignores
+  `rust-toolchain.toml`. Nor rustup's own pick: `RUSTUP_TOOLCHAIN` and `rustup override` beat the file, and `RUSTC`
+  swaps the compiler. Read the channel from the file and build with `rustup run <channel>`. Every inherited path
+  (`CARGO_HOME`, `RUSTUP_HOME`) needs making absolute, like `--dir`. And "installed" isn't "usable": probe HTTPS
+  (curl can lack a CA bundle) and link a program on macOS too (stale Command Line Tools after an OS upgrade).
+  Sweep all of a script's inputs, including its environment, in one pass; this took four review rounds piecemeal.
 - **`pkill -f <pattern>` matches the shell running it** when the pattern is in its own command line. Save the PID
   when starting a background process and kill that.
 - **clap skips `requires` when the required argument conflicts with one that's present.** `--baud` requires

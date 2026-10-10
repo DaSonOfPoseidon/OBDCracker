@@ -50,6 +50,37 @@ from developers being careful:
 New capabilities are developed test-first: golden-frame unit tests, then property tests and fuzzing of response parsers,
 then a simulated ECU (`obdcracker-sim`), then a dry run on the car, and only then a live session.
 
+## Install
+
+One command builds the `obdcracker` CLI from source. It installs whatever is missing (a C linker and rustup), and
+doesn't need Git. Run it again to update.
+
+```powershell
+# Windows (PowerShell)
+irm https://raw.githubusercontent.com/DaSonOfPoseidon/OBDCracker/main/scripts/install.ps1 | iex
+```
+
+```sh
+# macOS and Linux (or `wget -qO- <url> | sh` without curl)
+curl -fsSL https://raw.githubusercontent.com/DaSonOfPoseidon/OBDCracker/main/scripts/install.sh | sh
+```
+
+- **Windows:** the first run installs the Visual C++ Build Tools, which is a few GB and asks for admin rights. If
+  `obdcracker ports` doesn't list the adapter, install the [FTDI VCP driver](https://ftdichip.com/drivers/vcp-drivers/).
+- **macOS:** if the Xcode Command Line Tools are missing, the script opens their installer; run it again once that's
+  done. Use the `/dev/cu.*` port.
+- **Linux:** the script adds you to the serial ports' group (`dialout` or `uucp`); log out and back in once.
+- To build a branch: `-Ref <branch>` on Windows (`& ([scriptblock]::Create((irm <url>))) -Ref <branch>`), or
+  `| sh -s -- --ref <branch>` elsewhere. To build a checkout: `scripts/install.ps1 -Source .` or `scripts/install.sh --source .`.
+
+Then, with the adapter plugged into the car and the ignition on:
+
+```sh
+obdcracker ports                       # find the adapter's port
+obdcracker --serial <PORT> adapter     # check the adapter; sends nothing to the car
+obdcracker --serial <PORT> fingerprint
+```
+
 ## Using it as a library
 
 OBDCracker is meant to be imported. Add the `obdcracker` crate, which re-exports the others:
