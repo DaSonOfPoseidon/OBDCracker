@@ -19,7 +19,7 @@
 //! car.send(&vin).unwrap();
 //! let reply = car.recv(Duration::from_millis(50)).unwrap();
 //! assert_eq!(reply.source, 0x7E8);
-//! assert_eq!(obd::decode_vin(&reply.payload).unwrap(), "WAUZZZ4G1EN000000");
+//! assert_eq!(obd::decode_vin(&reply.payload).unwrap(), "WAU2MBFC6EN093415");
 //! ```
 
 use std::collections::VecDeque;

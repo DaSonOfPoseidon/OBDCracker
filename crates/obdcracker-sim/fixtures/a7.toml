@@ -1,17 +1,19 @@
 # What the simulated A7's modules answer. Module addresses come from the A7 vehicle profile.
 #
-# Placeholders, not read from the car: part numbers and versions have the right shape but made-up
-# values. M4's read-only `fingerprint` session replaces them with the car's real (tuned) values.
-# The calibration IDs and CVNs are already the real ones, from the first session (#46). Part and
-# hardware numbers are 11 bytes, space-padded, and versions 4 bytes, as real VAG engines and
-# transmissions answer (see opendbc-vag.toml).
+# Values marked "real" are what the car (tuned, EGR-deleted) sent in the first read-only session
+# (#46, 2026-10-10): the engine's and transmission's mode 09 VIN, CALIDs and CVNs, and their
+# F187, F188 (refused), F189, F191 and F19E. The transmission didn't answer mode 09 PID 02, so it
+# has no VIN here. Everything else is a placeholder with the right shape but a made-up value,
+# until a later session reads it. Part and hardware numbers are 11 bytes, space-padded, and
+# versions 4 bytes, as real VAG engines and transmissions answer (see opendbc-vag.toml).
 
 [[ecu]]
 module = "engine"
 dtc_format = 0x00
 
+# Real: vin, calids, cvns. Placeholders: ecu_name, dtcs, pids.
 [ecu.obd]
-vin = "WAUZZZ4G1EN000000"
+vin = "WAU2MBFC6EN093415"
 # "" is an empty slot: 16 bytes of 0x00, as the engine sends in its second one.
 calids = ["4G0401N 0016BVAB", "", "0000000000000000", "NOX00907807 0015", "PMS00906261 4010"]
 cvns = ["9B F7 47 0D", "00 00 00 00", "00 00 00 00", "38 D3 FF 82", "0E 1F C3 9E"]
@@ -25,29 +27,33 @@ dtcs = ["P0299"]
 "0D" = "00"
 "42" = "36 B0"
 
+# Real: F187, F189, F191, F19E (with the trailing 0x00 the engine sends), and no F188.
 [[ecu.did]]
 id = 0xF187
-text = "4G0907401A "
+text = "4G0907401N "
 
 [[ecu.did]]
 id = 0xF189
-text = "0010"
+text = "0016"
 
+# Placeholder: F190 wasn't read; assumed to match the mode 09 VIN.
 [[ecu.did]]
 id = 0xF190
-text = "WAUZZZ4G1EN000000"
+text = "WAU2MBFC6EN093415"
 
 [[ecu.did]]
 id = 0xF191
-text = "4G0907401  "
-
-[[ecu.did]]
-id = 0xF197
-text = "V6 3.0l TDI"
+text = "4G0907401E "
 
 [[ecu.did]]
 id = 0xF19E
-text = "EV_ECM30TDI0114G0907401A"
+# "EV_ECM30TDI0114G0907401N" and 0x00
+hex = "45 56 5F 45 43 4D 33 30 54 44 49 30 31 31 34 47 30 39 30 37 34 30 31 4E 00"
+
+# Placeholders from here to the next module: F197, F1A3, F1AA, 0600 and the DTCs.
+[[ecu.did]]
+id = 0xF197
+text = "V6 3.0l TDI"
 
 [[ecu.did]]
 id = 0xF1A3
@@ -75,24 +81,35 @@ status = 0x00
 module = "transmission"
 dtc_format = 0x00
 
+# Real: calids, cvns, and no VIN. Placeholders: ecu_name, dtcs.
 [ecu.obd]
-vin = "WAUZZZ4G1EN000000"
 calids = ["4G0158Q 100821  "]
 cvns = ["E4 76 49 64"]
 ecu_name = { acronym = "TCM", name = "TransmissionCtl" }
 dtcs = []
 
+# Real: F187, F189, F191, F19E (with its trailing 0x00), and no F188.
 [[ecu.did]]
 id = 0xF187
-text = "4G0927158  "
+text = "4G0927158Q "
 
 [[ecu.did]]
 id = 0xF189
-text = "1100"
+text = "1008"
 
 [[ecu.did]]
+id = 0xF191
+text = "0BK927156AM"
+
+[[ecu.did]]
+id = 0xF19E
+# "EV_TCMAL551211" and 0x00
+hex = "45 56 5F 54 43 4D 41 4C 35 35 31 32 31 31 00"
+
+# Placeholders: F190 (assumed to match the engine's VIN), F197, F1A3.
+[[ecu.did]]
 id = 0xF190
-text = "WAUZZZ4G1EN000000"
+text = "WAU2MBFC6EN093415"
 
 [[ecu.did]]
 id = 0xF197
@@ -102,6 +119,7 @@ text = "ZF 8HP"
 id = 0xF1A3
 text = "H03"
 
+# Placeholders: the gateway and instruments haven't been read yet.
 [[ecu]]
 module = "gateway"
 
@@ -115,7 +133,7 @@ text = "0100"
 
 [[ecu.did]]
 id = 0xF190
-text = "WAUZZZ4G1EN000000"
+text = "WAU2MBFC6EN093415"
 
 [[ecu.did]]
 id = 0xF197
@@ -135,7 +153,7 @@ text = "4G8920930  "
 
 [[ecu.did]]
 id = 0xF190
-text = "WAUZZZ4G1EN000000"
+text = "WAU2MBFC6EN093415"
 
 [[ecu.did]]
 id = 0xF197

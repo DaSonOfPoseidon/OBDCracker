@@ -58,16 +58,15 @@ fn nothing_to_receive_times_out() {
 }
 
 #[test]
-fn functional_vin_is_answered_by_engine_and_transmission() {
+fn functional_vin_is_answered_by_the_engine_only() {
+    // As on the real A7 (#46): the transmission doesn't answer mode 09 PID 02.
     let replies = ask(&mut a7(), Target::ObdFunctional, &obd::vehicle_info(0x02));
     let sources: Vec<_> = replies.iter().map(|r| r.source).collect();
-    assert_eq!(sources, [0x7E8, 0x7E9]);
-    for reply in &replies {
-        assert_eq!(
-            obd::decode_vin(&reply.payload).unwrap(),
-            "WAUZZZ4G1EN000000"
-        );
-    }
+    assert_eq!(sources, [0x7E8]);
+    assert_eq!(
+        obd::decode_vin(&replies[0].payload).unwrap(),
+        "WAU2MBFC6EN093415"
+    );
 }
 
 #[test]
@@ -190,7 +189,7 @@ fn module_without_obd_refuses_obd_services() {
 fn reads_one_did() {
     let reply = ask_one(&mut a7(), GATEWAY, &uds::read_did(uds::did::VIN));
     let data = uds::decode_did(&reply, uds::did::VIN).unwrap();
-    assert_eq!(uds::decode_text(data).unwrap(), "WAUZZZ4G1EN000000");
+    assert_eq!(uds::decode_text(data).unwrap(), "WAU2MBFC6EN093415");
 }
 
 #[test]
@@ -205,7 +204,7 @@ fn reads_several_dids_in_request_order() {
         .collect();
     assert_eq!(
         values,
-        [(0xF189, "0010".into()), (0xF187, "4G0907401A".into())]
+        [(0xF189, "0016".into()), (0xF187, "4G0907401N".into())]
     );
 }
 
@@ -296,19 +295,16 @@ fn slow_did_sends_response_pending_first() {
 }
 
 #[test]
-fn exchange_collects_the_vin_from_every_obd_ecu() {
-    let vin = Policy::read_only()
-        .approve(Target::ObdFunctional, &obd::vehicle_info(0x02))
+fn exchange_collects_the_calids_from_every_obd_ecu() {
+    let calids = Policy::read_only()
+        .approve(Target::ObdFunctional, &obd::vehicle_info(0x04))
         .unwrap();
-    let replies = exchange(&mut a7(), &vin, Expect::ObdEcus, Timing::default()).unwrap();
-    let vins: Vec<_> = replies
+    let replies = exchange(&mut a7(), &calids, Expect::ObdEcus, Timing::default()).unwrap();
+    let counts: Vec<_> = replies
         .iter()
-        .map(|r| (r.source, obd::decode_vin(&r.payload).unwrap()))
+        .map(|r| (r.source, obd::decode_calids(&r.payload).unwrap().count()))
         .collect();
-    assert_eq!(
-        vins,
-        [(0x7E8, "WAUZZZ4G1EN000000"), (0x7E9, "WAUZZZ4G1EN000000")]
-    );
+    assert_eq!(counts, [(0x7E8, 5), (0x7E9, 1)]);
 }
 
 #[test]
