@@ -59,6 +59,7 @@ function Install-ObdCracker {
     # RUSTUP_HOME would land the toolchain or the binary under the source
     function Get-AbsolutePath([string]$Path) { $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($Path) }
     $cargoHome = Get-AbsolutePath $(if ($env:CARGO_HOME) { $env:CARGO_HOME } else { Join-Path $env:USERPROFILE '.cargo' })
+    $rustupHome = if ($env:RUSTUP_HOME) { Get-AbsolutePath $env:RUSTUP_HOME } else { '' }
     $cargoBin = Join-Path $cargoHome 'bin'
     $pathHadCargo = ($env:Path -split ';') -contains $cargoBin
 
@@ -172,7 +173,7 @@ function Install-ObdCracker {
         }
         try {
             if ($env:CARGO_HOME) { $env:CARGO_HOME = $cargoHome }
-            if ($env:RUSTUP_HOME) { $env:RUSTUP_HOME = Get-AbsolutePath $env:RUSTUP_HOME }
+            if ($rustupHome) { $env:RUSTUP_HOME = $rustupHome }
             # Name the pinned toolchain explicitly. rustup's own choice can be overridden
             # (RUSTUP_TOOLCHAIN, `rustup override`), and a cargo first on PATH may not be rustup's.
             $channel = Select-String -LiteralPath 'rust-toolchain.toml' -Pattern '^channel\s*=\s*"([^"]+)"' | Select-Object -First 1
