@@ -55,7 +55,10 @@ function Install-ObdCracker {
         'ARM64' { $triple = 'aarch64-pc-windows-msvc'; $vcComponent = 'Microsoft.VisualStudio.Component.VC.Tools.ARM64'; $sdkArch = 'arm64' }
         default { throw "unsupported processor architecture: $arch (need 64-bit x86 or ARM)" }
     }
-    $cargoHome = if ($env:CARGO_HOME) { $env:CARGO_HOME } else { Join-Path $env:USERPROFILE '.cargo' }
+    # Absolute, because the build runs from inside the source tree: a relative CARGO_HOME or
+    # RUSTUP_HOME would land the toolchain or the binary under the source
+    function Get-AbsolutePath([string]$Path) { $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($Path) }
+    $cargoHome = Get-AbsolutePath $(if ($env:CARGO_HOME) { $env:CARGO_HOME } else { Join-Path $env:USERPROFILE '.cargo' })
     $cargoBin = Join-Path $cargoHome 'bin'
     $pathHadCargo = ($env:Path -split ';') -contains $cargoBin
 
@@ -162,25 +165,30 @@ function Install-ObdCracker {
         # 4. Build
         Say 'Building obdcracker (the first run also downloads the pinned Rust toolchain)'
         Push-Location -LiteralPath $src
-        $pathBeforeBuild = $env:Path
+        # Environment the build changes, put back afterwards so an iex caller's session keeps its own
+        $savedEnv = @{}
+        foreach ($name in 'RUSTUP_TOOLCHAIN', 'RUSTC', 'CARGO_BUILD_TARGET', 'CARGO_HOME', 'RUSTUP_HOME') {
+            $savedEnv[$name] = [Environment]::GetEnvironmentVariable($name, 'Process')
+        }
         try {
-            # Install what rust-toolchain.toml pins. rustup 1.28+ does it with `toolchain install`;
-            # older rustup doesn't take that without a name, but installs it on `show`.
-            & rustup toolchain install
-            if ($LASTEXITCODE -ne 0) { Invoke-Checked rustup @('show') }
-            # Build with that toolchain's own cargo and rustc, not whatever is first on PATH: a
-            # system cargo (or a rustup whose proxies aren't on PATH) would ignore rust-toolchain.toml
-            $toolchainCargo = & rustup which cargo
-            if ($LASTEXITCODE -ne 0 -or -not $toolchainCargo) { throw "rustup can't find cargo for the pinned toolchain" }
-            $env:Path = "$(Split-Path -Parent $toolchainCargo);$env:Path"
-            # The build cache lives outside the source, so a re-run only rebuilds what changed
-            # --root pins where the binary goes, whatever CARGO_INSTALL_ROOT or Cargo's install.root
-            # say, so it lands in the directory rustup put on PATH
-            Invoke-Checked cargo @('install', '--path', 'crates/obdcracker-cli', '--locked', '--force',
-                '--target-dir', (Join-Path $Dir 'target'), '--root', $cargoHome)
+            if ($env:CARGO_HOME) { $env:CARGO_HOME = $cargoHome }
+            if ($env:RUSTUP_HOME) { $env:RUSTUP_HOME = Get-AbsolutePath $env:RUSTUP_HOME }
+            # Name the pinned toolchain explicitly. rustup's own choice can be overridden
+            # (RUSTUP_TOOLCHAIN, `rustup override`), and a cargo first on PATH may not be rustup's.
+            $channel = Select-String -LiteralPath 'rust-toolchain.toml' -Pattern '^channel\s*=\s*"([^"]+)"' | Select-Object -First 1
+            if (-not $channel) { throw "can't read the toolchain channel from rust-toolchain.toml" }
+            $toolchain = $channel.Matches[0].Groups[1].Value
+            Invoke-Checked rustup @('toolchain', 'install', $toolchain, '--profile', 'minimal')
+            # `rustup run` puts that toolchain's cargo and rustc first. RUSTC or CARGO_BUILD_TARGET
+            # from the caller's environment would still swap the compiler or the target, so drop them.
+            $env:RUSTC = $null
+            $env:CARGO_BUILD_TARGET = $null
+            # The build cache lives outside the source, so a re-run only rebuilds what changed.
+            # --root pins where the binary goes, whatever CARGO_INSTALL_ROOT or Cargo's install.root say.
+            Invoke-Checked rustup @('run', $toolchain, 'cargo', 'install', '--path', 'crates/obdcracker-cli',
+                '--locked', '--force', '--target-dir', (Join-Path $Dir 'target'), '--root', $cargoHome)
         } finally {
-            # The toolchain's directory was for the build only; don't leave it in an iex caller's PATH
-            $env:Path = $pathBeforeBuild
+            foreach ($name in $savedEnv.Keys) { [Environment]::SetEnvironmentVariable($name, $savedEnv[$name], 'Process') }
             Pop-Location
         }
 

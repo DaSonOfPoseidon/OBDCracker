@@ -57,13 +57,13 @@ find_sudo() {
 }
 
 ensure_linker_macos() {
-	if xcode-select -p >/dev/null 2>&1; then
+	if xcode-select -p >/dev/null 2>&1 && can_link; then
 		note "Xcode Command Line Tools: already installed"
 		return
 	fi
 	say "Installing the Xcode Command Line Tools (Rust needs their linker)"
 	xcode-select --install || true
-	die "finish the Command Line Tools install in the window that opened, then run this script again"
+	die "finish the Command Line Tools install in the window that opened, then run this script again. If it says they're already installed, they're out of date (common after a macOS upgrade): update them in System Settings > Software Update, or run 'sudo rm -rf /Library/Developer/CommandLineTools' and run this script again"
 }
 
 # Whether cc can build and link a program: a bare cc (gcc without libc6-dev, say) isn't enough.
@@ -72,17 +72,22 @@ can_link() {
 		printf 'int main(void) { return 0; }\n' | cc -x c - -o "$TMP/link-test" >/dev/null 2>&1
 }
 
+# Whether an HTTPS download works: curl or wget can be installed without a CA bundle.
+https_works() {
+	fetch https://static.rust-lang.org/rustup/release-stable.toml >/dev/null 2>&1
+}
+
 ensure_linker_linux() {
 	# A distro's minimal image can lack both curl and wget once the script is already local
 	downloader=
 	if ! command -v curl >/dev/null 2>&1 && ! command -v wget >/dev/null 2>&1; then
 		downloader=curl
 	fi
-	if can_link && [ -z "$downloader" ]; then
+	if can_link && [ -z "$downloader" ] && https_works; then
 		note "C compiler and linker (cc): already installed"
 		return
 	fi
-	say "Installing a C compiler and linker (Rust needs one)${downloader:+, and curl}"
+	say "Installing a C compiler and linker (Rust needs one), with curl and CA certificates"
 	find_sudo
 	if command -v apt-get >/dev/null 2>&1; then
 		$SUDO apt-get update </dev/null
@@ -90,16 +95,17 @@ ensure_linker_linux() {
 		$SUDO env DEBIAN_FRONTEND=noninteractive apt-get install -y build-essential ca-certificates $downloader </dev/null
 	elif command -v dnf >/dev/null 2>&1; then
 		# shellcheck disable=SC2086
-		$SUDO dnf install -y gcc glibc-devel $downloader </dev/null
+		$SUDO dnf install -y gcc glibc-devel ca-certificates $downloader </dev/null
 	elif command -v pacman >/dev/null 2>&1; then
 		# shellcheck disable=SC2086
-		$SUDO pacman -S --needed --noconfirm base-devel $downloader </dev/null
+		$SUDO pacman -S --needed --noconfirm base-devel ca-certificates $downloader </dev/null
 	elif command -v zypper >/dev/null 2>&1; then
 		# shellcheck disable=SC2086
-		$SUDO zypper --non-interactive install gcc glibc-devel $downloader </dev/null
+		$SUDO zypper --non-interactive install gcc glibc-devel ca-certificates $downloader </dev/null
 	else
 		die "no apt-get, dnf, pacman or zypper found: install a C compiler (gcc or clang) yourself, then run this again"
 	fi
+	https_works || die "installed CA certificates, but HTTPS downloads still fail: check the network or proxy"
 	can_link || die "installed a compiler, but cc still can't build a program: install your distro's C build tools (e.g. build-essential)"
 }
 
@@ -153,18 +159,18 @@ prepare_dir() {
 build() {
 	say "Building obdcracker (the first run also downloads the pinned Rust toolchain)"
 	cd "$SRC"
-	# Install what rust-toolchain.toml pins. rustup 1.28+ does it with `toolchain install`; older
-	# rustup doesn't take that without a name, but installs it on `show`.
-	rustup toolchain install </dev/null || rustup show </dev/null
-	# Build with that toolchain's own cargo and rustc, not whatever is first on PATH: a system
-	# cargo (or a packaged rustup whose proxies aren't on PATH) would ignore rust-toolchain.toml
-	toolchain_cargo=$(rustup which cargo </dev/null) || die "rustup can't find cargo for the pinned toolchain"
-	PATH="$(dirname "$toolchain_cargo"):$PATH"
-	# The build cache lives outside the source, so a re-run only rebuilds what changed
-	# --root pins where the binary goes, whatever CARGO_INSTALL_ROOT or Cargo's install.root say,
-	# so it lands in the directory rustup put on PATH
-	cargo install --path crates/obdcracker-cli --locked --force --target-dir "$DIR/target" \
-		--root "$CARGO_HOME_DIR" </dev/null
+	# Name the pinned toolchain explicitly. rustup's own choice can be overridden (RUSTUP_TOOLCHAIN,
+	# `rustup override`), and a cargo first on PATH may not be rustup's at all.
+	toolchain=$(sed -n 's/^channel *= *"\([^"]*\)".*/\1/p' rust-toolchain.toml)
+	[ -n "$toolchain" ] || die "can't read the toolchain channel from rust-toolchain.toml"
+	rustup toolchain install "$toolchain" --profile minimal </dev/null
+	# `rustup run` puts that toolchain's cargo and rustc first. RUSTC or CARGO_BUILD_TARGET from
+	# the caller's environment would still swap the compiler or the target, so drop them.
+	unset RUSTC CARGO_BUILD_TARGET
+	# The build cache lives outside the source, so a re-run only rebuilds what changed. --root pins
+	# where the binary goes, whatever CARGO_INSTALL_ROOT or Cargo's install.root say.
+	rustup run "$toolchain" cargo install --path crates/obdcracker-cli --locked --force \
+		--target-dir "$DIR/target" --root "$CARGO_HOME_DIR" </dev/null
 }
 
 # Linux: the serial ports' group must include you, or opening one fails with "permission denied".
@@ -245,7 +251,17 @@ main() {
 	fi
 
 	OS=$(uname -s)
+	# Absolute, because the build runs from inside the source tree: a relative CARGO_HOME or
+	# RUSTUP_HOME would land the toolchain or the binary under the source
 	CARGO_HOME_DIR=${CARGO_HOME:-$HOME/.cargo}
+	mkdir -p "$CARGO_HOME_DIR"
+	CARGO_HOME_DIR=$(cd "$CARGO_HOME_DIR" && pwd)
+	if [ -n "${CARGO_HOME:-}" ]; then export CARGO_HOME="$CARGO_HOME_DIR"; fi
+	if [ -n "${RUSTUP_HOME:-}" ]; then
+		mkdir -p "$RUSTUP_HOME"
+		RUSTUP_HOME=$(cd "$RUSTUP_HOME" && pwd)
+		export RUSTUP_HOME
+	fi
 	CARGO_BIN=$CARGO_HOME_DIR/bin
 	RELOGIN=
 	path_had_cargo=

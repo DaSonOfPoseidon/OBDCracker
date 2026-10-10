@@ -198,7 +198,11 @@ Each entry names the class, what to check, and where it bit us.
   `cargo` off PATH, and a bad `-Source` was only caught after a multi-GB install. Check every component the build
   needs, validate all input before any system-wide change, and pass user paths to PowerShell with `-LiteralPath`
   (`[` and `]` are wildcards to `-Path`). And don't trust whichever `cargo` is first on PATH: a system one ignores
-  `rust-toolchain.toml`, so build with the pinned toolchain's own (`rustup which cargo`).
+  `rust-toolchain.toml`. Nor rustup's own pick: `RUSTUP_TOOLCHAIN` and `rustup override` beat the file, and `RUSTC`
+  swaps the compiler. Read the channel from the file and build with `rustup run <channel>`. Every inherited path
+  (`CARGO_HOME`, `RUSTUP_HOME`) needs making absolute, like `--dir`. And "installed" isn't "usable": probe HTTPS
+  (curl can lack a CA bundle) and link a program on macOS too (stale Command Line Tools after an OS upgrade).
+  Sweep all of a script's inputs, including its environment, in one pass; this took four review rounds piecemeal.
 - **`pkill -f <pattern>` matches the shell running it** when the pattern is in its own command line. Save the PID
   when starting a background process and kill that.
 - **clap skips `requires` when the required argument conflicts with one that's present.** `--baud` requires
