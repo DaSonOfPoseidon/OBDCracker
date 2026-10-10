@@ -31,6 +31,7 @@ jobs:
       - uses: EmbarkStudios/cargo-deny-action@v2
       # GitHub rejects an invalid workflow file without running it, so lint them here
       - run: docker run --rm -v "$PWD:/repo" -w /repo rhysd/actionlint:1.7.7
+      - run: shellcheck scripts/install.sh
 
   build:
     strategy:
@@ -42,6 +43,23 @@ jobs:
       - run: rustup show
       - uses: Swatinem/rust-cache@v2
       - run: cargo build --release -p obdcracker-cli
+
+  # The install scripts, building this commit (--source) on each OS. The runners already have a
+  # linker and rustup, so this covers the skip paths, PATH handling, build and check, not the
+  # installs from scratch. Windows uses Windows PowerShell 5.1, what a fresh laptop has.
+  install:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v5
+      - if: runner.os != 'Windows'
+        run: sh scripts/install.sh --source .
+      - if: runner.os == 'Windows'
+        shell: powershell
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File scripts\install.ps1 -Source .
+      - run: obdcracker --version
 
   # The ELM driver against an ELM327 implementation we didn't write (issue #13). Not required
   # by branch protection, and it doesn't fail the run while it settles in.
