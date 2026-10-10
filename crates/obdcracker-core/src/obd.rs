@@ -296,7 +296,7 @@ pub fn decode_vin(reply: &[u8]) -> Result<&str, Error> {
 }
 
 /// Decodes the mode 09 PID 04 reply: each calibration ID (the software calibration's name),
-/// with its padding removed. A module may report several.
+/// with its padding removed. A module may report several, and some of them may be empty slots.
 pub fn decode_calids(reply: &[u8]) -> Result<Calids<'_>, Error> {
     let (count, data) = info(reply, 0x04)?;
     if count == 0 || data.len() != count * CALID_LEN {
@@ -305,16 +305,23 @@ pub fn decode_calids(reply: &[u8]) -> Result<Calids<'_>, Error> {
     Ok(Calids(data.as_chunks::<CALID_LEN>().0.iter()))
 }
 
-/// The calibration IDs in a mode 09 PID 04 reply. One that isn't printable text, or is only
-/// padding, yields [`Error::Malformed`].
+/// The calibration IDs in a mode 09 PID 04 reply. A slot of nothing but 0x00 padding is empty
+/// (`None`): the 2014 A7's engine sends one, with CVN 00000000. One that isn't printable text
+/// yields [`Error::Malformed`].
 #[derive(Debug, Clone)]
 pub struct Calids<'a>(slice::Iter<'a, [u8; CALID_LEN]>);
 
 impl<'a> Iterator for Calids<'a> {
-    type Item = Result<&'a str, Error>;
+    type Item = Result<Option<&'a str>, Error>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        self.0.next().map(|calid| text(calid))
+        self.0.next().map(|calid| {
+            if calid.iter().all(|&b| b == 0) {
+                Ok(None)
+            } else {
+                text(calid).map(Some)
+            }
+        })
     }
 }
 

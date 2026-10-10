@@ -265,7 +265,7 @@ mod vehicle_info {
             .unwrap()
             .collect::<Result<_, _>>()
             .unwrap();
-        assert_eq!(calids, ["JMB*36761500", "JMB*47872611"]);
+        assert_eq!(calids, [Some("JMB*36761500"), Some("JMB*47872611")]);
     }
 
     #[test]
@@ -299,10 +299,45 @@ mod vehicle_info {
     }
 
     #[test]
-    fn calid_of_only_padding_is_malformed() {
+    fn calid_of_only_padding_is_an_empty_slot() {
         let reply = reply(0x04, 1, &[0; 16]);
         let first = decode_calids(&reply).unwrap().next();
+        assert_eq!(first, Some(Ok(None)));
+    }
+
+    #[test]
+    fn calid_with_padding_before_its_text_is_malformed() {
+        let mut data = vec![0; 4];
+        data.extend(padded("JMB*36761500", 12));
+        let reply = reply(0x04, 1, &data);
+        let first = decode_calids(&reply).unwrap().next();
         assert_eq!(first, Some(Err(Error::Malformed)));
+    }
+
+    #[test]
+    fn decodes_the_a7_engines_five_calids_with_empty_slots() {
+        // The 2014 A7 3.0 TDI's engine (7E8), first real-car session (#46): five slots, one of
+        // them all 0x00 and paired with CVN 00000000.
+        let mut data = b"4G0401N 0016BVAB".to_vec();
+        data.extend([0; 16]);
+        data.extend(b"0000000000000000");
+        data.extend(b"NOX00907807 0015");
+        data.extend(b"PMS00906261 4010");
+        let reply = reply(0x04, 5, &data);
+        let calids: Vec<_> = decode_calids(&reply)
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(
+            calids,
+            [
+                Some("4G0401N 0016BVAB"),
+                None,
+                Some("0000000000000000"),
+                Some("NOX00907807 0015"),
+                Some("PMS00906261 4010"),
+            ]
+        );
     }
 
     #[test]

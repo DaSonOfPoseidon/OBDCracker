@@ -289,7 +289,13 @@ fn print_fingerprint(found: &Fingerprint) {
     }
     for ecu in &found.ecus {
         match &ecu.calids {
-            Ok(calids) => println!("{:03X} CALID {}", ecu.source, calids.join(", ")),
+            Ok(calids) => {
+                let calids: Vec<_> = calids
+                    .iter()
+                    .map(|calid| calid.as_deref().unwrap_or("(empty)"))
+                    .collect();
+                println!("{:03X} CALID {}", ecu.source, calids.join(", "));
+            }
             Err(e) => println!("{:03X} CALID ({e})", ecu.source),
         }
         match &ecu.cvns {

@@ -45,6 +45,9 @@ Each entry names the class, what to check, and where it bit us.
 - **Empty, blank and padding-only values** are input too: names, text DIDs, CALIDs. `"   "` is not empty but
   decodes as `""`, and so does `hex = "20 20"` for a text DID. Codes that are padding or wildcards aren't codes:
   P0000 in mode 03, and 0x000000 and 0xFFFFFF ("all groups") in UDS.
+- **But check real modules before calling padding malformed.** A list slot can be legitimately empty: the A7's
+  engine answers mode 09 PID 04 with five CALIDs, one of them all 0x00 (CVN 00000000). Rejecting it threw away
+  the four real ones (#46). Model an empty slot explicitly (`None`), and still reject one that isn't text.
 - **Names are keys.** If lookups are exact, reject names with surrounding spaces rather than trimming them in one
   place only, and treat names that differ only in case as duplicates.
 - **Escape what you write, too.** A format built by hand (JSON Lines, TOML) must escape every string it
