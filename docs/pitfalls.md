@@ -73,6 +73,9 @@ Each entry names the class, what to check, and where it bit us.
 - **Keep timers per source.** Each pending ECU gets its own P2*. One global "latest deadline" lets a late ECU in:
   both an ECU whose own P2* ran out, and an ECU that never went pending but answers after P2 while another ECU's
   P2* keeps the loop open, or after a pending ECU's answer restarted a shared timer.
+- **Keep a multi-step broadcast's progress per source.** `scan` follows the mode 01 bitmap chain (00, 20, 40, …)
+  for as long as any ECU advertises the next page. One ECU's answer to a page it never advertised, or a page after
+  its own chain broke, was still counted. Accept a page from an ECU only if that ECU said it comes next (#48, Codex).
 - **Deadlines must shrink back** once the reason to extend them is gone (P2 again after the pending ECU answers).
 - **Match a reply to its request by what it echoes**, not only the service ID: the PID (mode 09), a requested PID
   (mode 01), a requested DID (0x22) or the subfunction. A late reply to an earlier request has the same SID
