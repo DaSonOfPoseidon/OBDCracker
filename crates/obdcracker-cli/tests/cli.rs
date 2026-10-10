@@ -325,9 +325,9 @@ fn sim_fingerprint_shows_values_and_refusals() {
     );
     let stdout = String::from_utf8_lossy(&out.stdout);
     for line in [
-        "7E8 CALID 4G0907401A  0010",
-        "7E8 CVN   1A2B3C4D",
-        "7E9 CALID 4G0927158   1100",
+        "7E8 CALID 4G0401N 0016BVAB, (empty), 0000000000000000, NOX00907807 0015, PMS00906261 4010",
+        "7E8 CVN   9BF7470D, 00000000, 00000000, 38D3FF82, 0E1FC39E",
+        "7E9 CALID 4G0158Q 100821  ",
         "7E8 engine F187 4G0907401A",
         "7E8 engine F19E EV_ECM30TDI0114G0907401A",
         "7E9 transmission F189 1100",

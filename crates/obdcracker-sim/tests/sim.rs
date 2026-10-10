@@ -164,9 +164,11 @@ fn mode_09_reports_calids_cvns_and_name() {
         .unwrap()
         .map(Result::unwrap)
         .collect();
-    assert_eq!(calids.len(), 1);
+    // The engine's real reply (#46): five slots, the second one empty.
+    assert_eq!(calids.len(), 5);
+    assert_eq!(calids[..2], [Some("4G0401N 0016BVAB"), None]);
     let cvns = ask_one(&mut bus, ENGINE, &obd::vehicle_info(0x06));
-    assert_eq!(obd::decode_cvns(&cvns).unwrap().count(), 1);
+    assert_eq!(obd::decode_cvns(&cvns).unwrap().count(), 5);
     let name = ask_one(&mut bus, ENGINE, &obd::vehicle_info(0x0A));
     let name = obd::decode_ecu_name(&name).unwrap();
     assert_eq!((name.acronym, name.name), ("ECM", "EngineControl"));

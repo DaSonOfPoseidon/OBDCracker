@@ -209,7 +209,12 @@ impl ObdFixture {
             let mut calids = Vec::new();
             let mut cvns = Vec::new();
             for (calid, cvn) in self.calids.iter().zip(&self.cvns) {
-                calids.extend(padded(calid, CALID_LEN, "bad calibration ID")?);
+                // "" is an empty slot (all 0x00), which the A7's engine sends (#46).
+                if calid.is_empty() {
+                    calids.extend([0; CALID_LEN]);
+                } else {
+                    calids.extend(padded(calid, CALID_LEN, "bad calibration ID")?);
+                }
                 let cvn_bytes = hex_bytes(cvn)?;
                 if cvn_bytes.len() != CVN_LEN {
                     return Err(value_error("CVN must be 4 bytes", cvn));
