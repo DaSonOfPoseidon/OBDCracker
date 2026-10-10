@@ -234,45 +234,65 @@ pub fn scan<T: Transport + ?Sized>(
 // A module's DID reads, then its DTC count and DTC list requests, all approved.
 type ModuleRequests = (Vec<(ExtraDid, Approved)>, Approved, Approved);
 
-// Each ECU that answered the first bitmap and the PIDs it supports, following the bitmaps while
-// any ECU says the next one is supported. PID E0 is the last bitmap.
+// One ECU's supported PIDs so far, and the bitmap it said comes next, if any.
+struct Chain {
+    pids: Result<Vec<u8>, ReadError>,
+    next: Option<u8>,
+}
+
+// Each ECU that answered the first bitmap and the PIDs it supports. Each ECU's chain follows only
+// the bitmaps it says it supports, and ends at a missing or garbled one, even while another
+// ECU's chain keeps the requests going. PID E0 is the last bitmap.
 fn supported_pids<T: Transport + ?Sized>(
     transport: &mut T,
     pid_requests: &[Approved],
     timing: Timing,
 ) -> Result<BTreeMap<u32, Result<Vec<u8>, ReadError>>, ScanError> {
-    let mut supported: BTreeMap<u32, Result<Vec<u8>, ReadError>> = BTreeMap::new();
+    let mut chains: BTreeMap<u32, Chain> = BTreeMap::new();
     let mut base = 0u8;
     loop {
         let replies = broadcast(transport, &pid_requests[usize::from(base)], timing)?;
-        let next = base.checked_add(0x20);
-        let mut more = false;
+        let after = base.checked_add(0x20);
         for reply in &replies {
-            let decoded = decode_bitmap(&reply.payload, base);
-            let list = supported.entry(reply.source).or_insert_with(|| {
-                // Only the first bitmap starts a list; an ECU that skipped it has none.
-                if base == 0 {
-                    Ok(Vec::new())
-                } else {
-                    Err(ReadError::NoReply)
+            let chain = if base == 0 {
+                chains.entry(reply.source).or_insert(Chain {
+                    pids: Ok(Vec::new()),
+                    next: Some(0),
+                })
+            } else {
+                match chains.get_mut(&reply.source) {
+                    Some(chain) if chain.next == Some(base) => chain,
+                    // A page this ECU didn't say it supports.
+                    _ => continue,
                 }
-            });
-            let Ok(pids) = list else { continue };
-            match decoded {
+            };
+            chain.next = None;
+            match decode_bitmap(&reply.payload, base) {
                 Ok(bitmap) => {
-                    pids.extend(bitmap.iter().filter(|pid| pid % 0x20 != 0));
-                    more |= next.is_some_and(|next| bitmap.contains(next));
+                    if let Ok(pids) = &mut chain.pids {
+                        pids.extend(bitmap.iter().filter(|pid| pid % 0x20 != 0));
+                    }
+                    chain.next = after.filter(|&after| bitmap.contains(after));
                 }
-                Err(e) if base == 0 => *list = Err(ReadError::Reply(e)),
+                Err(e) if base == 0 => chain.pids = Err(ReadError::Reply(e)),
                 Err(_) => {}
             }
         }
-        match next {
-            Some(next) if more => base = next,
+        // An ECU that said this page comes next but didn't answer it ends its chain here.
+        for chain in chains.values_mut() {
+            if chain.next == Some(base) {
+                chain.next = None;
+            }
+        }
+        match after {
+            Some(after) if chains.values().any(|chain| chain.next == Some(after)) => base = after,
             _ => break,
         }
     }
-    Ok(supported)
+    Ok(chains
+        .into_iter()
+        .map(|(source, chain)| (source, chain.pids))
+        .collect())
 }
 
 // Each supported PID's value from each ECU that supports it, one broadcast per PID.

@@ -286,6 +286,70 @@ fn a_silent_car_loses_only_its_values() {
 }
 
 #[test]
+fn a_garbled_later_bitmap_ends_that_ecus_chain() {
+    // 7E8's bitmap 20 is truncated while 7E9's keeps the chain going to 40; 7E8 answers 40 too.
+    let mut car = Car::new(|id, request| match (id, request) {
+        (0x7DF, [0x01, 0x00]) => vec![
+            // 05 and 20
+            reply(0x7E8, &[0x41, 0x00, 0x08, 0x00, 0x00, 0x01]),
+            reply(0x7E9, &[0x41, 0x00, 0x08, 0x00, 0x00, 0x01]),
+        ],
+        (0x7DF, [0x01, 0x20]) => vec![
+            reply(0x7E8, &[0x41, 0x20, 0x00]),
+            // 40
+            reply(0x7E9, &[0x41, 0x20, 0x00, 0x00, 0x00, 0x01]),
+        ],
+        // 42
+        (0x7DF, [0x01, 0x40]) => vec![
+            reply(0x7E8, &[0x41, 0x40, 0x40, 0x00, 0x00, 0x00]),
+            reply(0x7E9, &[0x41, 0x40, 0x40, 0x00, 0x00, 0x00]),
+        ],
+        _ => Vec::new(),
+    });
+    let got = scan(&mut car, &Policy::read_only(), &[], TIMING).unwrap();
+    let pids = |ecu: &ObdEcu| -> Vec<u8> {
+        ecu.pids
+            .as_ref()
+            .unwrap()
+            .iter()
+            .map(|(pid, _)| *pid)
+            .collect()
+    };
+    assert_eq!(pids(&got.ecus[0]), [0x05]);
+    assert_eq!(pids(&got.ecus[1]), [0x05, 0x42]);
+}
+
+#[test]
+fn a_bitmap_an_ecu_didnt_advertise_is_ignored() {
+    // Only 7E8 says bitmap 20 is supported, but 7E9 answers it too.
+    let mut car = Car::new(|id, request| match (id, request) {
+        (0x7DF, [0x01, 0x00]) => vec![
+            // 05 and 20
+            reply(0x7E8, &[0x41, 0x00, 0x08, 0x00, 0x00, 0x01]),
+            // 05
+            reply(0x7E9, &[0x41, 0x00, 0x08, 0x00, 0x00, 0x00]),
+        ],
+        // 21
+        (0x7DF, [0x01, 0x20]) => vec![
+            reply(0x7E8, &[0x41, 0x20, 0x80, 0x00, 0x00, 0x00]),
+            reply(0x7E9, &[0x41, 0x20, 0x80, 0x00, 0x00, 0x00]),
+        ],
+        _ => Vec::new(),
+    });
+    let got = scan(&mut car, &Policy::read_only(), &[], TIMING).unwrap();
+    let pids = |ecu: &ObdEcu| -> Vec<u8> {
+        ecu.pids
+            .as_ref()
+            .unwrap()
+            .iter()
+            .map(|(pid, _)| *pid)
+            .collect()
+    };
+    assert_eq!(pids(&got.ecus[0]), [0x05, 0x21]);
+    assert_eq!(pids(&got.ecus[1]), [0x05]);
+}
+
+#[test]
 fn the_bitmap_chain_stops_after_pid_e0() {
     // Every bitmap says the next one is supported, and nothing else.
     let mut car = Car::new(|id, request| match (id, request) {
