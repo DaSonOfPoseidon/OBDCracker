@@ -249,23 +249,9 @@ pub fn fingerprint<T: Transport + ?Sized>(
     for (module, requests) in modules.iter().zip(did_requests) {
         let mut dids = Vec::with_capacity(requests.len());
         for (did, request) in requests {
-            let value = match exchange(
-                transport,
-                &request,
-                Expect::Module(module.response_id),
-                timing,
-            ) {
-                Ok(replies) => replies.first().map_or(Err(ReadError::NoReply), |reply| {
-                    uds::decode_did(&reply.payload, did)
-                        .map(|data| match uds::decode_text(data) {
-                            Ok(text) => DidValue::Text(text.to_owned()),
-                            Err(_) => DidValue::Bytes(data.to_vec()),
-                        })
-                        .map_err(ReadError::Reply)
-                }),
-                Err(Error::Timeout) => Err(ReadError::NoReply),
-                Err(e) => return Err(FingerprintError::Transport(e)),
-            };
+            let value = ask(transport, &request, module.response_id, timing, |payload| {
+                decode_did_value(payload, did)
+            })?;
             dids.push((did, value));
         }
         identified.push(Identification {
@@ -280,8 +266,33 @@ pub fn fingerprint<T: Transport + ?Sized>(
     })
 }
 
+// A DID's data as text, or as bytes if it isn't printable.
+pub(crate) fn decode_did_value(payload: &[u8], did: u16) -> Result<DidValue, response::Error> {
+    uds::decode_did(payload, did).map(|data| match uds::decode_text(data) {
+        Ok(text) => DidValue::Text(text.to_owned()),
+        Err(_) => DidValue::Bytes(data.to_vec()),
+    })
+}
+
+// One module's decoded answer to `request`, or NoReply. Only an adapter failure is an error.
+pub(crate) fn ask<T: Transport + ?Sized, V>(
+    transport: &mut T,
+    request: &Approved,
+    response_id: u32,
+    timing: Timing,
+    decode: impl FnOnce(&[u8]) -> Result<V, response::Error>,
+) -> Result<Result<V, ReadError>, FingerprintError> {
+    match exchange(transport, request, Expect::Module(response_id), timing) {
+        Ok(replies) => Ok(replies.first().map_or(Err(ReadError::NoReply), |reply| {
+            decode(&reply.payload).map_err(ReadError::Reply)
+        })),
+        Err(Error::Timeout) => Ok(Err(ReadError::NoReply)),
+        Err(e) => Err(FingerprintError::Transport(e)),
+    }
+}
+
 // Every emissions ECU's answer to a broadcast.
-fn broadcast<T: Transport + ?Sized>(
+pub(crate) fn broadcast<T: Transport + ?Sized>(
     transport: &mut T,
     request: &Approved,
     timing: Timing,
@@ -290,7 +301,7 @@ fn broadcast<T: Transport + ?Sized>(
 }
 
 // Decodes `source`'s reply among `replies`, or NoReply if it didn't answer.
-fn from<V>(
+pub(crate) fn from<V>(
     replies: &[Response],
     source: u32,
     decode: impl FnOnce(&[u8]) -> Result<V, response::Error>,
