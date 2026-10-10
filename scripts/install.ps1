@@ -51,22 +51,57 @@ function Install-ObdCracker {
     # The 64-bit OS's architecture, even from a 32-bit PowerShell
     $arch = if ($env:PROCESSOR_ARCHITEW6432) { $env:PROCESSOR_ARCHITEW6432 } else { $env:PROCESSOR_ARCHITECTURE }
     switch ($arch) {
-        'AMD64' { $triple = 'x86_64-pc-windows-msvc'; $vcComponent = 'Microsoft.VisualStudio.Component.VC.Tools.x86.x64' }
-        'ARM64' { $triple = 'aarch64-pc-windows-msvc'; $vcComponent = 'Microsoft.VisualStudio.Component.VC.Tools.ARM64' }
+        'AMD64' { $triple = 'x86_64-pc-windows-msvc'; $vcComponent = 'Microsoft.VisualStudio.Component.VC.Tools.x86.x64'; $sdkArch = 'x64' }
+        'ARM64' { $triple = 'aarch64-pc-windows-msvc'; $vcComponent = 'Microsoft.VisualStudio.Component.VC.Tools.ARM64'; $sdkArch = 'arm64' }
         default { throw "unsupported processor architecture: $arch (need 64-bit x86 or ARM)" }
     }
     $cargoHome = if ($env:CARGO_HOME) { $env:CARGO_HOME } else { Join-Path $env:USERPROFILE '.cargo' }
     $cargoBin = Join-Path $cargoHome 'bin'
     $pathHadCargo = ($env:Path -split ';') -contains $cargoBin
+
+    # Whether MSVC can link a Rust program: the compiler component, plus a Windows SDK with the
+    # system and C runtime libraries for this architecture, which Visual Studio installs separately
+    function Test-MsvcToolchain {
+        $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
+        if (-not (Test-Path -LiteralPath $vswhere)) { return $false }
+        if (-not (& $vswhere -products * -requires $vcComponent -property installationPath)) { return $false }
+        foreach ($key in 'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows Kits\Installed Roots',
+            'HKLM:\SOFTWARE\Microsoft\Windows Kits\Installed Roots') {
+            $root = (Get-ItemProperty -LiteralPath $key -ErrorAction SilentlyContinue).KitsRoot10
+            if (-not $root) { continue }
+            $lib = Join-Path $root 'Lib'
+            if (-not (Test-Path -LiteralPath $lib)) { continue }
+            foreach ($version in Get-ChildItem -LiteralPath $lib -Directory) {
+                if ((Test-Path -LiteralPath (Join-Path $version.FullName "um\$sdkArch\kernel32.lib")) -and
+                    (Test-Path -LiteralPath (Join-Path $version.FullName "ucrt\$sdkArch\ucrt.lib"))) { return $true }
+            }
+        }
+        return $false
+    }
+
+    # Check the inputs before installing anything system-wide. User paths are literal throughout:
+    # [ and ] are legal in Windows names, and -Path would treat them as wildcards.
+    if ($Source) {
+        if (-not (Test-Path -LiteralPath (Join-Path $Source 'Cargo.toml'))) { throw "-Source $Source has no Cargo.toml" }
+        $Source = (Resolve-Path -LiteralPath $Source).Path
+    }
+    # The install directory: refuse to take over one this script didn't create
+    if ((Test-Path -LiteralPath $Dir) -and -not (Test-Path -LiteralPath (Join-Path $Dir $marker)) -and
+        (Get-ChildItem -Force -LiteralPath $Dir | Select-Object -First 1)) {
+        throw "$Dir already exists and wasn't made by this script; pick another -Dir (or -Source to build a checkout)"
+    }
+    New-Item -ItemType Directory -Force -Path $Dir | Out-Null
+    # Absolute, because the build runs from inside the source tree
+    $Dir = (Resolve-Path -LiteralPath $Dir).Path
+    New-Item -ItemType File -Force -Path (Join-Path $Dir $marker) | Out-Null
+
     $tmp = Join-Path ([IO.Path]::GetTempPath()) ("obdcracker-install-" + [guid]::NewGuid())
     New-Item -ItemType Directory -Path $tmp | Out-Null
 
     try {
-        # 1. The MSVC linker
-        $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
-        $haveVc = (Test-Path $vswhere) -and (& $vswhere -products * -requires $vcComponent -property installationPath)
-        if ($haveVc) {
-            Note 'Visual C++ Build Tools: already installed'
+        # 1. The MSVC linker and Windows SDK
+        if (Test-MsvcToolchain) {
+            Note 'Visual C++ Build Tools and Windows SDK: already installed'
         } else {
             Say 'Installing the Visual C++ Build Tools (Rust needs their linker). This is a few GB and can take 10-20 minutes; approve the admin prompt.'
             $installer = Join-Path $tmp 'vs_BuildTools.exe'
@@ -79,6 +114,9 @@ function Install-ObdCracker {
                 throw 'the Build Tools installed but need a restart: restart Windows, then run this script again'
             } elseif ($proc.ExitCode -ne 0) {
                 throw "the Build Tools installer failed (exit code $($proc.ExitCode))"
+            }
+            if (-not (Test-MsvcToolchain)) {
+                throw 'the C++ build tools or the Windows SDK are still missing: open Visual Studio Installer, choose Modify, and add "Desktop development with C++" with a Windows SDK'
             }
         }
 
@@ -95,20 +133,14 @@ function Install-ObdCracker {
         }
         # rustup adds this to the user's PATH for new windows; this one needs it too
         if (-not (($env:Path -split ';') -contains $cargoBin)) { $env:Path = "$cargoBin;$env:Path" }
-
-        # 3. The install directory, refusing to take over one this script didn't create
-        if ((Test-Path $Dir) -and -not (Test-Path (Join-Path $Dir $marker)) -and (Get-ChildItem -Force $Dir | Select-Object -First 1)) {
-            throw "$Dir already exists and wasn't made by this script; pick another -Dir (or -Source to build a checkout)"
+        # A rustup from elsewhere (Scoop, say) may keep its cargo proxy somewhere not on PATH
+        if (-not (Get-Command cargo -ErrorAction SilentlyContinue)) {
+            throw "rustup is installed but cargo isn't on PATH: add rustup's proxy directory (usually $cargoBin) to PATH"
         }
-        New-Item -ItemType Directory -Force -Path $Dir | Out-Null
-        # Absolute, because the build runs from inside the source tree
-        $Dir = (Resolve-Path $Dir).Path
-        New-Item -ItemType File -Force -Path (Join-Path $Dir $marker) | Out-Null
 
-        # 4. The source
+        # 3. The source
         if ($Source) {
-            if (-not (Test-Path (Join-Path $Source 'Cargo.toml'))) { throw "-Source $Source has no Cargo.toml" }
-            $src = (Resolve-Path $Source).Path
+            $src = $Source
             Note "building the checkout in $src"
         } else {
             Say "Downloading $repo at $Ref"
@@ -119,21 +151,21 @@ function Install-ObdCracker {
                 throw "couldn't download ${Ref}: check the name, and that it's pushed to GitHub ($($_.Exception.Message))"
             }
             $unpacked = Join-Path $tmp 'source'
-            Expand-Archive -Path $zip -DestinationPath $unpacked
+            Expand-Archive -LiteralPath $zip -DestinationPath $unpacked
             # The archive holds one folder, named after the repo and ref
-            $top = @(Get-ChildItem -Directory $unpacked)
-            if ($top.Count -ne 1 -or -not (Test-Path (Join-Path $top[0].FullName 'Cargo.toml'))) {
+            $top = @(Get-ChildItem -Directory -LiteralPath $unpacked)
+            if ($top.Count -ne 1 -or -not (Test-Path -LiteralPath (Join-Path $top[0].FullName 'Cargo.toml'))) {
                 throw "the download has no Cargo.toml; is '$Ref' an OBDCracker ref?"
             }
             # Replace the last run's copy only once the new one is complete
             $src = Join-Path $Dir 'src'
-            if (Test-Path $src) { Remove-Item -Recurse -Force $src }
-            Move-Item $top[0].FullName $src
+            if (Test-Path -LiteralPath $src) { Remove-Item -Recurse -Force -LiteralPath $src }
+            Move-Item -LiteralPath $top[0].FullName -Destination $src
         }
 
-        # 5. Build
+        # 4. Build
         Say 'Building obdcracker (the first run also downloads the pinned Rust toolchain)'
-        Push-Location $src
+        Push-Location -LiteralPath $src
         try {
             # Install what rust-toolchain.toml pins. rustup 1.28+ does it with `toolchain install`;
             # older rustup doesn't take that without a name, but installs it on `show`.
@@ -148,7 +180,7 @@ function Install-ObdCracker {
             Pop-Location
         }
 
-        # 6. Check it runs and can see the adapter
+        # 5. Check it runs and can see the adapter
         Say 'Checking the install'
         $exe = Join-Path $cargoBin 'obdcracker.exe'
         Invoke-Checked $exe @('--version')
@@ -167,7 +199,13 @@ function Install-ObdCracker {
         Note 'obdcracker ports                      # find the adapter''s port, e.g. COM3'
         Note 'obdcracker --serial COM3 adapter      # check the adapter; sends nothing to the car'
         Note 'obdcracker --serial COM3 vin'
-        if (-not $pathHadCargo) { Note "open a new terminal first, so $cargoBin is on your PATH" }
+        if (-not $pathHadCargo) {
+            if (([Environment]::GetEnvironmentVariable('Path', 'User') -split ';') -contains $cargoBin) {
+                Note "open a new terminal first, so $cargoBin is on your PATH"
+            } else {
+                Note "add $cargoBin to your PATH to run obdcracker from any terminal"
+            }
+        }
     } finally {
         Remove-Item -Recurse -Force $tmp -ErrorAction SilentlyContinue
     }

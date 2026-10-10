@@ -106,13 +106,28 @@ ensure_linker_linux() {
 ensure_rustup() {
 	if command -v rustup >/dev/null 2>&1; then
 		note "rustup: already installed"
-		return
-	fi
-	if [ -x "$CARGO_BIN/rustup" ]; then
+	elif [ -x "$CARGO_BIN/rustup" ]; then
 		note "rustup: already installed in $CARGO_BIN"
 		PATH="$CARGO_BIN:$PATH"
-		return
+	else
+		install_rustup
 	fi
+	ensure_cargo
+}
+
+# A packaged rustup can keep its cargo proxy off PATH (Homebrew puts it in its keg's bin).
+ensure_cargo() {
+	command -v cargo >/dev/null 2>&1 && return
+	for dir in "$CARGO_BIN" "$(brew --prefix rustup 2>/dev/null)/bin"; do
+		if [ -x "$dir/cargo" ]; then
+			PATH="$dir:$PATH"
+			return
+		fi
+	done
+	die "rustup is installed but cargo isn't on PATH: add rustup's proxy directory to PATH and run this again"
+}
+
+install_rustup() {
 	say "Installing rustup"
 	tmp_rustup="$TMP/rustup-init.sh"
 	fetch https://sh.rustup.rs >"$tmp_rustup"
@@ -249,15 +264,23 @@ main() {
 	trap 'rm -rf "$TMP"' EXIT
 
 	case $OS in
-	Darwin) ensure_linker_macos ;;
-	Linux) ensure_linker_linux ;;
+	Darwin | Linux) ;;
 	*) die "this script supports macOS and Linux; on Windows use scripts/install.ps1" ;;
 	esac
-	ensure_rustup
-	prepare_dir
+	# Check the inputs before installing anything system-wide
 	if [ -n "$SRC" ]; then
 		[ -f "$SRC/Cargo.toml" ] || die "--source $SRC has no Cargo.toml"
 		SRC=$(cd "$SRC" && pwd)
+	fi
+	prepare_dir
+
+	if [ "$OS" = Darwin ]; then
+		ensure_linker_macos
+	else
+		ensure_linker_linux
+	fi
+	ensure_rustup
+	if [ -n "$SRC" ]; then
 		note "building the checkout in $SRC"
 	else
 		download_source
@@ -273,7 +296,12 @@ main() {
 	note "obdcracker --serial <PORT> adapter     # check the adapter; sends nothing to the car"
 	note "obdcracker --serial <PORT> vin"
 	if [ -z "$path_had_cargo" ]; then
-		note "open a new terminal first, so $CARGO_BIN is on your PATH"
+		# rustup-init leaves this file and adds it to the shell profiles; a packaged rustup doesn't
+		if [ -f "$CARGO_HOME_DIR/env" ]; then
+			note "open a new terminal first, so $CARGO_BIN is on your PATH"
+		else
+			note "add $CARGO_BIN to your PATH to run obdcracker from any terminal"
+		fi
 	fi
 	if [ -n "$RELOGIN" ]; then
 		note "log out and back in first, so the new group applies"

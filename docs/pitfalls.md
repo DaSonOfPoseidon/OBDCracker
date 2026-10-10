@@ -194,6 +194,10 @@ Each entry names the class, what to check, and where it bit us.
   toolchain (gcc without libc6-dev can't link), resolved a relative `--dir` after changing into the source tree, and
   looked for the binary in `CARGO_HOME` while Cargo's `install.root` can send it elsewhere. Test the capability (link
   a program), make paths absolute before any `cd`, pin outputs (`--root`), and validate an option only where it's used.
+  The second round found more of the same class: MSVC without a Windows SDK can't link, a packaged rustup can keep
+  `cargo` off PATH, and a bad `-Source` was only caught after a multi-GB install. Check every component the build
+  needs, validate all input before any system-wide change, and pass user paths to PowerShell with `-LiteralPath`
+  (`[` and `]` are wildcards to `-Path`).
 - **`pkill -f <pattern>` matches the shell running it** when the pattern is in its own command line. Save the PID
   when starting a background process and kill that.
 - **clap skips `requires` when the required argument conflicts with one that's present.** `--baud` requires
