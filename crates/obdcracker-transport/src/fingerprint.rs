@@ -83,8 +83,8 @@ pub struct Fingerprint {
 pub struct Calibration {
     /// The CAN ID the ECU answered on.
     pub source: u32,
-    /// Its calibration IDs (mode 09 PID 04).
-    pub calids: Result<Vec<String>, ReadError>,
+    /// Its calibration IDs (mode 09 PID 04). `None` is an empty slot, sent as only 0x00 padding.
+    pub calids: Result<Vec<Option<String>>, ReadError>,
     /// Its calibration verification numbers (mode 09 PID 06), one per calibration ID, in the same
     /// order. [`ReadError::CountMismatch`] if the counts differ.
     pub cvns: Result<Vec<Cvn>, ReadError>,
@@ -220,9 +220,9 @@ pub fn fingerprint<T: Transport + ?Sized>(
             let declared = from(&calids, source, |payload| {
                 Ok(obd::decode_calids(payload)?.count())
             });
-            let calids: Result<Vec<String>, _> = from(&calids, source, |payload| {
+            let calids: Result<Vec<Option<String>>, _> = from(&calids, source, |payload| {
                 obd::decode_calids(payload)?
-                    .map(|calid| calid.map(str::to_owned))
+                    .map(|calid| calid.map(|calid| calid.map(str::to_owned)))
                     .collect()
             });
             let cvns = match from(&cvns, source, |payload| -> Result<Vec<Cvn>, _> {

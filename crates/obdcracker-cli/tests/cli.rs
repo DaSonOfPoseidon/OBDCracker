@@ -68,7 +68,8 @@ fn refuses_to_run_without_an_adapter() {
 }
 
 #[test]
-fn sim_vin_prints_every_ecu_and_audits_each_frame() {
+fn sim_vin_prints_each_answer_and_audits_each_frame() {
+    // Only the A7's engine answers mode 09 PID 02; its transmission stays silent (#46).
     let log = temp_log("sim");
     let out = obdcracker(&["--sim", "a7", "--audit-log", log.to_str().unwrap(), "vin"]);
     assert!(
@@ -78,15 +79,14 @@ fn sim_vin_prints_every_ecu_and_audits_each_frame() {
     );
     assert_eq!(
         String::from_utf8_lossy(&out.stdout),
-        "7E8 WAUZZZ4G1EN000000\n7E9 WAUZZZ4G1EN000000\n"
+        "7E8 WAU2MBFC6EN093415\n"
     );
 
     let audit = std::fs::read_to_string(&log).unwrap();
     let lines: Vec<_> = audit.lines().collect();
-    assert_eq!(lines.len(), 3, "{audit}");
+    assert_eq!(lines.len(), 2, "{audit}");
     assert!(lines[0].contains(r#""dir":"tx","id":"7DF","payload":"09 02","link":"sim""#));
     assert!(lines[1].contains(r#""dir":"rx","id":"7E8""#));
-    assert!(lines[2].contains(r#""dir":"rx","id":"7E9""#));
 }
 
 #[test]
@@ -325,13 +325,16 @@ fn sim_fingerprint_shows_values_and_refusals() {
     );
     let stdout = String::from_utf8_lossy(&out.stdout);
     for line in [
-        "7E8 CALID 4G0907401A  0010",
-        "7E8 CVN   1A2B3C4D",
-        "7E9 CALID 4G0927158   1100",
-        "7E8 engine F187 4G0907401A",
-        "7E8 engine F19E EV_ECM30TDI0114G0907401A",
-        "7E9 transmission F189 1100",
-        "7E9 transmission F19E (service 0x22 refused: request out of range (0x31))",
+        "7E8 CALID 4G0401N 0016BVAB, (empty), 0000000000000000, NOX00907807 0015, PMS00906261 4010",
+        "7E8 CVN   9BF7470D, 00000000, 00000000, 38D3FF82, 0E1FC39E",
+        "7E9 CALID 4G0158Q 100821  ",
+        "7E8 engine F187 4G0907401N",
+        "7E8 engine F188 (service 0x22 refused: request out of range (0x31))",
+        "7E8 engine F19E EV_ECM30TDI0114G0907401N",
+        "7E9 transmission F188 (service 0x22 refused: request out of range (0x31))",
+        "7E9 transmission F189 1008",
+        "7E9 transmission F191 0BK927156AM",
+        "7E9 transmission F19E EV_TCMAL551211",
     ] {
         assert!(
             stdout.lines().any(|l| l == line),

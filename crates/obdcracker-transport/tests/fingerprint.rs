@@ -113,12 +113,12 @@ fn reads_calibrations_then_each_modules_dids() {
         [
             Calibration {
                 source: 0x7E8,
-                calids: Ok(vec!["4G0907401A  0010".to_owned()]),
+                calids: Ok(vec![Some("4G0907401A  0010".to_owned())]),
                 cvns: Ok(vec![Cvn([0x1A, 0x2B, 0x3C, 0x4D])]),
             },
             Calibration {
                 source: 0x7E9,
-                calids: Ok(vec!["4G0927158   1100".to_owned()]),
+                calids: Ok(vec![Some("4G0927158   1100".to_owned())]),
                 cvns: Err(ReadError::NoReply),
             },
         ]
@@ -166,11 +166,11 @@ fn a_silent_module_and_a_silent_car_lose_only_their_values() {
 
 #[test]
 fn a_bad_reply_is_reported_not_trusted() {
-    // CALIDs of nothing but padding, and DIDs echoed with no data
+    // A CALID with a control character, and DIDs echoed with no data
     let mut car = Car::new(|id, request| match (id, request) {
         (0x7DF, [0x09, 0x04]) => {
             let mut payload = vec![0x49, 0x04, 0x01];
-            payload.extend([0; 16]);
+            payload.extend(calid("4G0907401\x1B  0010"));
             vec![reply(0x7E8, &payload)]
         }
         (0x7E0, [0x22, high, low]) => vec![reply(0x7E8, &[0x62, *high, *low])],
@@ -301,5 +301,74 @@ fn cvns_are_checked_against_the_declared_count_even_when_a_calid_is_bad() {
     assert_eq!(
         got.ecus[0].cvns,
         Err(ReadError::CountMismatch { calids: 2, cvns: 1 })
+    );
+}
+
+// The mode 09 replies the 2014 A7 3.0 TDI sent in the first real-car session (#46).
+fn a7_calibrations(id: u32, request: &[u8]) -> Vec<Response> {
+    match (id, request) {
+        (0x7DF, [0x09, 0x04]) => vec![
+            reply(
+                0x7E9,
+                &hex_bytes("49 04 01 34 47 30 31 35 38 51 20 31 30 30 38 32 31 20 20"),
+            ),
+            reply(
+                0x7E8,
+                &hex_bytes(
+                    "49 04 05 34 47 30 34 30 31 4E 20 30 30 31 36 42 56 41 42 00 00 00 00 00 00 \
+                     00 00 00 00 00 00 00 00 00 00 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 \
+                     30 4E 4F 58 30 30 39 30 37 38 30 37 20 30 30 31 35 50 4D 53 30 30 39 30 36 \
+                     32 36 31 20 34 30 31 30",
+                ),
+            ),
+        ],
+        (0x7DF, [0x09, 0x06]) => vec![
+            reply(0x7E9, &hex_bytes("49 06 01 E4 76 49 64")),
+            reply(
+                0x7E8,
+                &hex_bytes("49 06 05 9B F7 47 0D 00 00 00 00 00 00 00 00 38 D3 FF 82 0E 1F C3 9E"),
+            ),
+        ],
+        _ => Vec::new(),
+    }
+}
+
+fn hex_bytes(text: &str) -> Vec<u8> {
+    text.split_whitespace()
+        .map(|b| u8::from_str_radix(b, 16).unwrap())
+        .collect()
+}
+
+#[test]
+fn an_empty_calibration_slot_doesnt_hide_the_others() {
+    let mut car = Car::new(a7_calibrations);
+    let got = fingerprint(&mut car, &Policy::read_only(), &[], TIMING).unwrap();
+    let some = |text: &str| Some(text.to_owned());
+    assert_eq!(
+        got.ecus,
+        [
+            Calibration {
+                source: 0x7E8,
+                calids: Ok(vec![
+                    some("4G0401N 0016BVAB"),
+                    None,
+                    some("0000000000000000"),
+                    some("NOX00907807 0015"),
+                    some("PMS00906261 4010"),
+                ]),
+                cvns: Ok(vec![
+                    Cvn([0x9B, 0xF7, 0x47, 0x0D]),
+                    Cvn([0; 4]),
+                    Cvn([0; 4]),
+                    Cvn([0x38, 0xD3, 0xFF, 0x82]),
+                    Cvn([0x0E, 0x1F, 0xC3, 0x9E]),
+                ]),
+            },
+            Calibration {
+                source: 0x7E9,
+                calids: Ok(vec![some("4G0158Q 100821  ")]),
+                cvns: Ok(vec![Cvn([0xE4, 0x76, 0x49, 0x64])]),
+            },
+        ]
     );
 }
