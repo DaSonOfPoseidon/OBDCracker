@@ -133,10 +133,6 @@ function Install-ObdCracker {
         }
         # rustup adds this to the user's PATH for new windows; this one needs it too
         if (-not (($env:Path -split ';') -contains $cargoBin)) { $env:Path = "$cargoBin;$env:Path" }
-        # A rustup from elsewhere (Scoop, say) may keep its cargo proxy somewhere not on PATH
-        if (-not (Get-Command cargo -ErrorAction SilentlyContinue)) {
-            throw "rustup is installed but cargo isn't on PATH: add rustup's proxy directory (usually $cargoBin) to PATH"
-        }
 
         # 3. The source
         if ($Source) {
@@ -166,17 +162,25 @@ function Install-ObdCracker {
         # 4. Build
         Say 'Building obdcracker (the first run also downloads the pinned Rust toolchain)'
         Push-Location -LiteralPath $src
+        $pathBeforeBuild = $env:Path
         try {
             # Install what rust-toolchain.toml pins. rustup 1.28+ does it with `toolchain install`;
             # older rustup doesn't take that without a name, but installs it on `show`.
             & rustup toolchain install
             if ($LASTEXITCODE -ne 0) { Invoke-Checked rustup @('show') }
+            # Build with that toolchain's own cargo and rustc, not whatever is first on PATH: a
+            # system cargo (or a rustup whose proxies aren't on PATH) would ignore rust-toolchain.toml
+            $toolchainCargo = & rustup which cargo
+            if ($LASTEXITCODE -ne 0 -or -not $toolchainCargo) { throw "rustup can't find cargo for the pinned toolchain" }
+            $env:Path = "$(Split-Path -Parent $toolchainCargo);$env:Path"
             # The build cache lives outside the source, so a re-run only rebuilds what changed
             # --root pins where the binary goes, whatever CARGO_INSTALL_ROOT or Cargo's install.root
             # say, so it lands in the directory rustup put on PATH
             Invoke-Checked cargo @('install', '--path', 'crates/obdcracker-cli', '--locked', '--force',
                 '--target-dir', (Join-Path $Dir 'target'), '--root', $cargoHome)
         } finally {
+            # The toolchain's directory was for the build only; don't leave it in an iex caller's PATH
+            $env:Path = $pathBeforeBuild
             Pop-Location
         }
 

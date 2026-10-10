@@ -112,19 +112,6 @@ ensure_rustup() {
 	else
 		install_rustup
 	fi
-	ensure_cargo
-}
-
-# A packaged rustup can keep its cargo proxy off PATH (Homebrew puts it in its keg's bin).
-ensure_cargo() {
-	command -v cargo >/dev/null 2>&1 && return
-	for dir in "$CARGO_BIN" "$(brew --prefix rustup 2>/dev/null)/bin"; do
-		if [ -x "$dir/cargo" ]; then
-			PATH="$dir:$PATH"
-			return
-		fi
-	done
-	die "rustup is installed but cargo isn't on PATH: add rustup's proxy directory to PATH and run this again"
 }
 
 install_rustup() {
@@ -169,6 +156,10 @@ build() {
 	# Install what rust-toolchain.toml pins. rustup 1.28+ does it with `toolchain install`; older
 	# rustup doesn't take that without a name, but installs it on `show`.
 	rustup toolchain install </dev/null || rustup show </dev/null
+	# Build with that toolchain's own cargo and rustc, not whatever is first on PATH: a system
+	# cargo (or a packaged rustup whose proxies aren't on PATH) would ignore rust-toolchain.toml
+	toolchain_cargo=$(rustup which cargo </dev/null) || die "rustup can't find cargo for the pinned toolchain"
+	PATH="$(dirname "$toolchain_cargo"):$PATH"
 	# The build cache lives outside the source, so a re-run only rebuilds what changed
 	# --root pins where the binary goes, whatever CARGO_INSTALL_ROOT or Cargo's install.root say,
 	# so it lands in the directory rustup put on PATH

@@ -197,7 +197,8 @@ Each entry names the class, what to check, and where it bit us.
   The second round found more of the same class: MSVC without a Windows SDK can't link, a packaged rustup can keep
   `cargo` off PATH, and a bad `-Source` was only caught after a multi-GB install. Check every component the build
   needs, validate all input before any system-wide change, and pass user paths to PowerShell with `-LiteralPath`
-  (`[` and `]` are wildcards to `-Path`).
+  (`[` and `]` are wildcards to `-Path`). And don't trust whichever `cargo` is first on PATH: a system one ignores
+  `rust-toolchain.toml`, so build with the pinned toolchain's own (`rustup which cargo`).
 - **`pkill -f <pattern>` matches the shell running it** when the pattern is in its own command line. Save the PID
   when starting a background process and kill that.
 - **clap skips `requires` when the required argument conflicts with one that's present.** `--baud` requires
