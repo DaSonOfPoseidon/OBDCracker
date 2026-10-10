@@ -32,7 +32,9 @@ from developers being careful:
   right now: read from the same module, saved to disk and read back from disk. Every change is reversible from that
   backup, and each restore path is tested end to end against the simulator (back up → write → restore → read back
   equals the original) before it touches a car.
-- `--dry-run` prints the exact frames a command would send without opening a device.
+- `--dry-run` prints the exact frames a command would send without opening a device. Frames that depend on the
+  car's answers (`scan`'s later PID bitmaps and PID reads) can't be known in advance; the dry run lists what they
+  can be instead.
 - `--sim a7` runs a command against a simulated A7 instead of a car, through the same policy and audit log.
 - `fingerprint` identifies the engine and transmission software: calibration IDs and CVNs (OBD-II mode 09), then
   part numbers and versions (UDS `22 F187`, `F188`, `F189`, `F191`, `F19E`), one read at a time. A tune changes the

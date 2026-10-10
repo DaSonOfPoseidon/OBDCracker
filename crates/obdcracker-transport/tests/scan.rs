@@ -8,7 +8,9 @@ use obdcracker_core::response::{Error as ReplyError, NegativeResponse, Nrc};
 use obdcracker_core::uds::{DtcCount, DtcFormat, DtcRecord, DtcStatus, UdsDtc};
 use obdcracker_safety::{Approved, Policy};
 use obdcracker_transport::fingerprint::{DidValue, FingerprintError, ReadError, UdsModule};
-use obdcracker_transport::scan::{ObdEcu, PidValue, SCAN_DIDS, ScanModule, scan};
+use obdcracker_transport::scan::{
+    DidFormat, ExtraDid, ObdEcu, PidValue, SCAN_DIDS, ScanModule, scan,
+};
 use obdcracker_transport::{Error, Response, Timing, Transport, hex};
 
 type Answer = Box<dyn FnMut(u32, &[u8]) -> Vec<Response>>;
@@ -67,7 +69,13 @@ const REFUSED: Nrc = Nrc::RequestOutOfRange;
 fn engine(extra_dids: &[u16]) -> ScanModule {
     ScanModule {
         module: UdsModule::obd_engine(),
-        extra_dids: extra_dids.to_vec(),
+        extra_dids: extra_dids
+            .iter()
+            .map(|&id| ExtraDid {
+                id,
+                format: DidFormat::Text,
+            })
+            .collect(),
     }
 }
 
@@ -218,6 +226,40 @@ fn reads_each_did_once_in_standard_then_profile_order() {
     let mut expected = SCAN_DIDS.to_vec();
     expected.extend([0x0600, 0xF1AA]);
     assert_eq!(dids, expected);
+}
+
+#[test]
+fn a_hex_did_keeps_its_bytes_even_when_they_look_like_text() {
+    // A VAG coding value whose bytes happen to be printable ("01").
+    let mut car = Car::new(|id, request| match (id, request) {
+        (0x7E0, [0x22, 0x06, 0x00]) => vec![reply(0x7E8, &[0x62, 0x06, 0x00, 0x30, 0x31])],
+        (0x7E0, [0x22, 0xF1, 0x87]) => vec![reply(0x7E8, b"\x62\xF1\x87ab")],
+        _ => Vec::new(),
+    });
+    let module = ScanModule {
+        module: UdsModule::obd_engine(),
+        extra_dids: vec![
+            ExtraDid {
+                id: 0x0600,
+                format: DidFormat::Hex,
+            },
+            // A standard DID stays text, whatever a later entry says.
+            ExtraDid {
+                id: 0xF187,
+                format: DidFormat::Hex,
+            },
+        ],
+    };
+    let got = scan(&mut car, &Policy::read_only(), &[module], TIMING).unwrap();
+    let value = |want: u16| {
+        got.modules[0]
+            .dids
+            .iter()
+            .find(|(did, _)| *did == want)
+            .map(|(_, value)| value.clone())
+    };
+    assert_eq!(value(0x0600), Some(Ok(DidValue::Bytes(vec![0x30, 0x31]))));
+    assert_eq!(value(0xF187), Some(Ok(DidValue::Text("ab".into()))));
 }
 
 #[test]

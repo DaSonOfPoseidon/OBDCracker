@@ -47,8 +47,26 @@ pub struct ScanModule {
     /// Where it sits on the bus.
     pub module: UdsModule,
     /// More DIDs to read after [`SCAN_DIDS`], such as VAG's F1A3 or 0600. Each DID is read
-    /// once, however often it's listed.
-    pub extra_dids: Vec<u16>,
+    /// once, however often it's listed, and a standard DID keeps the standard's format.
+    pub extra_dids: Vec<ExtraDid>,
+}
+
+/// A DID a vehicle profile adds, and how to show its value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ExtraDid {
+    /// The 2-byte identifier.
+    pub id: u16,
+    /// How to show its value.
+    pub format: DidFormat,
+}
+
+/// How to show a DID's value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DidFormat {
+    /// Text, or the bytes if they aren't printable.
+    Text,
+    /// Always the bytes, even when they happen to be printable, such as a coding value.
+    Hex,
 }
 
 /// Everything a scan read.
@@ -157,7 +175,7 @@ pub fn scan<T: Transport + ?Sized>(
             let target = Target::Physical(scanned.module.request_id);
             let dids = dids_of(scanned)
                 .into_iter()
-                .map(|did| Ok((did, approve(target, &uds::read_did(did))?)))
+                .map(|extra| Ok((extra, approve(target, &uds::read_did(extra.id))?)))
                 .collect::<Result<Vec<_>, _>>()?;
             let count = approve(target, &uds::dtc_count_by_status_mask(DTC_MASK))?;
             let dtcs = approve(target, &uds::dtcs_by_status_mask(DTC_MASK))?;
@@ -214,7 +232,7 @@ pub fn scan<T: Transport + ?Sized>(
 }
 
 // A module's DID reads, then its DTC count and DTC list requests, all approved.
-type ModuleRequests = (Vec<(u16, Approved)>, Approved, Approved);
+type ModuleRequests = (Vec<(ExtraDid, Approved)>, Approved, Approved);
 
 // Each ECU that answered the first bitmap and the PIDs it supports, following the bitmaps while
 // any ECU says the next one is supported. PID E0 is the last bitmap.
@@ -291,11 +309,18 @@ fn scan_module<T: Transport + ?Sized>(
 ) -> Result<ModuleScan, ScanError> {
     let response_id = module.response_id;
     let mut dids = Vec::with_capacity(did_requests.len());
-    for (did, request) in did_requests {
-        let value = ask(transport, &request, response_id, timing, |payload| {
-            decode_did_value(payload, did)
-        })?;
-        dids.push((did, value));
+    for (ExtraDid { id, format }, request) in did_requests {
+        let value = ask(
+            transport,
+            &request,
+            response_id,
+            timing,
+            |payload| match format {
+                DidFormat::Text => decode_did_value(payload, id),
+                DidFormat::Hex => Ok(DidValue::Bytes(uds::decode_did(payload, id)?.to_vec())),
+            },
+        )?;
+        dids.push((id, value));
     }
     let dtc_count = ask(
         transport,
@@ -316,12 +341,18 @@ fn scan_module<T: Transport + ?Sized>(
     })
 }
 
-// SCAN_DIDS, then the module's extra DIDs, each once.
-fn dids_of(scanned: &ScanModule) -> Vec<u16> {
-    let mut dids = SCAN_DIDS.to_vec();
-    for &did in &scanned.extra_dids {
-        if !dids.contains(&did) {
-            dids.push(did);
+// SCAN_DIDS as text, then the module's extra DIDs, each once and in its first format.
+fn dids_of(scanned: &ScanModule) -> Vec<ExtraDid> {
+    let mut dids: Vec<ExtraDid> = SCAN_DIDS
+        .iter()
+        .map(|&id| ExtraDid {
+            id,
+            format: DidFormat::Text,
+        })
+        .collect();
+    for &extra in &scanned.extra_dids {
+        if !dids.iter().any(|did| did.id == extra.id) {
+            dids.push(extra);
         }
     }
     dids

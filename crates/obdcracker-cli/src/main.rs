@@ -7,13 +7,13 @@ use std::time::Duration;
 use clap::builder::PossibleValuesParser;
 use clap::{Parser, Subcommand};
 use obdcracker_core::obd;
-use obdcracker_profile::{Profile, Protocol};
+use obdcracker_profile::{Decode, Profile, Protocol};
 use obdcracker_safety::{Policy, Target};
 use obdcracker_sim::SimBus;
 use obdcracker_transport::elm::Elm;
 use obdcracker_transport::fingerprint::{self, DidValue, Fingerprint, ReadError, UdsModule};
 use obdcracker_transport::link::{Link, SerialLink, TcpLink};
-use obdcracker_transport::scan::{self, PidValue, Scan, ScanModule};
+use obdcracker_transport::scan::{self, DidFormat, ExtraDid, PidValue, Scan, ScanModule};
 use obdcracker_transport::{Audited, DryRun, Expect, Timing, Transport, exchange, hex};
 
 // OBDLink USB adapters' rate.
@@ -361,7 +361,17 @@ fn scan_modules(cli: &Cli) -> Result<Vec<ScanModule>, String> {
                 request_id: module.request_id,
                 response_id: module.response_id,
             },
-            extra_dids: module.dids.iter().map(|did| did.id).collect(),
+            extra_dids: module
+                .dids
+                .iter()
+                .map(|did| ExtraDid {
+                    id: did.id,
+                    format: match did.decode {
+                        Decode::Text => DidFormat::Text,
+                        Decode::Hex => DidFormat::Hex,
+                    },
+                })
+                .collect(),
         });
     }
     Ok(modules)
@@ -378,6 +388,12 @@ fn run_scan<T: Transport>(cli: &Cli, transport: &mut T, timing: Timing) -> ExitC
     match scan::scan(transport, &Policy::read_only(), &modules, timing) {
         Ok(_) if cli.dry_run => {
             println!("dry run: nothing was sent");
+            // Nothing answers a dry run, so the reads that depend on the answers aren't shown.
+            println!(
+                "a live scan also sends, to 7DF: 01 20, 01 40, ... up to 01 E0 while an ECU says \
+                 the next bitmap is supported, then 01 <PID> for each PID an ECU says it supports \
+                 (mode 01 reads only)"
+            );
             ExitCode::SUCCESS
         }
         Ok(found) => {

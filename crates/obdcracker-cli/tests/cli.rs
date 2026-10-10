@@ -470,9 +470,11 @@ fn dry_run_scan_sends_nothing() {
         "{}",
         String::from_utf8_lossy(&out.stderr)
     );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("dry run: nothing was sent"), "{stdout}");
+    // The PID reads depend on the car's answers, so the preview says they're missing.
     assert!(
-        String::from_utf8_lossy(&out.stdout).contains("dry run: nothing was sent"),
-        "{}",
-        String::from_utf8_lossy(&out.stdout)
+        stdout.contains("a live scan also sends") && stdout.contains("01 <PID>"),
+        "{stdout}"
     );
 }
