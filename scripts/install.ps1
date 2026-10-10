@@ -101,6 +101,8 @@ function Install-ObdCracker {
             throw "$Dir already exists and wasn't made by this script; pick another -Dir (or -Source to build a checkout)"
         }
         New-Item -ItemType Directory -Force -Path $Dir | Out-Null
+        # Absolute, because the build runs from inside the source tree
+        $Dir = (Resolve-Path $Dir).Path
         New-Item -ItemType File -Force -Path (Join-Path $Dir $marker) | Out-Null
 
         # 4. The source
@@ -138,8 +140,10 @@ function Install-ObdCracker {
             & rustup toolchain install
             if ($LASTEXITCODE -ne 0) { Invoke-Checked rustup @('show') }
             # The build cache lives outside the source, so a re-run only rebuilds what changed
+            # --root pins where the binary goes, whatever CARGO_INSTALL_ROOT or Cargo's install.root
+            # say, so it lands in the directory rustup put on PATH
             Invoke-Checked cargo @('install', '--path', 'crates/obdcracker-cli', '--locked', '--force',
-                '--target-dir', (Join-Path $Dir 'target'))
+                '--target-dir', (Join-Path $Dir 'target'), '--root', $cargoHome)
         } finally {
             Pop-Location
         }

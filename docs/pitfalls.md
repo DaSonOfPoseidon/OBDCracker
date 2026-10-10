@@ -190,6 +190,10 @@ Each entry names the class, what to check, and where it bit us.
 
 - **Gate commit and push on the checks.** Chain them with `&&`, never `;`, or a failing test still gets committed and
   pushed (PR #9, `00fdbc3`).
+- **Install scripts: check what the build will actually use.** PR #45's first draft took `command -v cc` as a working
+  toolchain (gcc without libc6-dev can't link), resolved a relative `--dir` after changing into the source tree, and
+  looked for the binary in `CARGO_HOME` while Cargo's `install.root` can send it elsewhere. Test the capability (link
+  a program), make paths absolute before any `cd`, pin outputs (`--root`), and validate an option only where it's used.
 - **`pkill -f <pattern>` matches the shell running it** when the pattern is in its own command line. Save the PID
   when starting a background process and kill that.
 - **clap skips `requires` when the required argument conflicts with one that's present.** `--baud` requires

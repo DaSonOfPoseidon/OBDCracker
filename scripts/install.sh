@@ -66,13 +66,19 @@ ensure_linker_macos() {
 	die "finish the Command Line Tools install in the window that opened, then run this script again"
 }
 
+# Whether cc can build and link a program: a bare cc (gcc without libc6-dev, say) isn't enough.
+can_link() {
+	command -v cc >/dev/null 2>&1 &&
+		printf 'int main(void) { return 0; }\n' | cc -x c - -o "$TMP/link-test" >/dev/null 2>&1
+}
+
 ensure_linker_linux() {
 	# A distro's minimal image can lack both curl and wget once the script is already local
 	downloader=
 	if ! command -v curl >/dev/null 2>&1 && ! command -v wget >/dev/null 2>&1; then
 		downloader=curl
 	fi
-	if command -v cc >/dev/null 2>&1 && [ -z "$downloader" ]; then
+	if can_link && [ -z "$downloader" ]; then
 		note "C compiler and linker (cc): already installed"
 		return
 	fi
@@ -84,17 +90,17 @@ ensure_linker_linux() {
 		$SUDO env DEBIAN_FRONTEND=noninteractive apt-get install -y build-essential ca-certificates $downloader </dev/null
 	elif command -v dnf >/dev/null 2>&1; then
 		# shellcheck disable=SC2086
-		$SUDO dnf install -y gcc $downloader </dev/null
+		$SUDO dnf install -y gcc glibc-devel $downloader </dev/null
 	elif command -v pacman >/dev/null 2>&1; then
 		# shellcheck disable=SC2086
 		$SUDO pacman -S --needed --noconfirm base-devel $downloader </dev/null
 	elif command -v zypper >/dev/null 2>&1; then
 		# shellcheck disable=SC2086
-		$SUDO zypper --non-interactive install gcc $downloader </dev/null
+		$SUDO zypper --non-interactive install gcc glibc-devel $downloader </dev/null
 	else
 		die "no apt-get, dnf, pacman or zypper found: install a C compiler (gcc or clang) yourself, then run this again"
 	fi
-	command -v cc >/dev/null 2>&1 || die "installed a compiler, but there's still no cc on PATH"
+	can_link || die "installed a compiler, but cc still can't build a program: install your distro's C build tools (e.g. build-essential)"
 }
 
 ensure_rustup() {
@@ -137,6 +143,8 @@ prepare_dir() {
 		die "$DIR already exists and wasn't made by this script; pick another --dir (or --source to build a checkout)"
 	fi
 	mkdir -p "$DIR"
+	# Absolute, because the build runs from inside the source tree
+	DIR=$(cd "$DIR" && pwd)
 	: >"$DIR/$MARKER"
 }
 
@@ -147,7 +155,10 @@ build() {
 	# rustup doesn't take that without a name, but installs it on `show`.
 	rustup toolchain install </dev/null || rustup show </dev/null
 	# The build cache lives outside the source, so a re-run only rebuilds what changed
-	cargo install --path crates/obdcracker-cli --locked --force --target-dir "$DIR/target" </dev/null
+	# --root pins where the binary goes, whatever CARGO_INSTALL_ROOT or Cargo's install.root say,
+	# so it lands in the directory rustup put on PATH
+	cargo install --path crates/obdcracker-cli --locked --force --target-dir "$DIR/target" \
+		--root "$CARGO_HOME_DIR" </dev/null
 }
 
 # Linux: the serial ports' group must include you, or opening one fails with "permission denied".
@@ -221,12 +232,15 @@ main() {
 		esac
 	done
 	[ -n "$DIR" ] || die "--dir is empty"
-	case $REF in
-	'' | -* | *..* | *[!A-Za-z0-9._/-]*) die "not a branch, tag or commit: '$REF'" ;;
-	esac
+	if [ -z "$SRC" ]; then
+		case $REF in
+		'' | -* | *..* | *[!A-Za-z0-9._/-]*) die "not a branch, tag or commit: '$REF'" ;;
+		esac
+	fi
 
 	OS=$(uname -s)
-	CARGO_BIN=${CARGO_HOME:-$HOME/.cargo}/bin
+	CARGO_HOME_DIR=${CARGO_HOME:-$HOME/.cargo}
+	CARGO_BIN=$CARGO_HOME_DIR/bin
 	RELOGIN=
 	path_had_cargo=
 	case ":$PATH:" in *":$CARGO_BIN:"*) path_had_cargo=1 ;; esac
