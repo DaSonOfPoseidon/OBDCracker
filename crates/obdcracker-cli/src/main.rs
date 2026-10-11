@@ -464,10 +464,12 @@ fn print_scan(found: &Scan) {
         print_dids(id, name, &module.dids);
         let format = match &module.dtc_count {
             Ok(count) => {
+                // The module's own count, which may ignore the mask; the list below is filtered.
                 println!(
-                    "{id:03X} {name} DTC format {:02X}, {} with a fault",
+                    "{id:03X} {name} DTC format {:02X}, the module counts {} for mask {:02X}",
                     count.format.code(),
-                    count.count
+                    count.count,
+                    obdcracker_transport::scan::FAULT_MASK
                 );
                 Some(count.format)
             }
