@@ -150,6 +150,17 @@ impl SimBus {
                         spec.module, did.id
                     )));
                 }
+                // A multi-DID read is split by the profile's lengths, so the value must match.
+                if let Some(length) = def.and_then(|def| def.length)
+                    && did.data.len() != usize::from(length)
+                {
+                    return Err(FixtureError::Value(format!(
+                        "module {}: DID 0x{:04X} is {} bytes, but the profile says {length}",
+                        spec.module,
+                        did.id,
+                        did.data.len()
+                    )));
+                }
             }
             let obd = spec.obd()?;
             let obd_ids = (0x7E0..=0x7E7).contains(&module.request_id)

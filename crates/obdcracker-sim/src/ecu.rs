@@ -309,8 +309,8 @@ mod tests {
     // The policy sends UDS only to physical IDs today, so this calls the module directly.
     #[test]
     fn functional_uds_requests_get_no_not_supported_refusals() {
-        let coding = "[[ecu]]\nmodule = \"engine\"\n[[ecu.did]]\nid = 0x0600\nhex = \"01\"\n\
-                      session = \"extended\"\n";
+        let coding = "[[ecu]]\nmodule = \"engine\"\n[[ecu.did]]\nid = 0x0600\n\
+                      hex = \"01 02 03 04 05 06 07 08 09 0A\"\nsession = \"extended\"\n";
         let mut bus = SimBus::new(&Profile::builtin("a7").unwrap(), coding).unwrap();
         let engine = bus.ecu_mut("engine").unwrap();
         // ISO 14229-1: a functionally addressed request gets no NRC 0x11, 0x12, 0x31, 0x7E or

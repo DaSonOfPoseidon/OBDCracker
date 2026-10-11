@@ -43,7 +43,7 @@ dtcs = ["P0299"]
 
 [[ecu.did]]
 id = 0x0600
-hex = "01 23 45 67 89 AB"
+hex = "01 23 45 67 89 AB CD EF 01 23"
 session = "extended"
 
 [[ecu]]
@@ -608,7 +608,12 @@ fn replies_longer_than_the_short_isotp_length_are_sent_whole() {
     let value = vec!["AB"; 5000].join(" ");
     let fixture =
         format!("[[ecu]]\nmodule = \"engine\"\n[[ecu.did]]\nid = 0x0600\nhex = \"{value}\"\n");
-    let mut bus = SimBus::new(&Profile::builtin("a7").unwrap(), &fixture).unwrap();
+    // Without the A7's 10-byte coding length, so any length goes.
+    let mut a7 = Profile::builtin("a7").unwrap();
+    for did in &mut a7.modules[0].dids {
+        did.length = None;
+    }
+    let mut bus = SimBus::new(&a7, &fixture).unwrap();
     let reply = ask_one(&mut bus, ENGINE, &uds::read_did(0x0600));
     assert_eq!(uds::decode_did(&reply, 0x0600).unwrap().len(), 5000);
 }
@@ -632,6 +637,28 @@ fn profiles_built_by_hand_are_validated() {
         SimBus::new(&a7, "[[ecu]]\nmodule = \"engine\"\n"),
         Err(FixtureError::Profile(ProfileError::DuplicateId(0x7E0)))
     ));
+}
+
+#[test]
+fn fixture_values_must_have_the_profile_length() {
+    // The A7 profile gives the engine's coding (0600) as 10 bytes.
+    let a7 = Profile::builtin("a7").unwrap();
+    let coding = |hex: &str| {
+        format!("[[ecu]]\nmodule = \"engine\"\n[[ecu.did]]\nid = 0x0600\nhex = \"{hex}\"\n")
+    };
+    for wrong in [
+        "1A 2A 40 12 05 66 01 05 00",
+        "1A 2A 40 12 05 66 01 05 00 00 00",
+    ] {
+        assert!(
+            matches!(
+                SimBus::new(&a7, &coding(wrong)),
+                Err(FixtureError::Value(_))
+            ),
+            "{wrong}"
+        );
+    }
+    assert!(SimBus::new(&a7, &coding("1A 2A 40 12 05 66 01 05 00 00")).is_ok());
 }
 
 #[test]
