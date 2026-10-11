@@ -24,6 +24,9 @@ pub struct FakeElm {
     // The line as received, for the echo.
     raw: Vec<u8>,
     output: VecDeque<u8>,
+    // Whether the output holds a command's answer, which any byte written interrupts; the echo
+    // of characters as they're typed doesn't.
+    printing: bool,
     last: Option<String>,
     /// The settings an `ATZ` resets.
     pub settings: Settings,
@@ -53,6 +56,10 @@ pub struct FakeElm {
     pub after_echo: Vec<u8>,
     /// Bytes printed right after the next prompt, as an adapter that resets while idle would.
     pub after_prompt: Vec<u8>,
+    /// Echo a line only once its carriage return arrives, as some clones may. The STN in an
+    /// `OBDLink EX` (and the ELM327) echoes each character as it arrives, and holds the line
+    /// until the carriage return, however long that takes (#54).
+    pub echo_at_line_end: bool,
 }
 
 // What `AT PPS` prints for a v2.0 ELM327 with every parameter off (datasheet p. 57).
@@ -116,6 +123,7 @@ impl FakeElm {
             input: Vec::new(),
             raw: Vec::new(),
             output: VecDeque::new(),
+            printing: false,
             last: None,
             settings: Settings::default(),
             commands: Vec::new(),
@@ -130,6 +138,7 @@ impl FakeElm {
             pps: None,
             after_echo: Vec::new(),
             after_prompt: Vec::new(),
+            echo_at_line_end: false,
         }
     }
 
@@ -141,7 +150,7 @@ impl FakeElm {
     /// Takes bytes from the host.
     pub fn write(&mut self, bytes: &[u8]) {
         for &byte in bytes {
-            if !self.output.is_empty() {
+            if self.printing && !self.output.is_empty() {
                 // Any byte interrupts the adapter while it's busy (datasheet p. 7).
                 self.interrupted += 1;
                 self.output.clear();
@@ -156,22 +165,35 @@ impl FakeElm {
                         .map(char::from)
                         .collect();
                     let raw = std::mem::take(&mut self.raw);
+                    self.printing = true;
                     self.run(&line, &raw);
                 }
                 // Spaces and control characters are ignored (datasheet p. 8), but echoed.
-                b' ' | 0..=0x1F => self.raw.push(byte),
-                _ => {
-                    self.raw.push(byte);
-                    self.input.push(byte);
-                }
+                b' ' | 0..=0x1F => self.receive(byte, false),
+                _ => self.receive(byte, true),
             }
+        }
+    }
+
+    // A character of the line being typed, echoed at once unless the echo waits for the line.
+    fn receive(&mut self, byte: u8, input: bool) {
+        self.raw.push(byte);
+        if input {
+            self.input.push(byte);
+        }
+        if self.settings.echo && !self.echo_at_line_end {
+            self.output.push_back(byte);
         }
     }
 
     /// Takes up to `max` bytes the adapter has printed.
     pub fn read(&mut self, max: usize) -> Vec<u8> {
         let n = max.min(self.output.len());
-        self.output.drain(..n).collect()
+        let bytes = self.output.drain(..n).collect();
+        if self.output.is_empty() {
+            self.printing = false;
+        }
+        bytes
     }
 
     pub fn has_output(&self) -> bool {
@@ -192,7 +214,8 @@ impl FakeElm {
         self.output.extend(std::mem::take(&mut self.after_prompt));
     }
 
-    // The adapter echoes what it received, as it received it, once the line ends.
+    // The adapter has echoed each character as it arrived (or, with `echo_at_line_end`, echoes
+    // the line now), and echoes the carriage return.
     fn run(&mut self, line: &str, raw: &[u8]) {
         let line = if line.is_empty() {
             // A bare carriage return repeats the last command (datasheet p. 8).
@@ -211,7 +234,9 @@ impl FakeElm {
             if raw.is_empty() {
                 self.print(&line);
             } else {
-                self.output.extend(raw);
+                if self.echo_at_line_end {
+                    self.output.extend(raw);
+                }
                 self.output.push_back(b'\r');
             }
         }
@@ -449,6 +474,8 @@ pub struct FakeLink {
     pub chunk: usize,
     /// Every byte the host wrote.
     pub written: Vec<u8>,
+    /// Each write the host made, in order.
+    pub writes: Vec<Vec<u8>>,
     /// When set, every read returns these bytes instead of the adapter's output, forever, once
     /// `inject` is used up.
     pub flood: Option<Vec<u8>>,
@@ -471,6 +498,7 @@ impl FakeLink {
             elm,
             chunk: 64,
             written: Vec::new(),
+            writes: Vec::new(),
             flood: None,
             flooded: 0,
             closed: false,
@@ -487,6 +515,7 @@ impl Link for FakeLink {
             return Err(io::ErrorKind::BrokenPipe.into());
         }
         self.written.extend_from_slice(bytes);
+        self.writes.push(bytes.to_vec());
         let mut bytes = bytes.to_vec();
         if let Some((index, bits)) = self.corrupt_next_write.take() {
             bytes[index] ^= bits;

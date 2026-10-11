@@ -4,9 +4,10 @@
 //! request it puts on the bus. [`Elm`] only ever writes a fixed set of `AT` commands and the
 //! hex of [`Approved`] requests. No single bit flipped on the way, which a serial line can do,
 //! turns one of those commands into a line of hex digits, and the adapter's echo of every line
-//! is checked against what was written. It never writes a bare carriage return, which repeats
-//! the adapter's last command. Behaviour is from the ELM327 datasheet (ELM327DS v2.0); see
-//! `docs/elm327.md`.
+//! is checked against what was written: a request's before its carriage return, so a misheard
+//! one never reaches the bus, when the adapter echoes characters as it reads them. It never ends
+//! an empty line with a carriage return, which repeats the adapter's last command. Behaviour is
+//! from the ELM327 datasheet (ELM327DS v2.0) and measurements on an STN; see `docs/elm327.md`.
 
 pub mod codec;
 
@@ -94,6 +95,13 @@ const SILENCE_LIMIT: Duration = ADAPTER_TIMEOUT
     .saturating_add(Duration::from_secs(1));
 // The longest any single receive waits, so a huge timeout can't overflow the clock.
 const LONGEST_WAIT: Duration = Duration::from_secs(3600);
+// How long a request's digits may take to echo before its carriage return. The STN in an
+// `OBDLink EX` echoes each character within about 15 ms (#54); this leaves room for a slow link.
+const ECHO_WAIT: Duration = Duration::from_secs(1);
+// Ends a line the adapter misheard so that it refuses it: two letters that aren't hex digits, so
+// no single flipped bit of this leaves a line of hex digits, then the carriage return the adapter
+// needs before it drops the line (an STN holds an unfinished line indefinitely, #54).
+const KILL: &[u8] = b"XX\r";
 
 /// An ELM327-compatible adapter on CAN (ISO 15765-4, 11-bit IDs, 500 kbit/s).
 ///
@@ -127,8 +135,11 @@ const LONGEST_WAIT: Duration = Duration::from_secs(3600);
 /// - it doesn't finish a command in time, or stays quiet in a request for longer than its own
 ///   timeout plus a response-pending wait (about 7 s, counted while the driver waits);
 /// - it refuses a setting;
-/// - it echoes a line other than the one written (a serial error; a misheard request has
-///   already gone on the bus by then);
+/// - it echoes a line other than the one written (a serial error). A request's digits are
+///   written first, and its carriage return only once they've echoed correctly; otherwise the
+///   line is ended with `XX` so the adapter refuses it, and nothing reaches the bus. An adapter
+///   that echoes nothing before the carriage return on the first request is taken to echo whole
+///   lines only, and a request it misheard has gone on the bus by the time its echo shows it;
 /// - it prints something unexpected: an overlong line, `STOPPED` (the driver never interrupts
 ///   it, so something else did), a frame from outside its receive filter, or anything at all
 ///   between its prompt and the next line it's sent;
@@ -151,6 +162,9 @@ pub struct Elm<L> {
     busy: bool,
     // The request line the adapter hasn't echoed yet.
     echo: Option<String>,
+    // Whether the adapter echoes a request's characters before its carriage return, once the
+    // first request has shown it.
+    early_echo: Option<bool>,
     // How long the driver has waited since the adapter last printed anything. Time the caller
     // spends elsewhere doesn't count; waits across calls add up.
     quiet: Duration,
@@ -200,6 +214,7 @@ impl<L: Link> Elm<L> {
             filter: WIDE_FILTER.to_owned(),
             busy: false,
             echo: None,
+            early_echo: None,
             quiet: Duration::ZERO,
             last_byte: None,
             broken: None,
@@ -656,11 +671,15 @@ impl<L: Link> Transport for Elm<L> {
         // A setting command's prompt may have been followed by a reset.
         self.check_idle()?;
         // The adapter ignores spaces, but leaving them out keeps the line short.
-        let mut line = hex(payload).replace(' ', "");
-        line.push('\r');
-        self.write(line.as_bytes())?;
+        let line = hex(payload).replace(' ', "");
+        if self.early_echo == Some(false) {
+            self.write(format!("{line}\r").as_bytes())?;
+        } else {
+            self.write(line.as_bytes())?;
+            self.check_early_echo(&line)?;
+            self.write(b"\r")?;
+        }
         self.quiet = Duration::ZERO;
-        line.pop();
         self.echo = Some(line);
         self.busy = true;
         self.senders.clear();
@@ -700,6 +719,57 @@ impl<L: Link> Transport for Elm<L> {
 }
 
 impl<L: Link> Elm<L> {
+    // Reads the echo of a request's digits, written without their carriage return, so a line the
+    // adapter misheard is caught before it can go on the bus. The adapter holds the line until
+    // the carriage return. An adapter that echoes nothing before it, on the first request, is
+    // taken to echo only whole lines, and its echo is checked after the carriage return instead.
+    fn check_early_echo(&mut self, line: &str) -> Result<(), Error> {
+        let mut echoed = vec![0; line.len()];
+        let mut got = 0;
+        let deadline = Instant::now() + ECHO_WAIT;
+        while got < echoed.len() {
+            let Some(left) = deadline
+                .checked_duration_since(Instant::now())
+                .filter(|left| !left.is_zero())
+            else {
+                break;
+            };
+            got += self.read(&mut echoed[got..], left)?;
+        }
+        echoed.truncate(got);
+        if echoed.is_empty() && self.early_echo.is_none() {
+            self.early_echo = Some(false);
+            return Ok(());
+        }
+        if echoed.eq_ignore_ascii_case(line.as_bytes()) {
+            self.early_echo = Some(true);
+            // The line's carriage return completes it, and its echo is checked again then.
+            let mut events = Vec::new();
+            self.splitter.push(&echoed, &mut events);
+            self.events.extend(events);
+            return Ok(());
+        }
+        let why = if echoed.is_empty() {
+            format!("the adapter didn't echo {line}")
+        } else {
+            // Untrusted output that reaches a terminal: only printable ASCII.
+            let shown: String = echoed
+                .iter()
+                .map(|&b| {
+                    if b.is_ascii_graphic() {
+                        char::from(b)
+                    } else {
+                        '.'
+                    }
+                })
+                .collect();
+            format!("the adapter echoed {shown} instead of {line}")
+        };
+        // Best effort: the driver stops either way, and reconnecting resets the adapter.
+        let _ = self.write(KILL);
+        Err(self.break_down(format!("{why}; the request wasn't sent")))
+    }
+
     // Classifies a line printed after a request: `None` for its echo. Anything that means the
     // adapter lost its settings or misheard the request, or that isn't a reply at all, leaves
     // it in an unknown state.
