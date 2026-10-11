@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use obdcracker_core::obd::{self, Unit, Value};
 use obdcracker_core::response::{Error as ReplyError, Nrc};
-use obdcracker_core::uds::{self, DtcFormat};
+use obdcracker_core::uds::{self, DtcFormat, DtcStatus};
 use obdcracker_profile::{Profile, ProfileError};
 use obdcracker_safety::{Policy, Target};
 use obdcracker_sim::{Fault, FixtureError, Session, SimBus};
@@ -13,11 +13,48 @@ use obdcracker_transport::{Error, Expect, Response, Timing, Transport, exchange}
 use proptest::prelude::*;
 
 const ENGINE: Target = Target::Physical(0x7E0);
+const TRANSMISSION: Target = Target::Physical(0x7E1);
 const GATEWAY: Target = Target::Physical(0x710);
+const INSTRUMENTS: Target = Target::Physical(0x714);
 const TIMEOUT: Duration = Duration::from_millis(50);
 
 fn a7() -> SimBus {
     SimBus::builtin("a7").unwrap()
+}
+
+// Behaviour the real A7 doesn't show, on the A7's addresses: a stored mode 03 code, a coding DID
+// that needs the extended session, and the DTC count report.
+const FEATURES: &str = r#"
+[[ecu]]
+module = "engine"
+dtc_format = 0x00
+
+[[ecu.dtc]]
+code = 0x029900
+status = 0x08
+
+# No status bits set, so only 0x19 0x0A lists it.
+[[ecu.dtc]]
+code = 0x011300
+status = 0x00
+
+[ecu.obd]
+dtcs = ["P0299"]
+
+[[ecu.did]]
+id = 0x0600
+hex = "01 23 45 67 89 AB"
+session = "extended"
+
+[[ecu]]
+module = "transmission"
+
+[ecu.obd]
+dtcs = []
+"#;
+
+fn features() -> SimBus {
+    SimBus::new(&Profile::builtin("a7").unwrap(), FEATURES).unwrap()
 }
 
 // Sends one read and returns every reply it produced.
@@ -104,7 +141,16 @@ fn mode_01_supported_pid_bitmaps_chain_to_every_listed_pid() {
         supported.extend(bitmap.iter().filter(|pid| !pid.is_multiple_of(0x20)));
         base = b.checked_add(0x20).filter(|&next| bitmap.contains(next));
     }
-    assert_eq!(supported, [0x05, 0x0C, 0x0D, 0x42]);
+    // The engine's real list (#49).
+    assert_eq!(
+        supported,
+        [
+            0x01, 0x04, 0x05, 0x0C, 0x0D, 0x0F, 0x10, 0x11, 0x13, 0x1C, 0x1F, 0x21, 0x24, 0x30,
+            0x31, 0x33, 0x3C, 0x3E, 0x41, 0x42, 0x45, 0x46, 0x49, 0x4A, 0x4C, 0x4F, 0x51, 0x5C,
+            0x5D, 0x5E, 0x61, 0x62, 0x63, 0x65, 0x67, 0x69, 0x6B, 0x6D, 0x70, 0x71, 0x78, 0x7A,
+            0x7F, 0x81, 0x82, 0x83, 0x85, 0x88, 0x8B, 0x8F
+        ]
+    );
 }
 
 #[test]
@@ -121,7 +167,7 @@ fn mode_01_answers_several_pids_at_once() {
             (
                 0x0C,
                 Value::Quantity {
-                    value: 800.0,
+                    value: 0.0,
                     unit: Unit::Rpm
                 }
             ),
@@ -138,13 +184,14 @@ fn mode_01_answers_several_pids_at_once() {
 
 #[test]
 fn unsupported_obd_pid_gets_no_reply() {
-    assert_silent(&mut a7(), Target::ObdFunctional, &obd::current_data(0x10));
+    // Neither the engine nor the transmission supports PID 0A (fuel pressure).
+    assert_silent(&mut a7(), Target::ObdFunctional, &obd::current_data(0x0A));
     assert_silent(&mut a7(), Target::ObdFunctional, &obd::vehicle_info(0x08));
 }
 
 #[test]
 fn mode_03_lists_stored_dtcs_per_module() {
-    let replies = ask(&mut a7(), Target::ObdFunctional, &obd::stored_dtcs());
+    let replies = ask(&mut features(), Target::ObdFunctional, &obd::stored_dtcs());
     let dtcs: Vec<(u32, Vec<String>)> = replies
         .iter()
         .map(|r| {
@@ -153,6 +200,12 @@ fn mode_03_lists_stored_dtcs_per_module() {
         })
         .collect();
     assert_eq!(dtcs, [(0x7E8, vec!["P0299".into()]), (0x7E9, vec![])]);
+    // The real A7 has none stored (#49).
+    let replies = ask(&mut a7(), Target::ObdFunctional, &obd::stored_dtcs());
+    assert_eq!(replies.len(), 2);
+    for reply in replies {
+        assert_eq!(obd::decode_stored_dtcs(&reply.payload).unwrap().count(), 0);
+    }
 }
 
 #[test]
@@ -187,9 +240,21 @@ fn module_without_obd_refuses_obd_services() {
 
 #[test]
 fn reads_one_did() {
-    let reply = ask_one(&mut a7(), GATEWAY, &uds::read_did(uds::did::VIN));
-    let data = uds::decode_did(&reply, uds::did::VIN).unwrap();
-    assert_eq!(uds::decode_text(data).unwrap(), "WAU2MBFC6EN093415");
+    let reply = ask_one(
+        &mut a7(),
+        GATEWAY,
+        &uds::read_did(uds::did::SPARE_PART_NUMBER),
+    );
+    let data = uds::decode_did(&reply, uds::did::SPARE_PART_NUMBER).unwrap();
+    assert_eq!(uds::decode_text(data).unwrap(), "4G0907468AD");
+    // The gateway and instruments refuse F190 (#49).
+    for target in [GATEWAY, INSTRUMENTS] {
+        let reply = ask(&mut a7(), target, &uds::read_did(uds::did::VIN))
+            .pop()
+            .unwrap()
+            .payload;
+        assert_eq!(nrc(&reply, 0x22), Nrc::RequestOutOfRange);
+    }
 }
 
 #[test]
@@ -219,7 +284,7 @@ fn unknown_dids_are_dropped_or_refused() {
 
 #[test]
 fn coding_did_needs_the_extended_session() {
-    let mut bus = a7();
+    let mut bus = features();
     let reply = ask_one(&mut bus, ENGINE, &uds::read_did(0x0600));
     assert_eq!(nrc(&reply, 0x22), Nrc::RequestOutOfRange);
 
@@ -231,6 +296,20 @@ fn coding_did_needs_the_extended_session() {
 
     ask_one(&mut bus, ENGINE, &[0x10, 0x01]);
     assert_eq!(bus.ecu("engine").unwrap().session(), Session::Default);
+}
+
+#[test]
+fn a7_coding_reads_in_the_default_session() {
+    // Every A7 module answered 0600 without a session change (#49). The instruments send
+    // response-pending first, so the answer is the last reply.
+    let mut bus = a7();
+    for target in [ENGINE, GATEWAY, INSTRUMENTS] {
+        let reply = ask(&mut bus, target, &uds::read_did(0x0600))
+            .pop()
+            .unwrap()
+            .payload;
+        assert!(uds::decode_did(&reply, 0x0600).is_ok(), "{target:?}");
+    }
 }
 
 #[test]
@@ -248,7 +327,7 @@ fn suppress_bit_silences_positive_replies_only() {
 
 #[test]
 fn reads_uds_dtcs() {
-    let mut bus = a7();
+    let mut bus = features();
     let reply = ask_one(&mut bus, ENGINE, &uds::dtc_count_by_status_mask(0x08));
     let count = uds::decode_dtc_count(&reply).unwrap();
     assert_eq!((count.format, count.count), (DtcFormat::SaeJ2012Da00, 1));
@@ -262,6 +341,92 @@ fn reads_uds_dtcs() {
 
     let reply = ask_one(&mut bus, ENGINE, &uds::supported_dtcs());
     assert_eq!(uds::decode_supported_dtcs(&reply).unwrap().1.count(), 2);
+}
+
+// A module that, like every A7 module (#49), only reports DTCs by status mask, and supports only
+// some status bits.
+const DTC_REPORTS: &str = r#"
+[[ecu]]
+module = "engine"
+status_availability = 0x09
+dtc_reports = [0x02]
+
+[[ecu.dtc]]
+code = 0x029900
+status = 0x08
+
+[[ecu.dtc]]
+code = 0x011300
+status = 0x01
+"#;
+
+#[test]
+fn a_module_answers_only_the_dtc_reports_it_supports() {
+    let mut bus = SimBus::new(&Profile::builtin("a7").unwrap(), DTC_REPORTS).unwrap();
+    for request in [
+        &uds::dtc_count_by_status_mask(0xFF)[..],
+        &uds::supported_dtcs(),
+    ] {
+        let reply = ask_one(&mut bus, ENGINE, request);
+        assert_eq!(
+            nrc(&reply, 0x19),
+            Nrc::SubFunctionNotSupported,
+            "{request:02X?}"
+        );
+    }
+    let reply = ask_one(&mut bus, ENGINE, &uds::dtcs_by_status_mask(0x08));
+    let (availability, records) = uds::decode_dtcs_by_status_mask(&reply).unwrap();
+    assert_eq!(availability, DtcStatus(0x09));
+    let records: Vec<_> = records.map(|r| (r.dtc.code(), r.status)).collect();
+    assert_eq!(records, [(0x02_9900, DtcStatus(0x08))]);
+}
+
+#[test]
+fn dtc_report_settings_are_checked() {
+    let a7 = Profile::builtin("a7").unwrap();
+    let engine = "[[ecu]]\nmodule = \"engine\"\n";
+    for bad in [
+        // Not a report the sim implements, or listed twice.
+        "dtc_reports = [0x04]\n",
+        "dtc_reports = [0x02, 0x02]\n",
+        // A module that reports no DTCs at all doesn't support the service; leave it out.
+        "dtc_reports = []\n",
+        // The format is only sent in the count report (0x01).
+        "dtc_reports = [0x02]\ndtc_format = 0x00\n",
+        // A status may only use bits the module says it supports.
+        "status_availability = 0x09\n[[ecu.dtc]]\ncode = 0x029900\nstatus = 0x10\n",
+    ] {
+        assert!(
+            matches!(
+                SimBus::new(&a7, &format!("{engine}{bad}")),
+                Err(FixtureError::Value(_))
+            ),
+            "{bad}"
+        );
+    }
+}
+
+#[test]
+fn a7_modules_report_dtcs_as_the_car_did() {
+    // Session 2 (#49): every module refuses the count report and lists its DTC table by status
+    // mask, but no DTC is failed, pending or confirmed.
+    let mut bus = a7();
+    for (target, availability) in [
+        (ENGINE, 0xFF),
+        (TRANSMISSION, 0xFF),
+        (GATEWAY, 0x19),
+        (INSTRUMENTS, 0x19),
+    ] {
+        let reply = ask_one(&mut bus, target, &uds::dtc_count_by_status_mask(0xFF));
+        assert_eq!(nrc(&reply, 0x19), Nrc::SubFunctionNotSupported);
+        let reply = ask_one(&mut bus, target, &uds::dtcs_by_status_mask(0xFF));
+        let (status, records) = uds::decode_dtcs_by_status_mask(&reply).unwrap();
+        assert_eq!(status, DtcStatus(availability), "{target:?}");
+        assert!(records.count() > 0, "{target:?}");
+        let reply = ask_one(&mut bus, target, &uds::dtcs_by_status_mask(0x0F));
+        let (_, records) = uds::decode_dtcs_by_status_mask(&reply).unwrap();
+        assert_eq!(records.count(), 0, "{target:?}");
+    }
 }
 
 #[test]

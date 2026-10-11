@@ -19,9 +19,16 @@ pub(crate) struct FixtureFile {
 #[serde(deny_unknown_fields)]
 pub(crate) struct EcuFixture {
     pub(crate) module: String,
-    // ISO 14229-1 D.4; 0x01 (ISO 14229-1's own format) unless the fixture says otherwise.
-    #[serde(default = "iso14229_format")]
-    pub(crate) dtc_format: u8,
+    // ISO 14229-1 D.4, sent in the count report (0x01); 0x01 (ISO 14229-1's own format) unless
+    // the fixture says otherwise.
+    dtc_format: Option<u8>,
+    // The status bits the module supports (ISO 14229-1 D.2); every one unless the fixture says
+    // otherwise.
+    #[serde(default = "every_status_bit")]
+    status_availability: u8,
+    // The ReadDTCInformation reports it answers; the others get NRC 0x12.
+    #[serde(default = "every_dtc_report")]
+    dtc_reports: Vec<u8>,
     obd: Option<ObdFixture>,
     #[serde(rename = "did", default)]
     dids: Vec<DidFixture>,
@@ -29,8 +36,25 @@ pub(crate) struct EcuFixture {
     dtcs: Vec<DtcFixture>,
 }
 
-fn iso14229_format() -> u8 {
-    0x01
+// The ReadDTCInformation reports the sim implements: count by status mask, DTCs by status mask,
+// and supported DTCs.
+const DTC_REPORTS: [u8; 3] = [0x01, 0x02, 0x0A];
+
+fn every_status_bit() -> u8 {
+    0xFF
+}
+
+fn every_dtc_report() -> Vec<u8> {
+    DTC_REPORTS.to_vec()
+}
+
+// How a module answers `ReadDTCInformation`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct DtcService {
+    pub(crate) format: u8,
+    pub(crate) availability: u8,
+    pub(crate) reports: Vec<u8>,
+    pub(crate) dtcs: Vec<(u32, u8)>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -283,7 +307,42 @@ impl EcuFixture {
         self.dids.iter().map(DidFixture::build).collect()
     }
 
-    pub(crate) fn dtcs(&self) -> Result<Vec<(u32, u8)>, FixtureError> {
+    pub(crate) fn dtc_service(&self) -> Result<DtcService, FixtureError> {
+        let error = |what: String| FixtureError::Value(format!("module {}: {what}", self.module));
+        if self.dtc_reports.is_empty() {
+            return Err(error("dtc_reports can't be empty".into()));
+        }
+        let mut seen = HashSet::new();
+        for &report in &self.dtc_reports {
+            if !DTC_REPORTS.contains(&report) || !seen.insert(report) {
+                return Err(error(format!(
+                    "DTC report 0x{report:02X} is unknown or listed twice"
+                )));
+            }
+        }
+        if self.dtc_format.is_some() && !self.dtc_reports.contains(&0x01) {
+            return Err(error(
+                "dtc_format is only sent in the count report (0x01)".into(),
+            ));
+        }
+        let dtcs = self.dtcs()?;
+        if let Some(&(code, status)) = dtcs
+            .iter()
+            .find(|&&(_, status)| status & !self.status_availability != 0)
+        {
+            return Err(error(format!(
+                "DTC 0x{code:06X} has status bits 0x{status:02X} outside status_availability"
+            )));
+        }
+        Ok(DtcService {
+            format: self.dtc_format.unwrap_or(0x01),
+            availability: self.status_availability,
+            reports: self.dtc_reports.clone(),
+            dtcs,
+        })
+    }
+
+    fn dtcs(&self) -> Result<Vec<(u32, u8)>, FixtureError> {
         // The DTC count reply (0x19 0x01) has a 16-bit count.
         if self.dtcs.len() > usize::from(u16::MAX) {
             return Err(FixtureError::Value(format!(

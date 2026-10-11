@@ -4,6 +4,8 @@ use std::collections::BTreeMap;
 
 use obdcracker_core::response::Nrc;
 
+use crate::fixture::DtcService;
+
 /// A module's diagnostic session.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Session {
@@ -50,16 +52,13 @@ pub struct Ecu {
     pub(crate) response_id: u32,
     pub(crate) obd: Option<Obd>,
     pub(crate) dids: Vec<Did>,
-    pub(crate) dtcs: Vec<(u32, u8)>,
-    pub(crate) dtc_format: u8,
+    pub(crate) dtc: DtcService,
     pub(crate) session: Session,
     pub(crate) fault: Option<Fault>,
 }
 
 const NEGATIVE: u8 = 0x7F;
 const POSITIVE_OFFSET: u8 = 0x40;
-// Every status bit is supported.
-const STATUS_AVAILABILITY: u8 = 0xFF;
 // P2 50 ms, P2* 5000 ms (in 10 ms units), as ISO 14229-2 defaults.
 const SESSION_TIMING: [u8; 4] = [0x00, 0x32, 0x01, 0xF4];
 const SUPPRESS_POSITIVE: u8 = 0x80;
@@ -169,22 +168,26 @@ impl Ecu {
             (0x01 | 0x02 | 0x0A, _) => return one(negative(0x19, Nrc::IncorrectMessageLength)),
             _ => return one(negative(0x19, Nrc::SubFunctionNotSupported)),
         };
+        if !self.dtc.reports.contains(&sub) {
+            return one(negative(0x19, Nrc::SubFunctionNotSupported));
+        }
         if raw & SUPPRESS_POSITIVE != 0 {
             return Vec::new();
         }
+        let availability = self.dtc.availability;
         let matching = self
+            .dtc
             .dtcs
             .iter()
-            .map(|&(code, status)| (code, status & STATUS_AVAILABILITY))
-            .filter(|&(_, status)| sub == 0x0A || status & mask != 0);
-        let mut reply = vec![0x59, sub, STATUS_AVAILABILITY];
+            .filter(|&&(_, status)| sub == 0x0A || status & availability & mask != 0);
+        let mut reply = vec![0x59, sub, availability];
         if sub == 0x01 {
             // The fixture holds at most u16::MAX DTCs
             let count = u16::try_from(matching.count()).unwrap_or(u16::MAX);
-            reply.push(self.dtc_format);
+            reply.push(self.dtc.format);
             reply.extend(count.to_be_bytes());
         } else {
-            for (code, status) in matching {
+            for &(code, status) in matching {
                 reply.extend(&code.to_be_bytes()[1..]);
                 reply.push(status);
             }
@@ -299,12 +302,16 @@ fn bitmap(base: u8, pids: impl Iterator<Item = u8>, next: bool) -> u32 {
 
 #[cfg(test)]
 mod tests {
+    use obdcracker_profile::Profile;
+
     use crate::SimBus;
 
     // The policy sends UDS only to physical IDs today, so this calls the module directly.
     #[test]
     fn functional_uds_requests_get_no_not_supported_refusals() {
-        let mut bus = SimBus::builtin("a7").unwrap();
+        let coding = "[[ecu]]\nmodule = \"engine\"\n[[ecu.did]]\nid = 0x0600\nhex = \"01\"\n\
+                      session = \"extended\"\n";
+        let mut bus = SimBus::new(&Profile::builtin("a7").unwrap(), coding).unwrap();
         let engine = bus.ecu_mut("engine").unwrap();
         // ISO 14229-1: a functionally addressed request gets no NRC 0x11, 0x12, 0x31, 0x7E or
         // 0x7F. The coding DID 0x0600 needs the extended session.
