@@ -14,7 +14,7 @@ use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
 use obdcracker_core::isotp::{Addressing, MAX_SHORT_PAYLOAD, Progress, Reassembler};
-use obdcracker_safety::Approved;
+use obdcracker_safety::{Approved, Target};
 
 use crate::link::{Driver, Link, LinkKind};
 use crate::{Error, Response, Timing, Transport, hex};
@@ -33,7 +33,7 @@ const SETUP: &[&str] = &[
     "ATSP6",
     // Wait for replies after every request
     "ATR1",
-    // Show every 11-bit reply ID from 0x700 to 0x7FF; `exchange` picks the ones that count
+    // Show every 11-bit reply ID from 0x700 to 0x7FF (`WIDE_FILTER`) until a request narrows it
     "ATCRA7XX",
     // Adaptive timing, capped at the longest timeout (0xFF x 4 ms)
     "ATAT1", "ATSTFF",
@@ -48,6 +48,11 @@ const KEPT_DEFAULTS: &[(u8, u8, &str)] = &[
     // Off, or every frame line has its data length between the CAN ID and the data
     (0x29, 0xFF, "CAN data length display"),
 ];
+
+// `AT CRA` patterns: three hex digits, each of which may be `X` (any). Every diagnostic reply ID,
+// and every OBD-II emissions ECU's.
+const WIDE_FILTER: &str = "7XX";
+const OBD_FILTER: &str = "7EX";
 
 /// The longest the adapter waits for a reply, or for more replies after one: `AT ST FF`.
 pub const ADAPTER_TIMEOUT: Duration = Duration::from_millis(0xFF * 4);
@@ -107,6 +112,12 @@ const LONGEST_WAIT: Duration = Duration::from_secs(3600);
 /// here, per module, from the frames the adapter prints, for up to 16 modules per request;
 /// frames from any more are dropped, so those modules' replies time out.
 ///
+/// The adapter shows only the frames its receive filter (`AT CRA`) passes, set per request: the
+/// module's reply ID when the request knows it (an OBD-II ECU, or a module the policy was
+/// narrowed to with a vehicle profile), 0x7E0..=0x7EF for a broadcast, and 0x700..=0x7FF
+/// otherwise. Frames it doesn't show get no flow control, so another module's long reply on a
+/// busy bus isn't acknowledged in the tester's name.
+///
 /// The adapter sends ISO-TP flow control frames itself, which no audit log records: for the
 /// OBD-II IDs (0x7DF and 0x7E0..=0x7E7) its standard ones, and for any other module
 /// `30 00 00` (continue, no block limit, no gap) to the module's request ID.
@@ -134,6 +145,8 @@ pub struct Elm<L> {
     events: VecDeque<Event>,
     header: Option<u32>,
     flow: Option<Flow>,
+    // The `AT CRA` pattern in effect.
+    filter: String,
     // A request is out and the adapter hasn't printed its prompt yet.
     busy: bool,
     // The request line the adapter hasn't echoed yet.
@@ -184,6 +197,7 @@ impl<L: Link> Elm<L> {
             events: VecDeque::new(),
             header: None,
             flow: None,
+            filter: WIDE_FILTER.to_owned(),
             busy: false,
             echo: None,
             quiet: Duration::ZERO,
@@ -565,7 +579,8 @@ impl<L: Link> Elm<L> {
         }
     }
 
-    fn set_target(&mut self, id: u32) -> Result<(), Error> {
+    fn set_target(&mut self, request: &Approved) -> Result<(), Error> {
+        let id = request.target().can_id();
         if self.header != Some(id) {
             self.expect_ok(&format!("ATSH{id:03X}"))?;
             self.header = Some(id);
@@ -586,8 +601,29 @@ impl<L: Link> Elm<L> {
             }
             self.flow = Some(flow);
         }
+        // Each `ATCRA` line keeps two non-hex letters (T, R), so one flipped bit can't make it a
+        // bus request.
+        let filter = match (request.reply_id(), request.target()) {
+            (Some(reply), _) => format!("{reply:03X}"),
+            (None, Target::ObdFunctional) => OBD_FILTER.to_owned(),
+            (None, Target::Physical(_)) => WIDE_FILTER.to_owned(),
+        };
+        if self.filter != filter {
+            self.expect_ok(&format!("ATCRA{filter}"))?;
+            self.filter = filter;
+        }
         Ok(())
     }
+}
+
+// Whether an `AT CRA` pattern shows frames from `id`.
+fn filter_shows(pattern: &str, id: u32) -> bool {
+    let id = format!("{id:03X}");
+    id.len() == pattern.len()
+        && pattern
+            .bytes()
+            .zip(id.bytes())
+            .all(|(want, got)| want == b'X' || want == got)
 }
 
 // Whether a status means the adapter's settings, or what it reads next, can't be trusted: it
@@ -616,7 +652,7 @@ impl<L: Link> Transport for Elm<L> {
             )));
         }
         self.ready()?;
-        self.set_target(request.target().can_id())?;
+        self.set_target(request)?;
         // A setting command's prompt may have been followed by a reset.
         self.check_idle()?;
         // The adapter ignores spaces, but leaving them out keeps the line short.
@@ -683,12 +719,14 @@ impl<L: Link> Elm<L> {
             Line::Status(status) if leaves_unknown_state(status) => {
                 Err(self.break_down(format!("the adapter said {status}")))
             }
-            // The receive filter passes 0x700..=0x7FF only: the adapter lost it, and may be
-            // sending flow control for frames it shouldn't see.
-            Line::Frame(frame) if frame.id() < 0x700 => Err(self.break_down(format!(
-                "a frame from {:03X} got past the receive filter",
-                frame.id()
-            ))),
+            // A frame the receive filter hides: the adapter lost the filter, and may be sending
+            // flow control for frames it shouldn't see.
+            Line::Frame(frame) if !filter_shows(&self.filter, frame.id()) => {
+                Err(self.break_down(format!(
+                    "a frame from {:03X} got past the receive filter",
+                    frame.id()
+                )))
+            }
             // Such as a banner after a reset.
             Line::Ok | Line::Text(_) => {
                 Err(self.break_down(format!("unexpected output from the adapter: {text}")))
