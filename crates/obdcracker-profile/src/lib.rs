@@ -35,6 +35,24 @@ pub struct Profile {
     /// The modules on the bus.
     #[serde(rename = "module", default)]
     pub modules: Vec<Module>,
+    /// Where to look for modules the profile doesn't list, if anywhere.
+    pub discovery: Option<Discovery>,
+}
+
+/// A range of request IDs to try for modules a profile doesn't list, each answering on its
+/// request ID plus a fixed offset (0x6A on VAG cars).
+///
+/// No candidate's request ID may be any module's or candidate's reply ID: a request sent there
+/// would look like that module's reply to everything listening.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Discovery {
+    /// The first request ID to try.
+    pub first_request_id: u32,
+    /// The last request ID to try.
+    pub last_request_id: u32,
+    /// What to add to a request ID for its reply ID.
+    pub reply_offset: u32,
 }
 
 /// One module (ECU) on the bus.
@@ -168,6 +186,11 @@ pub enum ProfileError {
     PaddedName(String),
     /// No built-in profile has this name.
     UnknownBuiltin(String),
+    /// The discovery range's first request ID is after its last.
+    DiscoveryRange,
+    /// The discovery range doesn't fit the modules: a candidate's request ID is a reply ID, is
+    /// outside 0x700..=0x7FF, or is a module's request ID with another reply ID, and so on.
+    Discovery(NarrowingError),
 }
 
 impl fmt::Display for ProfileError {
@@ -199,6 +222,10 @@ impl fmt::Display for ProfileError {
             Self::EmptyName => f.write_str("names can't be empty"),
             Self::PaddedName(name) => write!(f, "name {name:?} starts or ends with spaces"),
             Self::UnknownBuiltin(name) => write!(f, "no built-in profile named {name}"),
+            Self::DiscoveryRange => {
+                f.write_str("discovery: the first request ID is after the last")
+            }
+            Self::Discovery(e) => write!(f, "discovery: {e}"),
         }
     }
 }
@@ -254,15 +281,45 @@ impl Profile {
     /// The modules' IDs are inconsistent, as a profile built or changed by hand can be: a request
     /// ID that is also a reply ID, for example.
     pub fn narrow(&self, policy: Policy) -> Result<Policy, NarrowingError> {
-        let modules: Vec<ModuleIds> = self
-            .modules
+        policy.narrowed_to(&self.module_ids())
+    }
+
+    /// Like [`Profile::narrow`], but also allows each of [`Profile::candidates`], so modules the
+    /// profile doesn't list can be looked for.
+    ///
+    /// # Errors
+    ///
+    /// As [`Profile::narrow`], counting the candidates as modules.
+    pub fn narrow_for_discovery(&self, policy: Policy) -> Result<Policy, NarrowingError> {
+        let mut modules = self.module_ids();
+        modules.extend(self.candidates());
+        policy.narrowed_to(&modules)
+    }
+
+    /// Each request ID in the discovery range with its reply ID, in order; none without one.
+    /// An ID past 0x7FF is left out, which [`Profile::validate`] refuses anyway.
+    #[must_use]
+    pub fn candidates(&self) -> Vec<ModuleIds> {
+        let Some(discovery) = self.discovery else {
+            return Vec::new();
+        };
+        let last = discovery.last_request_id.min(*DIAGNOSTIC_IDS.end());
+        (discovery.first_request_id..=last)
+            .map(|request| ModuleIds {
+                request,
+                reply: request.saturating_add(discovery.reply_offset),
+            })
+            .collect()
+    }
+
+    fn module_ids(&self) -> Vec<ModuleIds> {
+        self.modules
             .iter()
             .map(|module| ModuleIds {
                 request: module.request_id,
                 reply: module.response_id,
             })
-            .collect();
-        policy.narrowed_to(&modules)
+            .collect()
     }
 
     /// Checks everything [`Profile::from_toml`] checks. Call it after building or changing a
@@ -336,6 +393,21 @@ impl Profile {
                     });
                 }
             }
+        }
+        if let Some(discovery) = self.discovery {
+            if discovery.first_request_id > discovery.last_request_id {
+                return Err(ProfileError::DiscoveryRange);
+            }
+            // `candidates` stops at 0x7FF, so one past it is refused here.
+            if discovery.last_request_id > *DIAGNOSTIC_IDS.end() {
+                return Err(ProfileError::Discovery(NarrowingError::Request(
+                    discovery.last_request_id,
+                )));
+            }
+            // The safety policy's own checks: every request ID one it accepts, and no ID both a
+            // request and a reply.
+            self.narrow_for_discovery(Policy::read_only())
+                .map_err(ProfileError::Discovery)?;
         }
         Ok(())
     }
