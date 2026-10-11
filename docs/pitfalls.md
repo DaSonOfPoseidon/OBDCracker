@@ -103,7 +103,8 @@ Each entry names the class, what to check, and where it bit us.
   0x78 exception (PR #9, PR #11).
 - **No answer isn't no effect.** A request that timed out may still have reached the module and taken effect;
   only its reply may be lost. Undo what it could have done: `ExtendedSession::enter` sends `10 01` after an
-  unanswered `10 03`, and skips it only when the module refused (#68, Codex). The reverse holds too: never count an
+  unanswered `10 03`, and skips it only for a well-formed refusal (`7F 10 <NRC>`) (#68, Codex and the review
+  gate). The reverse holds too: never count an
   unanswered or refused request as having worked (the guard's S3 clock only restarts on positive replies).
 - **A DTC status mask of 0xFF isn't "every stored fault".** The "test not completed" bits (4 and 6) are set on every
   code a module hasn't tested yet, so `19 02 FF` returns its whole DTC table: about 330 codes across four A7

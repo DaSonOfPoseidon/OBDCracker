@@ -298,10 +298,36 @@ fn guard_leaves_a_session_whose_entry_went_unanswered() {
     bus.ecu_mut("engine")
         .unwrap()
         .set_fault(Some(obdcracker_sim::Fault::Silent));
-    let error =
-        ExtendedSession::enter(&mut bus, &Policy::read_only(), ENGINE, Timing::default(), GUARD)
-            .unwrap_err();
+    let error = ExtendedSession::enter(
+        &mut bus,
+        &Policy::read_only(),
+        ENGINE,
+        Timing::default(),
+        GUARD,
+    )
+    .unwrap_err();
     assert_eq!(error, SessionError::Transport(Error::Timeout));
     assert_eq!(sent(&bus), [vec![0x10, 0x03], vec![0x10, 0x01]]);
+    assert_eq!(session(&bus), Session::Default);
+}
+
+#[test]
+fn guard_leaves_a_session_whose_entry_got_a_reply_to_something_else() {
+    // `Fault::WrongSid` switches session, then answers for another service.
+    let mut bus = car();
+    bus.ecu_mut("engine")
+        .unwrap()
+        .set_fault(Some(obdcracker_sim::Fault::WrongSid));
+    assert!(
+        ExtendedSession::enter(
+            &mut bus,
+            &Policy::read_only(),
+            ENGINE,
+            Timing::default(),
+            GUARD
+        )
+        .is_err()
+    );
+    assert_eq!(sent(&bus).last().unwrap(), &[0x10, 0x01]);
     assert_eq!(session(&bus), Session::Default);
 }

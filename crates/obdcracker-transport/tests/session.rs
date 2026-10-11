@@ -110,3 +110,16 @@ fn a_refused_reentry_is_tried_again_rather_than_kept_alive() {
         ]
     );
 }
+
+#[test]
+fn a_malformed_refusal_counts_as_no_answer_and_is_left() {
+    // `exchange` drops a refusal with a trailing byte, so the module may have switched: leave.
+    let mut adapter = mock(&[&[0x7F, 0x10, 0x22, 0x00]]);
+    let error = ExtendedSession::enter(&mut adapter, &Policy::read_only(), ENGINE, FAST, GUARD)
+        .unwrap_err();
+    assert_eq!(
+        error,
+        SessionError::Transport(obdcracker_transport::Error::Timeout)
+    );
+    assert_eq!(sent(&adapter), [vec![0x10, 0x03], vec![0x10, 0x01]]);
+}
