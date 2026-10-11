@@ -174,6 +174,25 @@ fn reads_dids_with_known_lengths_three_at_a_time() {
 }
 
 #[test]
+fn a_did_with_length_0_is_read_alone() {
+    let mut car = Car::new(|_, _| Vec::new());
+    let mut module = engine_with_lengths();
+    module.extra_dids[1].length = Some(0);
+    scan(&mut car, &Policy::read_only(), &[module], TIMING).unwrap();
+    // Nothing answers, so the three in the batch are read alone after it.
+    assert_eq!(
+        &did_requests(&car)[..4],
+        [
+            "7E0 22 F1 87 F1 91 06 00",
+            "7E0 22 F1 87",
+            "7E0 22 F1 91",
+            "7E0 22 06 00"
+        ]
+    );
+    assert!(did_requests(&car).contains(&"7E0 22 F1 89"));
+}
+
+#[test]
 fn a_did_missing_from_a_batched_reply_is_read_alone() {
     // ISO 14229-1: a module leaves out the DIDs it doesn't support. Here it leaves out F189,
     // which it then answers alone, as a module might under a different condition.

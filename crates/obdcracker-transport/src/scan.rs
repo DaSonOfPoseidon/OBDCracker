@@ -276,10 +276,10 @@ const BATCH: usize = 3;
 const READ_DIDS_REPLY: u8 = uds::READ_DATA_BY_IDENTIFIER + 0x40;
 
 // Groups the DIDs with a length, in order, up to BATCH a request. A DID left alone is read on its
-// own.
+// own, and so is one whose length is 0: every DID value has at least one byte.
 fn batches_of(dids: &[ExtraDid]) -> Vec<Vec<usize>> {
     let known: Vec<usize> = (0..dids.len())
-        .filter(|&index| dids[index].length.is_some())
+        .filter(|&index| dids[index].length.is_some_and(|length| length > 0))
         .collect();
     known
         .chunks(BATCH)
