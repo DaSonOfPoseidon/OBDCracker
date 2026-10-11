@@ -8,6 +8,11 @@ use obdcracker_safety::{Approved, Policy, Rejection, Target};
 use crate::{Error, Expect, Response, Timing, Transport, exchange};
 
 /// How long a module keeps a non-default session without a request, and how often to remind it.
+///
+/// Any values are safe, they only change what's sent: with `keepalive` at or above `timeout`,
+/// [`ExtendedSession::keep_alive`] never sends `TesterPresent` and enters the session again
+/// instead once `timeout` has passed; a zero `keepalive` sends `TesterPresent` on every call; and
+/// a zero `timeout` enters the session again before every request.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct S3 {
     /// How long after the last request to send `TesterPresent`: 2 s by default (S3client,
