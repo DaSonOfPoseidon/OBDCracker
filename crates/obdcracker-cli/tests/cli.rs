@@ -494,3 +494,74 @@ fn dry_run_scan_sends_nothing() {
         "{stdout}"
     );
 }
+
+#[test]
+fn sim_scan_discover_finds_the_modules_that_answer_then_scans_them() {
+    let log = temp_log("discover");
+    let out = obdcracker(&[
+        "--sim",
+        "a7",
+        "--audit-log",
+        log.to_str().unwrap(),
+        "scan",
+        "--discover",
+    ]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    // The simulated A7 has only its profile's modules, so those are all discovery finds.
+    for line in [
+        "77A found at 710 (profile: gateway), F187 4G0907468AD",
+        "77E found at 714 (profile: instruments), F187 4G8920984A",
+        "discovery: 2 of 106 request IDs answered",
+        "77A gateway F197 J533--Gateway",
+    ] {
+        assert!(
+            stdout.lines().any(|l| l == line),
+            "{line:?} missing from:\n{stdout}"
+        );
+    }
+    // One 22 F1 87 to each request ID 0x700..=0x769, in order, before the scan; never to a reply
+    // ID.
+    let audit = std::fs::read_to_string(&log).unwrap();
+    let sent: Vec<&str> = audit
+        .lines()
+        .filter(|l| l.contains(r#""dir":"tx""#))
+        .collect();
+    for (line, id) in sent.iter().zip(0x700..=0x769) {
+        assert!(
+            line.contains(&format!(r#""id":"{id:03X}","payload":"22 F1 87""#)),
+            "{line}"
+        );
+    }
+    for line in &sent {
+        let id = line.split(r#""id":""#).nth(1).unwrap();
+        let id = u32::from_str_radix(&id[..3], 16).unwrap();
+        assert!(
+            !(0x76A..=0x7D3).contains(&id) && !(0x7E8..=0x7EF).contains(&id),
+            "{line}"
+        );
+    }
+}
+
+#[test]
+fn scan_discover_needs_a_profile_with_a_discovery_range() {
+    let out = obdcracker(&["--dry-run", "scan", "--discover"]);
+    assert_eq!(out.status.code(), Some(2));
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("--discover needs a profile"),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let out = obdcracker(&["--dry-run", "--profile", "a7", "scan", "--discover"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("dry run: nothing was sent"), "{stdout}");
+}
