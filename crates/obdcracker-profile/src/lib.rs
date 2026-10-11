@@ -59,6 +59,19 @@ pub struct Module {
 }
 
 impl Module {
+    /// Each DID with its length, in the order given, to decode a multi-DID read
+    /// (`obdcracker_core::uds::decode_dids`). `None` if the profile doesn't give every one's
+    /// length.
+    #[must_use]
+    pub fn did_layout(&self, dids: &[u16]) -> Option<Vec<(u16, usize)>> {
+        dids.iter()
+            .map(|&id| {
+                let length = self.dids.iter().find(|did| did.id == id)?.length?;
+                Some((id, usize::from(length)))
+            })
+            .collect()
+    }
+
     /// How the module is addressed inside CAN frames.
     #[must_use]
     pub fn addressing(&self) -> Addressing {
@@ -89,6 +102,11 @@ pub struct DidDef {
     pub name: String,
     /// How to show the value.
     pub decode: Decode,
+    /// The value's length in bytes, if the module always sends this many. It's fixed per ECU
+    /// variant, not per DID, and lets several DIDs be read in one request: a multi-DID reply
+    /// doesn't say where each value ends.
+    #[serde(default)]
+    pub length: Option<u16>,
 }
 
 /// How to show a data identifier's value.
@@ -129,6 +147,14 @@ pub enum ProfileError {
         /// The DID.
         did: u16,
     },
+    /// A DID's length is 0, or more than a UDS reply can carry (4092 bytes after the service
+    /// and DID bytes).
+    DidLength {
+        /// The module.
+        module: String,
+        /// The DID.
+        did: u16,
+    },
     /// A module lists a standard DID with another format than ISO 14229-1 gives it (see
     /// [`standard_decode`]).
     StandardDidFormat {
@@ -164,6 +190,10 @@ impl fmt::Display for ProfileError {
             Self::DuplicateDid { module, did } => {
                 write!(f, "module {module}: DID 0x{did:04X} is listed twice")
             }
+            Self::DidLength { module, did } => write!(
+                f,
+                "module {module}: DID 0x{did:04X}'s length must be 1 to {MAX_DID_LENGTH}"
+            ),
             Self::StandardDidFormat { module, did } => write!(
                 f,
                 "module {module}: DID 0x{did:04X} is text in ISO 14229-1, so its decode must be text"
@@ -187,6 +217,10 @@ pub const STANDARD_DIDS: std::ops::RangeInclusive<u16> = 0xF180..=0xF19F;
 pub fn standard_decode(did: u16) -> Option<Decode> {
     uds::did::is_text(did).then_some(Decode::Text)
 }
+
+/// The longest DID value: an ISO-TP message is at most 4095 bytes, and a reply starts with the
+/// service byte and the 2-byte DID.
+pub const MAX_DID_LENGTH: u16 = 4092;
 
 const BITRATES: [u32; 2] = [250_000, 500_000];
 const DIAGNOSTIC_IDS: std::ops::RangeInclusive<u32> = 0x700..=0x7FF;
@@ -291,6 +325,15 @@ impl Profile {
             for did in &module.dids {
                 if standard_decode(did.id).is_some_and(|decode| decode != did.decode) {
                     return Err(ProfileError::StandardDidFormat {
+                        module: module.name.clone(),
+                        did: did.id,
+                    });
+                }
+                if did
+                    .length
+                    .is_some_and(|length| !(1..=MAX_DID_LENGTH).contains(&length))
+                {
+                    return Err(ProfileError::DidLength {
                         module: module.name.clone(),
                         did: did.id,
                     });

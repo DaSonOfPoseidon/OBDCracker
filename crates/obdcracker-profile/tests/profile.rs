@@ -1,7 +1,9 @@
 //! Parsing and validating vehicle profiles, and the built-in A7 profile.
 
 use obdcracker_core::isotp::Addressing;
-use obdcracker_profile::{Decode, Profile, ProfileError, Protocol, standard_decode};
+use obdcracker_profile::{
+    Decode, MAX_DID_LENGTH, Profile, ProfileError, Protocol, standard_decode,
+};
 use obdcracker_safety::{Policy, Target};
 use proptest::prelude::*;
 
@@ -366,4 +368,57 @@ fn standard_dids_keep_their_iso_format() {
     assert_eq!(standard_decode(0xF190), Some(Decode::Text));
     assert_eq!(standard_decode(0xF18B), None);
     assert_eq!(standard_decode(0x0600), None);
+}
+
+#[test]
+fn a_did_can_give_its_length() {
+    let toml = MINIMAL.replace("decode = \"text\"", "decode = \"text\"\nlength = 17");
+    let profile = Profile::from_toml(&toml).unwrap();
+    assert_eq!(profile.modules[0].dids[0].length, Some(17));
+    // Without one, the length is unknown.
+    assert_eq!(
+        Profile::from_toml(MINIMAL).unwrap().modules[0].dids[0].length,
+        None
+    );
+}
+
+#[test]
+fn rejects_a_did_length_no_reply_can_have() {
+    for length in [0, MAX_DID_LENGTH + 1, u16::MAX] {
+        let toml = MINIMAL.replace(
+            "decode = \"text\"",
+            &format!("decode = \"text\"\nlength = {length}"),
+        );
+        assert_eq!(
+            Profile::from_toml(&toml).unwrap_err(),
+            ProfileError::DidLength {
+                module: "engine".into(),
+                did: 0xF190
+            },
+            "{length}"
+        );
+    }
+    let toml = MINIMAL.replace(
+        "decode = \"text\"",
+        &format!("decode = \"text\"\nlength = {MAX_DID_LENGTH}"),
+    );
+    assert!(Profile::from_toml(&toml).is_ok());
+}
+
+#[test]
+fn a_did_layout_needs_every_length() {
+    let toml = format!(
+        "{}\n[[module.did]]\nid = 0x0600\nname = \"coding\"\ndecode = \"hex\"\nlength = 10\n\
+         [[module.did]]\nid = 0xF1A3\nname = \"hardware version\"\ndecode = \"text\"\n",
+        MINIMAL.replace("decode = \"text\"", "decode = \"text\"\nlength = 17")
+    );
+    let engine = &Profile::from_toml(&toml).unwrap().modules[0];
+    assert_eq!(
+        engine.did_layout(&[0x0600, 0xF190]),
+        Some(vec![(0x0600, 10), (0xF190, 17)])
+    );
+    assert_eq!(engine.did_layout(&[]), Some(vec![]));
+    // F1A3 has no length, and F187 isn't listed at all.
+    assert_eq!(engine.did_layout(&[0xF190, 0xF1A3]), None);
+    assert_eq!(engine.did_layout(&[0xF187]), None);
 }
