@@ -1,9 +1,7 @@
 //! Parsing and validating vehicle profiles, and the built-in A7 profile.
 
 use obdcracker_core::isotp::Addressing;
-use obdcracker_profile::{
-    Decode, MAX_DID_LENGTH, Profile, ProfileError, Protocol, standard_decode,
-};
+use obdcracker_profile::{Decode, Profile, ProfileError, Protocol, standard_decode};
 use obdcracker_safety::{Policy, Target};
 use proptest::prelude::*;
 
@@ -383,26 +381,24 @@ fn a_did_can_give_its_length() {
 }
 
 #[test]
-fn rejects_a_did_length_no_reply_can_have() {
-    for length in [0, MAX_DID_LENGTH + 1, u16::MAX] {
-        let toml = MINIMAL.replace(
+fn rejects_a_did_length_of_0() {
+    let with_length = |length: u16| {
+        MINIMAL.replace(
             "decode = \"text\"",
             &format!("decode = \"text\"\nlength = {length}"),
-        );
-        assert_eq!(
-            Profile::from_toml(&toml).unwrap_err(),
-            ProfileError::DidLength {
-                module: "engine".into(),
-                did: 0xF190
-            },
-            "{length}"
-        );
-    }
-    let toml = MINIMAL.replace(
-        "decode = \"text\"",
-        &format!("decode = \"text\"\nlength = {MAX_DID_LENGTH}"),
+        )
+    };
+    assert_eq!(
+        Profile::from_toml(&with_length(0)).unwrap_err(),
+        ProfileError::DidLength {
+            module: "engine".into(),
+            did: 0xF190
+        }
     );
-    assert!(Profile::from_toml(&toml).is_ok());
+    // ISO-TP's escaped first frame carries more than 4095 bytes, so any other length is fine.
+    for length in [1, 4092, 4093, u16::MAX] {
+        assert!(Profile::from_toml(&with_length(length)).is_ok(), "{length}");
+    }
 }
 
 #[test]

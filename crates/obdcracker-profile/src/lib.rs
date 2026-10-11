@@ -147,8 +147,7 @@ pub enum ProfileError {
         /// The DID.
         did: u16,
     },
-    /// A DID's length is 0, or more than a UDS reply can carry (4092 bytes after the service
-    /// and DID bytes).
+    /// A DID's length is 0: every DID value has at least one byte.
     DidLength {
         /// The module.
         module: String,
@@ -190,10 +189,9 @@ impl fmt::Display for ProfileError {
             Self::DuplicateDid { module, did } => {
                 write!(f, "module {module}: DID 0x{did:04X} is listed twice")
             }
-            Self::DidLength { module, did } => write!(
-                f,
-                "module {module}: DID 0x{did:04X}'s length must be 1 to {MAX_DID_LENGTH}"
-            ),
+            Self::DidLength { module, did } => {
+                write!(f, "module {module}: DID 0x{did:04X}'s length can't be 0")
+            }
             Self::StandardDidFormat { module, did } => write!(
                 f,
                 "module {module}: DID 0x{did:04X} is text in ISO 14229-1, so its decode must be text"
@@ -217,10 +215,6 @@ pub const STANDARD_DIDS: std::ops::RangeInclusive<u16> = 0xF180..=0xF19F;
 pub fn standard_decode(did: u16) -> Option<Decode> {
     uds::did::is_text(did).then_some(Decode::Text)
 }
-
-/// The longest DID value: an ISO-TP message is at most 4095 bytes, and a reply starts with the
-/// service byte and the 2-byte DID.
-pub const MAX_DID_LENGTH: u16 = 4092;
 
 const BITRATES: [u32; 2] = [250_000, 500_000];
 const DIAGNOSTIC_IDS: std::ops::RangeInclusive<u32> = 0x700..=0x7FF;
@@ -329,10 +323,7 @@ impl Profile {
                         did: did.id,
                     });
                 }
-                if did
-                    .length
-                    .is_some_and(|length| !(1..=MAX_DID_LENGTH).contains(&length))
-                {
+                if did.length == Some(0) {
                     return Err(ProfileError::DidLength {
                         module: module.name.clone(),
                         did: did.id,
