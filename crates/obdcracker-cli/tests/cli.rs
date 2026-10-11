@@ -512,12 +512,20 @@ fn sim_scan_discover_finds_the_modules_that_answer_then_scans_them() {
         String::from_utf8_lossy(&out.stderr)
     );
     let stdout = String::from_utf8_lossy(&out.stdout);
-    // The simulated A7 has only its profile's modules, so those are all discovery finds.
+    // The simulated A7 has the 22 modules discovery found on the car in #54, all in the profile.
     for line in [
         "77A found at 710 (profile: gateway), F187 4G0907468AD",
         "77E found at 714 (profile: instruments), F187 4G8920984A",
-        "discovery: 2 of 106 request IDs answered",
+        "785 found at 71B (profile: head-up display), F187 4G8919604K",
+        "7D3 found at 769 (profile: top view), F187 4H0907428B",
+        "discovery: 22 of 106 request IDs answered",
         "77A gateway F197 J533--Gateway",
+        // As the car sent them in #54, now that #62 and #63 are fixed.
+        "77E instruments F19E EV_RBD4K",
+        "785 head-up display F19E EV_HUDContiC7",
+        "78D rear lid F190 (not set)",
+        "791 night vision DTC 001017 failed, confirmed (status 09)",
+        "78B sensor cluster DTC format 01, the module counts 0 for mask AF",
     ] {
         assert!(
             stdout.lines().any(|l| l == line),
