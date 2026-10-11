@@ -37,7 +37,11 @@ Each entry names the class, what to check, and where it bit us.
 - **Standard data has a format whether or not a profile lists it.** F190 must be a VIN, and
   F187/F188/F189/F191/F197/F19E must be text (ISO 14229-1). Skipping validation because there's no `DidDef` let
   `hex = "FF"` pass as a VIN, and letting a `DidDef` replace the check let `F190 text = "abc"` through. A profile
-  can't declare a standard DID in another format either (`standard_decode`).
+  can't declare a standard DID in another format either (`standard_decode`). The rule cuts both ways: a standard
+  DID with *no* fixed format (F18B's BCD date) must take the profile's format, and every reader of a text DID must
+  apply the same check as the others. Scan forced F18B to text and read F190 with the plain text decoder, so a
+  printable date showed as a string and `62 F1 90 61 62 63` as the VIN `abc` (#50, #51). Keep the list in one place
+  (`uds::did::is_text`, `obd::check_vin`).
 - **Cross-check related sources.** Fixture vs profile: every DID is standard or in the profile, values match the
   profile's `decode`, and OBD-II data only sits on OBD-II ID pairs (0x7E0..=0x7E7 → +8).
 - **Public fields bypass the parser.** Anything with `pub` fields can be built or edited by hand, so consumers must
