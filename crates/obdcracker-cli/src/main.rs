@@ -72,8 +72,8 @@ enum Command {
     Fingerprint,
     /// Read everything the default diagnostic session allows: every supported mode 01 PID, mode
     /// 09 PIDs 00 and 0A and mode 03 DTCs from each emissions ECU, then each profile module's
-    /// identification and profile DIDs and its DTCs that are failed, pending or confirmed (UDS
-    /// 0x22 and 0x19)
+    /// identification and profile DIDs and its DTCs that are failed, pending, confirmed or failed
+    /// since the last clear (UDS 0x22 and 0x19)
     Scan,
     /// List this computer's serial ports
     Ports,
