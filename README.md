@@ -43,7 +43,8 @@ from developers being careful:
 - `scan` reads everything the default diagnostic session allows, without changing any module's session. From each
   emissions ECU it reads every supported mode 01 PID, mode 09 PIDs 00 and 0A, and mode 03 stored DTCs. From each
   plain-UDS module in the profile it reads the standard identification DIDs plus the profile's own DIDs, and its DTCs
-  (`19 01 FF`, `19 02 FF`).
+  (`19 01 AF`, `19 02 AF`). It lists only DTCs that are failed, pending, confirmed or failed since the last clear, not
+  the module's untested codes.
 - Every frame sent or received in a real session is appended to an audit log, along with any adapter error (such as an
   adapter mishearing a request it may already have sent).
 - **One gap: ELM327/STN adapters.** Their serial line has no checksum, and the adapter sends a request before the

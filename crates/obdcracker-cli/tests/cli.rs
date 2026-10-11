@@ -436,12 +436,14 @@ fn sim_scan_reads_obd_data_and_every_profile_module() {
         "7E8 engine F197 3.0TDI FSA",
         "7E8 engine F1AA J623",
         "7E8 engine DTC count (service 0x19 refused: subfunction not supported (0x12))",
-        "7E8 engine DTC 001257 status 50",
+        // Every A7 DTC is untested, not a fault (#49, #52).
+        "7E8 engine DTCs (no faults)",
         "7E9 transmission F191 0BK927156AM",
         "77A gateway F18B [00 00 00]",
         "77A gateway F190 (service 0x22 refused: request out of range (0x31))",
         "77A gateway F197 J533--Gateway",
-        "77A gateway DTC 820002 status 10",
+        "77A gateway DTCs (no faults)",
+        "77E instruments DTCs (no faults)",
         "77E instruments F18B [13 11 19]",
         "77E instruments F197 TDieUsaAccNv",
     ] {
