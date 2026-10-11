@@ -74,8 +74,180 @@ fn engine(extra_dids: &[u16]) -> ScanModule {
             .map(|&id| ExtraDid {
                 id,
                 format: DidFormat::Text,
+                length: None,
             })
             .collect(),
+    }
+}
+
+// The engine with the lengths of F187, F189, F191 (11, 4 and 11 bytes) and its 2-byte coding
+// (0600), so those can be read several at a time.
+fn engine_with_lengths() -> ScanModule {
+    let did = |id, format, length| ExtraDid {
+        id,
+        format,
+        length: Some(length),
+    };
+    ScanModule {
+        module: UdsModule::obd_engine(),
+        extra_dids: vec![
+            did(0xF187, DidFormat::Text, 11),
+            did(0xF189, DidFormat::Text, 4),
+            did(0xF191, DidFormat::Text, 11),
+            did(0x0600, DidFormat::Hex, 2),
+        ],
+    }
+}
+
+const F187: &[u8] = b"\xF1\x874G0907401N ";
+const F189: &[u8] = b"\xF1\x890016";
+const F191: &[u8] = b"\xF1\x914G0907401E ";
+
+// A positive 0x22 reply carrying `values`, each a DID and its data.
+fn dids_reply(values: &[&[u8]]) -> Vec<Response> {
+    let mut payload = vec![0x62];
+    for value in values {
+        payload.extend_from_slice(value);
+    }
+    vec![reply(0x7E8, &payload)]
+}
+
+// The engine's DID requests, in the order they were sent.
+fn did_requests(car: &Car) -> Vec<&str> {
+    car.sent
+        .iter()
+        .map(String::as_str)
+        .filter(|sent| sent.starts_with("7E0 22"))
+        .collect()
+}
+
+// The text of each DID read, and whether every other one was refused.
+fn texts(scan: &Scan) -> Vec<(u16, String)> {
+    scan.modules[0]
+        .dids
+        .iter()
+        .filter_map(|(did, value)| match value {
+            Ok(DidValue::Text(text)) => Some((*did, text.clone())),
+            Ok(DidValue::Bytes(bytes)) => Some((*did, hex(bytes))),
+            Err(_) => None,
+        })
+        .collect()
+}
+
+const READ: [(u16, &str); 4] = [
+    (0xF187, "4G0907401N"),
+    (0xF189, "0016"),
+    (0xF191, "4G0907401E"),
+    (0x0600, "01 02"),
+];
+
+#[test]
+fn reads_dids_with_known_lengths_three_at_a_time() {
+    let mut car = Car::new(|id, request| match (id, request) {
+        (0x7E0, [0x22, 0xF1, 0x87, 0xF1, 0x89, 0xF1, 0x91]) => dids_reply(&[F187, F189, F191]),
+        (0x7E0, [0x22, 0x06, 0x00]) => dids_reply(&[&[0x06, 0x00, 0x01, 0x02]]),
+        (0x7E0, [0x22, _, _]) => vec![reply(0x7E8, &[0x7F, 0x22, 0x31])],
+        _ => Vec::new(),
+    });
+    let got = scan(
+        &mut car,
+        &Policy::read_only(),
+        &[engine_with_lengths()],
+        TIMING,
+    )
+    .unwrap();
+    // The three with lengths in one request where the first of them comes, the rest alone. A
+    // group of one is an ordinary read.
+    let mut expected = vec!["7E0 22 F1 87 F1 89 F1 91".to_owned()];
+    for did in SCAN_DIDS.iter().chain(&[0x0600]) {
+        if ![0xF187, 0xF189, 0xF191].contains(did) {
+            expected.push(format!("7E0 22 {:02X} {:02X}", did >> 8, did & 0xFF));
+        }
+    }
+    assert_eq!(did_requests(&car), expected);
+    assert_eq!(texts(&got), READ.map(|(did, text)| (did, text.to_owned())));
+    // Values stay in the order of SCAN_DIDS, then the extra DIDs.
+    let order: Vec<u16> = got.modules[0].dids.iter().map(|(did, _)| *did).collect();
+    let mut want = SCAN_DIDS.to_vec();
+    want.push(0x0600);
+    assert_eq!(order, want);
+}
+
+#[test]
+fn a_did_missing_from_a_batched_reply_is_read_alone() {
+    // ISO 14229-1: a module leaves out the DIDs it doesn't support. Here it leaves out F189,
+    // which it then answers alone, as a module might under a different condition.
+    let mut car = Car::new(|id, request| match (id, request) {
+        (0x7E0, [0x22, 0xF1, 0x87, 0xF1, 0x89, 0xF1, 0x91]) => dids_reply(&[F187, F191]),
+        (0x7E0, [0x22, 0xF1, 0x89]) => dids_reply(&[F189]),
+        (0x7E0, [0x22, 0x06, 0x00]) => dids_reply(&[&[0x06, 0x00, 0x01, 0x02]]),
+        (0x7E0, [0x22, _, _]) => vec![reply(0x7E8, &[0x7F, 0x22, 0x31])],
+        _ => Vec::new(),
+    });
+    let got = scan(
+        &mut car,
+        &Policy::read_only(),
+        &[engine_with_lengths()],
+        TIMING,
+    )
+    .unwrap();
+    assert_eq!(
+        &did_requests(&car)[..2],
+        ["7E0 22 F1 87 F1 89 F1 91", "7E0 22 F1 89"]
+    );
+    assert_eq!(
+        did_requests(&car)
+            .iter()
+            .filter(|sent| sent.contains("F1 87") || sent.contains("F1 91"))
+            .count(),
+        1
+    );
+    assert_eq!(texts(&got), READ.map(|(did, text)| (did, text.to_owned())));
+}
+
+#[test]
+fn a_batched_read_that_fails_is_read_again_one_at_a_time() {
+    let wrong_length: &[u8] = b"\xF1\x874G0907401N";
+    for batch in [
+        // A refusal, such as a module that takes one DID per request
+        vec![reply(0x7E8, &[0x7F, 0x22, 0x13])],
+        // F187 a byte shorter than the profile says, so F189 doesn't start where expected
+        dids_reply(&[wrong_length, F189, F191]),
+        // A byte left over
+        dids_reply(&[F187, F189, F191, &[0x00]]),
+        // DIDs out of the order asked for
+        dids_reply(&[F189, F187, F191]),
+        // A DID that wasn't asked for
+        dids_reply(&[F187, &[0xF1, 0x88, 0x30, 0x30]]),
+        // Nothing at all
+        Vec::new(),
+    ] {
+        let mut car = Car::new(move |id, request| match (id, request) {
+            (0x7E0, [0x22, 0xF1, 0x87, 0xF1, 0x89, 0xF1, 0x91]) => batch.clone(),
+            (0x7E0, [0x22, 0xF1, 0x87]) => dids_reply(&[F187]),
+            (0x7E0, [0x22, 0xF1, 0x89]) => dids_reply(&[F189]),
+            (0x7E0, [0x22, 0xF1, 0x91]) => dids_reply(&[F191]),
+            (0x7E0, [0x22, 0x06, 0x00]) => dids_reply(&[&[0x06, 0x00, 0x01, 0x02]]),
+            (0x7E0, [0x22, _, _]) => vec![reply(0x7E8, &[0x7F, 0x22, 0x31])],
+            _ => Vec::new(),
+        });
+        let got = scan(
+            &mut car,
+            &Policy::read_only(),
+            &[engine_with_lengths()],
+            TIMING,
+        )
+        .unwrap();
+        assert_eq!(
+            &did_requests(&car)[..4],
+            [
+                "7E0 22 F1 87 F1 89 F1 91",
+                "7E0 22 F1 87",
+                "7E0 22 F1 89",
+                "7E0 22 F1 91"
+            ]
+        );
+        assert_eq!(texts(&got), READ.map(|(did, text)| (did, text.to_owned())));
     }
 }
 
@@ -281,11 +453,13 @@ fn a_hex_did_keeps_its_bytes_even_when_they_look_like_text() {
             ExtraDid {
                 id: 0x0600,
                 format: DidFormat::Hex,
+                length: None,
             },
             // A standard DID stays text, whatever a later entry says.
             ExtraDid {
                 id: 0xF187,
                 format: DidFormat::Hex,
+                length: None,
             },
         ],
     };
@@ -322,6 +496,7 @@ fn a_profile_format_replaces_the_default_for_a_standard_did_with_no_fixed_format
     let hex = |id| ExtraDid {
         id,
         format: DidFormat::Hex,
+        length: None,
     };
     let module = ScanModule {
         module: UdsModule::obd_engine(),
@@ -332,6 +507,7 @@ fn a_profile_format_replaces_the_default_for_a_standard_did_with_no_fixed_format
             ExtraDid {
                 id: 0xF18B,
                 format: DidFormat::Text,
+                length: None,
             },
         ],
     };
