@@ -62,6 +62,40 @@ pub fn read_did(did: u16) -> [u8; 3] {
     [READ_DATA_BY_IDENTIFIER, high, low]
 }
 
+/// The `DiagnosticSessionControl` service.
+pub const DIAGNOSTIC_SESSION_CONTROL: u8 = 0x10;
+
+/// The `TesterPresent` service.
+pub const TESTER_PRESENT: u8 = 0x3E;
+
+/// A diagnostic session a tester may switch a module to. The programming session isn't one:
+/// the policy bans it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum DiagnosticSession {
+    /// The session a module starts in and returns to (0x01).
+    Default,
+    /// The extended diagnostic session (0x03), which unlocks more reads.
+    Extended,
+}
+
+/// A `DiagnosticSessionControl` request, with the positive reply asked for.
+#[must_use]
+pub fn session_control(session: DiagnosticSession) -> [u8; 2] {
+    let sub = match session {
+        DiagnosticSession::Default => 0x01,
+        DiagnosticSession::Extended => 0x03,
+    };
+    [DIAGNOSTIC_SESSION_CONTROL, sub]
+}
+
+/// A `TesterPresent` request, `3E 00`, which keeps a non-default session open. The positive
+/// reply isn't suppressed (`3E 80`): an ELM adapter waits out its whole timeout for a reply that
+/// never comes.
+#[must_use]
+pub fn tester_present() -> [u8; 2] {
+    [TESTER_PRESENT, 0x00]
+}
+
 // The DID echoed at the start of `data`, and the bytes after it.
 fn split_did(data: &[u8]) -> Result<(u16, &[u8]), Error> {
     let [high, low, rest @ ..] = data else {

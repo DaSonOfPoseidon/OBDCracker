@@ -287,3 +287,15 @@ mod read_dtc_information {
         assert!(!status.warning_indicator_requested());
     }
 }
+
+mod session {
+    use obdcracker_core::uds::{DiagnosticSession, session_control, tester_present};
+
+    #[test]
+    fn builds_the_requests() {
+        assert_eq!(session_control(DiagnosticSession::Default), [0x10, 0x01]);
+        assert_eq!(session_control(DiagnosticSession::Extended), [0x10, 0x03]);
+        // Not `3E 80`: a suppressed reply makes an ELM adapter wait out its timeout.
+        assert_eq!(tester_present(), [0x3E, 0x00]);
+    }
+}
