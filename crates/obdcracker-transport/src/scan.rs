@@ -456,10 +456,18 @@ fn scan_module<T: Transport + ?Sized>(
                 values[i] = Some(decode_scanned(&single, id, format).map_err(ReadError::Reply));
             }
         }
-        // Then those it left out.
+        // Then those it left out. A reply carrying two or more of the batch's DIDs is the
+        // multi-DID read's, arriving late; it would pass for the first DID with the others'
+        // bytes as its value.
         for &i in batch {
             if values[i].is_none() {
-                values[i] = Some(read_alone(transport, i)?);
+                let (ExtraDid { id, format, .. }, request) = &did_requests[i];
+                values[i] = Some(ask(transport, request, response_id, timing, |payload| {
+                    if split_batch(payload, &layout).is_ok_and(|found| found.len() > 1) {
+                        return Err(ReplyError::Malformed);
+                    }
+                    decode_scanned(payload, *id, *format)
+                })?);
             }
         }
     }

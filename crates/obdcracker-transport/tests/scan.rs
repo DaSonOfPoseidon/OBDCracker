@@ -207,6 +207,53 @@ fn a_batch_never_asks_for_a_reply_longer_than_iso_tp_carries() {
 }
 
 #[test]
+fn a_late_batched_reply_isnt_taken_for_one_did() {
+    // The multi-DID read times out, and its reply arrives during the first read alone. It starts
+    // with F187, but the rest is F189 and F191, not more of F187's value.
+    let mut car = Car::new(|id, request| match (id, request) {
+        (0x7E0, [0x22, 0xF1, 0x87]) => dids_reply(&[F187, F189, F191]),
+        (0x7E0, [0x22, 0xF1, 0x89]) => dids_reply(&[F189]),
+        (0x7E0, [0x22, 0xF1, 0x91]) => dids_reply(&[F191]),
+        _ => Vec::new(),
+    });
+    let got = scan(
+        &mut car,
+        &Policy::read_only(),
+        &[engine_with_lengths()],
+        TIMING,
+    )
+    .unwrap();
+    assert_eq!(
+        did_value(&got, 0xF187),
+        Some(Err(ReadError::Reply(ReplyError::Malformed)))
+    );
+    assert_eq!(
+        did_value(&got, 0xF189),
+        Some(Ok(DidValue::Text("0016".into())))
+    );
+    assert_eq!(
+        did_value(&got, 0xF191),
+        Some(Ok(DidValue::Text("4G0907401E".into())))
+    );
+    // A reply to a read alone may still carry just that DID at its length.
+    let mut car = Car::new(|id, request| match (id, request) {
+        (0x7E0, [0x22, 0xF1, 0x87]) => dids_reply(&[F187]),
+        _ => Vec::new(),
+    });
+    let got = scan(
+        &mut car,
+        &Policy::read_only(),
+        &[engine_with_lengths()],
+        TIMING,
+    )
+    .unwrap();
+    assert_eq!(
+        did_value(&got, 0xF187),
+        Some(Ok(DidValue::Text("4G0907401N".into())))
+    );
+}
+
+#[test]
 fn a_refused_batch_counts_as_an_answer() {
     // The module refuses the multi-DID read, then goes quiet: every later read times out.
     let mut car = Car::new(|id, request| match (id, request) {
