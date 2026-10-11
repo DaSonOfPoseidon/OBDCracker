@@ -48,6 +48,81 @@ mod current_data {
         assert_eq!(unit, Unit::Volts);
     }
 
+    // Within float rounding of `want`.
+    fn assert_quantity(reply: &[u8], want: f32, want_unit: Unit) {
+        let (value, unit) = quantity(reply);
+        assert!(
+            (value - want).abs() < 1e-3 && unit == want_unit,
+            "{reply:02X?}: {value} {unit:?}, want {want} {want_unit:?}"
+        );
+    }
+
+    #[test]
+    fn decodes_the_scalar_pids_the_a7_supports() {
+        // The bytes the A7's engine sent in #49 (engine off), and the formulas from SAE J1979.
+        for (reply, value, unit) in [
+            (&[0x41, 0x10, 0x00, 0xEC][..], 2.36, Unit::GramsPerSecond),
+            (&[0x41, 0x1F, 0x00, 0x00], 0.0, Unit::Seconds),
+            (&[0x41, 0x21, 0x00, 0x00], 0.0, Unit::Kilometres),
+            (&[0x41, 0x30, 0xED], 237.0, Unit::Count),
+            (&[0x41, 0x31, 0x1C, 0xC3], 7363.0, Unit::Kilometres),
+            (&[0x41, 0x33, 0x62], 98.0, Unit::Kilopascals),
+            (&[0x41, 0x3C, 0x00, 0x00], -40.0, Unit::Celsius),
+            (&[0x41, 0x3E, 0x02, 0xC6], 31.0, Unit::Celsius),
+            (&[0x41, 0x45, 0xFF], 100.0, Unit::Percent),
+            (&[0x41, 0x46, 0x47], 31.0, Unit::Celsius),
+            (&[0x41, 0x49, 0x26], 14.901_96, Unit::Percent),
+            (&[0x41, 0x4A, 0x26], 14.901_96, Unit::Percent),
+            (&[0x41, 0x4C, 0xFF], 100.0, Unit::Percent),
+            (&[0x41, 0x5C, 0x61], 57.0, Unit::Celsius),
+            (&[0x41, 0x5D, 0x69, 0x00], 0.0, Unit::Degrees),
+            (&[0x41, 0x5E, 0x00, 0x00], 0.0, Unit::LitresPerHour),
+            (&[0x41, 0x61, 0x74], -9.0, Unit::Percent),
+            (&[0x41, 0x62, 0x7D], 0.0, Unit::Percent),
+            (&[0x41, 0x63, 0x02, 0x44], 580.0, Unit::NewtonMetres),
+        ] {
+            assert_quantity(reply, value, unit);
+        }
+    }
+
+    #[test]
+    fn scalar_pids_reach_their_formula_limits() {
+        for (reply, value, unit) in [
+            (&[0x41, 0x10, 0xFF, 0xFF][..], 655.35, Unit::GramsPerSecond),
+            (&[0x41, 0x1F, 0xFF, 0xFF], 65535.0, Unit::Seconds),
+            (&[0x41, 0x30, 0xFF], 255.0, Unit::Count),
+            (&[0x41, 0x3C, 0xFF, 0xFF], 6513.5, Unit::Celsius),
+            (&[0x41, 0x46, 0x00], -40.0, Unit::Celsius),
+            (&[0x41, 0x5D, 0x00, 0x00], -210.0, Unit::Degrees),
+            (&[0x41, 0x5D, 0xFF, 0xFF], 301.992_2, Unit::Degrees),
+            (&[0x41, 0x5E, 0xFF, 0xFF], 3276.75, Unit::LitresPerHour),
+            (&[0x41, 0x61, 0x00], -125.0, Unit::Percent),
+            (&[0x41, 0x62, 0xFF], 130.0, Unit::Percent),
+            (&[0x41, 0x63, 0xFF, 0xFF], 65535.0, Unit::NewtonMetres),
+        ] {
+            assert_quantity(reply, value, unit);
+        }
+    }
+
+    #[test]
+    fn scalar_pids_need_their_full_length() {
+        // A known PID cut short is an error, not a reading of the bytes that are there.
+        for reply in [
+            &[0x41, 0x10, 0x00][..],
+            &[0x41, 0x31, 0x1C],
+            &[0x41, 0x3E, 0x02],
+            &[0x41, 0x5D, 0x69],
+            &[0x41, 0x63, 0x02],
+            &[0x41, 0x30],
+        ] {
+            let mut readings = decode_current_data(reply).unwrap();
+            assert!(
+                matches!(readings.next(), Some(Err(_))),
+                "{reply:02X?} should be an error"
+            );
+        }
+    }
+
     #[test]
     fn decodes_supported_pid_bitmaps() {
         // Wikipedia's OBD-II PID 00 example
@@ -82,11 +157,11 @@ mod current_data {
 
     #[test]
     fn unknown_pid_takes_the_rest_of_the_reply_raw() {
-        // PID 5C, engine oil temperature, isn't in the decoding table
+        // SAE J1979 doesn't define PID E1, so no decoder ever will.
         assert_eq!(
-            readings(&[0x41, 0x5C, 0x7B]),
+            readings(&[0x41, 0xE1, 0x7B]),
             [Reading {
-                pid: 0x5C,
+                pid: 0xE1,
                 value: Value::Raw(&[0x7B])
             }]
         );
@@ -94,7 +169,7 @@ mod current_data {
 
     #[test]
     fn unknown_pid_without_data_is_truncated() {
-        let got: Vec<_> = decode_current_data(&[0x41, 0x5C]).unwrap().collect();
+        let got: Vec<_> = decode_current_data(&[0x41, 0xE1]).unwrap().collect();
         assert_eq!(got, [Err(Error::TooShort)]);
     }
 

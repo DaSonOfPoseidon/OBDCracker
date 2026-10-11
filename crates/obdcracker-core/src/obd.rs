@@ -36,6 +36,22 @@ pub enum Unit {
     KilometresPerHour,
     /// Volts.
     Volts,
+    /// Grams per second (air flow).
+    GramsPerSecond,
+    /// Seconds.
+    Seconds,
+    /// Kilometres.
+    Kilometres,
+    /// A count with no unit, such as warm-ups since the codes were cleared.
+    Count,
+    /// Kilopascals, absolute.
+    Kilopascals,
+    /// Degrees of crankshaft rotation, relative to top dead centre.
+    Degrees,
+    /// Litres per hour.
+    LitresPerHour,
+    /// Newton metres.
+    NewtonMetres,
 }
 
 impl fmt::Display for Unit {
@@ -46,6 +62,14 @@ impl fmt::Display for Unit {
             Self::Rpm => "rpm",
             Self::KilometresPerHour => "km/h",
             Self::Volts => "V",
+            Self::GramsPerSecond => "g/s",
+            Self::Seconds => "s",
+            Self::Kilometres => "km",
+            Self::Count => "",
+            Self::Kilopascals => "kPa",
+            Self::Degrees => "°",
+            Self::LitresPerHour => "L/h",
+            Self::NewtonMetres => "Nm",
         })
     }
 }
@@ -121,11 +145,23 @@ fn decode_pid(pid: u8, data: &[u8]) -> Option<(usize, Value<'static>)> {
             let bytes = data.get(..4)?.try_into().ok()?;
             (4, Value::Supported(SupportedPids::new(pid, bytes)))
         }
-        0x04 | 0x11 => (1, quantity(byte(0)? * 100.0 / 255.0, Unit::Percent)),
-        0x05 | 0x0F => (1, quantity(byte(0)? - 40.0, Unit::Celsius)),
+        0x04 | 0x11 | 0x45 | 0x49 | 0x4A | 0x4C => {
+            (1, quantity(byte(0)? * 100.0 / 255.0, Unit::Percent))
+        }
+        0x05 | 0x0F | 0x46 | 0x5C => (1, quantity(byte(0)? - 40.0, Unit::Celsius)),
         0x0C => (2, quantity(word()? / 4.0, Unit::Rpm)),
         0x0D => (1, quantity(byte(0)?, Unit::KilometresPerHour)),
+        0x10 => (2, quantity(word()? / 100.0, Unit::GramsPerSecond)),
+        0x1F => (2, quantity(word()?, Unit::Seconds)),
+        0x21 | 0x31 => (2, quantity(word()?, Unit::Kilometres)),
+        0x30 => (1, quantity(byte(0)?, Unit::Count)),
+        0x33 => (1, quantity(byte(0)?, Unit::Kilopascals)),
+        0x3C | 0x3E => (2, quantity(word()? / 10.0 - 40.0, Unit::Celsius)),
         0x42 => (2, quantity(word()? / 1000.0, Unit::Volts)),
+        0x5D => (2, quantity(word()? / 128.0 - 210.0, Unit::Degrees)),
+        0x5E => (2, quantity(word()? / 20.0, Unit::LitresPerHour)),
+        0x61 | 0x62 => (1, quantity(byte(0)? - 125.0, Unit::Percent)),
+        0x63 => (2, quantity(word()?, Unit::NewtonMetres)),
         _ => return None,
     };
     Some(decoded)
