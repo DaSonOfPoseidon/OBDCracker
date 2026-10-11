@@ -31,6 +31,9 @@ pub struct FakeElm {
     pub commands: Vec<String>,
     /// Every request put on the bus: the header and payload.
     pub sent: Vec<(u32, Vec<u8>)>,
+    /// The module each flow control frame the adapter sent was for: every sender of a
+    /// multi-frame reply that passed the receive filter.
+    pub flow_control_for: Vec<u32>,
     /// Commands this adapter doesn't support (it answers `?`), as a clone might.
     pub unsupported: Vec<String>,
     /// What `STI` answers; `None` for a plain ELM327.
@@ -72,6 +75,21 @@ pub struct Settings {
     pub fc_header: Option<u32>,
     pub fc_data: Option<String>,
     pub fc_mode: u8,
+    /// The `AT CRA` receive filter: three hex digits, each of which may be `X` (any). `None`
+    /// shows every ID.
+    pub cra: Option<String>,
+}
+
+impl Settings {
+    // Whether the receive filter shows frames from `id`.
+    fn shows(&self, id: u32) -> bool {
+        self.cra.as_ref().is_none_or(|pattern| {
+            pattern
+                .chars()
+                .zip(format!("{id:03X}").chars())
+                .all(|(want, got)| want == 'X' || want == got)
+        })
+    }
 }
 
 impl Default for Settings {
@@ -86,6 +104,7 @@ impl Default for Settings {
             fc_header: None,
             fc_data: None,
             fc_mode: 0,
+            cra: None,
         }
     }
 }
@@ -101,6 +120,7 @@ impl FakeElm {
             settings: Settings::default(),
             commands: Vec::new(),
             sent: Vec::new(),
+            flow_control_for: Vec::new(),
             unsupported: Vec::new(),
             sti: None,
             interrupted: 0,
@@ -256,7 +276,7 @@ impl FakeElm {
                 self.settings.headers = cmd == "H1";
                 true
             }
-            "R1" | "AT1" | "STFF" | "CRA7XX" => true,
+            "R1" | "AT1" | "STFF" => true,
             "FCSM0" => {
                 self.settings.fc_mode = 0;
                 true
@@ -277,6 +297,16 @@ impl FakeElm {
                 } else if let Some(id) = cmd.strip_prefix("FCSH") {
                     self.settings.fc_header = parse_id(id);
                     self.settings.fc_header.is_some()
+                } else if let Some(pattern) = cmd.strip_prefix("CRA") {
+                    // Three hex digits or X (datasheet p. 15); a bare `AT CRA` shows every ID.
+                    let valid = pattern.len() == 3
+                        && pattern.bytes().all(|b| b.is_ascii_hexdigit() || b == b'X');
+                    if valid {
+                        self.settings.cra = Some(pattern.to_owned());
+                    } else if pattern.is_empty() {
+                        self.settings.cra = None;
+                    }
+                    valid || pattern.is_empty()
                 } else if let Some(data) = cmd.strip_prefix("FCSD") {
                     self.settings.fc_data = Some(data.to_owned());
                     true
@@ -343,12 +373,21 @@ impl FakeElm {
             self.prompt();
             return;
         }
-        let replies = (self.responder)(self.settings.header, &bytes);
+        // The receive filter hides frames from other IDs, and the adapter sends no flow control
+        // for what it doesn't show.
+        let replies: Vec<_> = (self.responder)(self.settings.header, &bytes)
+            .into_iter()
+            .filter(|(source, _)| self.settings.shows(*source))
+            .collect();
         if replies.is_empty() {
             self.print("NO DATA");
         }
         for (source, payload) in replies {
-            for frame in frames(&payload) {
+            let frames = frames(&payload);
+            if frames.len() > 1 {
+                self.flow_control_for.push(source);
+            }
+            for frame in frames {
                 let line = if self.settings.headers {
                     format!("{source:03X} {}", hex(&frame))
                 } else {
