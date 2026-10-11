@@ -234,6 +234,32 @@ impl DtcStatus {
     }
 }
 
+/// Each set flag, in bit order, such as `failed, confirmed`; `no flags` if none is set.
+impl fmt::Display for DtcStatus {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        const NAMES: [&str; 8] = [
+            "failed",
+            "failed this cycle",
+            "pending",
+            "confirmed",
+            "not tested since clear",
+            "failed since clear",
+            "not tested this cycle",
+            "lamp",
+        ];
+        let mut set = (0..8u8)
+            .filter(|&n| self.bit(n))
+            .map(|n| NAMES[usize::from(n)]);
+        match set.next() {
+            None => f.write_str("no flags"),
+            Some(first) => {
+                f.write_str(first)?;
+                set.try_for_each(|name| write!(f, ", {name}"))
+            }
+        }
+    }
+}
+
 /// How a module encodes its DTCs, from the reply to [`dtc_count_by_status_mask`]
 /// (ISO 14229-1 D.4).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

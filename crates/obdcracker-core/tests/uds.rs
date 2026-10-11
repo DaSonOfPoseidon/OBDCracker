@@ -145,6 +145,21 @@ mod read_dtc_information {
     };
 
     #[test]
+    fn a_status_shows_its_flags_in_bit_order() {
+        assert_eq!(DtcStatus(0x00).to_string(), "no flags");
+        assert_eq!(DtcStatus(0x09).to_string(), "failed, confirmed");
+        assert_eq!(
+            DtcStatus(0x50).to_string(),
+            "not tested since clear, not tested this cycle"
+        );
+        assert_eq!(
+            DtcStatus(0xFF).to_string(),
+            "failed, failed this cycle, pending, confirmed, not tested since clear, \
+             failed since clear, not tested this cycle, lamp"
+        );
+    }
+
+    #[test]
     fn builds_the_requests() {
         assert_eq!(dtc_count_by_status_mask(0xFF), [0x19, 0x01, 0xFF]);
         assert_eq!(dtcs_by_status_mask(0x08), [0x19, 0x02, 0x08]);
