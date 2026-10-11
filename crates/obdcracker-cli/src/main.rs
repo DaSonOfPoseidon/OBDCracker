@@ -423,7 +423,11 @@ fn print_scan(found: &Scan) {
                 for (pid, value) in pids {
                     match value {
                         Ok(PidValue::Quantity { value, unit }) => {
-                            println!("{id:03X} PID {pid:02X} {value} {unit}");
+                            // A count has no unit, so no trailing space either.
+                            println!(
+                                "{}",
+                                format!("{id:03X} PID {pid:02X} {value} {unit}").trim_end()
+                            );
                         }
                         Ok(PidValue::Raw(bytes)) => {
                             println!("{id:03X} PID {pid:02X} [{}]", hex(bytes));
