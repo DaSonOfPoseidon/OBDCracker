@@ -139,7 +139,8 @@ pub struct ModuleScan {
     pub response_id: u32,
     /// Each of [`SCAN_DIDS`], then each of [`ScanModule::extra_dids`], and its value. DIDs with a
     /// length are read up to three at a time; any a multi-DID reply leaves out, or all of them
-    /// if it's refused or doesn't fit their lengths, are read again one at a time.
+    /// if it's refused or doesn't fit their lengths, are read again one at a time, and must then be
+    /// exactly their length.
     pub dids: Vec<(u16, Result<DidValue, ReadError>)>,
     /// How it encodes DTCs, and how many have a [`FAULT_MASK`] bit set (`ReadDTCInformation`
     /// 0x01).
@@ -445,8 +446,7 @@ fn scan_module<T: Transport + ?Sized>(
         let found = ask(transport, request, response_id, timing, |payload| {
             split_batch(payload, &layout)
         })?;
-        let timed_out = found.as_ref().err() == Some(&ReadError::NoReply);
-        batch_answered |= !timed_out;
+        batch_answered |= found.as_ref().err() != Some(&ReadError::NoReply);
         let found = found.unwrap_or_default();
         for (id, data) in found {
             if let Some(&i) = batch.iter().find(|&&i| did_requests[i].0.id == id) {
@@ -457,16 +457,17 @@ fn scan_module<T: Transport + ?Sized>(
                 values[i] = Some(decode_scanned(&single, id, format).map_err(ReadError::Reply));
             }
         }
-        // Then those it left out. After a timeout, the multi-DID read's reply may still arrive
-        // during these reads and pass for the first DID, the others' bytes taken for its value,
-        // so each must be exactly its length. A module that answered can't send that late
-        // reply, and a value of another length (another ECU variant) is shown as it is.
+        // Then those it left out. The multi-DID read's reply may still arrive during these reads
+        // (after a timeout, or after a late refusal to an earlier read was taken for its
+        // answer, since refusals echo no DID) and pass for the first DID, the others' bytes
+        // taken for its value. So each must be exactly its length; a value of another length
+        // (another ECU variant) is malformed until the profile is fixed.
         for &i in batch {
             if values[i].is_none() {
                 let (ExtraDid { id, format, length }, request) = &did_requests[i];
                 values[i] = Some(ask(transport, request, response_id, timing, |payload| {
                     let data = uds::decode_did(payload, *id)?;
-                    if timed_out && length.is_some_and(|length| data.len() != usize::from(length)) {
+                    if length.is_some_and(|length| data.len() != usize::from(length)) {
                         return Err(ReplyError::Malformed);
                     }
                     decode_scanned(payload, *id, *format)

@@ -204,6 +204,25 @@ fn a_batch_never_asks_for_a_reply_longer_than_iso_tp_carries() {
     };
     scan(&mut car, &Policy::read_only(), &[module], TIMING).unwrap();
     assert!(did_requests(&car).contains(&"7E0 22 06 00 06 01"));
+    // A value too long for any batch is read alone, and the ones around it still batch.
+    let mut car = Car::new(|_, _| Vec::new());
+    let module = ScanModule {
+        module: UdsModule::obd_engine(),
+        extra_dids: vec![
+            did(0x0600, 1),
+            did(0x0601, 5000),
+            did(0x0602, 1),
+            did(0x0603, 1),
+        ],
+    };
+    scan(&mut car, &Policy::read_only(), &[module], TIMING).unwrap();
+    let requests = did_requests(&car);
+    assert!(requests.contains(&"7E0 22 06 01"), "{requests:?}");
+    assert!(requests.contains(&"7E0 22 06 02 06 03"), "{requests:?}");
+    assert!(
+        !requests.iter().any(|sent| sent.contains("06 01 06")),
+        "{requests:?}"
+    );
 }
 
 #[test]
@@ -270,14 +289,16 @@ fn a_late_batched_reply_isnt_taken_for_one_did() {
 }
 
 #[test]
-fn after_an_answered_batch_a_did_may_have_another_length() {
-    // The module refused the multi-DID read, so no late reply to it can come, and a value of
-    // another length than the profile's (another ECU variant, say) is shown as it is.
+fn after_any_failed_batch_a_did_must_have_its_length() {
+    // Even a refusal can be late: an earlier read's, taken for the multi-DID read's answer
+    // (refusals echo no DID), with the real reply still to come. So a DID read alone after a
+    // batch must be the profile's length; a value of another length (another ECU variant, say)
+    // is malformed, and the profile needs fixing.
     let mut car = Car::new(|id, request| match (id, request) {
         (0x7E0, [0x22, 0xF1, 0x87, 0xF1, 0x89, 0xF1, 0x91]) => {
             vec![reply(0x7E8, &[0x7F, 0x22, 0x13])]
         }
-        (0x7E0, [0x22, 0xF1, 0x87]) => dids_reply(&[b"\xF1\x874G0907401AB"]),
+        (0x7E0, [0x22, 0xF1, 0x87]) => dids_reply(&[b"\xF1\x874G0907401ABC"]),
         _ => Vec::new(),
     });
     let got = scan(
@@ -289,7 +310,7 @@ fn after_an_answered_batch_a_did_may_have_another_length() {
     .unwrap();
     assert_eq!(
         did_value(&got, 0xF187),
-        Some(Ok(DidValue::Text("4G0907401AB".into())))
+        Some(Err(ReadError::Reply(ReplyError::Malformed)))
     );
 }
 
