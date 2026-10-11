@@ -5,13 +5,23 @@ mod support;
 use std::io;
 use std::time::{Duration, Instant};
 
-use obdcracker_safety::{Approved, Policy, Target};
+use obdcracker_safety::{Approved, ModuleIds, Policy, Target};
 use obdcracker_transport::elm::Elm;
 use obdcracker_transport::link::{Driver, Link, LinkKind};
 use obdcracker_transport::{Audited, Error, Expect, Response, Transport, exchange};
 use support::fake_elm::{BANNER, FakeElm, FakeLink};
 
 const VIN: &[u8] = b"\x49\x02\x01WAUZZZ4G1EN000000";
+
+// The A7's gateway and instruments, as its profile gives them.
+const GATEWAY: ModuleIds = ModuleIds {
+    request: 0x710,
+    reply: 0x77A,
+};
+const INSTRUMENTS: ModuleIds = ModuleIds {
+    request: 0x714,
+    reply: 0x77E,
+};
 
 fn approve(target: Target, payload: &[u8]) -> Approved {
     Policy::read_only().approve(target, payload).unwrap()
@@ -86,6 +96,15 @@ mod setup {
             elm.send(&approve(target, &[0x09, 0x02])).unwrap();
             while elm.recv(Duration::from_secs(1)).is_ok() {}
         }
+        // A module whose reply ID a profile gives
+        let narrowed = Policy::read_only().narrowed_to(&[INSTRUMENTS]).unwrap();
+        elm.send(
+            &narrowed
+                .approve(Target::Physical(0x714), &[0x22, 0xF1, 0x87])
+                .unwrap(),
+        )
+        .unwrap();
+        while elm.recv(Duration::from_secs(1)).is_ok() {}
         commands(&elm)
             .iter()
             .filter(|c| !c.bytes().all(|b| b.is_ascii_hexdigit()))
@@ -107,6 +126,9 @@ mod setup {
             "ATFCSD300000",
             "ATFCSM1",
             "ATFCSM0",
+            "ATCRA7EX",
+            "ATCRA7E8",
+            "ATCRA77E",
         ] {
             assert!(
                 commands.iter().any(|c| c == expected),
@@ -355,25 +377,76 @@ mod requests {
         assert_eq!(
             commands(&elm)[setup..],
             [
-                // OBD-II IDs: the adapter's own ISO 15765-4 flow control
+                // OBD-II IDs: the adapter's own ISO 15765-4 flow control. A broadcast shows
+                // every emissions ECU's reply, a physical request only its own ECU's.
                 "ATSH7DF",
                 "ATFCSM0",
+                "ATCRA7EX",
                 "0902",
                 "0902",
                 "ATSH7E0",
+                "ATCRA7E8",
                 "0902",
-                // Any other module: flow control goes to the module's request ID
+                // Any other module: flow control goes to the module's request ID. Without a
+                // profile its reply ID isn't known, so every diagnostic ID shows.
                 "ATSH714",
                 "ATFCSH714",
                 "ATFCSD300000",
                 "ATFCSM1",
+                "ATCRA7XX",
                 "0902",
                 "0902",
                 "ATSH7E1",
                 "ATFCSM0",
+                "ATCRA7E9",
                 "0902",
             ]
         );
+    }
+
+    // A busy bus: while the gateway answers, the instruments send a long reply of their own.
+    fn busy_bus() -> FakeElm {
+        FakeElm::new(Box::new(|header, request| {
+            if header != 0x710 || request != [0x22, 0xF1, 0x87] {
+                return Vec::new();
+            }
+            vec![
+                (0x77E, b"\x62\xF1\x874G8920930A ".to_vec()),
+                (0x77A, b"\x62\xF1\x874G0907468  ".to_vec()),
+            ]
+        }))
+    }
+
+    #[test]
+    fn a_profile_module_shows_only_its_own_replies() {
+        let narrowed = Policy::read_only().narrowed_to(&[GATEWAY]).unwrap();
+        let request = narrowed
+            .approve(Target::Physical(0x710), &[0x22, 0xF1, 0x87])
+            .unwrap();
+        let mut elm = connect(busy_bus());
+        elm.send(&request).unwrap();
+        let mut sources = Vec::new();
+        while let Ok(reply) = elm.recv(Duration::from_secs(1)) {
+            sources.push(reply.source);
+        }
+        assert_eq!(sources, [0x77A]);
+        // The adapter acknowledged only the gateway's reply, never the instruments'.
+        assert_eq!(elm.link().elm.flow_control_for, [0x77A]);
+        assert_eq!(commands(&elm).last().map(String::as_str), Some("22F187"));
+        assert!(commands(&elm).iter().any(|c| c == "ATCRA77A"));
+    }
+
+    #[test]
+    fn without_a_profile_every_diagnostic_id_shows() {
+        let mut elm = connect(busy_bus());
+        elm.send(&approve(Target::Physical(0x710), &[0x22, 0xF1, 0x87]))
+            .unwrap();
+        let mut sources = Vec::new();
+        while let Ok(reply) = elm.recv(Duration::from_secs(1)) {
+            sources.push(reply.source);
+        }
+        assert_eq!(sources, [0x77E, 0x77A]);
+        assert_eq!(elm.link().elm.flow_control_for, [0x77E, 0x77A]);
     }
 
     #[test]
@@ -936,11 +1009,16 @@ mod misbehaving {
         assert_eq!(elm.link().elm.sent, []);
     }
 
-    // The receive filter passes 0x700..=0x7FF only, so a frame from anywhere else means the
-    // adapter lost it, and may send flow control for frames it shouldn't see.
+    // A frame the receive filter should have hidden means the adapter lost the filter, and may
+    // send flow control for frames it shouldn't see.
     #[test]
     fn a_frame_from_outside_the_receive_filter_fails_closed() {
-        for frame in [&b"6FF 02 01 00\r"[..], b"123 03 41 00 00\r"] {
+        // A broadcast narrows the filter to 0x7E0..=0x7EF, so 0x77A is outside it too.
+        for frame in [
+            &b"6FF 02 01 00\r"[..],
+            b"123 03 41 00 00\r",
+            b"77A 03 41 00 00\r",
+        ] {
             let mut elm = broadcasting();
             elm.link_mut().elm.after_echo = frame.to_vec();
             elm.send(&approve(Target::ObdFunctional, &[0x09, 0x02]))

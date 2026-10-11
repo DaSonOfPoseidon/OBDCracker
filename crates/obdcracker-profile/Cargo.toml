@@ -9,11 +9,11 @@ publish.workspace = true
 
 [dependencies]
 obdcracker-core.workspace = true
+obdcracker-safety.workspace = true
 serde = { version = "1.0.229", features = ["derive"] }
 toml = "1.1.6"
 
 [dev-dependencies]
-obdcracker-safety.workspace = true
 proptest = "1.11.0"
 
 [lints]

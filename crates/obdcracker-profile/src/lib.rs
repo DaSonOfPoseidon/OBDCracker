@@ -20,6 +20,7 @@ use std::fmt;
 
 use obdcracker_core::isotp::Addressing;
 use obdcracker_core::uds;
+use obdcracker_safety::{ModuleIds, NarrowingError, Policy};
 use serde::Deserialize;
 
 /// One car's profile.
@@ -214,6 +215,26 @@ impl Profile {
     #[must_use]
     pub fn module(&self, name: &str) -> Option<&Module> {
         self.modules.iter().find(|m| m.name == name)
+    }
+
+    /// Narrows `policy` to this car's modules ([`Policy::narrowed_to`]): physical requests may
+    /// then only go to a module's request ID, and each approved request carries its module's
+    /// reply ID. A profile can only narrow the policy, never widen it.
+    ///
+    /// # Errors
+    ///
+    /// The modules' IDs are inconsistent, as a profile built or changed by hand can be: a request
+    /// ID that is also a reply ID, for example.
+    pub fn narrow(&self, policy: Policy) -> Result<Policy, NarrowingError> {
+        let modules: Vec<ModuleIds> = self
+            .modules
+            .iter()
+            .map(|module| ModuleIds {
+                request: module.request_id,
+                reply: module.response_id,
+            })
+            .collect();
+        policy.narrowed_to(&modules)
     }
 
     /// Checks everything [`Profile::from_toml`] checks. Call it after building or changing a
