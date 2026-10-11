@@ -235,6 +235,22 @@ fn a_late_batched_reply_isnt_taken_for_one_did() {
         did_value(&got, 0xF191),
         Some(Ok(DidValue::Text("4G0907401E".into())))
     );
+    // Nor when it doesn't fit the lengths either: F187 a byte short.
+    let mut car = Car::new(|id, request| match (id, request) {
+        (0x7E0, [0x22, 0xF1, 0x87]) => dids_reply(&[b"\xF1\x874G0907401N", F189, F191]),
+        _ => Vec::new(),
+    });
+    let got = scan(
+        &mut car,
+        &Policy::read_only(),
+        &[engine_with_lengths()],
+        TIMING,
+    )
+    .unwrap();
+    assert_eq!(
+        did_value(&got, 0xF187),
+        Some(Err(ReadError::Reply(ReplyError::Malformed)))
+    );
     // A reply to a read alone may still carry just that DID at its length.
     let mut car = Car::new(|id, request| match (id, request) {
         (0x7E0, [0x22, 0xF1, 0x87]) => dids_reply(&[F187]),
@@ -250,6 +266,30 @@ fn a_late_batched_reply_isnt_taken_for_one_did() {
     assert_eq!(
         did_value(&got, 0xF187),
         Some(Ok(DidValue::Text("4G0907401N".into())))
+    );
+}
+
+#[test]
+fn after_an_answered_batch_a_did_may_have_another_length() {
+    // The module refused the multi-DID read, so no late reply to it can come, and a value of
+    // another length than the profile's (another ECU variant, say) is shown as it is.
+    let mut car = Car::new(|id, request| match (id, request) {
+        (0x7E0, [0x22, 0xF1, 0x87, 0xF1, 0x89, 0xF1, 0x91]) => {
+            vec![reply(0x7E8, &[0x7F, 0x22, 0x13])]
+        }
+        (0x7E0, [0x22, 0xF1, 0x87]) => dids_reply(&[b"\xF1\x874G0907401AB"]),
+        _ => Vec::new(),
+    });
+    let got = scan(
+        &mut car,
+        &Policy::read_only(),
+        &[engine_with_lengths()],
+        TIMING,
+    )
+    .unwrap();
+    assert_eq!(
+        did_value(&got, 0xF187),
+        Some(Ok(DidValue::Text("4G0907401AB".into())))
     );
 }
 

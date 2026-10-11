@@ -445,7 +445,8 @@ fn scan_module<T: Transport + ?Sized>(
         let found = ask(transport, request, response_id, timing, |payload| {
             split_batch(payload, &layout)
         })?;
-        batch_answered |= found.as_ref().err() != Some(&ReadError::NoReply);
+        let timed_out = found.as_ref().err() == Some(&ReadError::NoReply);
+        batch_answered |= !timed_out;
         let found = found.unwrap_or_default();
         for (id, data) in found {
             if let Some(&i) = batch.iter().find(|&&i| did_requests[i].0.id == id) {
@@ -456,14 +457,16 @@ fn scan_module<T: Transport + ?Sized>(
                 values[i] = Some(decode_scanned(&single, id, format).map_err(ReadError::Reply));
             }
         }
-        // Then those it left out. A reply carrying two or more of the batch's DIDs is the
-        // multi-DID read's, arriving late; it would pass for the first DID with the others'
-        // bytes as its value.
+        // Then those it left out. After a timeout, the multi-DID read's reply may still arrive
+        // during these reads and pass for the first DID, the others' bytes taken for its value,
+        // so each must be exactly its length. A module that answered can't send that late
+        // reply, and a value of another length (another ECU variant) is shown as it is.
         for &i in batch {
             if values[i].is_none() {
-                let (ExtraDid { id, format, .. }, request) = &did_requests[i];
+                let (ExtraDid { id, format, length }, request) = &did_requests[i];
                 values[i] = Some(ask(transport, request, response_id, timing, |payload| {
-                    if split_batch(payload, &layout).is_ok_and(|found| found.len() > 1) {
+                    let data = uds::decode_did(payload, *id)?;
+                    if timed_out && length.is_some_and(|length| data.len() != usize::from(length)) {
                         return Err(ReplyError::Malformed);
                     }
                     decode_scanned(payload, *id, *format)
