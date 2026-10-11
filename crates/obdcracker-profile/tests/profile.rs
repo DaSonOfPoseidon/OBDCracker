@@ -367,3 +367,54 @@ fn standard_dids_keep_their_iso_format() {
     assert_eq!(standard_decode(0xF18B), None);
     assert_eq!(standard_decode(0x0600), None);
 }
+
+#[test]
+fn a_did_can_give_its_length() {
+    let toml = MINIMAL.replace("decode = \"text\"", "decode = \"text\"\nlength = 17");
+    let profile = Profile::from_toml(&toml).unwrap();
+    assert_eq!(profile.modules[0].dids[0].length, Some(17));
+    // Without one, the length is unknown.
+    assert_eq!(
+        Profile::from_toml(MINIMAL).unwrap().modules[0].dids[0].length,
+        None
+    );
+}
+
+#[test]
+fn rejects_a_did_length_of_0() {
+    let with_length = |length: u16| {
+        MINIMAL.replace(
+            "decode = \"text\"",
+            &format!("decode = \"text\"\nlength = {length}"),
+        )
+    };
+    assert_eq!(
+        Profile::from_toml(&with_length(0)).unwrap_err(),
+        ProfileError::DidLength {
+            module: "engine".into(),
+            did: 0xF190
+        }
+    );
+    // ISO-TP's escaped first frame carries more than 4095 bytes, so any other length is fine.
+    for length in [1, 4092, 4093, u16::MAX] {
+        assert!(Profile::from_toml(&with_length(length)).is_ok(), "{length}");
+    }
+}
+
+#[test]
+fn a_did_layout_needs_every_length() {
+    let toml = format!(
+        "{}\n[[module.did]]\nid = 0x0600\nname = \"coding\"\ndecode = \"hex\"\nlength = 10\n\
+         [[module.did]]\nid = 0xF1A3\nname = \"hardware version\"\ndecode = \"text\"\n",
+        MINIMAL.replace("decode = \"text\"", "decode = \"text\"\nlength = 17")
+    );
+    let engine = &Profile::from_toml(&toml).unwrap().modules[0];
+    assert_eq!(
+        engine.did_layout(&[0x0600, 0xF190]),
+        Some(vec![(0x0600, 10), (0xF190, 17)])
+    );
+    assert_eq!(engine.did_layout(&[]), Some(vec![]));
+    // F1A3 has no length, and F187 isn't listed at all.
+    assert_eq!(engine.did_layout(&[0xF190, 0xF1A3]), None);
+    assert_eq!(engine.did_layout(&[0xF187]), None);
+}

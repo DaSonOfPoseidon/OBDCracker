@@ -383,6 +383,7 @@ fn scan_modules(cli: &Cli) -> Result<Vec<ScanModule>, String> {
                         Decode::Text => DidFormat::Text,
                         Decode::Hex => DidFormat::Hex,
                     },
+                    length: did.length,
                 })
                 .collect(),
         });

@@ -3,9 +3,11 @@
 # The layout comes from public VAG UDS references, and the second read-only session (#49) confirmed
 # every module here: each answered on its request and reply IDs (a VAG reply ID is the request ID
 # + 0x6A, except the OBD-II pairs).
-# Standard identification DIDs (0xF180..=0xF19F) need no entry. F18B (manufacture date) is listed
-# to show it as bytes: it's BCD, such as 13 11 19, and all zeros when unset. F197 (system name) is
-# listed to name it; the rest are VAG extras.
+# Standard identification DIDs (0xF180..=0xF19F) need no entry; they're listed here to give their
+# length, which lets a scan read several in one request. Each length is what this car's module
+# sent in #49, so it holds for these ECU variants (part numbers), not every A7. A DID the module
+# refused has no length. F18B (manufacture date) is listed to show it as bytes: it's BCD, such as
+# 13 11 19, and all zeros when unset. The rest are VAG extras.
 
 name = "2014 Audi A7 3.0 TDI (C7)"
 bitrate = 500000
@@ -18,29 +20,63 @@ response_id = 0x7E8
 protocol = "uds"
 
 [[module.did]]
+id = 0xF187
+name = "spare part number"
+decode = "text"
+length = 11
+
+[[module.did]]
+id = 0xF189
+name = "software version"
+decode = "text"
+length = 4
+
+[[module.did]]
 id = 0xF18B
 name = "manufacture date"
 decode = "hex"
 
 [[module.did]]
+id = 0xF190
+name = "VIN"
+decode = "text"
+length = 17
+
+[[module.did]]
+id = 0xF191
+name = "hardware number"
+decode = "text"
+length = 11
+
+[[module.did]]
 id = 0xF197
 name = "system name"
 decode = "text"
+length = 13
+
+[[module.did]]
+id = 0xF19E
+name = "ODX file"
+decode = "text"
+length = 25
 
 [[module.did]]
 id = 0xF1A3
 name = "VW ECU hardware version"
 decode = "text"
+length = 3
 
 [[module.did]]
 id = 0xF1AA
 name = "VW workshop system name"
 decode = "text"
+length = 5
 
 [[module.did]]
 id = 0x0600
 name = "VW coding value"
 decode = "hex"
+length = 10
 
 [[module]]
 name = "transmission"
@@ -50,19 +86,51 @@ response_id = 0x7E9
 protocol = "uds"
 
 [[module.did]]
+id = 0xF187
+name = "spare part number"
+decode = "text"
+length = 11
+
+[[module.did]]
+id = 0xF189
+name = "software version"
+decode = "text"
+length = 4
+
+[[module.did]]
 id = 0xF18B
 name = "manufacture date"
 decode = "hex"
 
 [[module.did]]
+id = 0xF190
+name = "VIN"
+decode = "text"
+length = 17
+
+[[module.did]]
+id = 0xF191
+name = "hardware number"
+decode = "text"
+length = 11
+
+[[module.did]]
 id = 0xF197
 name = "system name"
 decode = "text"
+length = 13
+
+[[module.did]]
+id = 0xF19E
+name = "ODX file"
+decode = "text"
+length = 15
 
 [[module.did]]
 id = 0xF1A3
 name = "VW ECU hardware version"
 decode = "text"
+length = 3
 
 [[module.did]]
 id = 0xF1AA
@@ -77,19 +145,52 @@ response_id = 0x77A
 protocol = "uds"
 
 [[module.did]]
+id = 0xF187
+name = "spare part number"
+decode = "text"
+length = 11
+
+[[module.did]]
+id = 0xF189
+name = "software version"
+decode = "text"
+length = 4
+
+[[module.did]]
 id = 0xF18B
 name = "manufacture date"
 decode = "hex"
+length = 3
+
+[[module.did]]
+id = 0xF18C
+name = "serial number"
+decode = "text"
+length = 14
+
+[[module.did]]
+id = 0xF191
+name = "hardware number"
+decode = "text"
+length = 11
 
 [[module.did]]
 id = 0xF197
 name = "system name"
 decode = "text"
+length = 13
+
+[[module.did]]
+id = 0xF19E
+name = "ODX file"
+decode = "text"
+length = 15
 
 [[module.did]]
 id = 0x0600
 name = "VW coding value"
 decode = "hex"
+length = 5
 
 [[module]]
 name = "instruments"
@@ -99,16 +200,55 @@ response_id = 0x77E
 protocol = "uds"
 
 [[module.did]]
+id = 0xF187
+name = "spare part number"
+decode = "text"
+length = 11
+
+[[module.did]]
+id = 0xF188
+name = "software number"
+decode = "text"
+length = 2
+
+[[module.did]]
+id = 0xF189
+name = "software version"
+decode = "text"
+length = 4
+
+[[module.did]]
 id = 0xF18B
 name = "manufacture date"
 decode = "hex"
+length = 3
+
+[[module.did]]
+id = 0xF18C
+name = "serial number"
+decode = "text"
+length = 16
+
+[[module.did]]
+id = 0xF191
+name = "hardware number"
+decode = "text"
+length = 11
 
 [[module.did]]
 id = 0xF197
 name = "system name"
 decode = "text"
+length = 13
+
+[[module.did]]
+id = 0xF19E
+name = "ODX file"
+decode = "text"
+length = 24
 
 [[module.did]]
 id = 0x0600
 name = "VW coding value"
 decode = "hex"
+length = 11

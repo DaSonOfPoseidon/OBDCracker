@@ -59,6 +59,19 @@ pub struct Module {
 }
 
 impl Module {
+    /// Each DID with its length, in the order given, to decode a multi-DID read
+    /// (`obdcracker_core::uds::decode_dids`). `None` if the profile doesn't give every one's
+    /// length.
+    #[must_use]
+    pub fn did_layout(&self, dids: &[u16]) -> Option<Vec<(u16, usize)>> {
+        dids.iter()
+            .map(|&id| {
+                let length = self.dids.iter().find(|did| did.id == id)?.length?;
+                Some((id, usize::from(length)))
+            })
+            .collect()
+    }
+
     /// How the module is addressed inside CAN frames.
     #[must_use]
     pub fn addressing(&self) -> Addressing {
@@ -89,6 +102,11 @@ pub struct DidDef {
     pub name: String,
     /// How to show the value.
     pub decode: Decode,
+    /// The value's length in bytes, if the module always sends this many. It's fixed per ECU
+    /// variant, not per DID, and lets several DIDs be read in one request: a multi-DID reply
+    /// doesn't say where each value ends.
+    #[serde(default)]
+    pub length: Option<u16>,
 }
 
 /// How to show a data identifier's value.
@@ -129,6 +147,13 @@ pub enum ProfileError {
         /// The DID.
         did: u16,
     },
+    /// A DID's length is 0: every DID value has at least one byte.
+    DidLength {
+        /// The module.
+        module: String,
+        /// The DID.
+        did: u16,
+    },
     /// A module lists a standard DID with another format than ISO 14229-1 gives it (see
     /// [`standard_decode`]).
     StandardDidFormat {
@@ -163,6 +188,9 @@ impl fmt::Display for ProfileError {
             }
             Self::DuplicateDid { module, did } => {
                 write!(f, "module {module}: DID 0x{did:04X} is listed twice")
+            }
+            Self::DidLength { module, did } => {
+                write!(f, "module {module}: DID 0x{did:04X}'s length can't be 0")
             }
             Self::StandardDidFormat { module, did } => write!(
                 f,
@@ -291,6 +319,12 @@ impl Profile {
             for did in &module.dids {
                 if standard_decode(did.id).is_some_and(|decode| decode != did.decode) {
                     return Err(ProfileError::StandardDidFormat {
+                        module: module.name.clone(),
+                        did: did.id,
+                    });
+                }
+                if did.length == Some(0) {
+                    return Err(ProfileError::DidLength {
                         module: module.name.clone(),
                         did: did.id,
                     });
