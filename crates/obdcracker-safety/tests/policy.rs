@@ -1,6 +1,6 @@
 //! The safety policy: allowlist cases and properties that must hold for any input.
 
-use obdcracker_safety::{Policy, Rejection, Target, Tier};
+use obdcracker_safety::{ModuleIds, NarrowingError, Policy, Rejection, Target, Tier};
 use proptest::prelude::*;
 
 const ENGINE: Target = Target::Physical(0x7E0);
@@ -228,5 +228,145 @@ proptest! {
         let sub = if suppress { 0x82 } else { 0x02 };
         let result = Policy::read_only().approve(target, &[0x10, sub]);
         prop_assert_eq!(result.map(|a| a.tier()), Err(Rejection::Banned));
+    }
+}
+
+// The A7's modules (#49): engine, transmission, gateway, instruments.
+const A7: [ModuleIds; 4] = [
+    ModuleIds {
+        request: 0x7E0,
+        reply: 0x7E8,
+    },
+    ModuleIds {
+        request: 0x7E1,
+        reply: 0x7E9,
+    },
+    ModuleIds {
+        request: 0x710,
+        reply: 0x77A,
+    },
+    ModuleIds {
+        request: 0x714,
+        reply: 0x77E,
+    },
+];
+
+fn a7() -> Policy {
+    Policy::read_only().narrowed_to(&A7).unwrap()
+}
+
+#[test]
+fn a_narrowed_policy_accepts_only_its_modules_request_ids() {
+    let read = [0x22, 0xF1, 0x87];
+    for module in A7 {
+        let approved = a7()
+            .approve(Target::Physical(module.request), &read)
+            .unwrap();
+        assert_eq!(approved.reply_id(), Some(module.reply));
+        // A request on a reply ID would look like that module's answer to everyone listening.
+        assert_eq!(
+            a7().approve(Target::Physical(module.reply), &read),
+            Err(Rejection::WrongTarget)
+        );
+    }
+    // In the bare policy's range, but not a module of this car.
+    for id in [0x700, 0x711, 0x7E2, 0x7A0] {
+        assert_eq!(
+            a7().approve(Target::Physical(id), &read),
+            Err(Rejection::WrongTarget),
+            "{id:03X}"
+        );
+    }
+    // The OBD-II broadcast isn't a module, and is unaffected.
+    let vin = a7().approve(Target::ObdFunctional, &[0x09, 0x02]).unwrap();
+    assert_eq!(vin.reply_id(), None);
+}
+
+#[test]
+fn reply_ids_are_known_for_obd_ids_or_from_a_profile() {
+    let read = [0x22, 0xF1, 0x87];
+    // ISO 15765-4: an OBD-II ECU answers on its request ID + 8.
+    for (request, reply) in OBD_REQUEST_IDS.iter().zip(OBD_RESPONSE_IDS) {
+        let approved = Policy::read_only()
+            .approve(Target::Physical(*request), &read)
+            .unwrap();
+        assert_eq!(approved.reply_id(), Some(reply));
+    }
+    // Without a profile, any other module's reply ID is unknown.
+    let approved = Policy::read_only()
+        .approve(Target::Physical(0x710), &read)
+        .unwrap();
+    assert_eq!(approved.reply_id(), None);
+}
+
+#[test]
+fn narrowing_refuses_inconsistent_modules() {
+    let ids = |request, reply| ModuleIds { request, reply };
+    for (modules, error) in [
+        // A request ID the bare policy refuses.
+        (vec![ids(0x7E8, 0x7F0)], NarrowingError::Request(0x7E8)),
+        (vec![ids(0x6FF, 0x769)], NarrowingError::Request(0x6FF)),
+        (vec![ids(0x7DF, 0x7E7)], NarrowingError::Request(0x7DF)),
+        // A reply ID outside 0x700..=0x7FF, or the broadcast ID.
+        (vec![ids(0x710, 0x800)], NarrowingError::Reply(0x800)),
+        (vec![ids(0x710, 0x7DF)], NarrowingError::Reply(0x7DF)),
+        // One module's request ID is another's reply ID.
+        (
+            vec![ids(0x710, 0x77A), ids(0x77A, 0x7E4)],
+            NarrowingError::RequestIsReply(0x77A),
+        ),
+        (
+            vec![ids(0x710, 0x710)],
+            NarrowingError::RequestIsReply(0x710),
+        ),
+        // One request ID, two reply IDs.
+        (
+            vec![ids(0x710, 0x77A), ids(0x710, 0x77B)],
+            NarrowingError::AmbiguousReply(0x710),
+        ),
+    ] {
+        assert_eq!(
+            Policy::read_only().narrowed_to(&modules).err(),
+            Some(error),
+            "{modules:?}"
+        );
+    }
+    // Modules sharing a request and reply ID (extended addressing, such as Toyota's 0x750) are
+    // one target.
+    let shared = [ids(0x750, 0x758), ids(0x750, 0x758)];
+    assert!(Policy::read_only().narrowed_to(&shared).is_ok());
+    assert!(
+        NarrowingError::RequestIsReply(0x77A)
+            .to_string()
+            .contains("77A")
+    );
+}
+
+fn any_modules() -> impl Strategy<Value = Vec<ModuleIds>> {
+    prop::collection::vec(
+        (0x6F0u32..=0x80F, 0x6F0u32..=0x80F)
+            .prop_map(|(request, reply)| ModuleIds { request, reply }),
+        0..6,
+    )
+}
+
+proptest! {
+    #[test]
+    fn narrowing_never_widens_the_policy(
+        modules in any_modules(),
+        target in any_target(),
+        payload in prop::collection::vec(any::<u8>(), 0..8),
+    ) {
+        let Ok(narrowed) = Policy::read_only().narrowed_to(&modules) else {
+            return Ok(());
+        };
+        if let Ok(approved) = narrowed.approve(target, &payload) {
+            prop_assert!(Policy::read_only().approve(target, &payload).is_ok());
+            if let Target::Physical(id) = target {
+                prop_assert!(modules.iter().any(|m| m.request == id));
+                prop_assert!(!modules.iter().any(|m| m.reply == id));
+            }
+            prop_assert_eq!(approved.payload(), &payload[..]);
+        }
     }
 }

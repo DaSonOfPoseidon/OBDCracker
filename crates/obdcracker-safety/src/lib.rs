@@ -51,8 +51,9 @@ pub enum Rejection {
     Banned,
     /// Not on the allowlist, malformed, or empty.
     NotAllowed,
-    /// UDS sent to the broadcast address, a physical ID outside 0x700..=0x7FF, or an ID that
-    /// OBD-II ECUs answer on (0x7E8..=0x7EF).
+    /// UDS sent to the broadcast address, a physical ID outside 0x700..=0x7FF, an ID that
+    /// OBD-II ECUs answer on (0x7E8..=0x7EF), or, once the policy is narrowed to a car's modules
+    /// ([`Policy::narrowed_to`]), any ID that isn't one of their request IDs.
     WrongTarget,
 }
 
@@ -77,12 +78,52 @@ impl std::fmt::Display for Rejection {
 
 impl std::error::Error for Rejection {}
 
+/// A module's request and reply CAN IDs, as a vehicle profile gives them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ModuleIds {
+    /// The 11-bit CAN ID requests are sent to.
+    pub request: u32,
+    /// The 11-bit CAN ID the module answers on.
+    pub reply: u32,
+}
+
+/// Why [`Policy::narrowed_to`] refused a list of modules.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NarrowingError {
+    /// A request ID the policy refuses anyway.
+    Request(u32),
+    /// A reply ID outside 0x700..=0x7FF, or the broadcast ID 0x7DF.
+    Reply(u32),
+    /// An ID that is one module's request ID and a module's reply ID.
+    RequestIsReply(u32),
+    /// A request ID with two different reply IDs.
+    AmbiguousReply(u32),
+}
+
+impl std::fmt::Display for NarrowingError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Request(id) => write!(f, "0x{id:03X} can't be a request ID"),
+            Self::Reply(id) => write!(f, "0x{id:03X} can't be a reply ID"),
+            Self::RequestIsReply(id) => {
+                write!(f, "0x{id:03X} is both a request ID and a reply ID")
+            }
+            Self::AmbiguousReply(id) => {
+                write!(f, "request ID 0x{id:03X} has two different reply IDs")
+            }
+        }
+    }
+}
+
+impl std::error::Error for NarrowingError {}
+
 /// A request that passed the policy. Only this crate can create one.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Approved {
     target: Target,
     payload: Vec<u8>,
     tier: Tier,
+    reply: Option<u32>,
 }
 
 impl Approved {
@@ -103,6 +144,14 @@ impl Approved {
     pub fn tier(&self) -> Tier {
         self.tier
     }
+
+    /// The CAN ID the one module addressed answers on, if it's known: 8 above an OBD-II ECU's
+    /// request ID (ISO 15765-4), or the reply ID of a module the policy was narrowed to. `None`
+    /// for a broadcast, or a physical ID with no known module.
+    #[must_use]
+    pub fn reply_id(&self) -> Option<u32> {
+        self.reply
+    }
 }
 
 /// Decides which requests may be sent. Read-only is the only policy for now; unlocking a higher
@@ -110,6 +159,8 @@ impl Approved {
 #[derive(Debug)]
 pub struct Policy {
     unlocked: Tier,
+    // With a vehicle profile, the only modules physical requests may go to.
+    modules: Option<Vec<ModuleIds>>,
 }
 
 impl Policy {
@@ -118,7 +169,50 @@ impl Policy {
     pub fn read_only() -> Self {
         Self {
             unlocked: Tier::Read,
+            modules: None,
         }
+    }
+
+    /// Narrows the policy to a car's modules, as its vehicle profile lists them: a physical
+    /// request must then go to one of their request IDs, and never to any of their reply IDs.
+    /// Everything the policy refused before, it still refuses; the broadcast is unaffected.
+    ///
+    /// Narrowing again narrows further: a request must then fit both lists.
+    ///
+    /// # Errors
+    ///
+    /// A request ID the policy refuses anyway, a reply ID outside 0x700..=0x7FF (or 0x7DF), an ID
+    /// that is both a request ID and a reply ID, or a request ID with two reply IDs.
+    pub fn narrowed_to(self, modules: &[ModuleIds]) -> Result<Self, NarrowingError> {
+        for module in modules {
+            if check_target(Target::Physical(module.request), Kind::Uds).is_err() {
+                return Err(NarrowingError::Request(module.request));
+            }
+            if !(0x700..=0x7FF).contains(&module.reply) || module.reply == OBD_FUNCTIONAL_ID {
+                return Err(NarrowingError::Reply(module.reply));
+            }
+            if modules.iter().any(|other| other.reply == module.request) {
+                return Err(NarrowingError::RequestIsReply(module.request));
+            }
+            if modules
+                .iter()
+                .any(|other| other.request == module.request && other.reply != module.reply)
+            {
+                return Err(NarrowingError::AmbiguousReply(module.request));
+            }
+        }
+        let modules = match self.modules {
+            None => modules.to_vec(),
+            Some(earlier) => modules
+                .iter()
+                .filter(|module| earlier.contains(module))
+                .copied()
+                .collect(),
+        };
+        Ok(Self {
+            modules: Some(modules),
+            ..self
+        })
     }
 
     /// Checks a request against the allowlist and returns it as [`Approved`] if it may be sent.
@@ -133,10 +227,22 @@ impl Policy {
             return Err(Rejection::Locked(tier));
         }
         check_target(target, kind)?;
+        let reply = match (target, &self.modules) {
+            (Target::ObdFunctional, _) => None,
+            (Target::Physical(id), Some(modules)) => Some(
+                modules
+                    .iter()
+                    .find(|module| module.request == id)
+                    .ok_or(Rejection::WrongTarget)?
+                    .reply,
+            ),
+            (Target::Physical(id), None) => OBD_REQUEST_IDS.contains(&id).then(|| id + 8),
+        };
         Ok(Approved {
             target,
             payload: payload.to_vec(),
             tier,
+            reply,
         })
     }
 }
@@ -149,6 +255,7 @@ enum Kind {
 
 const OBD_FUNCTIONAL_ID: u32 = 0x7DF;
 // ISO 15765-4: emissions ECUs answer on 0x7E8..=0x7EF (their request ID + 8).
+const OBD_REQUEST_IDS: core::ops::RangeInclusive<u32> = 0x7E0..=0x7E7;
 const OBD_RESPONSE_IDS: core::ops::RangeInclusive<u32> = 0x7E8..=0x7EF;
 
 fn check_target(target: Target, kind: Kind) -> Result<(), Rejection> {
