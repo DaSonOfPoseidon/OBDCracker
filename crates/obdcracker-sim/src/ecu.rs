@@ -1,6 +1,7 @@
 // One simulated module: answers requests the way a UDS ECU with optional OBD-II support does.
 
 use std::collections::BTreeMap;
+use std::time::{Duration, Instant};
 
 use obdcracker_core::response::Nrc;
 
@@ -55,7 +56,13 @@ pub struct Ecu {
     pub(crate) dtc: DtcService,
     pub(crate) session: Session,
     pub(crate) fault: Option<Fault>,
+    // How long a non-default session lasts without a request (S3server), and when the last one came.
+    pub(crate) s3: Duration,
+    pub(crate) last_request: Instant,
 }
+
+/// S3server, ISO 14229-2: a module leaves a non-default session after 5 s without a request.
+pub(crate) const S3_DEFAULT: Duration = Duration::from_secs(5);
 
 const NEGATIVE: u8 = 0x7F;
 const POSITIVE_OFFSET: u8 = 0x40;
@@ -78,10 +85,21 @@ impl Ecu {
         &self.name
     }
 
-    /// The module's current diagnostic session.
+    /// The module's current diagnostic session. A non-default session falls back to the default
+    /// one after S3 without a request (see [`Ecu::set_s3`]).
     #[must_use]
     pub fn session(&self) -> Session {
-        self.session
+        if self.last_request.elapsed() >= self.s3 {
+            Session::Default
+        } else {
+            self.session
+        }
+    }
+
+    /// Sets S3, how long the module stays in a non-default session without a request: 5 s by
+    /// default (ISO 14229-2).
+    pub fn set_s3(&mut self, s3: Duration) {
+        self.s3 = s3;
     }
 
     /// Makes the module misbehave from now on, or behave again with `None`.
@@ -95,6 +113,9 @@ impl Ecu {
 
     // Every reply to `request`, in order, after any fault is applied.
     pub(crate) fn answer(&mut self, request: &[u8], functional: bool) -> Vec<Vec<u8>> {
+        // Every request restarts S3, after a session that ran out has fallen back.
+        self.session = self.session();
+        self.last_request = Instant::now();
         let mut replies = self.handle(request, functional);
         // ISO 14229-1: a functionally addressed request gets no "not supported" or "out of
         // range" refusal; the module stays silent instead.
