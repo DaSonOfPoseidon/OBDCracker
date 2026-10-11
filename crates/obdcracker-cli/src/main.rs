@@ -237,6 +237,18 @@ fn run<T: Transport>(cli: &Cli, transport: T, link: &str, timing: Timing) -> Exi
     status
 }
 
+// The read-only policy, narrowed to the profile's modules when there is one, so requests go only
+// to its request IDs and the adapter shows only each module's own replies.
+fn policy(cli: &Cli) -> Result<Policy, String> {
+    let Some(name) = cli.profile.as_ref().or(cli.sim.as_ref()) else {
+        return Ok(Policy::read_only());
+    };
+    let profile = Profile::builtin(name).map_err(|e| format!("profile {name}: {e}"))?;
+    profile
+        .narrow(Policy::read_only())
+        .map_err(|e| format!("profile {name}: {e}"))
+}
+
 // The engine and transmission modules from the profile, or their OBD-II IDs without one.
 fn fingerprint_modules(cli: &Cli) -> Result<Vec<UdsModule>, String> {
     let Some(name) = cli.profile.as_ref().or(cli.sim.as_ref()) else {
@@ -265,14 +277,14 @@ fn fingerprint_modules(cli: &Cli) -> Result<Vec<UdsModule>, String> {
 }
 
 fn run_fingerprint<T: Transport>(cli: &Cli, transport: &mut T, timing: Timing) -> ExitCode {
-    let modules = match fingerprint_modules(cli) {
-        Ok(modules) => modules,
+    let (modules, policy) = match fingerprint_modules(cli).and_then(|m| Ok((m, policy(cli)?))) {
+        Ok(found) => found,
         Err(e) => {
             eprintln!("{e}");
             return ExitCode::from(2);
         }
     };
-    match fingerprint::fingerprint(transport, &Policy::read_only(), &modules, timing) {
+    match fingerprint::fingerprint(transport, &policy, &modules, timing) {
         Ok(_) if cli.dry_run => {
             println!("dry run: nothing was sent");
             ExitCode::SUCCESS
@@ -378,14 +390,14 @@ fn scan_modules(cli: &Cli) -> Result<Vec<ScanModule>, String> {
 }
 
 fn run_scan<T: Transport>(cli: &Cli, transport: &mut T, timing: Timing) -> ExitCode {
-    let modules = match scan_modules(cli) {
-        Ok(modules) => modules,
+    let (modules, policy) = match scan_modules(cli).and_then(|m| Ok((m, policy(cli)?))) {
+        Ok(found) => found,
         Err(e) => {
             eprintln!("{e}");
             return ExitCode::from(2);
         }
     };
-    match scan::scan(transport, &Policy::read_only(), &modules, timing) {
+    match scan::scan(transport, &policy, &modules, timing) {
         Ok(_) if cli.dry_run => {
             println!("dry run: nothing was sent");
             // Nothing answers a dry run, so the reads that depend on the answers aren't shown.
