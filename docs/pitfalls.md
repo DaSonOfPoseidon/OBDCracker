@@ -93,7 +93,7 @@ Each entry names the class, what to check, and where it bit us.
   0x78 exception (PR #9, PR #11).
 - **A DTC status mask of 0xFF isn't "every stored fault".** The "test not completed" bits (4 and 6) are set on every
   code a module hasn't tested yet, so `19 02 FF` returns its whole DTC table: about 330 codes across four A7
-  modules, none failed, pending or confirmed (#49). Ask for the fault bits (`FAULT_MASK`, 0x8F), and still filter
+  modules, none failed, pending or confirmed (#49). Ask for the fault bits (`FAULT_MASK`, 0xAF), and still filter
   the reply by them and the module's availability mask, in case a module ignores the mask (#52).
 - **Functional requests get fewer refusals.** ISO 14229-1: a server doesn't send NRC 0x11, 0x12, 0x31, 0x7E or
   0x7F to a functionally addressed request; it stays silent. A simulated module must too.

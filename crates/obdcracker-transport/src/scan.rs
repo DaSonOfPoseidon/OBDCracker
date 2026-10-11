@@ -36,9 +36,10 @@ pub const SCAN_DIDS: [u16; 14] = [
 ];
 
 /// The DTC status bits scan asks for (ISO 14229-1 D.2): failed, failed this operation cycle,
-/// pending, confirmed and warning lamp. The "not tested" bits are left out: with them, a module
-/// lists every DTC it has never tested, which on the A7 is its whole DTC table (#49).
-pub const FAULT_MASK: u8 = 0x8F;
+/// pending, confirmed, failed since the last clear (an intermittent fault that passes now) and
+/// warning lamp. The "not tested" bits are left out: with them, a module lists every DTC it has
+/// never tested, which on the A7 is its whole DTC table (#49).
+pub const FAULT_MASK: u8 = 0xAF;
 
 /// Why a scan couldn't be taken at all.
 pub type ScanError = FingerprintError;
