@@ -182,13 +182,13 @@ fn functional_request_ignores_replies_to_another_service() {
 }
 
 #[test]
-fn too_many_pending_replies_time_out() {
+fn too_many_pending_replies_end_the_wait() {
     let read = approve(Target::Physical(0x7E0), &[0x22, 0xF1, 0x90]);
     let mut replies = vec![reply(0x7E8, PENDING); 4];
     replies.push(reply(0x7E8, F190));
     assert_eq!(
         exchange(&mut mock(&replies), &read, Expect::Module(0x7E8), FAST),
-        Err(Error::Timeout)
+        Err(Error::StillPending)
     );
 }
 
@@ -241,12 +241,13 @@ impl Transport for PendingThenSilent {
 }
 
 #[test]
-fn pending_extends_the_wait_to_p2_star_then_times_out() {
+fn pending_extends_the_wait_to_p2_star_then_says_the_module_never_answered() {
+    // Not a plain timeout: the module said it was busy (#17).
     let read = approve(Target::Physical(0x7E0), &[0x22, 0xF1, 0x90]);
     let mut adapter = PendingThenSilent::default();
     let start = Instant::now();
     let got = exchange(&mut adapter, &read, Expect::Module(0x7E8), FAST);
-    assert_eq!(got, Err(Error::Timeout));
+    assert_eq!(got, Err(Error::StillPending));
     assert!(start.elapsed() >= FAST.p2_star);
     assert!(adapter.asked_for[0] <= FAST.p2);
     assert!(adapter.asked_for[1] > FAST.p2 && adapter.asked_for[1] <= FAST.p2_star);
@@ -363,7 +364,7 @@ fn the_largest_pending_limit_still_ends_the_wait() {
     let mut ecu = Counted(Repeating(reply(0x7E8, PENDING)), 0);
     assert_eq!(
         exchange(&mut ecu, &read, Expect::Module(0x7E8), timing),
-        Err(Error::Timeout)
+        Err(Error::StillPending)
     );
     assert_eq!(ecu.1, usize::from(u16::MAX) + 1);
 }
@@ -529,4 +530,26 @@ fn a_pending_ecus_answer_does_not_reopen_p2_for_the_rest() {
     let vin = approve(Target::ObdFunctional, &[0x09, 0x02]);
     let got = exchange(&mut adapter, &vin, Expect::ObdEcus, timing).unwrap();
     assert_eq!(got, [reply(0x7E8, VIN)]);
+}
+
+#[test]
+fn a_transport_that_stops_listening_after_pending_says_the_module_never_answered() {
+    // An adapter that ends the request after a response-pending reply (a plain ELM327 that
+    // doesn't wait P2*, #17) returns Timeout at once; the module's answer would come later.
+    let read = approve(Target::Physical(0x7E0), &[0x22, 0xF1, 0x90]);
+    let got = exchange(
+        &mut mock(&[reply(0x7E8, PENDING)]),
+        &read,
+        Expect::Module(0x7E8),
+        FAST,
+    );
+    assert_eq!(got, Err(Error::StillPending));
+    // Another module's pending doesn't count against this one.
+    let got = exchange(
+        &mut mock(&[reply(0x7E9, PENDING)]),
+        &read,
+        Expect::Module(0x7E8),
+        FAST,
+    );
+    assert_eq!(got, Err(Error::Timeout));
 }

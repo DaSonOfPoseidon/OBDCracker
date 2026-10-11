@@ -130,6 +130,9 @@ impl fmt::Display for DidValue {
 pub enum ReadError {
     /// Nothing answered in time.
     NoReply,
+    /// The module said it was busy (response-pending) but didn't answer in time
+    /// ([`crate::Error::StillPending`]).
+    StillPending,
     /// The reply was a refusal or couldn't be decoded.
     Reply(response::Error),
     /// The CVNs don't pair with the calibration IDs: J1979 gives one CVN per calibration ID, so
@@ -147,6 +150,7 @@ impl fmt::Display for ReadError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::NoReply => f.write_str("no reply"),
+            Self::StillPending => crate::Error::StillPending.fmt(f),
             Self::Reply(e) => e.fmt(f),
             Self::CountMismatch { calids, cvns } => {
                 write!(f, "{cvns} CVNs for {calids} calibration IDs")
@@ -291,6 +295,7 @@ pub(crate) fn ask<T: Transport + ?Sized, V>(
             decode(&reply.payload).map_err(ReadError::Reply)
         })),
         Err(Error::Timeout) => Ok(Err(ReadError::NoReply)),
+        Err(Error::StillPending) => Ok(Err(ReadError::StillPending)),
         Err(e) => Err(FingerprintError::Transport(e)),
     }
 }

@@ -704,6 +704,67 @@ mod requests {
     }
 }
 
+mod response_pending {
+    use super::*;
+
+    // A module at 0x7E0 that answers 22 F1 87 with response-pending only.
+    fn busy_module() -> FakeElm {
+        FakeElm::new(Box::new(|header, request| {
+            if header == 0x7E0 && request == [0x22, 0xF1, 0x87] {
+                vec![(0x7E8, vec![0x7F, 0x22, 0x78])]
+            } else {
+                Vec::new()
+            }
+        }))
+    }
+
+    #[test]
+    fn an_answer_2_s_after_response_pending_arrives() {
+        // The STN keeps listening for P2* after `7F xx 78`: in #54 the transmission answered
+        // 1969 ms after one. The adapter prints the answer and its prompt when they come.
+        let mut elm = connect(busy_module());
+        elm.link_mut().elm.hang_after_request = true;
+        let read = approve(Target::Physical(0x7E0), &[0x22, 0xF1, 0x87]);
+        let start = Instant::now();
+        elm.link_mut().scheduled = [(
+            start + Duration::from_secs(2),
+            b"7E8 07 62 F1 87 34 47 30 39\r\r>".to_vec(),
+        )]
+        .into_iter()
+        .collect();
+        let got = exchange(
+            &mut elm,
+            &read,
+            Expect::Module(0x7E8),
+            Elm::<FakeLink>::timing(),
+        )
+        .unwrap();
+        assert_eq!(got[0].payload, b"\x62\xF1\x874G09");
+        assert!(start.elapsed() >= Duration::from_secs(2));
+    }
+
+    #[test]
+    fn an_adapter_that_stops_listening_after_response_pending_says_so() {
+        // A plain ELM327 may end the request at its own timeout after `7F xx 78` (#17). That's
+        // not a silent module: it said it was busy.
+        let mut elm = connect(busy_module());
+        let read = approve(Target::Physical(0x7E0), &[0x22, 0xF1, 0x87]);
+        let got = exchange(
+            &mut elm,
+            &read,
+            Expect::Module(0x7E8),
+            Elm::<FakeLink>::timing(),
+        );
+        assert_eq!(got, Err(Error::StillPending));
+        assert!(got.unwrap_err().to_string().contains("busy"));
+        // The adapter is fine: the next request goes out.
+        assert!(
+            elm.send(&approve(Target::Physical(0x7E0), &[0x09, 0x02]))
+                .is_ok()
+        );
+    }
+}
+
 mod misbehaving {
     use super::*;
 

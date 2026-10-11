@@ -932,3 +932,24 @@ fn an_adapter_failure_stops_the_scan() {
         assert_eq!(car.sent.len(), fail_after);
     }
 }
+
+#[test]
+fn a_module_that_stays_busy_loses_only_that_value() {
+    // F187 gets response-pending and never its answer (#17): that value says so, and the scan
+    // goes on to the rest.
+    let mut car = Car::new(|id, request| match (id, request) {
+        (0x7E0, [0x22, 0xF1, 0x87]) => vec![reply(0x7E8, &[0x7F, 0x22, 0x78])],
+        (0x7E0, [0x22, 0xF1, 0x89]) => vec![reply(0x7E8, b"\x62\xF1\x890016")],
+        _ => Vec::new(),
+    });
+    let got = scan(&mut car, &Policy::read_only(), &[engine(&[])], TIMING).unwrap();
+    assert_eq!(did_value(&got, 0xF187), Some(Err(ReadError::StillPending)));
+    assert_eq!(
+        did_value(&got, 0xF189),
+        Some(Ok(DidValue::Text("0016".into())))
+    );
+    assert_eq!(
+        ReadError::StillPending.to_string(),
+        "the module said it was busy (response-pending) but didn't answer in time"
+    );
+}

@@ -61,12 +61,12 @@ impl Default for Timing {
 /// - [`Expect::ObdEcus`] returns each ECU's answer, which may be none, once every ECU has
 ///   answered or run out of time.
 /// - [`Expect::Module`] returns the module's answer, or [`Error::Timeout`] if it didn't answer
-///   in time. A request with the suppress-positive-response bit set gets no reply when it
+///   in time ([`Error::StillPending`] if it had sent response-pending). A request with the suppress-positive-response bit set gets no reply when it
 ///   succeeds, so it times out here, unless the module sent response-pending first: then
 ///   ISO 14229-1 requires the positive reply.
 ///
 /// A module that sends more response-pending replies than [`Timing::max_pending`] is done
-/// without an answer: [`Expect::Module`] gives [`Error::Timeout`], and [`Expect::ObdEcus`] keeps
+/// without an answer: [`Expect::Module`] gives [`Error::StillPending`], and [`Expect::ObdEcus`] keeps
 /// the other ECUs' answers. An adapter error is returned as soon as it happens. P2 and P2* are capped at one hour.
 pub fn exchange<T: Transport + ?Sized>(
     transport: &mut T,
@@ -139,7 +139,7 @@ pub fn exchange<T: Transport + ?Sized>(
             // A module over the limit is done, without an answer.
             if *count == timing.max_pending {
                 match expect {
-                    Expect::Module(_) => return Err(Error::Timeout),
+                    Expect::Module(_) => return Err(Error::StillPending),
                     Expect::ObdEcus => {
                         done.push(reply.source);
                         continue;
@@ -157,6 +157,8 @@ pub fn exchange<T: Transport + ?Sized>(
         }
     }
     match expect {
+        // Only the expected module's replies get this far, so any pending count is its own.
+        Expect::Module(_) if !pending.is_empty() => Err(Error::StillPending),
         Expect::Module(_) => Err(Error::Timeout),
         Expect::ObdEcus => Ok(replies),
     }
