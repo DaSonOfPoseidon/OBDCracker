@@ -44,6 +44,11 @@ Each entry names the class, what to check, and where it bit us.
   (`uds::did::is_text`, `obd::check_vin`).
 - **Cross-check related sources.** Fixture vs profile: every DID is standard or in the profile, values match the
   profile's `decode`, and OBD-II data only sits on OBD-II ID pairs (0x7E0..=0x7E7 → +8).
+- **Check data against the real replies, not against another hand-made file.** The instruments' F19E got the
+  reply's length (24, with `62 F1 9E`) instead of the data's (21), in both the profile and the fixture. The cross-check
+  between them passed, because both were wrong the same way, and the car's correct reply then read as malformed
+  (#62). Keep the car's replies as test data (`crates/obdcracker-profile/tests/data/a7-did-replies.txt`) and
+  check every value derived from them against it.
 - **Public fields bypass the parser.** Anything with `pub` fields can be built or edited by hand, so consumers must
   re-validate (`Profile::validate`), or the type must make invalid values impossible.
 - **Empty, blank and padding-only values** are input too: names, text DIDs, CALIDs. `"   "` is not empty but
@@ -51,7 +56,8 @@ Each entry names the class, what to check, and where it bit us.
   P0000 in mode 03, and 0x000000 and 0xFFFFFF ("all groups") in UDS.
 - **But check real modules before calling padding malformed.** A list slot can be legitimately empty: the A7's
   engine answers mode 09 PID 04 with five CALIDs, one of them all 0x00 (CVN 00000000). Rejecting it threw away
-  the four real ones (#46). Model an empty slot explicitly (`None`), and still reject one that isn't text.
+  the four real ones (#46). Model an empty slot explicitly (`None`), and still reject one that isn't text. The
+  same goes for a VIN: three A7 modules answer F190 with 17 dashes, which scan called malformed (#63).
 - **Names are keys.** If lookups are exact, reject names with surrounding spaces rather than trimming them in one
   place only, and treat names that differ only in case as duplicates.
 - **Escape what you write, too.** A format built by hand (JSON Lines, TOML) must escape every string it

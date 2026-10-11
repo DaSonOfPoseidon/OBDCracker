@@ -347,6 +347,7 @@ fn print_dids(id: u32, name: &str, dids: &[(u16, Result<DidValue, ReadError>)]) 
             Ok(DidValue::Text(text)) => println!("{id:03X} {name} {did:04X} {text}"),
             // Bracketed, so binary data can't pass for text that looks like hex.
             Ok(bytes @ DidValue::Bytes(_)) => println!("{id:03X} {name} {did:04X} [{bytes}]"),
+            Ok(DidValue::NotSet) => println!("{id:03X} {name} {did:04X} (not set)"),
             Err(e) => println!("{id:03X} {name} {did:04X} ({e})"),
         }
     }
@@ -490,6 +491,7 @@ fn discover_modules<T: Transport>(
         let part = match &module.part_number {
             Ok(DidValue::Text(text)) => text.clone(),
             Ok(bytes @ DidValue::Bytes(_)) => format!("[{bytes}]"),
+            Ok(DidValue::NotSet) => "(not set)".to_owned(),
             Err(e) => format!("({e})"),
         };
         println!(

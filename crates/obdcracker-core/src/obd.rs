@@ -340,6 +340,17 @@ pub fn check_vin(data: &[u8]) -> Result<&str, Error> {
     text(data)
 }
 
+/// Whether `data` says no VIN is stored: 17 of one filler byte (`-`, space, 0x00 or 0xFF). Modules
+/// that don't know the VIN send it in UDS DID F190; the 2014 A7's rear lid sends dashes.
+#[must_use]
+pub fn is_vin_placeholder(data: &[u8]) -> bool {
+    data.len() == VIN_LEN
+        && data
+            .first()
+            .is_some_and(|&fill| matches!(fill, b'-' | b' ' | 0x00 | 0xFF))
+        && data.iter().all(|&b| b == data[0])
+}
+
 /// Decodes the mode 09 PID 04 reply: each calibration ID (the software calibration's name),
 /// with its padding removed. A module may report several, and some of them may be empty slots.
 pub fn decode_calids(reply: &[u8]) -> Result<Calids<'_>, Error> {

@@ -197,6 +197,23 @@ fn a7_profile_has_the_expected_uds_modules() {
         assert_eq!(module.protocol, Protocol::Uds, "{name}");
         assert_eq!(module.addressing(), Addressing::Normal, "{name}");
     }
+    // The head-up display, which `scan --discover` found in #54 (J898, VAG address 0x82).
+    let hud = a7.module("head-up display").unwrap();
+    assert_eq!(
+        (hud.vag_address, hud.request_id, hud.response_id),
+        (Some(0x82), 0x71B, 0x785)
+    );
+    // The 22 modules discovery found in #54, plus the engine and transmission on the OBD-II IDs,
+    // which its range doesn't reach.
+    assert_eq!(a7.modules.len(), 24);
+    // Each reads its coding.
+    for module in &a7.modules {
+        assert!(
+            module.dids.iter().any(|did| did.id == 0x0600) || module.name == "transmission",
+            "{}",
+            module.name
+        );
+    }
 }
 
 // A profile only names where requests go; what may be sent is still the policy's decision.
@@ -512,4 +529,44 @@ fn rejects_a_discovery_range_that_would_send_on_a_reply_id() {
         Profile::from_toml(&with_discovery(0x769, 0x700, 0x6A)).unwrap_err(),
         ProfileError::DiscoveryRange
     );
+}
+
+// Each A7 DID length is what the car sent, counted from the data, not the whole reply (#62).
+// Every length must come from a real reply, and every real reply must have that length.
+#[test]
+fn a7_did_lengths_match_the_cars_replies() {
+    let a7 = Profile::builtin("a7").unwrap();
+    let replies: Vec<(u32, Vec<u8>)> = include_str!("data/a7-did-replies.txt")
+        .lines()
+        .filter(|line| !line.starts_with('#'))
+        .map(|line| {
+            let mut fields = line.split(' ');
+            let id = u32::from_str_radix(fields.next().unwrap(), 16).unwrap();
+            let bytes = fields.map(|b| u8::from_str_radix(b, 16).unwrap()).collect();
+            (id, bytes)
+        })
+        .collect();
+    for module in &a7.modules {
+        for did in &module.dids {
+            let Some(length) = did.length else { continue };
+            let [high, low] = did.id.to_be_bytes();
+            let lengths: Vec<usize> = replies
+                .iter()
+                .filter(|(id, reply)| *id == module.response_id && reply[..3] == [0x62, high, low])
+                .map(|(_, reply)| reply.len() - 3)
+                .collect();
+            assert!(
+                !lengths.is_empty(),
+                "{} {:04X}: no reply from the car gives its length",
+                module.name,
+                did.id
+            );
+            assert!(
+                lengths.iter().all(|&got| got == usize::from(length)),
+                "{} {:04X}: profile says {length}, the car sent {lengths:?}",
+                module.name,
+                did.id
+            );
+        }
+    }
 }

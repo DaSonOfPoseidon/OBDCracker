@@ -139,7 +139,7 @@ impl SimBus {
                 let text = standard_decode(did.id) == Some(Decode::Text)
                     || def.is_some_and(|def| def.decode == Decode::Text);
                 let fits = if did.id == uds::did::VIN {
-                    obd::check_vin(&did.data).is_ok()
+                    obd::check_vin(&did.data).is_ok() || obd::is_vin_placeholder(&did.data)
                 } else {
                     // Text that is only padding decodes as empty.
                     !text || uds::decode_text(&did.data).is_ok_and(|text| !text.is_empty())

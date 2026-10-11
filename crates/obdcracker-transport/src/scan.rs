@@ -52,7 +52,8 @@ pub struct ScanModule {
     /// More DIDs to read after [`SCAN_DIDS`], such as VAG's F1A3 or 0600, or how to show one of
     /// [`SCAN_DIDS`] that has no fixed format, such as the manufacture date (F18B). Each DID is
     /// read once, however often it's listed, in its first entry's format. A DID ISO 14229-1
-    /// makes text ([`did::is_text`]) stays text, and F190 must be a VIN.
+    /// makes text ([`did::is_text`]) stays text, and F190 must be a VIN or the placeholder for
+    /// none ([`DidValue::NotSet`]).
     pub extra_dids: Vec<ExtraDid>,
 }
 
@@ -540,12 +541,16 @@ fn dids_of(scanned: &ScanModule) -> Vec<ExtraDid> {
     dids
 }
 
-// A DID's value in `format`. ISO 14229-1 makes F190 a VIN, so anything else there is malformed.
+// A DID's value in `format`. ISO 14229-1 makes F190 a VIN, so anything there other than a VIN or
+// the placeholder for none is malformed.
 fn decode_scanned(payload: &[u8], id: u16, format: DidFormat) -> Result<DidValue, ReplyError> {
     match format {
         DidFormat::Text if id == did::VIN => {
-            let vin = obd::check_vin(uds::decode_did(payload, id)?)?;
-            Ok(DidValue::Text(vin.to_owned()))
+            let data = uds::decode_did(payload, id)?;
+            if obd::is_vin_placeholder(data) {
+                return Ok(DidValue::NotSet);
+            }
+            Ok(DidValue::Text(obd::check_vin(data)?.to_owned()))
         }
         DidFormat::Text => decode_did_value(payload, id),
         DidFormat::Hex => Ok(DidValue::Bytes(uds::decode_did(payload, id)?.to_vec())),

@@ -129,6 +129,7 @@ fn texts(scan: &Scan) -> Vec<(u16, String)> {
         .filter_map(|(did, value)| match value {
             Ok(DidValue::Text(text)) => Some((*did, text.clone())),
             Ok(DidValue::Bytes(bytes)) => Some((*did, hex(bytes))),
+            Ok(DidValue::NotSet) => Some((*did, "not set".into())),
             Err(_) => None,
         })
         .collect()
@@ -723,7 +724,26 @@ fn f190_must_be_a_vin() {
             b"WAU2MBFC6EN09341 ",
             Err(ReadError::Reply(ReplyError::Malformed)),
         ),
-        (&[0x00; 17], Err(ReadError::Reply(ReplyError::Malformed))),
+        // A module with no VIN stored sends 17 of one filler byte: dashes on the A7's rear lid,
+        // parking brake and top view camera (#54, #63).
+        (b"-----------------", Ok(DidValue::NotSet)),
+        (&[0x00; 17], Ok(DidValue::NotSet)),
+        (&[0xFF; 17], Ok(DidValue::NotSet)),
+        (&[b' '; 17], Ok(DidValue::NotSet)),
+        // Only a whole VIN's worth of one filler.
+        (
+            b"----------------",
+            Err(ReadError::Reply(ReplyError::Malformed)),
+        ),
+        (
+            b"------------------",
+            Err(ReadError::Reply(ReplyError::Malformed)),
+        ),
+        (
+            b"----------------\0",
+            Err(ReadError::Reply(ReplyError::Malformed)),
+        ),
+        (&[0x2E; 17], Err(ReadError::Reply(ReplyError::Malformed))),
     ] {
         let payload = [&[0x62, 0xF1, 0x90][..], data].concat();
         let mut car = Car::new(move |id, request| match (id, request) {

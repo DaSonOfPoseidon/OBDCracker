@@ -1,13 +1,17 @@
 # 2014 Audi A7 3.0 TDI (C7, platform 4G).
 #
-# The layout comes from public VAG UDS references, and the second read-only session (#49) confirmed
-# every module here: each answered on its request and reply IDs (a VAG reply ID is the request ID
-# + 0x6A, except the OBD-II pairs).
+# The first four modules come from public VAG UDS references, and the second read-only session
+# (#49) confirmed them. The rest are what `scan --discover` found in the third (#54, engine idling).
+# Every module answered on its request and reply IDs: a VAG reply ID is the request ID + 0x6A,
+# except for the OBD-II pairs. A module's VAG address is given only where a public source confirms it:
+# the head-up display's 0x82 is from an Audi bulletin (J898, "diag. addr. 0082").
 # Standard identification DIDs (0xF180..=0xF19F) need no entry; they're listed here to give their
-# length, which lets a scan read several in one request. Each length is what this car's module
-# sent in #49, so it holds for these ECU variants (part numbers), not every A7. A DID the module
-# refused has no length. F18B (manufacture date) is listed to show it as bytes: it's BCD, such as
-# 13 11 19, and all zeros when unset. The rest are VAG extras.
+# length, which lets a scan read several in one request. Each length is the data (not the whole
+# reply) this car's module sent in #49 or #54, so it holds for these ECU variants (part numbers),
+# not every A7; `tests/data/a7-did-replies.txt` keeps those replies, and a test checks each length
+# against them. A DID the module refused has no length. F18B (manufacture date) is listed to show it
+# as bytes: it's BCD, such as 13 11 19, and all zeros when unset. 0x0600 (VW coding) is listed on
+# every module, so a scan reads it; the rest are VAG extras.
 
 name = "2014 Audi A7 3.0 TDI (C7)"
 bitrate = 500000
@@ -136,6 +140,7 @@ length = 3
 id = 0xF1AA
 name = "VW workshop system name"
 decode = "text"
+length = 5
 
 [[module]]
 name = "gateway"
@@ -245,13 +250,1158 @@ length = 13
 id = 0xF19E
 name = "ODX file"
 decode = "text"
-length = 24
+length = 21
 
 [[module.did]]
 id = 0x0600
 name = "VW coding value"
 decode = "hex"
 length = 11
+
+[[module]]
+name = "parking aid"
+request_id = 0x70A
+response_id = 0x774
+protocol = "uds"
+
+[[module.did]]
+id = 0xF187
+name = "spare part number"
+decode = "text"
+length = 11
+
+[[module.did]]
+id = 0xF189
+name = "software version"
+decode = "text"
+length = 4
+
+[[module.did]]
+id = 0xF18B
+name = "manufacture date"
+decode = "hex"
+length = 3
+
+[[module.did]]
+id = 0xF18C
+name = "serial number"
+decode = "text"
+length = 14
+
+[[module.did]]
+id = 0xF191
+name = "hardware number"
+decode = "text"
+length = 11
+
+[[module.did]]
+id = 0xF197
+name = "system name"
+decode = "text"
+length = 13
+
+[[module.did]]
+id = 0xF19E
+name = "ODX file"
+decode = "text"
+length = 20
+
+[[module.did]]
+id = 0x0600
+name = "VW coding value"
+decode = "hex"
+
+[[module]]
+name = "steering"
+request_id = 0x712
+response_id = 0x77C
+protocol = "uds"
+
+[[module.did]]
+id = 0xF187
+name = "spare part number"
+decode = "text"
+length = 11
+
+[[module.did]]
+id = 0xF189
+name = "software version"
+decode = "text"
+length = 4
+
+[[module.did]]
+id = 0xF18B
+name = "manufacture date"
+decode = "hex"
+length = 3
+
+[[module.did]]
+id = 0xF18C
+name = "serial number"
+decode = "text"
+length = 10
+
+[[module.did]]
+id = 0xF191
+name = "hardware number"
+decode = "text"
+length = 11
+
+[[module.did]]
+id = 0xF197
+name = "system name"
+decode = "text"
+length = 13
+
+[[module.did]]
+id = 0xF19E
+name = "ODX file"
+decode = "text"
+length = 25
+
+[[module.did]]
+id = 0x0600
+name = "VW coding value"
+decode = "hex"
+
+[[module]]
+name = "brakes"
+request_id = 0x713
+response_id = 0x77D
+protocol = "uds"
+
+[[module.did]]
+id = 0xF187
+name = "spare part number"
+decode = "text"
+length = 11
+
+[[module.did]]
+id = 0xF189
+name = "software version"
+decode = "text"
+length = 4
+
+[[module.did]]
+id = 0xF18B
+name = "manufacture date"
+decode = "hex"
+length = 3
+
+[[module.did]]
+id = 0xF18C
+name = "serial number"
+decode = "text"
+length = 14
+
+[[module.did]]
+id = 0xF191
+name = "hardware number"
+decode = "text"
+length = 11
+
+[[module.did]]
+id = 0xF197
+name = "system name"
+decode = "text"
+length = 13
+
+[[module.did]]
+id = 0xF19E
+name = "ODX file"
+decode = "text"
+length = 17
+
+[[module.did]]
+id = 0x0600
+name = "VW coding value"
+decode = "hex"
+
+[[module]]
+name = "airbag"
+request_id = 0x715
+response_id = 0x77F
+protocol = "uds"
+
+[[module.did]]
+id = 0xF187
+name = "spare part number"
+decode = "text"
+length = 11
+
+[[module.did]]
+id = 0xF189
+name = "software version"
+decode = "text"
+length = 4
+
+[[module.did]]
+id = 0xF18B
+name = "manufacture date"
+decode = "hex"
+length = 3
+
+[[module.did]]
+id = 0xF18C
+name = "serial number"
+decode = "text"
+length = 12
+
+[[module.did]]
+id = 0xF190
+name = "VIN"
+decode = "text"
+length = 17
+
+[[module.did]]
+id = 0xF191
+name = "hardware number"
+decode = "text"
+length = 11
+
+[[module.did]]
+id = 0xF197
+name = "system name"
+decode = "text"
+length = 13
+
+[[module.did]]
+id = 0xF19E
+name = "ODX file"
+decode = "text"
+length = 21
+
+[[module.did]]
+id = 0x0600
+name = "VW coding value"
+decode = "hex"
+
+[[module]]
+name = "rear climate"
+request_id = 0x71A
+response_id = 0x784
+protocol = "uds"
+
+[[module.did]]
+id = 0xF187
+name = "spare part number"
+decode = "text"
+length = 11
+
+[[module.did]]
+id = 0xF189
+name = "software version"
+decode = "text"
+length = 4
+
+[[module.did]]
+id = 0xF18B
+name = "manufacture date"
+decode = "hex"
+length = 3
+
+[[module.did]]
+id = 0xF18C
+name = "serial number"
+decode = "text"
+length = 14
+
+[[module.did]]
+id = 0xF191
+name = "hardware number"
+decode = "text"
+length = 11
+
+[[module.did]]
+id = 0xF197
+name = "system name"
+decode = "text"
+length = 13
+
+[[module.did]]
+id = 0xF19E
+name = "ODX file"
+decode = "text"
+length = 25
+
+[[module.did]]
+id = 0x0600
+name = "VW coding value"
+decode = "hex"
+
+[[module]]
+name = "head-up display"
+vag_address = 0x82
+request_id = 0x71B
+response_id = 0x785
+protocol = "uds"
+
+[[module.did]]
+id = 0xF187
+name = "spare part number"
+decode = "text"
+length = 11
+
+[[module.did]]
+id = 0xF189
+name = "software version"
+decode = "text"
+length = 4
+
+[[module.did]]
+id = 0xF18B
+name = "manufacture date"
+decode = "hex"
+length = 3
+
+[[module.did]]
+id = 0xF18C
+name = "serial number"
+decode = "text"
+length = 14
+
+[[module.did]]
+id = 0xF191
+name = "hardware number"
+decode = "text"
+length = 11
+
+[[module.did]]
+id = 0xF197
+name = "system name"
+decode = "text"
+length = 13
+
+[[module.did]]
+id = 0xF19E
+name = "ODX file"
+decode = "text"
+length = 14
+
+[[module.did]]
+id = 0x0600
+name = "VW coding value"
+decode = "hex"
+
+[[module]]
+name = "sensor cluster"
+request_id = 0x721
+response_id = 0x78B
+protocol = "uds"
+
+[[module.did]]
+id = 0xF187
+name = "spare part number"
+decode = "text"
+length = 11
+
+[[module.did]]
+id = 0xF189
+name = "software version"
+decode = "text"
+length = 4
+
+[[module.did]]
+id = 0xF18A
+name = "system supplier"
+decode = "text"
+length = 32
+
+[[module.did]]
+id = 0xF18B
+name = "manufacture date"
+decode = "hex"
+length = 3
+
+[[module.did]]
+id = 0xF18C
+name = "serial number"
+decode = "text"
+length = 24
+
+[[module.did]]
+id = 0xF190
+name = "VIN"
+decode = "text"
+length = 17
+
+[[module.did]]
+id = 0xF191
+name = "hardware number"
+decode = "text"
+length = 11
+
+[[module.did]]
+id = 0xF192
+name = "supplier hardware number"
+decode = "text"
+length = 10
+
+[[module.did]]
+id = 0xF193
+name = "supplier hardware version"
+decode = "text"
+length = 2
+
+[[module.did]]
+id = 0xF194
+name = "supplier software number"
+decode = "text"
+length = 10
+
+[[module.did]]
+id = 0xF195
+name = "supplier software version"
+decode = "text"
+length = 21
+
+[[module.did]]
+id = 0xF197
+name = "system name"
+decode = "text"
+length = 13
+
+[[module.did]]
+id = 0xF19E
+name = "ODX file"
+decode = "text"
+length = 9
+
+[[module.did]]
+id = 0x0600
+name = "VW coding value"
+decode = "hex"
+
+[[module]]
+name = "rear lid"
+request_id = 0x723
+response_id = 0x78D
+protocol = "uds"
+
+[[module.did]]
+id = 0xF187
+name = "spare part number"
+decode = "text"
+length = 11
+
+[[module.did]]
+id = 0xF189
+name = "software version"
+decode = "text"
+length = 4
+
+[[module.did]]
+id = 0xF18A
+name = "system supplier"
+decode = "text"
+length = 7
+
+[[module.did]]
+id = 0xF18B
+name = "manufacture date"
+decode = "hex"
+length = 3
+
+[[module.did]]
+id = 0xF18C
+name = "serial number"
+decode = "text"
+length = 9
+
+[[module.did]]
+id = 0xF190
+name = "VIN"
+decode = "text"
+length = 17
+
+[[module.did]]
+id = 0xF191
+name = "hardware number"
+decode = "text"
+length = 11
+
+[[module.did]]
+id = 0xF192
+name = "supplier hardware number"
+decode = "text"
+length = 15
+
+[[module.did]]
+id = 0xF193
+name = "supplier hardware version"
+decode = "text"
+length = 2
+
+[[module.did]]
+id = 0xF194
+name = "supplier software number"
+decode = "text"
+length = 15
+
+[[module.did]]
+id = 0xF195
+name = "supplier software version"
+decode = "text"
+length = 2
+
+[[module.did]]
+id = 0xF197
+name = "system name"
+decode = "text"
+length = 13
+
+[[module.did]]
+id = 0xF19E
+name = "ODX file"
+decode = "text"
+length = 24
+
+[[module.did]]
+id = 0x0600
+name = "VW coding value"
+decode = "hex"
+
+[[module]]
+name = "camera"
+request_id = 0x726
+response_id = 0x790
+protocol = "uds"
+
+[[module.did]]
+id = 0xF187
+name = "spare part number"
+decode = "text"
+length = 11
+
+[[module.did]]
+id = 0xF189
+name = "software version"
+decode = "text"
+length = 4
+
+[[module.did]]
+id = 0xF18C
+name = "serial number"
+decode = "text"
+length = 26
+
+[[module.did]]
+id = 0xF190
+name = "VIN"
+decode = "text"
+length = 17
+
+[[module.did]]
+id = 0xF191
+name = "hardware number"
+decode = "text"
+length = 11
+
+[[module.did]]
+id = 0xF197
+name = "system name"
+decode = "text"
+length = 13
+
+[[module.did]]
+id = 0xF19E
+name = "ODX file"
+decode = "text"
+length = 19
+
+[[module.did]]
+id = 0x0600
+name = "VW coding value"
+decode = "hex"
+
+[[module]]
+name = "night vision"
+request_id = 0x727
+response_id = 0x791
+protocol = "uds"
+
+[[module.did]]
+id = 0xF187
+name = "spare part number"
+decode = "text"
+length = 11
+
+[[module.did]]
+id = 0xF188
+name = "software number"
+decode = "text"
+length = 2
+
+[[module.did]]
+id = 0xF189
+name = "software version"
+decode = "text"
+length = 4
+
+[[module.did]]
+id = 0xF18B
+name = "manufacture date"
+decode = "hex"
+length = 3
+
+[[module.did]]
+id = 0xF18C
+name = "serial number"
+decode = "text"
+length = 14
+
+[[module.did]]
+id = 0xF191
+name = "hardware number"
+decode = "text"
+length = 11
+
+[[module.did]]
+id = 0xF197
+name = "system name"
+decode = "text"
+length = 13
+
+[[module.did]]
+id = 0xF19E
+name = "ODX file"
+decode = "text"
+length = 18
+
+[[module.did]]
+id = 0x0600
+name = "VW coding value"
+decode = "hex"
+
+[[module]]
+name = "tire pressure"
+request_id = 0x72A
+response_id = 0x794
+protocol = "uds"
+
+[[module.did]]
+id = 0xF187
+name = "spare part number"
+decode = "text"
+length = 11
+
+[[module.did]]
+id = 0xF189
+name = "software version"
+decode = "text"
+length = 4
+
+[[module.did]]
+id = 0xF18A
+name = "system supplier"
+decode = "text"
+length = 32
+
+[[module.did]]
+id = 0xF18B
+name = "manufacture date"
+decode = "hex"
+length = 3
+
+[[module.did]]
+id = 0xF18C
+name = "serial number"
+decode = "text"
+length = 9
+
+[[module.did]]
+id = 0xF191
+name = "hardware number"
+decode = "text"
+length = 11
+
+[[module.did]]
+id = 0xF195
+name = "supplier software version"
+decode = "hex"
+length = 2
+
+[[module.did]]
+id = 0xF197
+name = "system name"
+decode = "text"
+length = 13
+
+[[module.did]]
+id = 0xF19E
+name = "ODX file"
+decode = "text"
+length = 14
+
+[[module.did]]
+id = 0x0600
+name = "VW coding value"
+decode = "hex"
+
+[[module]]
+name = "climate"
+request_id = 0x746
+response_id = 0x7B0
+protocol = "uds"
+
+[[module.did]]
+id = 0xF187
+name = "spare part number"
+decode = "text"
+length = 11
+
+[[module.did]]
+id = 0xF189
+name = "software version"
+decode = "text"
+length = 4
+
+[[module.did]]
+id = 0xF18B
+name = "manufacture date"
+decode = "hex"
+length = 3
+
+[[module.did]]
+id = 0xF18C
+name = "serial number"
+decode = "text"
+length = 14
+
+[[module.did]]
+id = 0xF191
+name = "hardware number"
+decode = "text"
+length = 11
+
+[[module.did]]
+id = 0xF197
+name = "system name"
+decode = "text"
+length = 13
+
+[[module.did]]
+id = 0xF19E
+name = "ODX file"
+decode = "text"
+length = 20
+
+[[module.did]]
+id = 0x0600
+name = "VW coding value"
+decode = "hex"
+
+[[module]]
+name = "parking brake"
+request_id = 0x752
+response_id = 0x7BC
+protocol = "uds"
+
+[[module.did]]
+id = 0xF187
+name = "spare part number"
+decode = "text"
+length = 11
+
+[[module.did]]
+id = 0xF189
+name = "software version"
+decode = "text"
+length = 4
+
+[[module.did]]
+id = 0xF18C
+name = "serial number"
+decode = "text"
+length = 14
+
+[[module.did]]
+id = 0xF190
+name = "VIN"
+decode = "text"
+length = 17
+
+[[module.did]]
+id = 0xF191
+name = "hardware number"
+decode = "text"
+length = 11
+
+[[module.did]]
+id = 0xF197
+name = "system name"
+decode = "text"
+length = 13
+
+[[module.did]]
+id = 0xF19E
+name = "ODX file"
+decode = "text"
+length = 14
+
+[[module.did]]
+id = 0x0600
+name = "VW coding value"
+decode = "hex"
+
+[[module]]
+name = "headlight range"
+request_id = 0x754
+response_id = 0x7BE
+protocol = "uds"
+
+[[module.did]]
+id = 0xF187
+name = "spare part number"
+decode = "text"
+length = 11
+
+[[module.did]]
+id = 0xF189
+name = "software version"
+decode = "text"
+length = 4
+
+[[module.did]]
+id = 0xF18C
+name = "serial number"
+decode = "text"
+length = 18
+
+[[module.did]]
+id = 0xF191
+name = "hardware number"
+decode = "text"
+length = 11
+
+[[module.did]]
+id = 0xF197
+name = "system name"
+decode = "text"
+length = 13
+
+[[module.did]]
+id = 0xF19E
+name = "ODX file"
+decode = "text"
+length = 19
+
+[[module.did]]
+id = 0x0600
+name = "VW coding value"
+decode = "hex"
+
+[[module]]
+name = "acc 2"
+request_id = 0x756
+response_id = 0x7C0
+protocol = "uds"
+
+[[module.did]]
+id = 0xF187
+name = "spare part number"
+decode = "text"
+length = 11
+
+[[module.did]]
+id = 0xF189
+name = "software version"
+decode = "text"
+length = 4
+
+[[module.did]]
+id = 0xF18C
+name = "serial number"
+decode = "text"
+length = 14
+
+[[module.did]]
+id = 0xF191
+name = "hardware number"
+decode = "text"
+length = 11
+
+[[module.did]]
+id = 0xF197
+name = "system name"
+decode = "text"
+length = 13
+
+[[module.did]]
+id = 0xF19E
+name = "ODX file"
+decode = "text"
+length = 25
+
+[[module.did]]
+id = 0x0600
+name = "VW coding value"
+decode = "hex"
+
+[[module]]
+name = "acc"
+request_id = 0x757
+response_id = 0x7C1
+protocol = "uds"
+
+[[module.did]]
+id = 0xF187
+name = "spare part number"
+decode = "text"
+length = 11
+
+[[module.did]]
+id = 0xF189
+name = "software version"
+decode = "text"
+length = 4
+
+[[module.did]]
+id = 0xF18C
+name = "serial number"
+decode = "text"
+length = 14
+
+[[module.did]]
+id = 0xF191
+name = "hardware number"
+decode = "text"
+length = 11
+
+[[module.did]]
+id = 0xF197
+name = "system name"
+decode = "text"
+length = 13
+
+[[module.did]]
+id = 0xF19E
+name = "ODX file"
+decode = "text"
+length = 25
+
+[[module.did]]
+id = 0x0600
+name = "VW coding value"
+decode = "hex"
+
+[[module]]
+name = "image processing"
+request_id = 0x758
+response_id = 0x7C2
+protocol = "uds"
+
+[[module.did]]
+id = 0xF187
+name = "spare part number"
+decode = "text"
+length = 11
+
+[[module.did]]
+id = 0xF189
+name = "software version"
+decode = "text"
+length = 4
+
+[[module.did]]
+id = 0xF18C
+name = "serial number"
+decode = "text"
+length = 26
+
+[[module.did]]
+id = 0xF191
+name = "hardware number"
+decode = "text"
+length = 11
+
+[[module.did]]
+id = 0xF197
+name = "system name"
+decode = "text"
+length = 13
+
+[[module.did]]
+id = 0xF19E
+name = "ODX file"
+decode = "text"
+length = 7
+
+[[module.did]]
+id = 0x0600
+name = "VW coding value"
+decode = "hex"
+
+[[module]]
+name = "belt tensioner left"
+request_id = 0x75E
+response_id = 0x7C8
+protocol = "uds"
+
+[[module.did]]
+id = 0xF187
+name = "spare part number"
+decode = "text"
+length = 11
+
+[[module.did]]
+id = 0xF189
+name = "software version"
+decode = "text"
+length = 4
+
+[[module.did]]
+id = 0xF18B
+name = "manufacture date"
+decode = "hex"
+length = 3
+
+[[module.did]]
+id = 0xF191
+name = "hardware number"
+decode = "text"
+length = 11
+
+[[module.did]]
+id = 0xF194
+name = "supplier software number"
+decode = "text"
+length = 20
+
+[[module.did]]
+id = 0xF195
+name = "supplier software version"
+decode = "text"
+length = 8
+
+[[module.did]]
+id = 0xF197
+name = "system name"
+decode = "text"
+length = 13
+
+[[module.did]]
+id = 0xF19E
+name = "ODX file"
+decode = "text"
+length = 9
+
+[[module.did]]
+id = 0x0600
+name = "VW coding value"
+decode = "hex"
+
+[[module]]
+name = "belt tensioner right"
+request_id = 0x75F
+response_id = 0x7C9
+protocol = "uds"
+
+[[module.did]]
+id = 0xF187
+name = "spare part number"
+decode = "text"
+length = 11
+
+[[module.did]]
+id = 0xF189
+name = "software version"
+decode = "text"
+length = 4
+
+[[module.did]]
+id = 0xF18B
+name = "manufacture date"
+decode = "hex"
+length = 3
+
+[[module.did]]
+id = 0xF191
+name = "hardware number"
+decode = "text"
+length = 11
+
+[[module.did]]
+id = 0xF194
+name = "supplier software number"
+decode = "text"
+length = 20
+
+[[module.did]]
+id = 0xF195
+name = "supplier software version"
+decode = "text"
+length = 8
+
+[[module.did]]
+id = 0xF197
+name = "system name"
+decode = "text"
+length = 13
+
+[[module.did]]
+id = 0xF19E
+name = "ODX file"
+decode = "text"
+length = 9
+
+[[module.did]]
+id = 0x0600
+name = "VW coding value"
+decode = "hex"
+
+[[module]]
+name = "top view"
+request_id = 0x769
+response_id = 0x7D3
+protocol = "uds"
+
+[[module.did]]
+id = 0xF187
+name = "spare part number"
+decode = "text"
+length = 11
+
+[[module.did]]
+id = 0xF189
+name = "software version"
+decode = "text"
+length = 4
+
+[[module.did]]
+id = 0xF18C
+name = "serial number"
+decode = "text"
+length = 14
+
+[[module.did]]
+id = 0xF190
+name = "VIN"
+decode = "text"
+length = 17
+
+[[module.did]]
+id = 0xF191
+name = "hardware number"
+decode = "text"
+length = 11
+
+[[module.did]]
+id = 0xF197
+name = "system name"
+decode = "text"
+length = 13
+
+[[module.did]]
+id = 0xF19E
+name = "ODX file"
+decode = "text"
+length = 25
+
+[[module.did]]
+id = 0x0600
+name = "VW coding value"
+decode = "hex"
 
 # `scan --discover` tries each request ID here with `22 F187`, expecting replies at the request ID
 # + 0x6A. 0x700..=0x769 is as far as that goes safely: the replies (0x76A..=0x7D3) are never a
