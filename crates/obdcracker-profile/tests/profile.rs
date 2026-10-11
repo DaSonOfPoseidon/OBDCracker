@@ -212,6 +212,35 @@ fn a7_modules_are_targets_the_policy_still_checks() {
     }
 }
 
+#[test]
+fn a7_profile_narrows_the_policy_to_its_modules() {
+    let a7 = Profile::builtin("a7").unwrap();
+    let policy = a7.narrow(Policy::read_only()).unwrap();
+    let read = [0x22, 0xF1, 0x87];
+    for module in &a7.modules {
+        let approved = policy
+            .approve(Target::Physical(module.request_id), &read)
+            .unwrap();
+        assert_eq!(approved.reply_id(), Some(module.response_id));
+        assert!(
+            policy
+                .approve(Target::Physical(module.response_id), &read)
+                .is_err()
+        );
+    }
+    // In 0x700..=0x7FF, but no A7 module listens there.
+    assert!(policy.approve(Target::Physical(0x711), &read).is_err());
+    assert!(policy.approve(Target::ObdFunctional, &[0x09, 0x02]).is_ok());
+}
+
+#[test]
+fn a_hand_built_profile_with_inconsistent_ids_cant_narrow() {
+    let mut a7 = Profile::builtin("a7").unwrap();
+    // The gateway's request ID is now the instruments' reply ID.
+    a7.modules[2].request_id = 0x77E;
+    assert!(a7.narrow(Policy::read_only()).is_err());
+}
+
 proptest! {
     // Profiles can come from users, so no input may panic the parser.
     #[test]
