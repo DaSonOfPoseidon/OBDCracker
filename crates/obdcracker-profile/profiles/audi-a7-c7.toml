@@ -252,3 +252,13 @@ id = 0x0600
 name = "VW coding value"
 decode = "hex"
 length = 11
+
+# `scan --discover` tries each request ID here with `22 F187`, expecting replies at the request ID
+# + 0x6A. 0x700..=0x769 is as far as that goes safely: the replies (0x76A..=0x7D3) are never a
+# request ID, so nothing sent looks like another module's reply. It covers the modules above and
+# opendbc's VW firmware query addresses (0x712 steering, 0x715 airbag, 0x74F camera, 0x757 radar;
+# see THIRD_PARTY.md). A module whose request ID is past 0x769 isn't found.
+[discovery]
+first_request_id = 0x700
+last_request_id = 0x769
+reply_offset = 0x6A

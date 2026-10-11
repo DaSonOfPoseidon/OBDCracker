@@ -10,6 +10,7 @@ use obdcracker_core::obd;
 use obdcracker_profile::{Decode, Profile, Protocol};
 use obdcracker_safety::{Policy, Target};
 use obdcracker_sim::SimBus;
+use obdcracker_transport::discover;
 use obdcracker_transport::elm::Elm;
 use obdcracker_transport::fingerprint::{self, DidValue, Fingerprint, ReadError, UdsModule};
 use obdcracker_transport::link::{Link, SerialLink, TcpLink};
@@ -74,7 +75,13 @@ enum Command {
     /// 09 PIDs 00 and 0A and mode 03 DTCs from each emissions ECU, then each profile module's
     /// identification and profile DIDs and its DTCs that are failed, pending, confirmed or failed
     /// since the last clear (UDS 0x22 and 0x19)
-    Scan,
+    Scan {
+        /// First look for modules the profile doesn't list: read the part number (UDS 0x22 F187)
+        /// from each request ID in the profile's discovery range (on the A7, 0x700 to 0x769),
+        /// then scan those that answer too
+        #[arg(long)]
+        discover: bool,
+    },
     /// List this computer's serial ports
     Ports,
     /// Show what the adapter is and the voltage it sees; sends nothing on the bus
@@ -188,8 +195,8 @@ fn run<T: Transport>(cli: &Cli, transport: T, link: &str, timing: Timing) -> Exi
     if let Command::Fingerprint = cli.command {
         return run_fingerprint(cli, &mut transport, timing);
     }
-    if let Command::Scan = cli.command {
-        return run_scan(cli, &mut transport, timing);
+    if let Command::Scan { discover } = cli.command {
+        return run_scan(cli, &mut transport, timing, discover);
     }
     let (target, payload, expect) = match cli.command {
         Command::Vin => (
@@ -198,7 +205,7 @@ fn run<T: Transport>(cli: &Cli, transport: T, link: &str, timing: Timing) -> Exi
             Expect::ObdEcus,
         ),
         // Handled before any transport is opened, or above.
-        Command::Ports | Command::Adapter | Command::Fingerprint | Command::Scan => {
+        Command::Ports | Command::Adapter | Command::Fingerprint | Command::Scan { .. } => {
             unreachable!()
         }
     };
@@ -391,14 +398,28 @@ fn scan_modules(cli: &Cli) -> Result<Vec<ScanModule>, String> {
     Ok(modules)
 }
 
-fn run_scan<T: Transport>(cli: &Cli, transport: &mut T, timing: Timing) -> ExitCode {
-    let (modules, policy) = match scan_modules(cli).and_then(|m| Ok((m, policy(cli)?))) {
+fn run_scan<T: Transport>(
+    cli: &Cli,
+    transport: &mut T,
+    timing: Timing,
+    discover: bool,
+) -> ExitCode {
+    let (mut modules, mut policy) = match scan_modules(cli).and_then(|m| Ok((m, policy(cli)?))) {
         Ok(found) => found,
         Err(e) => {
             eprintln!("{e}");
             return ExitCode::from(2);
         }
     };
+    if discover {
+        match discover_modules(cli, transport, timing) {
+            Ok((found, discovery_policy)) => {
+                modules.extend(found);
+                policy = discovery_policy;
+            }
+            Err(code) => return code,
+        }
+    }
     match scan::scan(transport, &policy, &modules, timing) {
         Ok(_) if cli.dry_run => {
             println!("dry run: nothing was sent");
@@ -424,6 +445,74 @@ fn run_scan<T: Transport>(cli: &Cli, transport: &mut T, timing: Timing) -> ExitC
             ExitCode::FAILURE
         }
     }
+}
+
+// Looks for modules in the profile's discovery range and prints each that answers. Returns those
+// the profile doesn't list, to scan with the rest, and the policy that allows them.
+fn discover_modules<T: Transport>(
+    cli: &Cli,
+    transport: &mut T,
+    timing: Timing,
+) -> Result<(Vec<ScanModule>, Policy), ExitCode> {
+    let usage = |e: String| {
+        eprintln!("{e}");
+        ExitCode::from(2)
+    };
+    let Some(name) = cli.profile.as_ref().or(cli.sim.as_ref()) else {
+        return Err(usage(
+            "--discover needs a profile with a discovery range (--profile or --sim)".to_owned(),
+        ));
+    };
+    let profile = Profile::builtin(name).map_err(|e| usage(format!("profile {name}: {e}")))?;
+    let candidates = profile.candidates();
+    if candidates.is_empty() {
+        return Err(usage(format!(
+            "--discover needs a profile with a discovery range, and {name} has none"
+        )));
+    }
+    let policy = profile
+        .narrow_for_discovery(Policy::read_only())
+        .map_err(|e| usage(format!("profile {name}: {e}")))?;
+    let found = discover::discover(transport, &policy, &candidates, timing).map_err(|e| {
+        eprintln!("{e}");
+        ExitCode::FAILURE
+    })?;
+    let mut unlisted = Vec::new();
+    for module in &found {
+        let listed = profile
+            .modules
+            .iter()
+            .find(|listed| listed.request_id == module.request_id);
+        let known = listed.map_or_else(
+            || " (not in profile)".to_owned(),
+            |listed| format!(" (profile: {})", listed.name),
+        );
+        let part = match &module.part_number {
+            Ok(DidValue::Text(text)) => text.clone(),
+            Ok(bytes @ DidValue::Bytes(_)) => format!("[{bytes}]"),
+            Err(e) => format!("({e})"),
+        };
+        println!(
+            "{:03X} found at {:03X}{known}, F187 {part}",
+            module.response_id, module.request_id
+        );
+        if listed.is_none() {
+            unlisted.push(ScanModule {
+                module: UdsModule {
+                    name: format!("module-{:03X}", module.request_id),
+                    request_id: module.request_id,
+                    response_id: module.response_id,
+                },
+                extra_dids: Vec::new(),
+            });
+        }
+    }
+    println!(
+        "discovery: {} of {} request IDs answered",
+        found.len(),
+        candidates.len()
+    );
+    Ok((unlisted, policy))
 }
 
 fn print_scan(found: &Scan) {

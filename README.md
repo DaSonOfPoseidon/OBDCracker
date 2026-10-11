@@ -46,6 +46,10 @@ from developers being careful:
   (`19 01 AF`, `19 02 AF`). It lists only DTCs that are failed, pending, confirmed or failed since the last clear, not
   the module's untested codes. DIDs whose length the profile gives are read three to a request; any a reply leaves
   out or doesn't fit are read again one at a time, and must then be exactly that length.
+- `scan --discover` first looks for modules the profile doesn't list. It reads the part number (`22 F1 87`) from each
+  request ID in the profile's discovery range, one at a time and through the policy narrowed to those IDs, then scans
+  whatever answered along with the profile's modules. On the A7 that's 0x700 to 0x769, replies at +0x6A: no ID it sends
+  on is ever a reply ID. A module whose request ID is past 0x769 isn't found.
 - Every frame sent or received in a real session is appended to an audit log, along with any adapter error (such as an
   adapter mishearing a request it may already have sent).
 - **One gap: ELM327/STN adapters.** Their serial line has no checksum, and the adapter sends a request before the
@@ -89,6 +93,7 @@ obdcracker --serial <PORT> adapter     # check the adapter; sends nothing to the
 obdcracker --serial <PORT> fingerprint
 obdcracker --dry-run --profile a7 scan # what scan would send; opens no adapter
 obdcracker --serial <PORT> --profile a7 scan
+obdcracker --serial <PORT> --profile a7 scan --discover  # also look for modules the profile doesn't list
 ```
 
 ## Using it as a library

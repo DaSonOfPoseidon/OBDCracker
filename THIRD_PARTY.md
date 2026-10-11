@@ -7,7 +7,7 @@ third-party code ships in the crates.
 |---|---|---|---|
 | [pylessard/python-can-isotp](https://github.com/pylessard/python-can-isotp) | `5593c219f35e739554d743a98d3af68c9332da31` | MIT | `crates/obdcracker-core/tests/third_party.rs` (ISO-TP frames and reassembly) |
 | [pylessard/python-udsoncan](https://github.com/pylessard/python-udsoncan) | `78e85f1b5dac968b6a2d478fce9c0cc5adba2b50` | MIT | `crates/obdcracker-core/tests/third_party.rs` (UDS 0x22, 0x19, negative responses) |
-| [commaai/opendbc](https://github.com/commaai/opendbc) | `229dc7062d8986b4f954c7c97875b4ffd0044d12` | MIT | `crates/obdcracker-sim/fixtures/opendbc-vag.toml` (VW/Audi identification replies, from `scripts/import-opendbc.sh`) |
+| [commaai/opendbc](https://github.com/commaai/opendbc) | `229dc7062d8986b4f954c7c97875b4ffd0044d12` | MIT | `crates/obdcracker-sim/fixtures/opendbc-vag.toml` (VW/Audi identification replies, from `scripts/import-opendbc.sh`); the VW UDS module addresses in `opendbc/car/volkswagen/fingerprints.py` and `values.py` (request IDs 0x712, 0x715, 0x74F, 0x757, replies at +0x6A), which the A7 profile's discovery range covers |
 
 ## pylessard/python-can-isotp and pylessard/python-udsoncan
 

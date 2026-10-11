@@ -2,7 +2,7 @@
 
 use obdcracker_core::isotp::Addressing;
 use obdcracker_profile::{Decode, Profile, ProfileError, Protocol, standard_decode};
-use obdcracker_safety::{Policy, Target};
+use obdcracker_safety::{ModuleIds, Policy, Target};
 use proptest::prelude::*;
 
 const MINIMAL: &str = r#"
@@ -417,4 +417,99 @@ fn a_did_layout_needs_every_length() {
     // F1A3 has no length, and F187 isn't listed at all.
     assert_eq!(engine.did_layout(&[0xF190, 0xF1A3]), None);
     assert_eq!(engine.did_layout(&[0xF187]), None);
+}
+
+// MINIMAL's engine (0x7E0/0x7E8) with a gateway at 0x710/0x77A, and a discovery range.
+fn with_discovery(first: u32, last: u32, offset: u32) -> String {
+    format!(
+        "{MINIMAL}\n[[module]]\nname = \"gateway\"\nrequest_id = 0x710\nresponse_id = 0x77A\n\
+         protocol = \"uds\"\n\n[discovery]\nfirst_request_id = {first}\nlast_request_id = {last}\n\
+         reply_offset = {offset}\n"
+    )
+}
+
+#[test]
+fn a_discovery_range_lists_each_candidate_and_its_reply_id() {
+    let profile = Profile::from_toml(&with_discovery(0x70E, 0x710, 0x6A)).unwrap();
+    assert_eq!(
+        profile.candidates(),
+        [
+            ModuleIds {
+                request: 0x70E,
+                reply: 0x778
+            },
+            ModuleIds {
+                request: 0x70F,
+                reply: 0x779
+            },
+            // A listed module may be a candidate too, with its own reply ID.
+            ModuleIds {
+                request: 0x710,
+                reply: 0x77A
+            },
+        ]
+    );
+    assert_eq!(Profile::from_toml(MINIMAL).unwrap().candidates(), []);
+}
+
+#[test]
+fn the_a7_profile_discovers_0x700_to_0x769() {
+    let a7 = Profile::builtin("a7").unwrap();
+    let candidates = a7.candidates();
+    assert_eq!(candidates.len(), 0x6A);
+    assert_eq!(candidates[0].request, 0x700);
+    assert_eq!(candidates.last().unwrap().request, 0x769);
+    assert!(candidates.iter().all(|c| c.reply == c.request + 0x6A));
+}
+
+#[test]
+fn a_discovery_policy_allows_candidates_but_never_their_reply_ids() {
+    let profile = Profile::from_toml(&with_discovery(0x700, 0x769, 0x6A)).unwrap();
+    let read = [0x22, 0xF1, 0x87];
+    let modules_only = profile.narrow(Policy::read_only()).unwrap();
+    let discovery = profile.narrow_for_discovery(Policy::read_only()).unwrap();
+    let approved = discovery.approve(Target::Physical(0x74F), &read).unwrap();
+    assert_eq!(approved.reply_id(), Some(0x7B9));
+    // A plain narrowed policy still refuses modules the profile doesn't list.
+    assert!(
+        modules_only
+            .approve(Target::Physical(0x74F), &read)
+            .is_err()
+    );
+    for reply in [0x76A, 0x77A, 0x7B9, 0x7D3, 0x7E8] {
+        assert!(
+            discovery.approve(Target::Physical(reply), &read).is_err(),
+            "{reply:03X}"
+        );
+    }
+}
+
+#[test]
+fn rejects_a_discovery_range_that_would_send_on_a_reply_id() {
+    for (first, last, offset) in [
+        // 0x70E..=0x77A includes the gateway's reply ID 0x77A.
+        (0x70E, 0x77A, 0x6A),
+        // Replies at +0x10 make 0x710 (a candidate's and the gateway's request) a reply ID.
+        (0x700, 0x710, 0x10),
+        // Outside the diagnostic IDs, or the broadcast.
+        (0x6FF, 0x700, 0x6A),
+        (0x7DF, 0x7DF, 0x01),
+        (0x7A0, 0x7A0, 0x60),
+        // The OBD-II reply IDs.
+        (0x7E8, 0x7E8, 0x01),
+        // The gateway's request ID with another reply ID.
+        (0x710, 0x710, 0x10),
+    ] {
+        assert!(
+            matches!(
+                Profile::from_toml(&with_discovery(first, last, offset)),
+                Err(ProfileError::Discovery(_))
+            ),
+            "{first:03X}..={last:03X} +{offset:X}"
+        );
+    }
+    assert_eq!(
+        Profile::from_toml(&with_discovery(0x769, 0x700, 0x6A)).unwrap_err(),
+        ProfileError::DiscoveryRange
+    );
 }
