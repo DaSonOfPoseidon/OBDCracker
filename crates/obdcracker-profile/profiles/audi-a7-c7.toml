@@ -2,8 +2,9 @@
 #
 # The expected layout, from public VAG UDS references. It hasn't been read from the car yet:
 # the M5 read-only module scan confirms or corrects every entry before it's used live.
-# Standard identification DIDs (0xF180..=0xF19F) need no entry. F197 (system name) is listed to
-# name it; the rest are VAG extras.
+# Standard identification DIDs (0xF180..=0xF19F) need no entry. F18B (manufacture date) is listed
+# to show it as bytes: it's BCD, such as 13 11 19, and all zeros when unset. F197 (system name) is
+# listed to name it; the rest are VAG extras.
 
 name = "2014 Audi A7 3.0 TDI (C7)"
 bitrate = 500000
@@ -14,6 +15,11 @@ vag_address = 0x01
 request_id = 0x7E0
 response_id = 0x7E8
 protocol = "uds"
+
+[[module.did]]
+id = 0xF18B
+name = "manufacture date"
+decode = "hex"
 
 [[module.did]]
 id = 0xF197
@@ -43,6 +49,11 @@ response_id = 0x7E9
 protocol = "uds"
 
 [[module.did]]
+id = 0xF18B
+name = "manufacture date"
+decode = "hex"
+
+[[module.did]]
 id = 0xF197
 name = "system name"
 decode = "text"
@@ -60,6 +71,11 @@ response_id = 0x77A
 protocol = "uds"
 
 [[module.did]]
+id = 0xF18B
+name = "manufacture date"
+decode = "hex"
+
+[[module.did]]
 id = 0xF197
 name = "system name"
 decode = "text"
@@ -75,6 +91,11 @@ vag_address = 0x17
 request_id = 0x714
 response_id = 0x77E
 protocol = "uds"
+
+[[module.did]]
+id = 0xF18B
+name = "manufacture date"
+decode = "hex"
 
 [[module.did]]
 id = 0xF197
