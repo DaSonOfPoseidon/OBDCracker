@@ -109,6 +109,9 @@ pub enum DidValue {
     Text(String),
     /// Data that isn't printable text, as received. Shown as hex.
     Bytes(Vec<u8>),
+    /// A placeholder that says the module has no value stored, such as a VIN of 17 dashes
+    /// ([`obdcracker_core::obd::is_vin_placeholder`]). The bytes are in the audit log.
+    NotSet,
 }
 
 impl fmt::Display for DidValue {
@@ -116,6 +119,7 @@ impl fmt::Display for DidValue {
         match self {
             Self::Text(text) => f.write_str(text),
             Self::Bytes(bytes) => f.write_str(&hex(bytes)),
+            Self::NotSet => f.write_str("not set"),
         }
     }
 }

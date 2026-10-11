@@ -713,6 +713,18 @@ fn standard_dids_must_have_their_iso_format() {
     let fixture =
         "[[ecu]]\nmodule = \"engine\"\n[[ecu.did]]\nid = 0xF190\ntext = \"WAUZZZ4G1EN000000\"\n";
     assert!(SimBus::new(&listed, fixture).is_ok());
+    // A module with no VIN stored sends 17 of one filler byte, as the A7's rear lid does (#63).
+    for (value, ok) in [
+        ("text = \"-----------------\"", true),
+        (
+            "hex = \"00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00\"",
+            true,
+        ),
+        ("text = \"----------------\"", false),
+    ] {
+        let fixture = format!("[[ecu]]\nmodule = \"engine\"\n[[ecu.did]]\nid = 0xF190\n{value}\n");
+        assert_eq!(SimBus::new(&listed, &fixture).is_ok(), ok, "{value}");
+    }
     // Identification DIDs without a fixed text format, such as 0xF18B (manufacturing date), take any bytes.
     let fixture = "[[ecu]]\nmodule = \"engine\"\n[[ecu.did]]\nid = 0xF18B\nhex = \"26 10 08\"\n";
     assert!(SimBus::new(&a7, fixture).is_ok());

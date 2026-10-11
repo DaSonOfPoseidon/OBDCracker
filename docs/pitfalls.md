@@ -56,7 +56,8 @@ Each entry names the class, what to check, and where it bit us.
   P0000 in mode 03, and 0x000000 and 0xFFFFFF ("all groups") in UDS.
 - **But check real modules before calling padding malformed.** A list slot can be legitimately empty: the A7's
   engine answers mode 09 PID 04 with five CALIDs, one of them all 0x00 (CVN 00000000). Rejecting it threw away
-  the four real ones (#46). Model an empty slot explicitly (`None`), and still reject one that isn't text.
+  the four real ones (#46). Model an empty slot explicitly (`None`), and still reject one that isn't text. The
+  same goes for a VIN: three A7 modules answer F190 with 17 dashes, which scan called malformed (#63).
 - **Names are keys.** If lookups are exact, reject names with surrounding spaces rather than trimming them in one
   place only, and treat names that differ only in case as duplicates.
 - **Escape what you write, too.** A format built by hand (JSON Lines, TOML) must escape every string it

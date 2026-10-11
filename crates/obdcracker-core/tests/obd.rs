@@ -241,7 +241,7 @@ mod stored_dtcs {
 mod vehicle_info {
     use obdcracker_core::obd::{
         EcuName, check_vin, decode_calids, decode_cvns, decode_ecu_name, decode_supported_info,
-        decode_vin, vehicle_info,
+        decode_vin, is_vin_placeholder, vehicle_info,
     };
     use obdcracker_core::response::Error;
 
@@ -333,6 +333,28 @@ mod vehicle_info {
                 "{}",
                 String::from_utf8_lossy(bad)
             );
+        }
+    }
+
+    #[test]
+    fn a_vin_placeholder_is_17_of_one_filler_byte() {
+        // What a module with no VIN stored sends in F190: the A7's rear lid sends dashes (#63).
+        for unset in [[b'-'; 17], [b' '; 17], [0x00; 17], [0xFF; 17]] {
+            assert!(is_vin_placeholder(&unset), "{unset:02X?}");
+            assert_eq!(check_vin(&unset), Err(Error::Malformed));
+        }
+        let mut mixed = [b'-'; 17];
+        mixed[16] = 0x00;
+        for not in [
+            &b""[..],
+            &[b'-'; 16],
+            &[b'-'; 18],
+            &mixed,
+            &[b'.'; 17],
+            &[b'0'; 17],
+            b"WAU2MBFC6EN093415",
+        ] {
+            assert!(!is_vin_placeholder(not), "{not:02X?}");
         }
     }
 
