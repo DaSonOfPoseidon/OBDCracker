@@ -140,8 +140,8 @@ impl<'a, T: Transport + ?Sized> ExtendedSession<'a, T> {
     /// # Errors
     ///
     /// The policy refuses a session request for `target` or doesn't know its reply ID, the
-    /// module refuses `10 03` or doesn't answer, or the adapter fails. The module isn't sent
-    /// `10 01` then.
+    /// module refuses `10 03` or doesn't answer, or the adapter fails. Unless the module refused
+    /// it, `10 03` may have taken effect, so the module is sent `10 01` then.
     pub fn enter(
         transport: &'a mut T,
         policy: &Policy,
@@ -170,9 +170,20 @@ impl<'a, T: Transport + ?Sized> ExtendedSession<'a, T> {
             // Nothing to leave until the module has entered.
             ended: true,
         };
-        session.request(&session.enter.clone())?;
-        session.ended = false;
-        Ok(session)
+        match session.request(&session.enter.clone()) {
+            Ok(()) => {
+                session.ended = false;
+                Ok(session)
+            }
+            // The module answered that it stayed in the default session.
+            Err(e @ SessionError::Refused(_)) => Err(e),
+            Err(e) => {
+                // No answer doesn't mean the module didn't switch: only its reply may be lost.
+                // Dropping the session sends `10 01`.
+                session.ended = false;
+                Err(e)
+            }
+        }
     }
 
     /// Sends `TesterPresent` if [`S3::keepalive`] has passed since the last request the module

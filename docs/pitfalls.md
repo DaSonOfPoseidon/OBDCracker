@@ -66,6 +66,10 @@ Each entry names the class, what to check, and where it bit us.
 - **Don't over-restrict.** Know the protocol before rejecting something: Toyota body modules legitimately share
   CAN ID 0x750 with different extended-address bytes.
 
+- **State computed on read must also be stored.** The sim's `session()` reported a lapsed session as default
+  without storing it, so raising S3 afterwards brought the expired session back (#68, Codex). Write the derived
+  state back before changing anything it depends on.
+
 ## Arithmetic and time
 
 - **Compare against a limit before incrementing.** `pending += 1; if pending > max` overflows when a caller sets
@@ -97,6 +101,10 @@ Each entry names the class, what to check, and where it bit us.
   (ISO 14229-1), so it answers the request then (`response::answers_after_pending`). Check claims about the
   standard against a source before writing them down; this entry first said 0x19 had no such bit, then missed the
   0x78 exception (PR #9, PR #11).
+- **No answer isn't no effect.** A request that timed out may still have reached the module and taken effect;
+  only its reply may be lost. Undo what it could have done: `ExtendedSession::enter` sends `10 01` after an
+  unanswered `10 03`, and skips it only when the module refused (#68, Codex). The reverse holds too: never count an
+  unanswered or refused request as having worked (the guard's S3 clock only restarts on positive replies).
 - **A DTC status mask of 0xFF isn't "every stored fault".** The "test not completed" bits (4 and 6) are set on every
   code a module hasn't tested yet, so `19 02 FF` returns its whole DTC table: about 330 codes across four A7
   modules, none failed, pending or confirmed (#49). Ask for the fault bits (`FAULT_MASK`, 0xAF), and still filter

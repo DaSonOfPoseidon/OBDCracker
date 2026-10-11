@@ -289,3 +289,19 @@ fn a_longer_s3_does_not_revive_a_lapsed_session() {
         .set_s3(Duration::from_secs(60));
     assert_eq!(session(&bus), Session::Default);
 }
+
+#[test]
+fn guard_leaves_a_session_whose_entry_went_unanswered() {
+    // The silent module still switches session; only its reply is lost, so `10 03` may have
+    // taken effect and the guard sends `10 01` anyway.
+    let mut bus = car();
+    bus.ecu_mut("engine")
+        .unwrap()
+        .set_fault(Some(obdcracker_sim::Fault::Silent));
+    let error =
+        ExtendedSession::enter(&mut bus, &Policy::read_only(), ENGINE, Timing::default(), GUARD)
+            .unwrap_err();
+    assert_eq!(error, SessionError::Transport(Error::Timeout));
+    assert_eq!(sent(&bus), [vec![0x10, 0x03], vec![0x10, 0x01]]);
+    assert_eq!(session(&bus), Session::Default);
+}
