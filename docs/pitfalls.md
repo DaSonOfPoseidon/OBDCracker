@@ -136,6 +136,10 @@ Each entry names the class, what to check, and where it bit us.
   trailing odd digit as a response count, so a digit flipped to a control character drops out and shifts the rest of
   the line by a nibble: `22 F1 87` becomes `2F 18 7`. When reasoning about corruption, count deletions as well as
   substitutions, and check what the device does with the result (#19).
+- **Don't rely on a device to throw away a half-written line.** The ELM327 datasheet says an unfinished line is
+  discarded after about 20 s, but the STN in an OBDLink EX holds it until the next carriage return, whenever that
+  comes (#54). Checking a request's echo before its carriage return (#34) only helps if a bad line is then ended
+  explicitly with something the adapter refuses (`XX\r`), not left for the next command to finish.
 - **Weigh a mitigation against what it costs.** Refusing every request with a dangerous one-bit-flip neighbour
   (PR #31) refused most ordinary reads to guard against a bit error on the few centimetres of UART behind an adapter's
   USB chip. Estimate how likely the failure is and what it would actually do (one frame can't flash a module), and look

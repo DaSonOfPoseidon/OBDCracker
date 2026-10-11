@@ -468,18 +468,22 @@ mod requests {
     }
 
     #[test]
-    fn a_request_the_adapter_misheard_fails_closed() {
+    fn a_request_the_adapter_misheard_never_reaches_the_bus() {
         let mut elm = connect(car());
         elm.send(&approve(Target::Physical(0x7E0), &[0x09, 0x02]))
             .unwrap();
         while elm.recv(Duration::from_secs(1)).is_ok() {}
-        // 0902 arrives as 0912. The adapter has sent it by the time its echo shows that, so
-        // all the driver can do is stop.
+        let sent = elm.link().elm.sent.len();
+        // 0902 arrives as 0912. Its echo shows that before the carriage return is written, so
+        // the driver ends the line with non-hex characters instead (#34): the adapter refuses
+        // it, and nothing goes on the bus.
         elm.link_mut().corrupt_next_write = Some((2, 0x01));
-        elm.send(&approve(Target::Physical(0x7E0), &[0x09, 0x02]))
-            .unwrap();
-        let err = elm.recv(Duration::from_secs(1)).unwrap_err();
+        let err = elm
+            .send(&approve(Target::Physical(0x7E0), &[0x09, 0x02]))
+            .unwrap_err();
         assert!(err.to_string().contains("0912"), "{err}");
+        assert_eq!(elm.link().elm.sent.len(), sent);
+        assert_eq!(commands(&elm).last().unwrap(), "0912XX");
         let written = elm.link().written.len();
         assert!(
             elm.send(&approve(Target::Physical(0x7E0), &[0x09, 0x02]))
@@ -499,17 +503,17 @@ mod requests {
         elm.send(&approve(Target::Physical(0x7E0), &[0x09, 0x02]))
             .unwrap();
         while elm.recv(Duration::from_secs(1)).is_ok() {}
-        // 0902 arrives as 0912, which the adapter has sent by the time it echoes it.
+        // 0902 arrives as 0912; the driver kills the line before its carriage return.
         elm.link_mut().corrupt_next_write = Some((2, 0x01));
         let mut elm = Audited::open(&log, elm, "fake").unwrap();
-        elm.send(&approve(Target::Physical(0x7E0), &[0x09, 0x02]))
-            .unwrap();
-        let err = elm.recv(Duration::from_secs(1)).unwrap_err();
+        let err = elm
+            .send(&approve(Target::Physical(0x7E0), &[0x09, 0x02]))
+            .unwrap_err();
 
         let audit = std::fs::read_to_string(&log).unwrap();
         let last: serde_json::Value = serde_json::from_str(audit.lines().last().unwrap()).unwrap();
         assert_eq!(last["dir"], "err", "{audit}");
-        assert_eq!(last["op"], "recv", "{audit}");
+        assert_eq!(last["op"], "send", "{audit}");
         assert_eq!(last["error"], err.to_string(), "{audit}");
         assert!(last["error"].as_str().unwrap().contains("0912"), "{audit}");
     }
@@ -520,11 +524,89 @@ mod requests {
         elm.send(&approve(Target::Physical(0x7E0), &[0x09, 0x02]))
             .unwrap();
         while elm.recv(Duration::from_secs(1)).is_ok() {}
+        // It echoed the first request before its carriage return, so a request it doesn't echo
+        // is killed, not sent.
+        let sent = elm.link().elm.sent.len();
         elm.link_mut().elm.settings.echo = false;
-        elm.send(&approve(Target::Physical(0x7E0), &[0x09, 0x02]))
+        let err = elm
+            .send(&approve(Target::Physical(0x7E0), &[0x09, 0x02]))
+            .unwrap_err();
+        assert!(err.to_string().contains("echo"), "{err}");
+        assert_eq!(elm.link().elm.sent.len(), sent);
+        assert_eq!(commands(&elm).last().unwrap(), "0902XX");
+    }
+
+    #[test]
+    fn the_carriage_return_waits_for_the_echo() {
+        // The STN echoes each character as it arrives and holds the line until the carriage
+        // return (#54), so the request's digits go first, and the carriage return only once they
+        // have all come back.
+        let mut elm = broadcasting();
+        elm.link_mut().writes.clear();
+        elm.send(&approve(Target::ObdFunctional, &[0x09, 0x02]))
+            .unwrap();
+        assert_eq!(elm.link().writes, [b"0902".to_vec(), b"\r".to_vec()]);
+        assert!(elm.recv(Duration::from_secs(1)).is_ok());
+    }
+
+    #[test]
+    fn an_adapter_that_echoes_only_whole_lines_still_works() {
+        // Some clones may echo a line only once it ends. With nothing echoed before the carriage
+        // return on the first request, the driver checks the echo afterwards, as it did before
+        // #34, and doesn't wait for an early echo again.
+        let mut fake = car();
+        fake.echo_at_line_end = true;
+        let mut elm = connect(fake);
+        for _ in 0..2 {
+            let start = Instant::now();
+            elm.send(&approve(Target::ObdFunctional, &[0x09, 0x02]))
+                .unwrap();
+            assert!(elm.recv(Duration::from_secs(1)).is_ok());
+            while elm.recv(Duration::from_secs(1)).is_ok() {}
+            if elm.link().elm.sent.len() == 2 {
+                assert!(
+                    start.elapsed() < Duration::from_millis(500),
+                    "{:?}",
+                    start.elapsed()
+                );
+            }
+        }
+        assert_eq!(elm.link().elm.sent.len(), 2);
+        // Its late echo is still checked: a misheard request fails, though it went out.
+        elm.link_mut().corrupt_next_write = Some((2, 0x01));
+        elm.send(&approve(Target::ObdFunctional, &[0x09, 0x02]))
             .unwrap();
         let err = elm.recv(Duration::from_secs(1)).unwrap_err();
-        assert!(err.to_string().contains("echo"), "{err}");
+        assert!(err.to_string().contains("0912"), "{err}");
+    }
+
+    #[test]
+    fn no_single_bit_error_in_the_kill_lets_the_line_out() {
+        // A misheard line (any line of hex digits) ended with the driver's kill, `XX` and a
+        // carriage return, with any one bit of the kill flipped: the adapter never sends it.
+        for line in ["0912", "22F187", "1902AF"] {
+            let kill = b"XX\r";
+            for index in 0..kill.len() {
+                for bit in 0..8 {
+                    let mut bytes = line.as_bytes().to_vec();
+                    let mut flipped = kill.to_vec();
+                    flipped[index] ^= 1 << bit;
+                    bytes.extend(flipped);
+                    bytes.extend(b"ATI\r");
+                    let mut elm = FakeElm::silent();
+                    elm.settings.protocol = Some("6".into());
+                    for byte in bytes {
+                        elm.write(&[byte]);
+                        elm.read(usize::MAX);
+                    }
+                    assert_eq!(
+                        elm.sent,
+                        [],
+                        "{line} with bit {bit} of kill byte {index} flipped"
+                    );
+                }
+            }
+        }
     }
 
     #[test]
@@ -735,8 +817,9 @@ mod misbehaving {
         let mut elm = connect(car());
         elm.send(&approve(Target::ObdFunctional, &[0x09, 0x02]))
             .unwrap();
-        // After the echo, replace the adapter's output with an endless stream of first frames.
-        elm.link_mut().inject = b"0902\r".to_vec();
+        // After the echo (its digits were read before the carriage return), replace the
+        // adapter's output with an endless stream of first frames.
+        elm.link_mut().inject = b"\r".to_vec();
         elm.link_mut().flood = Some(b"7E8 10 14 49 02 01 57 41 55\r".to_vec());
         let start = Instant::now();
         assert_eq!(elm.recv(Duration::from_millis(200)), Err(Error::Timeout));
