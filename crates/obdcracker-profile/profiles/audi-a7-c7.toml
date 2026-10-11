@@ -1,7 +1,8 @@
 # 2014 Audi A7 3.0 TDI (C7, platform 4G).
 #
-# The expected layout, from public VAG UDS references. It hasn't been read from the car yet:
-# the M5 read-only module scan confirms or corrects every entry before it's used live.
+# The layout comes from public VAG UDS references, and the second read-only session (#49) confirmed
+# every module here: each answered on its request and reply IDs (a VAG reply ID is the request ID
+# + 0x6A, except the OBD-II pairs).
 # Standard identification DIDs (0xF180..=0xF19F) need no entry. F18B (manufacture date) is listed
 # to show it as bytes: it's BCD, such as 13 11 19, and all zeros when unset. F197 (system name) is
 # listed to name it; the rest are VAG extras.
@@ -61,6 +62,11 @@ decode = "text"
 [[module.did]]
 id = 0xF1A3
 name = "VW ECU hardware version"
+decode = "text"
+
+[[module.did]]
+id = 0xF1AA
+name = "VW workshop system name"
 decode = "text"
 
 [[module]]

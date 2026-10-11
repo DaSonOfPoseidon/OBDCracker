@@ -1,33 +1,155 @@
 # What the simulated A7's modules answer. Module addresses come from the A7 vehicle profile.
 #
-# Values marked "real" are what the car (tuned, EGR-deleted) sent in the first read-only session
-# (#46, 2026-10-10): the engine's and transmission's mode 09 VIN, CALIDs and CVNs, and their
-# F187, F188 (refused), F189, F191 and F19E. The transmission didn't answer mode 09 PID 02, so it
-# has no VIN here. Everything else is a placeholder with the right shape but a made-up value,
-# until a later session reads it. Part and hardware numbers are 11 bytes, space-padded, and
-# versions 4 bytes, as real VAG engines and transmissions answer (see opendbc-vag.toml).
+# Every value is what the car (tuned, EGR-deleted) sent, ignition on and engine off: mode 09 VIN,
+# CALIDs and CVNs from the first read-only session (#46, 2026-10-10), and everything else from the
+# second (#49, 2026-10-10). A DID that isn't listed was refused with NRC 0x31 (request out of
+# range), as the car refused it.
+#
+# Differences from the car, because the sim can't express them yet:
+# - The engine also lists mode 09 PID 0B in its PID 00 bitmap; the sim builds that bitmap from the
+#   PIDs it has, so 0B is missing.
+# - The transmission sent one response-pending (7F 19 78) before its DTC list; the sim models
+#   response-pending only for DIDs.
+# - Whether a module answers ReadDTCInformation 0x0A (supported DTCs) is untested; only 0x02 is
+#   listed, since 0x01 was refused (NRC 0x12) and 0x0A wasn't asked.
+#
+# UDS DTCs are each module's full table as `19 02 FF` returned it. Every status is "test not
+# completed" (0x10, 0x40 or 0x50): none is failed, pending or confirmed.
 
 [[ecu]]
 module = "engine"
-dtc_format = 0x00
+dtc_reports = [0x02]
+status_availability = 0xFF
+dtc = [
+  { code = 0x001257, status = 0x50 },
+  { code = 0x001259, status = 0x50 },
+  { code = 0x00125A, status = 0x50 },
+  { code = 0x00125B, status = 0x50 },
+  { code = 0x002296, status = 0x40 },
+  { code = 0x002297, status = 0x40 },
+  { code = 0x00793D, status = 0x50 },
+  { code = 0x00793C, status = 0x50 },
+  { code = 0x00793A, status = 0x50 },
+  { code = 0x00793B, status = 0x50 },
+  { code = 0x0052F1, status = 0x40 },
+  { code = 0x001456, status = 0x40 },
+  { code = 0x00145B, status = 0x40 },
+  { code = 0x00145D, status = 0x40 },
+  { code = 0x001460, status = 0x40 },
+  { code = 0x00146D, status = 0x40 },
+  { code = 0x001470, status = 0x40 },
+  { code = 0x00537F, status = 0x40 },
+  { code = 0x00154E, status = 0x40 },
+  { code = 0x00154F, status = 0x40 },
+  { code = 0x00154D, status = 0x40 },
+  { code = 0x001550, status = 0x40 },
+  { code = 0x001498, status = 0x40 },
+  { code = 0x001552, status = 0x40 },
+  { code = 0x001555, status = 0x40 },
+  { code = 0x0012D0, status = 0x40 },
+  { code = 0x000A54, status = 0x50 },
+  { code = 0x002287, status = 0x50 },
+  { code = 0x001556, status = 0x40 },
+  { code = 0x0012BA, status = 0x50 },
+  { code = 0x0012BB, status = 0x50 },
+  { code = 0x0015AF, status = 0x40 },
+  { code = 0x0015B0, status = 0x40 },
+  { code = 0x0015B1, status = 0x40 },
+  { code = 0x002113, status = 0x40 },
+  { code = 0x002B51, status = 0x40 },
+  { code = 0x00492B, status = 0x40 },
+  { code = 0x0012CD, status = 0x40 },
+  { code = 0x0012CE, status = 0x40 },
+  { code = 0x0012D1, status = 0x40 },
+  { code = 0x001B7D, status = 0x40 },
+  { code = 0x001B7E, status = 0x40 },
+  { code = 0x001184, status = 0x40 },
+  { code = 0x001EDD, status = 0x40 },
+  { code = 0x001512, status = 0x40 },
+  { code = 0x00133A, status = 0x40 },
+  { code = 0x0038E5, status = 0x40 },
+  { code = 0x0038E7, status = 0x40 },
+  { code = 0x0049A7, status = 0x40 },
+  { code = 0x0049A8, status = 0x40 },
+  { code = 0x0049AB, status = 0x40 },
+  { code = 0x0049AC, status = 0x40 },
+  { code = 0x00256A, status = 0x50 },
+  { code = 0x001433, status = 0x40 },
+  { code = 0x001434, status = 0x40 },
+  { code = 0x0015D0, status = 0x40 },
+  { code = 0x00143A, status = 0x40 },
+  { code = 0x002263, status = 0x40 },
+  { code = 0x009401, status = 0x40 },
+  { code = 0x009409, status = 0x40 },
+  { code = 0x0092DA, status = 0x40 },
+  { code = 0x0013AE, status = 0x40 },
+  { code = 0x009500, status = 0x40 },
+  { code = 0x009501, status = 0x40 },
+  { code = 0x009502, status = 0x40 },
+]
 
-# Real: vin, calids, cvns. Placeholders: ecu_name, dtcs, pids.
 [ecu.obd]
 vin = "WAU2MBFC6EN093415"
 # "" is an empty slot: 16 bytes of 0x00, as the engine sends in its second one.
 calids = ["4G0401N 0016BVAB", "", "0000000000000000", "NOX00907807 0015", "PMS00906261 4010"]
 cvns = ["9B F7 47 0D", "00 00 00 00", "00 00 00 00", "38 D3 FF 82", "0E 1F C3 9E"]
 ecu_name = { acronym = "ECM", name = "EngineControl" }
-dtcs = ["P0299"]
+dtcs = []
 
-# Mode 01 PID → data bytes: coolant 90 °C, 800 rpm, 0 km/h, 14.0 V
+# Mode 01 PID → data bytes. The bitmap PIDs (00, 20, …) are built from this list, and match the
+# car's.
 [ecu.obd.pids]
-"05" = "82"
-"0C" = "0C 80"
+"01" = "00 2F 28 20"
+"04" = "00"
+"05" = "67"
+"0C" = "00 00"
 "0D" = "00"
-"42" = "36 B0"
+"0F" = "50"
+"10" = "00 EC"
+"11" = "E1"
+"13" = "01"
+"1C" = "03"
+"1F" = "00 00"
+"21" = "00 00"
+"24" = "00 00 00 00"
+"30" = "ED"
+"31" = "1C C3"
+"33" = "62"
+"3C" = "00 00"
+"3E" = "02 C6"
+"41" = "00 3F 28 28"
+"42" = "2E E0"
+"45" = "FF"
+"46" = "47"
+"49" = "26"
+"4A" = "26"
+"4C" = "FF"
+"4F" = "20 00 00 00"
+"51" = "04"
+"5C" = "61"
+"5D" = "69 00"
+"5E" = "00 00"
+"61" = "74"
+"62" = "7D"
+"63" = "02 44"
+"65" = "08 00"
+"67" = "03 67 4F"
+"69" = "07 00 00 80 00 00 00"
+"6B" = "10 0A 00 00 00"
+"6D" = "03 0B B8 00 19 00 00 00 00 00 00"
+"70" = "03 0C 80 0C 5C 00 00 00 00 00"
+"71" = "07 00 01 00 00 02"
+"78" = "0F 03 DF 00 00 00 00 00 00"
+"7A" = "01 23 28 00 00 00 00"
+"7F" = "01 00 21 42 0C 00 00 00 00 00 00 00 00"
+"81" = "0B 00 00 04 76 00 00 01 17 00 03 B6 95 00 00 02 93 00 00 00 00 00 00 00 00 00 00 00 00 FF FF FF FF 00 00 00 00 00 00 00 00"
+"82" = "01 00 00 00 0C 00 00 00 01 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00"
+"83" = "03 00 00 00 00 00 00 00 00"
+"85" = "04 00 00 00 00 00 00 00 00 00"
+"88" = "00 00 00 00 00 00 00 00 00 00 00 00 00"
+"8B" = "53 00 00 00 00 01 8A"
+"8F" = "03 00 FF FF 00 00 00"
 
-# Real: F187, F189, F191, F19E (with the trailing 0x00 the engine sends), and no F188.
 [[ecu.did]]
 id = 0xF187
 text = "4G0907401N "
@@ -36,7 +158,6 @@ text = "4G0907401N "
 id = 0xF189
 text = "0016"
 
-# Placeholder: F190 wasn't read; assumed to match the mode 09 VIN.
 [[ecu.did]]
 id = 0xF190
 text = "WAU2MBFC6EN093415"
@@ -46,49 +167,124 @@ id = 0xF191
 text = "4G0907401E "
 
 [[ecu.did]]
+id = 0xF197
+text = "3.0TDI FSA   "
+
+[[ecu.did]]
 id = 0xF19E
 # "EV_ECM30TDI0114G0907401N" and 0x00
 hex = "45 56 5F 45 43 4D 33 30 54 44 49 30 31 31 34 47 30 39 30 37 34 30 31 4E 00"
 
-# Placeholders from here to the next module: F197, F1A3, F1AA, 0600 and the DTCs.
-[[ecu.did]]
-id = 0xF197
-text = "V6 3.0l TDI"
-
 [[ecu.did]]
 id = 0xF1A3
-text = "H05"
+text = "X14"
 
 [[ecu.did]]
 id = 0xF1AA
-text = "J623"
+text = "J623 "
 
+# Coding: read in the default session.
 [[ecu.did]]
 id = 0x0600
-hex = "01 23 45 67 89 AB"
-session = "extended"
-
-# P0299-00 underboost, confirmed; P0113-00 with no status bits set, so only 0x19 0x0A lists it
-[[ecu.dtc]]
-code = 0x029900
-status = 0x08
-
-[[ecu.dtc]]
-code = 0x011300
-status = 0x00
+hex = "1A 2A 40 12 05 66 01 05 00 00"
 
 [[ecu]]
 module = "transmission"
-dtc_format = 0x00
+dtc_reports = [0x02]
+status_availability = 0xFF
+dtc = [
+  { code = 0x0020B0, status = 0x50 },
+  { code = 0x003097, status = 0x50 },
+  { code = 0x003096, status = 0x50 },
+  { code = 0x0021E5, status = 0x50 },
+  { code = 0x0020B1, status = 0x50 },
+  { code = 0x0021E6, status = 0x50 },
+  { code = 0x0021E7, status = 0x50 },
+  { code = 0x003099, status = 0x50 },
+  { code = 0x003098, status = 0x50 },
+  { code = 0x00309F, status = 0x50 },
+  { code = 0x00309E, status = 0x50 },
+  { code = 0x0030A1, status = 0x50 },
+  { code = 0x0030A0, status = 0x50 },
+  { code = 0x0030AB, status = 0x40 },
+  { code = 0x0030AC, status = 0x40 },
+  { code = 0x0030AD, status = 0x40 },
+  { code = 0x0030AE, status = 0x40 },
+  { code = 0x0030AF, status = 0x40 },
+  { code = 0x0030B0, status = 0x40 },
+  { code = 0x0030B1, status = 0x40 },
+  { code = 0x0030B3, status = 0x40 },
+  { code = 0x0030B6, status = 0x40 },
+  { code = 0x0030B7, status = 0x40 },
+  { code = 0x0030BA, status = 0x50 },
+  { code = 0x0021EF, status = 0x40 },
+  { code = 0x0021EC, status = 0x40 },
+  { code = 0x0021ED, status = 0x40 },
+  { code = 0x0021EE, status = 0x40 },
+  { code = 0x000A03, status = 0x40 },
+  { code = 0x0030C1, status = 0x40 },
+  { code = 0x000A05, status = 0x40 },
+  { code = 0x000A06, status = 0x40 },
+  { code = 0x000A07, status = 0x40 },
+  { code = 0x000A15, status = 0x40 },
+  { code = 0x000A13, status = 0x40 },
+  { code = 0x000A19, status = 0x40 },
+  { code = 0x000A17, status = 0x40 },
+  { code = 0x0021F8, status = 0x40 },
+  { code = 0x000A16, status = 0x40 },
+  { code = 0x000A14, status = 0x40 },
+  { code = 0x0021F9, status = 0x40 },
+  { code = 0x000A18, status = 0x40 },
+  { code = 0x0021FA, status = 0x40 },
+  { code = 0x0021FB, status = 0x40 },
+  { code = 0x0021FC, status = 0x40 },
+  { code = 0x0021FD, status = 0x40 },
+  { code = 0x0021FE, status = 0x40 },
+  { code = 0x0021FF, status = 0x40 },
+  { code = 0x002200, status = 0x40 },
+  { code = 0x002201, status = 0x40 },
+  { code = 0x002202, status = 0x40 },
+  { code = 0x002203, status = 0x40 },
+  { code = 0x002204, status = 0x40 },
+  { code = 0x002205, status = 0x40 },
+  { code = 0x002206, status = 0x40 },
+  { code = 0x002207, status = 0x40 },
+  { code = 0x002208, status = 0x40 },
+  { code = 0x002209, status = 0x40 },
+  { code = 0x00220A, status = 0x40 },
+  { code = 0x00220B, status = 0x40 },
+  { code = 0x0030CD, status = 0x40 },
+  { code = 0x0030DB, status = 0x40 },
+  { code = 0x0030DC, status = 0x40 },
+  { code = 0x0030DF, status = 0x40 },
+  { code = 0x0030E1, status = 0x50 },
+  { code = 0x0040B4, status = 0x40 },
+  { code = 0x0030E9, status = 0x40 },
+  { code = 0x0030EC, status = 0x40 },
+  { code = 0x0040B6, status = 0x50 },
+  { code = 0x0009C4, status = 0x40 },
+  { code = 0x0044E9, status = 0x40 },
+  { code = 0x00361C, status = 0x40 },
+  { code = 0x00361A, status = 0x40 },
+]
 
-# Real: calids, cvns, and no VIN. Placeholders: ecu_name, dtcs.
+# No VIN: the transmission doesn't answer mode 09 PID 02.
 [ecu.obd]
 calids = ["4G0158Q 100821  "]
 cvns = ["E4 76 49 64"]
-ecu_name = { acronym = "TCM", name = "TransmissionCtl" }
+ecu_name = { acronym = "TCM", name = "TransmisCtrl" }
 dtcs = []
 
-# Real: F187, F189, F191, F19E (with its trailing 0x00), and no F188.
+[ecu.obd.pids]
+"01" = "00 04 00 00"
+"04" = "00"
+"05" = "67"
+"0C" = "00 00"
+"0D" = "00"
+"41" = "00 04 00 00"
+"42" = "2E B9"
+"49" = "26"
+
 [[ecu.did]]
 id = 0xF187
 text = "4G0927158Q "
@@ -98,68 +294,308 @@ id = 0xF189
 text = "1008"
 
 [[ecu.did]]
+id = 0xF190
+text = "WAU2MBFC6EN093415"
+
+[[ecu.did]]
 id = 0xF191
 text = "0BK927156AM"
+
+[[ecu.did]]
+id = 0xF197
+text = "0BK 30 TDIUSA"
 
 [[ecu.did]]
 id = 0xF19E
 # "EV_TCMAL551211" and 0x00
 hex = "45 56 5F 54 43 4D 41 4C 35 35 31 32 31 31 00"
 
-# Placeholders: F190 (assumed to match the engine's VIN), F197, F1A3.
-[[ecu.did]]
-id = 0xF190
-text = "WAU2MBFC6EN093415"
-
-[[ecu.did]]
-id = 0xF197
-text = "ZF 8HP"
-
 [[ecu.did]]
 id = 0xF1A3
-text = "H03"
+text = "H16"
 
-# Placeholders: the gateway and instruments haven't been read yet.
+# The gateway refuses F190.
 [[ecu]]
 module = "gateway"
+dtc_reports = [0x02]
+status_availability = 0x19
+dtc = [
+  { code = 0x0013BF, status = 0x10 },
+  { code = 0x001082, status = 0x10 },
+  { code = 0x001442, status = 0x10 },
+  { code = 0x00130B, status = 0x10 },
+  { code = 0x001521, status = 0x10 },
+  { code = 0x00164B, status = 0x10 },
+  { code = 0x0013C1, status = 0x10 },
+  { code = 0x001581, status = 0x10 },
+  { code = 0x001661, status = 0x10 },
+  { code = 0x0013D0, status = 0x10 },
+  { code = 0x0013D1, status = 0x10 },
+  { code = 0x0013D2, status = 0x10 },
+  { code = 0x0013D3, status = 0x10 },
+  { code = 0x001493, status = 0x10 },
+  { code = 0x001590, status = 0x10 },
+  { code = 0x001494, status = 0x10 },
+  { code = 0x001582, status = 0x10 },
+  { code = 0x0013C5, status = 0x10 },
+  { code = 0x001667, status = 0x10 },
+  { code = 0x00149A, status = 0x10 },
+  { code = 0x0013E0, status = 0x10 },
+  { code = 0x0013B6, status = 0x10 },
+  { code = 0x0013B7, status = 0x10 },
+  { code = 0x0013B8, status = 0x10 },
+  { code = 0x0013B9, status = 0x10 },
+  { code = 0x0013BC, status = 0x10 },
+  { code = 0x0013BD, status = 0x10 },
+  { code = 0x0013D7, status = 0x10 },
+  { code = 0x001652, status = 0x10 },
+  { code = 0x001080, status = 0x10 },
+  { code = 0x0015E3, status = 0x10 },
+  { code = 0x0013C2, status = 0x10 },
+  { code = 0x001104, status = 0x10 },
+  { code = 0x001086, status = 0x10 },
+  { code = 0x001395, status = 0x10 },
+  { code = 0x001085, status = 0x10 },
+  { code = 0x001084, status = 0x10 },
+  { code = 0x001645, status = 0x10 },
+  { code = 0x001318, status = 0x10 },
+  { code = 0x00130F, status = 0x10 },
+  { code = 0x0013D8, status = 0x10 },
+  { code = 0x0013D9, status = 0x10 },
+  { code = 0x001586, status = 0x10 },
+  { code = 0x0015F8, status = 0x10 },
+  { code = 0x001A00, status = 0x10 },
+  { code = 0x001A01, status = 0x10 },
+  { code = 0x001A02, status = 0x10 },
+  { code = 0x001A03, status = 0x10 },
+  { code = 0x00184E, status = 0x10 },
+  { code = 0x001857, status = 0x10 },
+  { code = 0x001858, status = 0x10 },
+  { code = 0x001850, status = 0x10 },
+  { code = 0x001854, status = 0x10 },
+  { code = 0x001862, status = 0x10 },
+  { code = 0x001396, status = 0x10 },
+  { code = 0x001389, status = 0x10 },
+  { code = 0x0019FE, status = 0x10 },
+  { code = 0x001A08, status = 0x10 },
+  { code = 0x001A09, status = 0x10 },
+  { code = 0x001A0A, status = 0x10 },
+  { code = 0x001A07, status = 0x10 },
+  { code = 0x001A10, status = 0x10 },
+  { code = 0x001A22, status = 0x10 },
+  { code = 0x001A11, status = 0x10 },
+  { code = 0x001A12, status = 0x10 },
+  { code = 0x001A13, status = 0x10 },
+  { code = 0x001A14, status = 0x10 },
+  { code = 0x001A15, status = 0x10 },
+  { code = 0x001A16, status = 0x10 },
+  { code = 0x001A17, status = 0x10 },
+  { code = 0x001A18, status = 0x10 },
+  { code = 0x001A19, status = 0x10 },
+  { code = 0x001A20, status = 0x10 },
+  { code = 0x001A21, status = 0x10 },
+  { code = 0x000100, status = 0x10 },
+  { code = 0x000101, status = 0x10 },
+  { code = 0x000102, status = 0x10 },
+  { code = 0x000103, status = 0x10 },
+  { code = 0x000104, status = 0x10 },
+  { code = 0x000105, status = 0x10 },
+  { code = 0x000106, status = 0x10 },
+  { code = 0x000107, status = 0x10 },
+  { code = 0x000108, status = 0x10 },
+  { code = 0x000109, status = 0x10 },
+  { code = 0x00010A, status = 0x10 },
+  { code = 0x000015, status = 0x10 },
+  { code = 0x000016, status = 0x10 },
+  { code = 0x000017, status = 0x10 },
+  { code = 0x000119, status = 0x10 },
+  { code = 0x00010B, status = 0x10 },
+  { code = 0x000110, status = 0x10 },
+  { code = 0x000113, status = 0x10 },
+  { code = 0x000111, status = 0x10 },
+  { code = 0x000112, status = 0x10 },
+  { code = 0x000114, status = 0x10 },
+  { code = 0x000115, status = 0x10 },
+  { code = 0x000120, status = 0x10 },
+  { code = 0xD10000, status = 0x10 },
+  { code = 0xEA6200, status = 0x10 },
+  { code = 0xEA6300, status = 0x10 },
+  { code = 0xEA6400, status = 0x10 },
+  { code = 0x000001, status = 0x10 },
+  { code = 0x000002, status = 0x10 },
+  { code = 0x000003, status = 0x10 },
+  { code = 0x000004, status = 0x10 },
+  { code = 0x000005, status = 0x10 },
+  { code = 0x000006, status = 0x10 },
+  { code = 0x000010, status = 0x10 },
+  { code = 0x000012, status = 0x10 },
+  { code = 0x000013, status = 0x10 },
+  { code = 0x003002, status = 0x10 },
+  { code = 0x003003, status = 0x10 },
+  { code = 0x003004, status = 0x10 },
+  { code = 0x004000, status = 0x10 },
+  { code = 0x004001, status = 0x10 },
+  { code = 0x003160, status = 0x10 },
+  { code = 0x000416, status = 0x10 },
+  { code = 0x000417, status = 0x10 },
+  { code = 0x820001, status = 0x10 },
+  { code = 0x820002, status = 0x10 },
+  { code = 0x002661, status = 0x10 },
+  { code = 0x002380, status = 0x10 },
+  { code = 0x002381, status = 0x10 },
+  { code = 0x002382, status = 0x10 },
+  { code = 0x002385, status = 0x10 },
+  { code = 0x0025F0, status = 0x10 },
+  { code = 0x0023C0, status = 0x10 },
+  { code = 0x002471, status = 0x10 },
+  { code = 0x0026B4, status = 0x10 },
+  { code = 0x002104, status = 0x10 },
+  { code = 0x0023A1, status = 0x10 },
+  { code = 0x0023A2, status = 0x10 },
+  { code = 0x002082, status = 0x10 },
+  { code = 0x002102, status = 0x10 },
+  { code = 0x002441, status = 0x10 },
+  { code = 0x00230B, status = 0x10 },
+  { code = 0x0026B7, status = 0x10 },
+  { code = 0x0026B8, status = 0x10 },
+  { code = 0x00210B, status = 0x10 },
+  { code = 0x002086, status = 0x10 },
+  { code = 0x002080, status = 0x10 },
+  { code = 0x002081, status = 0x10 },
+  { code = 0x002105, status = 0x10 },
+  { code = 0x002641, status = 0x10 },
+  { code = 0x002085, status = 0x10 },
+  { code = 0x00230F, status = 0x10 },
+  { code = 0x002313, status = 0x10 },
+  { code = 0x002314, status = 0x10 },
+  { code = 0x002315, status = 0x10 },
+  { code = 0x002111, status = 0x10 },
+  { code = 0x002114, status = 0x10 },
+  { code = 0x002600, status = 0x10 },
+  { code = 0x002604, status = 0x10 },
+  { code = 0x002606, status = 0x10 },
+  { code = 0x002130, status = 0x10 },
+  { code = 0x002584, status = 0x10 },
+  { code = 0x002395, status = 0x10 },
+  { code = 0x0023BF, status = 0x10 },
+  { code = 0x002040, status = 0x10 },
+  { code = 0x001659, status = 0x10 },
+  { code = 0x00165B, status = 0x10 },
+  { code = 0x00165C, status = 0x10 },
+  { code = 0x0015BD, status = 0x10 },
+  { code = 0x002440, status = 0x10 },
+  { code = 0x002640, status = 0x10 },
+  { code = 0x0020A8, status = 0x10 },
+  { code = 0x00167C, status = 0x10 },
+  { code = 0x002391, status = 0x10 },
+  { code = 0x00256F, status = 0x10 },
+  { code = 0x003396, status = 0x10 },
+  { code = 0x0026A0, status = 0x10 },
+  { code = 0x002041, status = 0x10 },
+]
 
 [[ecu.did]]
 id = 0xF187
-text = "4G0907468  "
+text = "4G0907468AD"
 
 [[ecu.did]]
 id = 0xF189
-text = "0100"
+text = "0050"
+
+# Manufacture date: unset.
+[[ecu.did]]
+id = 0xF18B
+hex = "00 00 00"
 
 [[ecu.did]]
-id = 0xF190
-text = "WAU2MBFC6EN093415"
+id = 0xF18C
+text = "00000001190570"
+
+[[ecu.did]]
+id = 0xF191
+text = "4G0907468AC"
 
 [[ecu.did]]
 id = 0xF197
-text = "J533 Gateway"
+text = "J533--Gateway"
+
+[[ecu.did]]
+id = 0xF19E
+# "EV_GatewPkoUDS" and 0x00
+hex = "45 56 5F 47 61 74 65 77 50 6B 6F 55 44 53 00"
 
 [[ecu.did]]
 id = 0x0600
-hex = "00 10 20 30 40 50 60 70"
-session = "extended"
+hex = "00 CD 07 7D 00"
 
+# The instruments refuse F190, and send one response-pending before most answers.
 [[ecu]]
 module = "instruments"
+dtc_reports = [0x02]
+status_availability = 0x19
+dtc = [
+  { code = 0x100003, status = 0x10 },
+  { code = 0x100005, status = 0x10 },
+  { code = 0x900008, status = 0x10 },
+  { code = 0x900009, status = 0x10 },
+  { code = 0x90000A, status = 0x10 },
+  { code = 0x90000D, status = 0x10 },
+  { code = 0xA00045, status = 0x10 },
+  { code = 0xFFF000, status = 0x10 },
+  { code = 0xFFF001, status = 0x10 },
+  { code = 0xFFF002, status = 0x10 },
+  { code = 0xFFF003, status = 0x10 },
+  { code = 0xFFF006, status = 0x10 },
+  { code = 0xFFF007, status = 0x10 },
+  { code = 0xFFF008, status = 0x10 },
+  { code = 0xFFF009, status = 0x10 },
+  { code = 0xFFF00B, status = 0x10 },
+  { code = 0xFFFFFA, status = 0x10 },
+  { code = 0xFFFFFB, status = 0x10 },
+]
 
 [[ecu.did]]
 id = 0xF187
-text = "4G8920930  "
+text = "4G8920984A "
+pending = 1
 
 [[ecu.did]]
-id = 0xF190
-text = "WAU2MBFC6EN093415"
+id = 0xF188
+text = "U7"
+
+[[ecu.did]]
+id = 0xF189
+text = "0621"
+pending = 1
+
+# Manufacture date, BCD: 2013-11-19.
+[[ecu.did]]
+id = 0xF18B
+hex = "13 11 19"
+pending = 1
+
+[[ecu.did]]
+id = 0xF18C
+text = "6581911135960167"
+pending = 1
+
+[[ecu.did]]
+id = 0xF191
+text = "4G8920984A "
+pending = 1
 
 [[ecu.did]]
 id = 0xF197
-text = "KOMBI"
+text = "TDieUsaAccNv "
+pending = 1
+
+[[ecu.did]]
+id = 0xF19E
+# "EV_RBD4K" and 16 bytes of 0x00
+hex = "45 56 5F 52 42 44 34 4B 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00"
+pending = 1
 
 [[ecu.did]]
 id = 0x0600
-hex = "11 22 33 44"
-session = "extended"
+hex = "0B C6 02 06 0F 53 D7 05 02 01 00"
+pending = 1

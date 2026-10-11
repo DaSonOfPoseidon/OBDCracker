@@ -415,23 +415,29 @@ fn sim_scan_reads_obd_data_and_every_profile_module() {
         String::from_utf8_lossy(&out.stderr)
     );
     let stdout = String::from_utf8_lossy(&out.stdout);
+    // What the car printed in #49, apart from mode 09 PID 0B, which the sim can't send.
     for line in [
-        "7E8 PID 05 90 °C",
-        "7E8 PID 0C 800 rpm",
-        "7E8 PID 42 14 V",
+        "7E8 PID 05 63 °C",
+        "7E8 PID 0C 0 rpm",
+        "7E8 PID 42 12 V",
+        "7E8 PID 8F [03 00 FF FF 00 00 00]",
         "7E8 mode 09 PIDs 02, 04, 06, 0A",
         "7E8 ECU name ECM-EngineControl",
-        "7E8 stored DTCs P0299",
-        "7E9 PIDs (no reply)",
+        "7E8 stored DTCs (none)",
+        "7E9 PID 42 11.961 V",
+        "7E9 ECU name TCM-TransmisCtrl",
         "7E9 stored DTCs (none)",
-        "7E8 engine F197 V6 3.0l TDI",
+        "7E8 engine F197 3.0TDI FSA",
         "7E8 engine F1AA J623",
-        "7E8 engine DTC format 00, 1 stored",
-        "7E8 engine DTC P0299-00 status 08",
+        "7E8 engine DTC count (service 0x19 refused: subfunction not supported (0x12))",
+        "7E8 engine DTC 001257 status 50",
         "7E9 transmission F191 0BK927156AM",
-        "77A gateway F197 J533 Gateway",
-        "77A gateway DTCs (none)",
-        "77E instruments F197 KOMBI",
+        "77A gateway F18B [00 00 00]",
+        "77A gateway F190 (service 0x22 refused: request out of range (0x31))",
+        "77A gateway F197 J533--Gateway",
+        "77A gateway DTC 820002 status 10",
+        "77E instruments F18B [13 11 19]",
+        "77E instruments F197 TDieUsaAccNv",
     ] {
         assert!(
             stdout.lines().any(|l| l == line),
@@ -439,7 +445,7 @@ fn sim_scan_reads_obd_data_and_every_profile_module() {
         );
     }
 
-    // Read services only, never a session change, so 0600 is refused in the default session.
+    // Read services only, never a session change; 0600 reads in the default session, as on the car.
     let audit = std::fs::read_to_string(&log).unwrap();
     for line in audit.lines().filter(|l| l.contains(r#""dir":"tx""#)) {
         assert!(
@@ -456,7 +462,9 @@ fn sim_scan_reads_obd_data_and_every_profile_module() {
         );
     }
     assert!(
-        stdout.contains("7E8 engine 0600 (service 0x22 refused"),
+        stdout
+            .lines()
+            .any(|l| l == "7E8 engine 0600 [1A 2A 40 12 05 66 01 05 00 00]"),
         "{stdout}"
     );
 }
