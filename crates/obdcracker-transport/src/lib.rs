@@ -35,6 +35,10 @@ pub struct Response {
 pub enum Error {
     /// No reply arrived in time.
     Timeout,
+    /// The module said it was busy (response-pending, NRC 0x78) but didn't answer before its
+    /// wait ended: P2* ran out, it went over [`Timing::max_pending`], or the adapter stopped
+    /// listening (a plain ELM327 may not wait P2*). Returned by [`exchange`] for one module.
+    StillPending,
     /// The adapter or its driver failed.
     Adapter(String),
 }
@@ -43,6 +47,9 @@ impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Timeout => f.write_str("no response before the timeout"),
+            Self::StillPending => f.write_str(
+                "the module said it was busy (response-pending) but didn't answer in time",
+            ),
             Self::Adapter(message) => write!(f, "adapter error: {message}"),
         }
     }
