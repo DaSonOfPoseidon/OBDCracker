@@ -165,8 +165,8 @@ mod stored_dtcs {
 
 mod vehicle_info {
     use obdcracker_core::obd::{
-        EcuName, decode_calids, decode_cvns, decode_ecu_name, decode_supported_info, decode_vin,
-        vehicle_info,
+        EcuName, check_vin, decode_calids, decode_cvns, decode_ecu_name, decode_supported_info,
+        decode_vin, vehicle_info,
     };
     use obdcracker_core::response::Error;
 
@@ -236,6 +236,29 @@ mod vehicle_info {
             Err(Error::Malformed),
             "a CALID reply isn't a VIN reply"
         );
+    }
+
+    #[test]
+    fn checks_a_vin_from_any_source() {
+        // UDS F190 carries the VIN without mode 09's framing; the same rule applies.
+        assert_eq!(check_vin(b"WAU2MBFC6EN093415"), Ok("WAU2MBFC6EN093415"));
+        for bad in [
+            &b""[..],
+            b"abc",
+            b"WAU2MBFC6EN09341",
+            b"WAU2MBFC6EN0934155",
+            b"WAU2MBFC6EN09341 ",
+            b"WAU2MBFC6EN09341\x00",
+            b"WAU2MBFC6EN09341I",
+            b"wau2mbfc6en093415",
+        ] {
+            assert_eq!(
+                check_vin(bad),
+                Err(Error::Malformed),
+                "{}",
+                String::from_utf8_lossy(bad)
+            );
+        }
     }
 
     #[test]

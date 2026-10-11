@@ -108,11 +108,6 @@ fn decodes_exactly(pid: u8, data: &[u8]) -> bool {
     })
 }
 
-// SAE J1979, as obd::decode_vin checks it.
-pub(crate) fn is_vin_char(b: u8) -> bool {
-    (b.is_ascii_digit() || b.is_ascii_uppercase()) && !matches!(b, b'I' | b'O' | b'Q')
-}
-
 fn is_printable(text: &str) -> bool {
     text.bytes().all(|b| (0x20..0x7F).contains(&b))
 }
@@ -190,7 +185,7 @@ impl ObdFixture {
             }
         }
         if let Some(vin) = &self.vin {
-            if vin.len() != VIN_LEN || !vin.bytes().all(is_vin_char) {
+            if obd::check_vin(vin.as_bytes()).is_err() {
                 return Err(value_error(
                     "VIN must be 17 digits and upper case letters other than I, O and Q",
                     vin,
