@@ -35,8 +35,10 @@ pub const SCAN_DIDS: [u16; 14] = [
     did::ODX_FILE,
 ];
 
-// Every status bit, so every stored DTC is listed whatever its state.
-const DTC_MASK: u8 = 0xFF;
+/// The DTC status bits scan asks for (ISO 14229-1 D.2): failed, failed this operation cycle,
+/// pending, confirmed and warning lamp. The "not tested" bits are left out: with them, a module
+/// lists every DTC it has never tested, which on the A7 is its whole DTC table (#49).
+pub const FAULT_MASK: u8 = 0x8F;
 
 /// Why a scan couldn't be taken at all.
 pub type ScanError = FingerprintError;
@@ -140,10 +142,12 @@ pub struct ModuleScan {
     pub response_id: u32,
     /// Each of [`SCAN_DIDS`], then each of [`ScanModule::extra_dids`], and its value.
     pub dids: Vec<(u16, Result<DidValue, ReadError>)>,
-    /// How it encodes DTCs, and how many it has stored (`ReadDTCInformation` 0x01, every status
-    /// bit).
+    /// How it encodes DTCs, and how many have a [`FAULT_MASK`] bit set (`ReadDTCInformation`
+    /// 0x01).
     pub dtc_count: Result<DtcCount, ReadError>,
-    /// Its stored DTCs and their status (`ReadDTCInformation` 0x02, every status bit).
+    /// Its DTCs with a [`FAULT_MASK`] bit set, and their status (`ReadDTCInformation` 0x02).
+    /// Only bits the module says it supports count, so a module that ignores the mask can't
+    /// list untested DTCs.
     pub dtcs: Result<Vec<DtcRecord>, ReadError>,
 }
 
@@ -179,8 +183,8 @@ pub fn scan<T: Transport + ?Sized>(
                 .into_iter()
                 .map(|extra| Ok((extra, approve(target, &uds::read_did(extra.id))?)))
                 .collect::<Result<Vec<_>, _>>()?;
-            let count = approve(target, &uds::dtc_count_by_status_mask(DTC_MASK))?;
-            let dtcs = approve(target, &uds::dtcs_by_status_mask(DTC_MASK))?;
+            let count = approve(target, &uds::dtc_count_by_status_mask(FAULT_MASK))?;
+            let dtcs = approve(target, &uds::dtcs_by_status_mask(FAULT_MASK))?;
             Ok((dids, count, dtcs))
         })
         .collect::<Result<Vec<ModuleRequests>, ScanError>>()?;
@@ -345,7 +349,10 @@ fn scan_module<T: Transport + ?Sized>(
         uds::decode_dtc_count,
     )?;
     let dtcs = ask(transport, &dtcs_request, response_id, timing, |payload| {
-        Ok(uds::decode_dtcs_by_status_mask(payload)?.1.collect())
+        let (availability, records) = uds::decode_dtcs_by_status_mask(payload)?;
+        Ok(records
+            .filter(|record| record.status.0 & availability.0 & FAULT_MASK != 0)
+            .collect())
     })?;
     Ok(ModuleScan {
         name: module.name.clone(),

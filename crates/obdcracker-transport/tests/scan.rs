@@ -115,10 +115,10 @@ fn car(id: u32, request: &[u8]) -> Vec<Response> {
         (0x7E0, [0x22, 0xF1, 0x87]) => vec![reply(0x7E8, b"\x62\xF1\x874G0907401N ")],
         (0x7E0, [0x22, 0x06, 0x00]) => vec![reply(0x7E8, &[0x62, 0x06, 0x00, 0x01, 0x02])],
         (0x7E0, [0x22, _, _]) => vec![reply(0x7E8, &[0x7F, 0x22, 0x31])],
-        (0x7E0, [0x19, 0x01, 0xFF]) => {
+        (0x7E0, [0x19, 0x01, 0x8F]) => {
             vec![reply(0x7E8, &[0x59, 0x01, 0xFF, 0x00, 0x00, 0x01])]
         }
-        (0x7E0, [0x19, 0x02, 0xFF]) => {
+        (0x7E0, [0x19, 0x02, 0x8F]) => {
             vec![reply(0x7E8, &[0x59, 0x02, 0xFF, 0x02, 0x99, 0x00, 0x08])]
         }
         _ => Vec::new(),
@@ -147,7 +147,7 @@ fn reads_obd_data_then_each_modules_dids_and_dtcs() {
     for did in SCAN_DIDS.iter().chain(&[0x0600]) {
         expected.push(format!("7E0 22 {:02X} {:02X}", did >> 8, did & 0xFF));
     }
-    expected.extend(["7E0 19 01 FF".to_owned(), "7E0 19 02 FF".to_owned()]);
+    expected.extend(["7E0 19 01 8F".to_owned(), "7E0 19 02 8F".to_owned()]);
     assert_eq!(car.sent, expected);
 
     let quantity = |value, unit| Ok(PidValue::Quantity { value, unit });
@@ -209,6 +209,39 @@ fn reads_obd_data_then_each_modules_dids_and_dtcs() {
             dtc: UdsDtc::new(0x02_9900),
             status: DtcStatus(0x08),
         }])
+    );
+}
+
+#[test]
+fn lists_only_dtcs_with_a_fault_bit_the_module_supports() {
+    // A module that ignores the mask and sends its whole DTC table, as every A7 module's table
+    // looks with mask 0xFF (#49), and supports only status bits 0, 3 and 4 (availability 0x19).
+    let mut car = Car::new(|id, request| match (id, request) {
+        (0x7E0, [0x19, 0x02, 0x8F]) => vec![reply(
+            0x7E8,
+            &[
+                0x59, 0x02, 0x19, //
+                0x00, 0x12, 0x57, 0x50, // not tested: no fault bit
+                0x00, 0x13, 0x01, 0x04, // pending, but the module says it has no such bit
+                0x02, 0x99, 0x00, 0x09, // failed, confirmed
+                0x00, 0x13, 0x02, 0x11, // failed, not tested since clear
+            ],
+        )],
+        _ => Vec::new(),
+    });
+    let got = scan(&mut car, &Policy::read_only(), &[engine(&[])], TIMING).unwrap();
+    assert_eq!(
+        got.modules[0].dtcs,
+        Ok(vec![
+            DtcRecord {
+                dtc: UdsDtc::new(0x02_9900),
+                status: DtcStatus(0x09),
+            },
+            DtcRecord {
+                dtc: UdsDtc::new(0x00_1302),
+                status: DtcStatus(0x11),
+            },
+        ])
     );
 }
 

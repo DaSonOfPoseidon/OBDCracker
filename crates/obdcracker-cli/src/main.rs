@@ -72,7 +72,8 @@ enum Command {
     Fingerprint,
     /// Read everything the default diagnostic session allows: every supported mode 01 PID, mode
     /// 09 PIDs 00 and 0A and mode 03 DTCs from each emissions ECU, then each profile module's
-    /// identification and profile DIDs and its DTCs (UDS 0x22 and 0x19)
+    /// identification and profile DIDs and its DTCs that are failed, pending or confirmed (UDS
+    /// 0x22 and 0x19)
     Scan,
     /// List this computer's serial ports
     Ports,
@@ -464,7 +465,7 @@ fn print_scan(found: &Scan) {
         let format = match &module.dtc_count {
             Ok(count) => {
                 println!(
-                    "{id:03X} {name} DTC format {:02X}, {} stored",
+                    "{id:03X} {name} DTC format {:02X}, {} with a fault",
                     count.format.code(),
                     count.count
                 );
@@ -476,14 +477,17 @@ fn print_scan(found: &Scan) {
             }
         };
         match &module.dtcs {
-            Ok(dtcs) if dtcs.is_empty() => println!("{id:03X} {name} DTCs (none)"),
+            Ok(dtcs) if dtcs.is_empty() => println!("{id:03X} {name} DTCs (no faults)"),
             Ok(dtcs) => {
                 for record in dtcs {
                     // The J2012 form only when the module said its DTCs are in that format.
                     let code = format
                         .and_then(|format| record.dtc.j2012(format))
                         .map_or_else(|| record.dtc.to_string(), |dtc| dtc.to_string());
-                    println!("{id:03X} {name} DTC {code} status {:02X}", record.status.0);
+                    println!(
+                        "{id:03X} {name} DTC {code} {} (status {:02X})",
+                        record.status, record.status.0
+                    );
                 }
             }
             Err(e) => println!("{id:03X} {name} DTCs ({e})"),
