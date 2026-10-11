@@ -92,15 +92,7 @@ impl Scan {
     /// adapter's link to it) was silent.
     #[must_use]
     pub fn anything_answered(&self) -> bool {
-        let answered = |e: &ReadError| *e != ReadError::NoReply;
-        !self.ecus.is_empty()
-            || self.modules.iter().any(|m| {
-                m.dids
-                    .iter()
-                    .any(|(_, value)| value.as_ref().err().is_none_or(answered))
-                    || m.dtc_count.as_ref().err().is_none_or(answered)
-                    || m.dtcs.as_ref().err().is_none_or(answered)
-            })
+        !self.ecus.is_empty() || self.modules.iter().any(|m| m.answered)
     }
 }
 
@@ -156,6 +148,10 @@ pub struct ModuleScan {
     /// Only bits the module says it supports count, so a module that ignores the mask can't
     /// list untested DTCs.
     pub dtcs: Result<Vec<DtcRecord>, ReadError>,
+    /// Whether the module answered anything at all, a refusal included. That covers a
+    /// multi-DID read whose DIDs were then read again one at a time, so it can be true when
+    /// every value above is [`ReadError::NoReply`].
+    pub answered: bool,
 }
 
 /// Scans a car, reading only: OBD-II from every emissions ECU (the supported PID bitmaps, then
@@ -275,17 +271,31 @@ const BATCH: usize = 3;
 // A positive ReadDataByIdentifier reply's first byte.
 const READ_DIDS_REPLY: u8 = uds::READ_DATA_BY_IDENTIFIER + 0x40;
 
-// Groups the DIDs with a length, in order, up to BATCH a request. A DID left alone is read on its
-// own, and so is one whose length is 0: every DID value has at least one byte.
+// The longest reply ISO-TP carries.
+const MAX_REPLY: usize = 4095;
+
+// Groups the DIDs with a length, in order, up to BATCH a request and as many as one reply can
+// carry (the service byte, then each DID and its value). A DID left alone is read on its own, and
+// so is one whose length is 0: every DID value has at least one byte.
 fn batches_of(dids: &[ExtraDid]) -> Vec<Vec<usize>> {
-    let known: Vec<usize> = (0..dids.len())
-        .filter(|&index| dids[index].length.is_some_and(|length| length > 0))
-        .collect();
-    known
-        .chunks(BATCH)
-        .filter(|batch| batch.len() > 1)
-        .map(<[usize]>::to_vec)
-        .collect()
+    let mut batches = Vec::new();
+    let mut batch: Vec<usize> = Vec::new();
+    let mut reply = 1;
+    for (index, did) in dids.iter().enumerate() {
+        let Some(length) = did.length.filter(|&length| length > 0) else {
+            continue;
+        };
+        let size = 2 + usize::from(length);
+        if batch.len() == BATCH || reply + size > MAX_REPLY {
+            batches.push(std::mem::take(&mut batch));
+            reply = 1;
+        }
+        batch.push(index);
+        reply += size;
+    }
+    batches.push(batch);
+    batches.retain(|batch| batch.len() > 1);
+    batches
 }
 
 // Splits a multi-DID reply into each DID's data by the lengths asked for. The module may leave
@@ -406,6 +416,8 @@ fn scan_module<T: Transport + ?Sized>(
     let response_id = module.response_id;
     let did_requests = &requests.dids;
     let mut values: Vec<Option<Result<DidValue, ReadError>>> = vec![None; did_requests.len()];
+    // Whether any multi-DID read got an answer, which the values may not show.
+    let mut batch_answered = false;
     let read_alone = |transport: &mut T, index: usize| {
         let (ExtraDid { id, format, .. }, request) = &did_requests[index];
         ask(transport, request, response_id, timing, |payload| {
@@ -432,8 +444,9 @@ fn scan_module<T: Transport + ?Sized>(
         // alone next.
         let found = ask(transport, request, response_id, timing, |payload| {
             split_batch(payload, &layout)
-        })?
-        .unwrap_or_default();
+        })?;
+        batch_answered |= found.as_ref().err() != Some(&ReadError::NoReply);
+        let found = found.unwrap_or_default();
         for (id, data) in found {
             if let Some(&i) = batch.iter().find(|&&i| did_requests[i].0.id == id) {
                 let mut single = vec![READ_DIDS_REPLY];
@@ -450,7 +463,7 @@ fn scan_module<T: Transport + ?Sized>(
             }
         }
     }
-    let dids = did_requests
+    let dids: Vec<_> = did_requests
         .iter()
         .zip(values)
         .map(|((did, _), value)| (did.id, value.unwrap_or(Err(ReadError::NoReply))))
@@ -468,12 +481,20 @@ fn scan_module<T: Transport + ?Sized>(
             .filter(|record| record.status.0 & availability.0 & FAULT_MASK != 0)
             .collect())
     })?;
+    let replied = |e: &ReadError| *e != ReadError::NoReply;
+    let answered = batch_answered
+        || dids
+            .iter()
+            .any(|(_, value)| value.as_ref().err().is_none_or(replied))
+        || dtc_count.as_ref().err().is_none_or(replied)
+        || dtcs.as_ref().err().is_none_or(replied);
     Ok(ModuleScan {
         name: module.name.clone(),
         response_id,
         dids,
         dtc_count,
         dtcs,
+        answered,
     })
 }
 

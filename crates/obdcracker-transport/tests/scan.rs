@@ -174,6 +174,65 @@ fn reads_dids_with_known_lengths_three_at_a_time() {
 }
 
 #[test]
+fn a_batch_never_asks_for_a_reply_longer_than_iso_tp_carries() {
+    // Two 2046-byte values need a 4097-byte reply (1 + 2 + 2046 + 2 + 2046), over ISO-TP's
+    // 4095, so they're read in separate requests; a small one still joins the second.
+    let mut car = Car::new(|_, _| Vec::new());
+    let did = |id, length| ExtraDid {
+        id,
+        format: DidFormat::Hex,
+        length: Some(length),
+    };
+    let module = ScanModule {
+        module: UdsModule::obd_engine(),
+        extra_dids: vec![did(0x0600, 2046), did(0x0601, 2046), did(0x0602, 1)],
+    };
+    scan(&mut car, &Policy::read_only(), &[module], TIMING).unwrap();
+    let requests = did_requests(&car);
+    assert!(requests.contains(&"7E0 22 06 01 06 02"), "{requests:?}");
+    assert!(
+        !requests
+            .iter()
+            .any(|sent| sent.starts_with("7E0 22 06 00 06")),
+        "{requests:?}"
+    );
+    // Exactly 4095 bytes fits: 1 + 2 + 2045 + 2 + 2045.
+    let mut car = Car::new(|_, _| Vec::new());
+    let module = ScanModule {
+        module: UdsModule::obd_engine(),
+        extra_dids: vec![did(0x0600, 2045), did(0x0601, 2045)],
+    };
+    scan(&mut car, &Policy::read_only(), &[module], TIMING).unwrap();
+    assert!(did_requests(&car).contains(&"7E0 22 06 00 06 01"));
+}
+
+#[test]
+fn a_refused_batch_counts_as_an_answer() {
+    // The module refuses the multi-DID read, then goes quiet: every later read times out.
+    let mut car = Car::new(|id, request| match (id, request) {
+        (0x7E0, [0x22, 0xF1, 0x87, 0xF1, 0x89, 0xF1, 0x91]) => {
+            vec![reply(0x7E8, &[0x7F, 0x22, 0x13])]
+        }
+        _ => Vec::new(),
+    });
+    let got = scan(
+        &mut car,
+        &Policy::read_only(),
+        &[engine_with_lengths()],
+        TIMING,
+    )
+    .unwrap();
+    assert!(
+        got.modules[0]
+            .dids
+            .iter()
+            .all(|(_, value)| *value == Err(ReadError::NoReply))
+    );
+    assert!(got.modules[0].answered);
+    assert!(got.anything_answered());
+}
+
+#[test]
 fn a_did_with_length_0_is_read_alone() {
     let mut car = Car::new(|_, _| Vec::new());
     let mut module = engine_with_lengths();
@@ -580,6 +639,7 @@ fn a_silent_car_loses_only_its_values() {
     assert_eq!(got.ecus, []);
     assert!(!got.anything_answered());
     let module = &got.modules[0];
+    assert!(!module.answered);
     assert!(
         module
             .dids
