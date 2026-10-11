@@ -289,7 +289,16 @@ fn is_vin_char(b: u8) -> bool {
 /// Decodes the mode 09 PID 02 reply: the 17-character VIN.
 pub fn decode_vin(reply: &[u8]) -> Result<&str, Error> {
     let (count, data) = info(reply, 0x02)?;
-    if count != 1 || data.len() != VIN_LEN || !data.iter().all(|&b| is_vin_char(b)) {
+    if count != 1 {
+        return Err(Error::Malformed);
+    }
+    check_vin(data)
+}
+
+/// Checks that `data` is a VIN, from any source (mode 09 PID 02's data, UDS DID F190): exactly
+/// 17 digits and upper case letters other than I, O and Q (SAE J1979), with no padding.
+pub fn check_vin(data: &[u8]) -> Result<&str, Error> {
+    if data.len() != VIN_LEN || !data.iter().all(|&b| is_vin_char(b)) {
         return Err(Error::Malformed);
     }
     text(data)

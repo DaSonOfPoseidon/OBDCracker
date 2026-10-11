@@ -32,8 +32,27 @@ pub mod did {
     pub const VIN: u16 = 0xF190;
     /// The manufacturer's ECU hardware number.
     pub const HARDWARE_NUMBER: u16 = 0xF191;
+    /// The system name or engine type.
+    pub const SYSTEM_NAME: u16 = 0xF197;
     /// The ODX file that describes the module's diagnostics.
     pub const ODX_FILE: u16 = 0xF19E;
+
+    /// Whether ISO 14229-1 makes `did` text: the VIN and the part, software, hardware, system
+    /// and ODX names. Other DIDs, standard ones such as the manufacture date (F18B) included,
+    /// can hold any bytes.
+    #[must_use]
+    pub fn is_text(did: u16) -> bool {
+        matches!(
+            did,
+            SPARE_PART_NUMBER
+                | SOFTWARE_NUMBER
+                | SOFTWARE_VERSION
+                | VIN
+                | HARDWARE_NUMBER
+                | SYSTEM_NAME
+                | ODX_FILE
+        )
+    }
 }
 
 /// A `ReadDataByIdentifier` request for one DID.

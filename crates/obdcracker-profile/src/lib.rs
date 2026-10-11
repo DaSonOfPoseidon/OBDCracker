@@ -184,16 +184,7 @@ pub const STANDARD_DIDS: std::ops::RangeInclusive<u16> = 0xF180..=0xF19F;
 /// (dates, sessions, and so on) or isn't a standard one.
 #[must_use]
 pub fn standard_decode(did: u16) -> Option<Decode> {
-    const TEXT: [u16; 7] = [
-        uds::did::SPARE_PART_NUMBER,
-        uds::did::SOFTWARE_NUMBER,
-        uds::did::SOFTWARE_VERSION,
-        uds::did::VIN,
-        uds::did::HARDWARE_NUMBER,
-        0xF197, // system name or engine type
-        uds::did::ODX_FILE,
-    ];
-    TEXT.contains(&did).then_some(Decode::Text)
+    uds::did::is_text(did).then_some(Decode::Text)
 }
 
 const BITRATES: [u32; 2] = [250_000, 500_000];

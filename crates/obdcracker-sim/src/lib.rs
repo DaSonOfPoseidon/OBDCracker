@@ -27,7 +27,7 @@ use std::fmt;
 use std::time::Duration;
 
 use obdcracker_core::isotp::Addressing;
-use obdcracker_core::uds;
+use obdcracker_core::{obd, uds};
 use obdcracker_profile::{Decode, Profile, ProfileError, Protocol, STANDARD_DIDS, standard_decode};
 use obdcracker_safety::{Approved, Target};
 use obdcracker_transport::{Error, Response, Transport};
@@ -139,7 +139,7 @@ impl SimBus {
                 let text = standard_decode(did.id) == Some(Decode::Text)
                     || def.is_some_and(|def| def.decode == Decode::Text);
                 let fits = if did.id == uds::did::VIN {
-                    did.data.len() == 17 && did.data.iter().all(|&b| fixture::is_vin_char(b))
+                    obd::check_vin(&did.data).is_ok()
                 } else {
                     // Text that is only padding decodes as empty.
                     !text || uds::decode_text(&did.data).is_ok_and(|text| !text.is_empty())

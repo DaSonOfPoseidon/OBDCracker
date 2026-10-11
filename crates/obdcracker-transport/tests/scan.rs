@@ -9,7 +9,7 @@ use obdcracker_core::uds::{DtcCount, DtcFormat, DtcRecord, DtcStatus, UdsDtc};
 use obdcracker_safety::{Approved, Policy};
 use obdcracker_transport::fingerprint::{DidValue, FingerprintError, ReadError, UdsModule};
 use obdcracker_transport::scan::{
-    DidFormat, ExtraDid, ObdEcu, PidValue, SCAN_DIDS, ScanModule, scan,
+    DidFormat, ExtraDid, ObdEcu, PidValue, SCAN_DIDS, Scan, ScanModule, scan,
 };
 use obdcracker_transport::{Error, Response, Timing, Transport, hex};
 
@@ -260,6 +260,83 @@ fn a_hex_did_keeps_its_bytes_even_when_they_look_like_text() {
     };
     assert_eq!(value(0x0600), Some(Ok(DidValue::Bytes(vec![0x30, 0x31]))));
     assert_eq!(value(0xF187), Some(Ok(DidValue::Text("ab".into()))));
+}
+
+// The value of `want` from the only module scanned.
+fn did_value(got: &Scan, want: u16) -> Option<Result<DidValue, ReadError>> {
+    got.modules[0]
+        .dids
+        .iter()
+        .find(|(did, _)| *did == want)
+        .map(|(_, value)| value.clone())
+}
+
+#[test]
+fn a_profile_format_replaces_the_default_for_a_standard_did_with_no_fixed_format() {
+    // A manufacture date (F18B) whose BCD bytes happen to be printable ("13 11 19" isn't, but
+    // "20 31 39" is), and an unset date of zeros, which as text would show as empty.
+    let mut car = Car::new(|id, request| match (id, request) {
+        (0x7E0, [0x22, 0xF1, 0x8B]) => vec![reply(0x7E8, &[0x62, 0xF1, 0x8B, 0x20, 0x31, 0x39])],
+        (0x7E0, [0x22, 0xF1, 0x8C]) => vec![reply(0x7E8, &[0x62, 0xF1, 0x8C, 0x00, 0x00, 0x00])],
+        _ => Vec::new(),
+    });
+    let hex = |id| ExtraDid {
+        id,
+        format: DidFormat::Hex,
+    };
+    let module = ScanModule {
+        module: UdsModule::obd_engine(),
+        // The first entry for a DID wins, as for any other extra DID.
+        extra_dids: vec![
+            hex(0xF18B),
+            hex(0xF18C),
+            ExtraDid {
+                id: 0xF18B,
+                format: DidFormat::Text,
+            },
+        ],
+    };
+    let got = scan(&mut car, &Policy::read_only(), &[module], TIMING).unwrap();
+    assert_eq!(
+        did_value(&got, 0xF18B),
+        Some(Ok(DidValue::Bytes(vec![0x20, 0x31, 0x39])))
+    );
+    assert_eq!(
+        did_value(&got, 0xF18C),
+        Some(Ok(DidValue::Bytes(vec![0x00, 0x00, 0x00])))
+    );
+    // Still read once each, in SCAN_DIDS order.
+    let dids: Vec<u16> = got.modules[0].dids.iter().map(|(did, _)| *did).collect();
+    assert_eq!(dids, SCAN_DIDS);
+}
+
+#[test]
+fn f190_must_be_a_vin() {
+    for (data, want) in [
+        (
+            &b"WAU2MBFC6EN093415"[..],
+            Ok(DidValue::Text("WAU2MBFC6EN093415".into())),
+        ),
+        (b"abc", Err(ReadError::Reply(ReplyError::Malformed))),
+        (
+            b"WAU2MBFC6EN09341 ",
+            Err(ReadError::Reply(ReplyError::Malformed)),
+        ),
+        (&[0x00; 17], Err(ReadError::Reply(ReplyError::Malformed))),
+    ] {
+        let payload = [&[0x62, 0xF1, 0x90][..], data].concat();
+        let mut car = Car::new(move |id, request| match (id, request) {
+            (0x7E0, [0x22, 0xF1, 0x90]) => vec![reply(0x7E8, &payload)],
+            _ => Vec::new(),
+        });
+        let got = scan(&mut car, &Policy::read_only(), &[engine(&[])], TIMING).unwrap();
+        assert_eq!(
+            did_value(&got, 0xF190),
+            Some(want),
+            "{}",
+            String::from_utf8_lossy(data)
+        );
+    }
 }
 
 #[test]

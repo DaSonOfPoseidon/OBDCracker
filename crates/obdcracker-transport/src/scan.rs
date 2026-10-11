@@ -31,7 +31,7 @@ pub const SCAN_DIDS: [u16; 14] = [
     0xF193,
     0xF194,
     0xF195,
-    0xF197,
+    did::SYSTEM_NAME,
     did::ODX_FILE,
 ];
 
@@ -46,8 +46,10 @@ pub type ScanError = FingerprintError;
 pub struct ScanModule {
     /// Where it sits on the bus.
     pub module: UdsModule,
-    /// More DIDs to read after [`SCAN_DIDS`], such as VAG's F1A3 or 0600. Each DID is read
-    /// once, however often it's listed, and a standard DID keeps the standard's format.
+    /// More DIDs to read after [`SCAN_DIDS`], such as VAG's F1A3 or 0600, or how to show one of
+    /// [`SCAN_DIDS`] that has no fixed format, such as the manufacture date (F18B). Each DID is
+    /// read once, however often it's listed, in its first entry's format. A DID ISO 14229-1
+    /// makes text ([`did::is_text`]) stays text, and F190 must be a VIN.
     pub extra_dids: Vec<ExtraDid>,
 }
 
@@ -330,16 +332,9 @@ fn scan_module<T: Transport + ?Sized>(
     let response_id = module.response_id;
     let mut dids = Vec::with_capacity(did_requests.len());
     for (ExtraDid { id, format }, request) in did_requests {
-        let value = ask(
-            transport,
-            &request,
-            response_id,
-            timing,
-            |payload| match format {
-                DidFormat::Text => decode_did_value(payload, id),
-                DidFormat::Hex => Ok(DidValue::Bytes(uds::decode_did(payload, id)?.to_vec())),
-            },
-        )?;
+        let value = ask(transport, &request, response_id, timing, |payload| {
+            decode_scanned(payload, id, format)
+        })?;
         dids.push((id, value));
     }
     let dtc_count = ask(
@@ -361,7 +356,8 @@ fn scan_module<T: Transport + ?Sized>(
     })
 }
 
-// SCAN_DIDS as text, then the module's extra DIDs, each once and in its first format.
+// SCAN_DIDS, then the module's other extra DIDs, each once. A DID takes its first extra entry's
+// format, except one ISO 14229-1 makes text; a SCAN_DIDS entry with no extra entry is text.
 fn dids_of(scanned: &ScanModule) -> Vec<ExtraDid> {
     let mut dids: Vec<ExtraDid> = SCAN_DIDS
         .iter()
@@ -370,12 +366,30 @@ fn dids_of(scanned: &ScanModule) -> Vec<ExtraDid> {
             format: DidFormat::Text,
         })
         .collect();
+    let mut seen = BTreeSet::new();
     for &extra in &scanned.extra_dids {
-        if !dids.iter().any(|did| did.id == extra.id) {
-            dids.push(extra);
+        if !seen.insert(extra.id) {
+            continue;
+        }
+        match dids.iter_mut().find(|did| did.id == extra.id) {
+            Some(did) if !did::is_text(did.id) => did.format = extra.format,
+            Some(_) => {}
+            None => dids.push(extra),
         }
     }
     dids
+}
+
+// A DID's value in `format`. ISO 14229-1 makes F190 a VIN, so anything else there is malformed.
+fn decode_scanned(payload: &[u8], id: u16, format: DidFormat) -> Result<DidValue, ReplyError> {
+    match format {
+        DidFormat::Text if id == did::VIN => {
+            let vin = obd::check_vin(uds::decode_did(payload, id)?)?;
+            Ok(DidValue::Text(vin.to_owned()))
+        }
+        DidFormat::Text => decode_did_value(payload, id),
+        DidFormat::Hex => Ok(DidValue::Bytes(uds::decode_did(payload, id)?.to_vec())),
+    }
 }
 
 // The one reading in a single-PID mode 01 reply, which must be `pid`.

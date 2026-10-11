@@ -17,6 +17,20 @@ mod read_data_by_identifier {
     }
 
     #[test]
+    fn knows_which_standard_identifiers_are_text() {
+        // ISO 14229-1 annex C: the part, software, hardware, system and ODX names, and the VIN.
+        for text in [0xF187, 0xF188, 0xF189, 0xF190, 0xF191, 0xF197, 0xF19E] {
+            assert!(did::is_text(text), "0x{text:04X}");
+        }
+        // Dates, serial numbers, supplier data and manufacturer DIDs have no fixed format.
+        for free in [
+            0xF18A, 0xF18B, 0xF18C, 0xF192, 0xF19F, 0x0600, 0x0000, 0xFFFF,
+        ] {
+            assert!(!did::is_text(free), "0x{free:04X}");
+        }
+    }
+
+    #[test]
     fn returns_the_data_after_the_echoed_identifier() {
         let reply = reply(did::VIN, b"WAUZZZ4G1EN000000");
         assert_eq!(decode_did(&reply, did::VIN), Ok(&b"WAUZZZ4G1EN000000"[..]));
