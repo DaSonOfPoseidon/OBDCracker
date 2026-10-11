@@ -245,7 +245,7 @@ length = 13
 id = 0xF19E
 name = "ODX file"
 decode = "text"
-length = 24
+length = 21
 
 [[module.did]]
 id = 0x0600

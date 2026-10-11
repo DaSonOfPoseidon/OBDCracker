@@ -591,8 +591,8 @@ pending = 1
 
 [[ecu.did]]
 id = 0xF19E
-# "EV_RBD4K" and 16 bytes of 0x00
-hex = "45 56 5F 52 42 44 34 4B 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00"
+# "EV_RBD4K" and 13 bytes of 0x00
+hex = "45 56 5F 52 42 44 34 4B 00 00 00 00 00 00 00 00 00 00 00 00 00"
 pending = 1
 
 [[ecu.did]]
