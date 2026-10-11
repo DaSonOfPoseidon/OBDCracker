@@ -197,6 +197,23 @@ fn a7_profile_has_the_expected_uds_modules() {
         assert_eq!(module.protocol, Protocol::Uds, "{name}");
         assert_eq!(module.addressing(), Addressing::Normal, "{name}");
     }
+    // The head-up display, which `scan --discover` found in #54 (J898, VAG address 0x82).
+    let hud = a7.module("head-up display").unwrap();
+    assert_eq!(
+        (hud.vag_address, hud.request_id, hud.response_id),
+        (Some(0x82), 0x71B, 0x785)
+    );
+    // The 22 modules discovery found in #54, plus the engine and transmission on the OBD-II IDs,
+    // which its range doesn't reach.
+    assert_eq!(a7.modules.len(), 24);
+    // Each reads its coding.
+    for module in &a7.modules {
+        assert!(
+            module.dids.iter().any(|did| did.id == 0x0600) || module.name == "transmission",
+            "{}",
+            module.name
+        );
+    }
 }
 
 // A profile only names where requests go; what may be sent is still the policy's decision.
