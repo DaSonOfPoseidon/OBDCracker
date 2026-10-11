@@ -99,6 +99,8 @@ impl Ecu {
     /// Sets S3, how long the module stays in a non-default session without a request: 5 s by
     /// default (ISO 14229-2).
     pub fn set_s3(&mut self, s3: Duration) {
+        // A session that already ran out stays out, whatever the new S3.
+        self.session = self.session();
         self.s3 = s3;
     }
 

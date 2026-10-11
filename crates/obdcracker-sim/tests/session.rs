@@ -278,3 +278,14 @@ fn guard_refuses_session_changes_it_does_not_make() {
     drop(guard);
     assert_eq!(sent(&bus), [vec![0x10, 0x03], vec![0x10, 0x01]]);
 }
+
+#[test]
+fn a_longer_s3_does_not_revive_a_lapsed_session() {
+    let mut bus = car();
+    ask(&mut bus, &[0x10, 0x03]);
+    sleep(SIM_S3 + Duration::from_millis(100));
+    bus.ecu_mut("engine")
+        .unwrap()
+        .set_s3(Duration::from_secs(60));
+    assert_eq!(session(&bus), Session::Default);
+}
