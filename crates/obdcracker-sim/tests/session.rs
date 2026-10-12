@@ -353,3 +353,46 @@ fn keep_alive_close_to_s3_reenters_instead() {
         [vec![0x10, 0x03], vec![0x10, 0x03], vec![0x10, 0x01]]
     );
 }
+
+// `scan_with` reads the coding in the extended session and leaves the engine in the default one.
+#[test]
+fn scan_reads_extended_dids_and_leaves_the_module_in_the_default_session() {
+    use obdcracker_core::uds::DiagnosticSession;
+    use obdcracker_transport::fingerprint::{DidValue, ReadError, UdsModule};
+    use obdcracker_transport::scan::{DidFormat, ExtraDid, ScanModule, ScanOptions, scan_with};
+
+    let module = ScanModule {
+        module: UdsModule::obd_engine(),
+        extra_dids: vec![ExtraDid {
+            id: CODING,
+            format: DidFormat::Hex,
+            length: Some(10),
+            session: DiagnosticSession::Extended,
+        }],
+    };
+    let coding = |options: &ScanOptions| {
+        let mut bus = car();
+        let got = scan_with(
+            &mut bus,
+            &Policy::read_only(),
+            std::slice::from_ref(&module),
+            Timing::default(),
+            options,
+        )
+        .unwrap();
+        assert_eq!(session(&bus), Session::Default);
+        let (_, value) = got.modules[0]
+            .dids
+            .iter()
+            .find(|(id, _)| *id == CODING)
+            .unwrap();
+        value.clone()
+    };
+    assert_eq!(
+        coding(&ScanOptions::default()),
+        Err(ReadError::NeedsExtendedSession)
+    );
+    let mut options = ScanOptions::default();
+    options.extended = Some(GUARD);
+    assert_eq!(coding(&options), Ok(DidValue::Bytes((1..=10).collect())));
+}

@@ -573,3 +573,45 @@ fn scan_discover_needs_a_profile_with_a_discovery_range() {
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(stdout.contains("dry run: nothing was sent"), "{stdout}");
 }
+
+#[test]
+fn scan_extended_says_what_it_does_and_switches_no_module_without_extended_dids() {
+    // The A7 profile has no DID that needs the extended session yet, so --extended reads the
+    // same as a plain scan and never sends 10 03.
+    let log = temp_log("scan-extended");
+    let out = obdcracker(&[
+        "--sim",
+        "a7",
+        "--audit-log",
+        log.to_str().unwrap(),
+        "scan",
+        "--extended",
+    ]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("extended diagnostic session (10 03)"),
+        "{stderr}"
+    );
+    let audit = std::fs::read_to_string(&log).unwrap();
+    assert!(!audit.contains(r#""payload":"10 03""#), "{audit}");
+}
+
+#[test]
+fn dry_run_scan_extended_lists_the_session_reads() {
+    let out = obdcracker(&["--dry-run", "scan", "--extended"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("with --extended, a live scan also reads"),
+        "{stdout}"
+    );
+}
