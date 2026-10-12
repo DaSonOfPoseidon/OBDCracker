@@ -30,6 +30,9 @@ Each entry names the class, what to check, and where it bit us.
   for duplicates.
 - **`from_str_radix` accepts a leading `+`.** Check that every character is a digit (`is_ascii_hexdigit`) before
   parsing.
+- **Validate what was written, not what a filter leaves.** Once `candidates` skipped IDs that answer on a listed
+  module's request ID, a discovery range of just 0x7DF (the broadcast) filtered down to nothing and passed. Check
+  every raw value in a range, then filter.
 - **Validate against the real decoder.** Data the tool will decode must pass the decoder that reads it: VIN characters,
   mode 01 PID widths, text DIDs. Round-trip through `obdcracker-core` rather than re-implementing the rule.
 - **Respect the wire format's limits.** A count stored in a `u8` (mode 03, mode 09) or a `u16` (UDS DTC count) caps

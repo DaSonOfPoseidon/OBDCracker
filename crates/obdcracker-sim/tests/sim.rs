@@ -931,3 +931,67 @@ fn a_raw_reply_after_response_pending_answers_a_suppressed_request() {
                    reply = \"59 01 00 00\"\npending = 1\n";
     assert!(SimBus::new(&Profile::builtin("a7").unwrap(), fixture).is_ok());
 }
+
+// Wide discovery finds a module past the first pass's range, here at VW's MQB MMI IDs, without
+// sending on a reply ID of a module that answers.
+#[test]
+fn wide_discovery_finds_a_module_past_the_first_range() {
+    use obdcracker_safety::ModuleIds;
+    use obdcracker_transport::discover::discover;
+
+    let profile = Profile::from_toml(
+        "name = \"x\"\nbitrate = 500000\n\
+         [[module]]\nname = \"gateway\"\nrequest_id = 0x710\nresponse_id = 0x77A\nprotocol = \"uds\"\n\
+         [[module]]\nname = \"mmi\"\nrequest_id = 0x773\nresponse_id = 0x7DD\nprotocol = \"uds\"\n\
+         [discovery]\nfirst_request_id = 0x700\nlast_request_id = 0x769\nreply_offset = 0x6A\n\
+         wide_last_request_id = 0x795\n",
+    )
+    .unwrap();
+    let fixture = "[[ecu]]\nmodule = \"gateway\"\n[[ecu.did]]\nid = 0xF187\ntext = \"4G0907468AD\"\n\
+                   [[ecu]]\nmodule = \"mmi\"\n[[ecu.did]]\nid = 0xF187\ntext = \"4G0035000\"\n";
+    let mut bus = SimBus::new(&profile, fixture).unwrap();
+    let timing = Timing::default();
+    let first = profile.narrow_for_discovery(Policy::read_only()).unwrap();
+    let found = discover(&mut bus, &first, &profile.candidates(), timing).unwrap();
+    let ids = |found: &[obdcracker_transport::discover::Found]| -> Vec<ModuleIds> {
+        found
+            .iter()
+            .map(|f| ModuleIds {
+                request: f.request_id,
+                reply: f.response_id,
+            })
+            .collect()
+    };
+    assert_eq!(
+        ids(&found),
+        [ModuleIds {
+            request: 0x710,
+            reply: 0x77A
+        }]
+    );
+    let known = ids(&found);
+    let wide = profile.wide_candidates(&known);
+    let policy = profile
+        .narrow_with(Policy::read_only(), &[known.as_slice(), &wide].concat())
+        .unwrap();
+    let more = discover(&mut bus, &policy, &wide, timing).unwrap();
+    assert_eq!(
+        ids(&more),
+        [ModuleIds {
+            request: 0x773,
+            reply: 0x7DD
+        }]
+    );
+    let sent: Vec<u32> = bus
+        .sent()
+        .iter()
+        .map(|r| match r.target() {
+            Target::Physical(id) => id,
+            Target::ObdFunctional => 0x7DF,
+        })
+        .collect();
+    // Not 0x709, whose reply ID is the MMI's request ID, nor the gateway's reply ID.
+    for never in [0x709, 0x77A, 0x7DD] {
+        assert!(!sent.contains(&never), "{never:03X}");
+    }
+}

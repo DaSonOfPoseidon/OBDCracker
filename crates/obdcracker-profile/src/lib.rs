@@ -53,6 +53,12 @@ pub struct Discovery {
     pub last_request_id: u32,
     /// What to add to a request ID for its reply ID.
     pub reply_offset: u32,
+    /// Where a second, wider pass ends, if there is one ([`Profile::wide_candidates`]). It starts
+    /// right after [`Discovery::last_request_id`], with the same reply offset. Those request IDs
+    /// are the first pass's reply IDs, so the wider pass only tries those no module it knows of
+    /// (listed, or found by the first pass) answers on.
+    #[serde(default)]
+    pub wide_last_request_id: Option<u32>,
 }
 
 /// One module (ECU) on the bus.
@@ -206,6 +212,8 @@ pub enum ProfileError {
     /// The discovery range doesn't fit the modules: a candidate's request ID is a reply ID, is
     /// outside 0x700..=0x7FF, or is a module's request ID with another reply ID, and so on.
     Discovery(NarrowingError),
+    /// The wide discovery range doesn't start right after the discovery range, or goes past 0x7FF.
+    WideDiscoveryRange,
 }
 
 impl fmt::Display for ProfileError {
@@ -241,6 +249,9 @@ impl fmt::Display for ProfileError {
                 f.write_str("discovery: the first request ID is after the last")
             }
             Self::Discovery(e) => write!(f, "discovery: {e}"),
+            Self::WideDiscoveryRange => f.write_str(
+                "discovery: the wide range must end after the discovery range, and by 0x7FF",
+            ),
         }
     }
 }
@@ -312,7 +323,9 @@ impl Profile {
     }
 
     /// Each request ID in the discovery range with its reply ID, in order; none without one.
-    /// An ID past 0x7FF is left out, which [`Profile::validate`] refuses anyway.
+    /// One whose reply ID is a listed module's request ID is left out, as no module answers
+    /// there (such as one the wide pass found, [`Profile::wide_candidates`]). An ID past 0x7FF
+    /// is left out too, which [`Profile::validate`] refuses anyway.
     #[must_use]
     pub fn candidates(&self) -> Vec<ModuleIds> {
         let Some(discovery) = self.discovery else {
@@ -324,7 +337,72 @@ impl Profile {
                 request,
                 reply: request.saturating_add(discovery.reply_offset),
             })
+            .filter(|candidate| {
+                self.modules
+                    .iter()
+                    .all(|module| module.request_id != candidate.reply)
+            })
             .collect()
+    }
+
+    /// The second, wider pass's candidates ([`Discovery::wide_last_request_id`]): each request ID
+    /// after the discovery range with its reply ID, in order, leaving out any whose request or
+    /// reply ID a known module uses another way, or that is an OBD-II ID (0x7DF..=0x7EF), or
+    /// whose reply is past 0x7FF. Known modules are the profile's and `found`, which should be
+    /// everything the first pass found: the wide request IDs are the first pass's reply IDs, and
+    /// only that pass shows which of them a module answers on.
+    #[must_use]
+    pub fn wide_candidates(&self, found: &[ModuleIds]) -> Vec<ModuleIds> {
+        let Some(Discovery {
+            last_request_id,
+            reply_offset,
+            wide_last_request_id: Some(wide_last),
+            ..
+        }) = self.discovery
+        else {
+            return Vec::new();
+        };
+        let known: Vec<ModuleIds> = self
+            .module_ids()
+            .into_iter()
+            .chain(found.iter().copied())
+            .collect();
+        let obd = 0x7DF..=0x7EF;
+        (last_request_id.saturating_add(1)..=wide_last.min(*DIAGNOSTIC_IDS.end()))
+            .map(|request| ModuleIds {
+                request,
+                reply: request.saturating_add(reply_offset),
+            })
+            .filter(|candidate| {
+                DIAGNOSTIC_IDS.contains(&candidate.reply)
+                    && !obd.contains(&candidate.request)
+                    && !obd.contains(&candidate.reply)
+                    && known.iter().all(|module| {
+                        // The same module, or IDs it doesn't use.
+                        *module == *candidate
+                            || (module.reply != candidate.request
+                                && module.request != candidate.reply
+                                && module.request != candidate.request
+                                && module.reply != candidate.reply)
+                    })
+            })
+            .collect()
+    }
+
+    /// Like [`Profile::narrow`], but also allows `extra`: modules discovery found, or candidates
+    /// to look for.
+    ///
+    /// # Errors
+    ///
+    /// As [`Profile::narrow`], counting `extra` as modules.
+    pub fn narrow_with(
+        &self,
+        policy: Policy,
+        extra: &[ModuleIds],
+    ) -> Result<Policy, NarrowingError> {
+        let mut modules = self.module_ids();
+        modules.extend_from_slice(extra);
+        policy.narrowed_to(&modules)
     }
 
     fn module_ids(&self) -> Vec<ModuleIds> {
@@ -419,10 +497,28 @@ impl Profile {
                     discovery.last_request_id,
                 )));
             }
+            // Each ID in the range must be one the policy accepts, whether or not `candidates`
+            // leaves it out.
+            for request in discovery.first_request_id..=discovery.last_request_id {
+                let candidate = ModuleIds {
+                    request,
+                    reply: request.saturating_add(discovery.reply_offset),
+                };
+                Policy::read_only()
+                    .narrowed_to(&[candidate])
+                    .map_err(ProfileError::Discovery)?;
+            }
             // The safety policy's own checks: every request ID one it accepts, and no ID both a
             // request and a reply.
             self.narrow_for_discovery(Policy::read_only())
                 .map_err(ProfileError::Discovery)?;
+            if let Some(wide_last) = discovery.wide_last_request_id {
+                if wide_last <= discovery.last_request_id || wide_last > *DIAGNOSTIC_IDS.end() {
+                    return Err(ProfileError::WideDiscoveryRange);
+                }
+                self.narrow_with(Policy::read_only(), &self.wide_candidates(&[]))
+                    .map_err(ProfileError::Discovery)?;
+            }
         }
         Ok(())
     }
