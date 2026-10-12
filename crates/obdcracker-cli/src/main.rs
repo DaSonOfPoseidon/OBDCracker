@@ -527,6 +527,7 @@ fn print_sweep(
             if matches!(
                 stop.why,
                 sweep::Why::Module(ReadError::NoReply | ReadError::StillPending)
+                    | sweep::Why::Unmatched(_)
                     | sweep::Why::Adapter(_)
             ) {
                 eprintln!(

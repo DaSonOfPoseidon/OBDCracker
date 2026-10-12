@@ -100,8 +100,9 @@ Each entry names the class, what to check, and where it bit us.
 - **Splitting a list to process it in groups reorders it.** `scan` read extended-session DIDs after the others and
   appended them, so values left their documented order. Put them back in the original order after the last group.
 - **A refusal doesn't say which request it refuses.** UDS `7F 22 31` names the service, not the DID, so after a read
-  times out its late refusal can arrive as the next read's answer. The sweep asks again when a refusal follows an
-  unanswered read.
+  times out its late refusal can arrive as the next read's answer. Asking again doesn't fix it: the retry takes the
+  first answer, and the duplicate's answer is left queued for the read after. Once replies may be out of step, stop,
+  and resume on a fresh connection from the read that can't be trusted.
 - **Match a reply to its request by what it echoes**, not only the service ID: the PID (mode 09), a requested PID
   (mode 01), a requested DID (0x22) or the subfunction. A late reply to an earlier request has the same SID
   (`response::answers`).

@@ -55,7 +55,7 @@ impl Sweep {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Stop {
     /// Where to resume: the first DID it didn't read, or the first of the unanswered DIDs just
-    /// before it.
+    /// before it, or for [`Why::Unmatched`] the DID whose answer couldn't be told from a late one.
     pub at: u16,
     /// Why it stopped.
     pub why: Why,
@@ -69,6 +69,11 @@ pub enum Why {
     /// refused `22` itself (service not supported, in this session or at all, or a bad format),
     /// or refused the extended session or didn't confirm it.
     Module(ReadError),
+    /// Right after a DID went unanswered, the next read got a refusal or another DID's value,
+    /// which may be the late answer to the earlier one: UDS refusals don't name the DID. Later
+    /// replies may then answer earlier requests, so the sweep stops. Sweeping again from
+    /// [`Stop::at`] on a fresh connection asks that DID first.
+    Unmatched(ReadError),
     /// The adapter failed, such as `BUFFER FULL`; its state may be unknown, so connect again.
     Adapter(Error),
 }
@@ -78,6 +83,7 @@ impl std::fmt::Display for Why {
         match self {
             Self::Module(ReadError::NoReply) => f.write_str("the module stopped answering"),
             Self::Module(e) => e.fmt(f),
+            Self::Unmatched(e) => write!(f, "a reply may have answered an earlier request ({e})"),
             Self::Adapter(e) => e.fmt(f),
         }
     }
@@ -237,17 +243,9 @@ fn read_each(
     for (did, request) in requests {
         // Where to resume after a stop that no answer came before: the first unanswered DID.
         let resume = quiet.first().map_or(*did, |(did, _)| *did);
-        let mut ask = || {
-            asker.ask(request, |payload| {
-                Ok(uds::decode_did(payload, *did)?.to_vec())
-            })
-        };
-        let mut answer = ask();
-        // After an unanswered read, a refusal or a reply for another DID may be the late answer
-        // to that one: UDS refusals don't name the DID. Asking again settles it.
-        if !quiet.is_empty() && matches!(answer, Ok(Err(ReadError::Reply(_)))) {
-            answer = ask();
-        }
+        let answer = asker.ask(request, |payload| {
+            Ok(uds::decode_did(payload, *did)?.to_vec())
+        });
         let value = match answer {
             Ok(value) => value,
             Err(e) => {
@@ -260,6 +258,20 @@ fn read_each(
                 };
             }
         };
+        // After an unanswered read, a refusal or another DID's value may be the late answer to
+        // that one. Asking again could leave this DID's own answer queued for the next.
+        if !quiet.is_empty()
+            && let Err(e @ ReadError::Reply(_)) = value
+        {
+            found.extend(unanswered(&mut quiet));
+            return Sweep {
+                found,
+                stop: Some(Stop {
+                    at: *did,
+                    why: Why::Unmatched(e),
+                }),
+            };
+        }
         progress(*did);
         match value {
             Err(e @ (ReadError::NoReply | ReadError::StillPending)) => {

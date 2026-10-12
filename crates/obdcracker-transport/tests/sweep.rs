@@ -336,9 +336,10 @@ fn a_refusal_of_the_service_stops_the_sweep() {
 }
 
 #[test]
-fn unanswered_dids_before_an_out_of_range_refusal_are_listed() {
+fn unanswered_dids_before_a_refusal_are_listed() {
     // 0x0601 goes unanswered once, then 0x0602 is refused as out of range: the module is still
-    // there, so 0x0601 may be worth reading again.
+    // there, so 0x0601 may be worth reading again. The refusal may be 0x0601's, so the sweep
+    // stops at 0x0602.
     let mut car = Car::new(|_, request| match request {
         [0x22, 0x06, 0x01] => Vec::new(),
         [0x22, ..] => reply(&[0x7F, 0x22, 0x31]),
@@ -354,7 +355,7 @@ fn unanswered_dids_before_an_out_of_range_refusal_are_listed() {
     )
     .unwrap();
     assert_eq!(got.found, [(0x0601, Err(ReadError::NoReply))]);
-    assert_eq!(got.stop, None);
+    assert_eq!(got.stop.map(|stop| stop.at), Some(0x0602));
 }
 
 #[test]
@@ -432,19 +433,12 @@ fn an_adapter_failure_leaving_the_session_outranks_a_module_stop() {
 }
 
 #[test]
-fn a_refusal_right_after_an_unanswered_read_is_asked_again() {
-    // 0x0600's late `7F 22 31` arrives as 0x0601's answer; asked again, 0x0601 answers.
-    let mut asked = 0;
-    let mut car = Car::new(move |_, request| match request {
+fn a_refusal_right_after_an_unanswered_read_stops_the_sweep_there() {
+    // 0x0600's late `7F 22 31` may arrive as 0x0601's answer, and a refusal doesn't name its
+    // DID. Asking again could leave a reply queued for 0x0602, so the sweep stops at 0x0601:
+    // resumed on a fresh connection, 0x0601 is asked first.
+    let mut car = Car::new(|_, request| match request {
         [0x22, 0x06, 0x00] => Vec::new(),
-        [0x22, 0x06, 0x01] => {
-            asked += 1;
-            if asked == 1 {
-                reply(&[0x7F, 0x22, 0x31])
-            } else {
-                reply(&[0x62, 0x06, 0x01, 0x42])
-            }
-        }
         _ => reply(&[0x7F, 0x22, 0x31]),
     });
     let got = sweep_dids(
@@ -456,11 +450,11 @@ fn a_refusal_right_after_an_unanswered_read_is_asked_again() {
         &SweepOptions::default(),
     )
     .unwrap();
-    assert_eq!(
-        got.found,
-        [(0x0600, Err(ReadError::NoReply)), (0x0601, Ok(vec![0x42])),]
-    );
-    assert_eq!(got.answered(), 1);
+    assert_eq!(got.found, [(0x0600, Err(ReadError::NoReply))]);
+    let stop = got.stop.unwrap();
+    assert_eq!(stop.at, 0x0601);
+    assert!(matches!(stop.why, Why::Unmatched(ReadError::Reply(_))));
+    assert_eq!(car.sent.len(), 2, "0x0602 isn't asked");
 }
 
 #[test]
