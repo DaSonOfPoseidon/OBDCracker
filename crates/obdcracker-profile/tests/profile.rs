@@ -565,8 +565,8 @@ fn with_wide_discovery(first: u32, last: u32, offset: u32, wide_last: u32) -> St
 
 #[test]
 fn wide_candidates_skip_every_known_request_and_reply_id() {
-    // Pass 1 covers 0x700..=0x769, replies 0x76A..=0x7D3; the wide range goes on to 0x7FF.
-    let profile = Profile::from_toml(&with_wide_discovery(0x700, 0x769, 0x6A, 0x7FF)).unwrap();
+    // Pass 1 covers 0x700..=0x769, replies 0x76A..=0x7D3; the wide range takes all of those.
+    let profile = Profile::from_toml(&with_wide_discovery(0x700, 0x769, 0x6A, 0x7D3)).unwrap();
     // A module pass 1 found that the profile doesn't list.
     let found = [ModuleIds {
         request: 0x705,
@@ -644,8 +644,16 @@ fn a_module_listed_in_the_wide_range_keeps_the_first_pass_off_its_request_id() {
 }
 
 #[test]
-fn rejects_a_wide_range_that_does_not_follow_the_discovery_range() {
-    for (last, wide_last) in [(0x709, 0x709), (0x709, 0x700), (0x709, 0x800)] {
+fn rejects_a_wide_range_outside_the_first_passs_reply_ids() {
+    for (last, wide_last) in [
+        (0x709, 0x709),
+        (0x709, 0x700),
+        (0x709, 0x800),
+        // The first pass listens on 0x76A..=0x773, so 0x70A wasn't checked for a reply.
+        (0x709, 0x70A),
+        // 0x76A..=0x7D4: one past the first pass's last reply ID, 0x7D3.
+        (0x769, 0x7D4),
+    ] {
         assert!(
             matches!(
                 Profile::from_toml(&with_wide_discovery(0x700, last, 0x6A, wide_last)),
