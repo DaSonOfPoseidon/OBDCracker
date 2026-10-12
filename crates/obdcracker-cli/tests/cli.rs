@@ -559,6 +559,87 @@ fn sim_scan_discover_finds_the_modules_that_answer_then_scans_them() {
 }
 
 #[test]
+fn sim_scan_discover_wide_looks_past_the_discovery_range_without_sending_on_a_reply_id() {
+    let log = temp_log("discover-wide");
+    let out = obdcracker(&[
+        "--sim",
+        "a7",
+        "--audit-log",
+        log.to_str().unwrap(),
+        "scan",
+        "--discover",
+        "--wide",
+    ]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("discovery: 22 of 106 request IDs answered"),
+        "{stdout}"
+    );
+    // The simulated A7 has nothing past 0x769.
+    assert!(
+        stdout
+            .lines()
+            .any(|l| l.starts_with("wide discovery: 0 of ")),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains("77A gateway F197 J533--Gateway"),
+        "{stdout}"
+    );
+    let audit = std::fs::read_to_string(&log).unwrap();
+    // The wide pass: the reads of F187 right after the first pass's 106, before the scan.
+    let wide: Vec<u32> = audit
+        .lines()
+        .filter(|l| l.contains(r#""dir":"tx""#))
+        .skip(0x6A)
+        .take_while(|l| l.contains(r#""payload":"22 F1 87""#))
+        .map(|l| {
+            let id = l.split(r#""id":""#).nth(1).unwrap();
+            u32::from_str_radix(&id[..3], 16).unwrap()
+        })
+        .collect();
+    assert_eq!(wide.first(), Some(&0x76A), "{wide:X?}");
+    // Up to 0x795, with the MMI's MQB ID among them.
+    assert!(wide.contains(&0x773), "{wide:X?}");
+    assert!(wide.iter().all(|id| *id <= 0x795), "{wide:X?}");
+    // Never on the reply ID of a module that answered (as every module in the profile did), nor
+    // on one whose reply would be an OBD-II ID.
+    let profile = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../obdcracker-profile/profiles/audi-a7-c7.toml"
+    ))
+    .unwrap();
+    for reply in profile
+        .lines()
+        .filter_map(|l| l.strip_prefix("response_id = 0x"))
+        .map(|id| u32::from_str_radix(id, 16).unwrap())
+    {
+        assert!(!wide.contains(&reply), "{reply:03X}");
+    }
+    assert!(
+        wide.iter()
+            .all(|id| !(0x7DF..=0x7EF).contains(&(id + 0x6A))),
+        "{wide:X?}"
+    );
+}
+
+#[test]
+fn scan_wide_needs_discover() {
+    let out = obdcracker(&["--dry-run", "--profile", "a7", "scan", "--wide"]);
+    assert_eq!(out.status.code(), Some(2));
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("--discover"),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+#[test]
 fn scan_discover_needs_a_profile_with_a_discovery_range() {
     let out = obdcracker(&["--dry-run", "scan", "--discover"]);
     assert_eq!(out.status.code(), Some(2));
