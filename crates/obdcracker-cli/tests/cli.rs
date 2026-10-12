@@ -526,6 +526,9 @@ fn sim_scan_discover_finds_the_modules_that_answer_then_scans_them() {
         "78D rear lid F190 (not set)",
         "791 night vision DTC 001017 failed, confirmed (status 09)",
         "78B sensor cluster DTC format 01, the module counts 0 for mask AF",
+        // The car's quirks, as #54's car3.txt shows them.
+        "77F airbag DTC count (reply is malformed)",
+        "791 night vision F190 (service 0x22 refused: conditions not correct (0x22))",
     ] {
         assert!(
             stdout.lines().any(|l| l == line),

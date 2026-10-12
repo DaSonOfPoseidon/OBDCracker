@@ -7,7 +7,7 @@ use obdcracker_core::obd::{self, Unit, Value};
 use obdcracker_core::response::{Error as ReplyError, Nrc};
 use obdcracker_core::uds::{self, DtcFormat, DtcStatus};
 use obdcracker_profile::{Profile, ProfileError};
-use obdcracker_safety::{Policy, Target};
+use obdcracker_safety::{Approved, Policy, Target};
 use obdcracker_sim::{Fault, FixtureError, Session, SimBus};
 use obdcracker_transport::{Error, Expect, Response, Timing, Transport, exchange};
 use proptest::prelude::*;
@@ -409,22 +409,27 @@ fn dtc_report_settings_are_checked() {
 #[test]
 fn a7_modules_report_dtcs_as_the_car_did() {
     // Session 2 (#49): every module refuses the count report and lists its DTC table by status
-    // mask, but no DTC is failed, pending or confirmed.
+    // mask, but no DTC is failed, pending or confirmed. The transmission says it's busy first.
     let mut bus = a7();
-    for (target, availability) in [
-        (ENGINE, 0xFF),
-        (TRANSMISSION, 0xFF),
-        (GATEWAY, 0x19),
-        (INSTRUMENTS, 0x19),
+    for (target, availability, pending) in [
+        (ENGINE, 0xFF, 0),
+        (TRANSMISSION, 0xFF, 1),
+        (GATEWAY, 0x19, 0),
+        (INSTRUMENTS, 0x19, 0),
     ] {
         let reply = ask_one(&mut bus, target, &uds::dtc_count_by_status_mask(0xFF));
         assert_eq!(nrc(&reply, 0x19), Nrc::SubFunctionNotSupported);
-        let reply = ask_one(&mut bus, target, &uds::dtcs_by_status_mask(0xFF));
+        let mut replies = payloads(&ask(&mut bus, target, &uds::dtcs_by_status_mask(0xFF)));
+        let reply = replies.pop().unwrap();
+        assert_eq!(replies.len(), pending, "{target:?}");
+        assert!(replies.iter().all(|r| nrc(r, 0x19).is_pending()));
         let (status, records) = uds::decode_dtcs_by_status_mask(&reply).unwrap();
         assert_eq!(status, DtcStatus(availability), "{target:?}");
         assert!(records.count() > 0, "{target:?}");
-        let reply = ask_one(&mut bus, target, &uds::dtcs_by_status_mask(0x0F));
-        let (_, records) = uds::decode_dtcs_by_status_mask(&reply).unwrap();
+        let reply = ask(&mut bus, target, &uds::dtcs_by_status_mask(0x0F))
+            .pop()
+            .unwrap();
+        let (_, records) = uds::decode_dtcs_by_status_mask(&reply.payload).unwrap();
         assert_eq!(records.count(), 0, "{target:?}");
     }
 }
@@ -773,22 +778,156 @@ proptest! {
         let Ok(request) = Policy::read_only().approve(target, &payload) else {
             return Ok(());
         };
-        let mut bus = a7();
-        bus.send(&request).unwrap();
-        while let Ok(reply) = bus.recv(TIMEOUT) {
-            let first = reply.payload[0];
-            if first == 0x7F {
-                prop_assert_eq!(reply.payload.len(), 3);
-                prop_assert_eq!(reply.payload[1], sid);
-            } else {
-                prop_assert_eq!(first, sid + 0x40);
-            }
-            prop_assert!(
-                obdcracker_core::response::answers(&payload, &reply.payload),
-                "{:02X?} doesn't answer {:02X?}",
-                reply.payload,
-                payload
-            );
-        }
+        check_replies(&request).map_err(TestCaseError::fail)?;
     }
+}
+
+// Every reply the simulated A7 sends to `request` is well formed and answers it: after
+// response-pending, the final reply comes even to a suppressed request.
+fn check_replies(request: &Approved) -> Result<(), String> {
+    let payload = request.payload();
+    let sid = payload[0];
+    let mut bus = a7();
+    bus.send(request).unwrap();
+    let mut pending = false;
+    while let Ok(reply) = bus.recv(TIMEOUT) {
+        let reply = reply.payload;
+        let shape = match reply[0] {
+            0x7F => reply.len() == 3 && reply[1] == sid,
+            first => first == sid + 0x40,
+        };
+        let answers = if pending {
+            obdcracker_core::response::answers_after_pending(payload, &reply)
+        } else {
+            obdcracker_core::response::answers(payload, &reply)
+        };
+        if !shape || !answers {
+            return Err(format!("{reply:02X?} doesn't answer {payload:02X?}"));
+        }
+        pending |= reply.len() == 3 && reply[0] == 0x7F && reply[2] == 0x78;
+    }
+    Ok(())
+}
+
+#[test]
+fn a_suppressed_dtc_request_gets_its_report_after_response_pending() {
+    // The transmission sends response-pending before each DTC report (session 3).
+    let request = Policy::read_only()
+        .approve(TRANSMISSION, &[0x19, 0x82, 0xAF])
+        .unwrap();
+    check_replies(&request).unwrap();
+}
+
+// What session 3 (#54) showed that a plain fixture couldn't say: response-pending before a DTC
+// report, a reply the car sent that isn't well formed, and a DID refused with an NRC of its own.
+const QUIRKS: &str = r#"
+[[ecu]]
+module = "engine"
+dtc_pending = 2
+dtc_reports = [0x02]
+
+[[ecu.dtc]]
+code = 0x029900
+status = 0x08
+
+[[ecu.did]]
+id = 0xF187
+text = "4G0907589F "
+
+[[ecu.did]]
+id = 0xF190
+nrc = 0x22
+
+[[ecu.raw]]
+request = "19 01 AF"
+reply = "59 01 00 00"
+pending = 1
+"#;
+
+fn quirks() -> SimBus {
+    SimBus::new(&Profile::builtin("a7").unwrap(), QUIRKS).unwrap()
+}
+
+fn payloads(replies: &[Response]) -> Vec<Vec<u8>> {
+    replies.iter().map(|r| r.payload.clone()).collect()
+}
+
+#[test]
+fn a_dtc_report_can_send_response_pending_first() {
+    let mut bus = quirks();
+    let replies = payloads(&ask(&mut bus, ENGINE, &uds::dtcs_by_status_mask(0xAF)));
+    assert_eq!(replies.len(), 3, "{replies:02X?}");
+    assert!(nrc(&replies[0], 0x19).is_pending());
+    assert!(nrc(&replies[1], 0x19).is_pending());
+    assert!(uds::decode_dtcs_by_status_mask(&replies[2]).is_ok());
+    // A refusal comes at once (session 3: `7F 19 12` with no pending first).
+    let replies = payloads(&ask(&mut bus, ENGINE, &uds::dtc_count_by_status_mask(0xFF)));
+    assert_eq!(replies, [[0x7F, 0x19, 0x12]]);
+}
+
+#[test]
+fn a_raw_reply_is_sent_as_the_car_sent_it() {
+    // The airbag answered `19 01 AF` with `59 01 00 00`, too short to decode.
+    let mut bus = quirks();
+    let replies = payloads(&ask(&mut bus, ENGINE, &uds::dtc_count_by_status_mask(0xAF)));
+    assert_eq!(replies.len(), 2, "{replies:02X?}");
+    assert!(nrc(&replies[0], 0x19).is_pending());
+    assert_eq!(replies[1], [0x59, 0x01, 0x00, 0x00]);
+    assert!(uds::decode_dtc_count(&replies[1]).is_err());
+}
+
+#[test]
+fn a_did_can_be_refused_with_its_own_nrc() {
+    // Night vision refused F190 with 0x22 (conditions not correct), not 0x31.
+    let mut bus = quirks();
+    let reply = ask_one(&mut bus, ENGINE, &uds::read_did(0xF190));
+    assert_eq!(nrc(&reply, 0x22), Nrc::ConditionsNotCorrect);
+    // ISO 14229-1 checks conditions for the whole request, so a read that includes it is refused.
+    let reply = ask_one(&mut bus, ENGINE, &[0x22, 0xF1, 0x87, 0xF1, 0x90]);
+    assert_eq!(nrc(&reply, 0x22), Nrc::ConditionsNotCorrect);
+    let reply = ask_one(&mut bus, ENGINE, &uds::read_did(0xF187));
+    assert!(uds::decode_did(&reply, 0xF187).is_ok());
+}
+
+#[test]
+fn quirk_settings_are_checked() {
+    let a7 = Profile::builtin("a7").unwrap();
+    for bad in [
+        // A refusal has no value, and 0x00 and 0x78 (response-pending) aren't refusals.
+        "[[ecu]]\nmodule = \"engine\"\n[[ecu.did]]\nid = 0xF190\nnrc = 0x22\ntext = \"WAUZZZ4G1EN000000\"\n",
+        "[[ecu]]\nmodule = \"engine\"\n[[ecu.did]]\nid = 0xF190\nnrc = 0x00\n",
+        "[[ecu]]\nmodule = \"engine\"\n[[ecu.did]]\nid = 0xF190\nnrc = 0x78\n",
+        // A raw reply must answer its request, and each request has one.
+        "[[ecu]]\nmodule = \"engine\"\n[[ecu.raw]]\nrequest = \"19 01 AF\"\nreply = \"62 F1 90\"\n",
+        "[[ecu]]\nmodule = \"engine\"\n[[ecu.raw]]\nrequest = \"19 01 AF\"\nreply = \"59 02 00\"\n",
+        "[[ecu]]\nmodule = \"engine\"\n[[ecu.raw]]\nrequest = \"19 01 AF\"\nreply = \"59 01 00 00\"\n[[ecu.raw]]\nrequest = \"19 01 AF\"\nreply = \"59 01 00 01\"\n",
+        "[[ecu]]\nmodule = \"engine\"\n[[ecu.raw]]\nrequest = \"\"\nreply = \"59 01 00 00\"\n",
+        // Session control changes the module's state, which a raw reply would skip.
+        "[[ecu]]\nmodule = \"engine\"\n[[ecu.raw]]\nrequest = \"10 03\"\nreply = \"50 03 00 32 01 F4\"\n",
+    ] {
+        assert!(
+            matches!(SimBus::new(&a7, bad), Err(FixtureError::Value(_))),
+            "{bad}"
+        );
+    }
+}
+
+#[test]
+fn a_refused_did_can_send_response_pending_first() {
+    let fixture =
+        "[[ecu]]\nmodule = \"engine\"\n[[ecu.did]]\nid = 0xF190\nnrc = 0x22\npending = 2\n";
+    let mut bus = SimBus::new(&Profile::builtin("a7").unwrap(), fixture).unwrap();
+    let replies = payloads(&ask(&mut bus, ENGINE, &uds::read_did(0xF190)));
+    assert_eq!(replies.len(), 3, "{replies:02X?}");
+    assert!(nrc(&replies[0], 0x22).is_pending());
+    assert!(nrc(&replies[1], 0x22).is_pending());
+    assert_eq!(nrc(&replies[2], 0x22), Nrc::ConditionsNotCorrect);
+}
+
+#[test]
+fn a_raw_reply_after_response_pending_answers_a_suppressed_request() {
+    // After response-pending, the final positive reply is sent even with bit 7 set.
+    let fixture = "[[ecu]]\nmodule = \"engine\"\n[[ecu.raw]]\nrequest = \"19 81 AF\"\n\
+                   reply = \"59 01 00 00\"\npending = 1\n";
+    assert!(SimBus::new(&Profile::builtin("a7").unwrap(), fixture).is_ok());
 }
