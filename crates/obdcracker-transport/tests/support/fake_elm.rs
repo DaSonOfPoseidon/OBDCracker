@@ -343,7 +343,7 @@ impl FakeElm {
                 self.settings.headers = cmd == "H1";
                 true
             }
-            "R1" | "AT1" | "STFF" => true,
+            "R1" | "AT0" | "AT1" | "STFF" => true,
             "FCSM0" => {
                 self.settings.fc_mode = 0;
                 true

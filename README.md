@@ -177,8 +177,10 @@ obdcracker --tcp 192.168.0.10:35000 vin            # a Wi-Fi adapter
 ```
 
 The ELM driver only sends single-frame requests (up to 7 bytes: the OBD-II reads, and UDS 0x22 with up to 3 DIDs), never
-lets the adapter search for a protocol, and stops if the adapter stops answering. On a plain ELM327 it paces long replies
-to the link's speed, so its 512-byte buffer can't overflow. [`docs/elm327.md`](docs/elm327.md)
+lets the adapter search for a protocol, and stops if the adapter stops answering. On a plain ELM327 it paces a physical
+request's long reply to the link's speed, so its 512-byte buffer doesn't overflow (down to about 2300 baud). Broadcasts
+can't be paced: several ECUs' multi-frame replies at once on a slow link can still overflow it, which the driver
+reports as `BUFFER FULL` (#71). [`docs/elm327.md`](docs/elm327.md)
 lists the adapter behaviour it relies on, with datasheet pages. It's tested against a fake adapter written from the
 datasheet, against the simulated A7, and against [ELM327-emulator](https://github.com/Ircama/ELM327-emulator), an
 independent implementation. That last test is opt-in (`#[ignore]`) and runs in a CI job that doesn't block merging yet.

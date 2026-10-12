@@ -253,6 +253,14 @@ impl<L: Link> Elm<L> {
         let stn = elm.command("STI")?.join(" ");
         elm.stn = stn.starts_with("STN").then_some(stn);
         elm.pace = pace(elm.stn.is_some(), elm.link.byte_rate());
+        // Adaptive timing learns the timeout from response times and may set it below the gap
+        // a paced module leaves between frames, ending the reply early (ELM327DS p. 12; the
+        // OBDLink FRPM says the same timer waits for each next frame). So it's off when pacing,
+        // and the timeout is always `AT ST FF`: every request then waits about 1 s after its
+        // last reply.
+        if elm.pace.is_some() {
+            elm.expect_ok("ATAT0")?;
+        }
         Ok(elm)
     }
 

@@ -70,7 +70,7 @@ mod setup {
             commands(&elm),
             [
                 "ATZ", "ATPPS", "ATL0", "ATS1", "ATH1", "ATSP6", "ATR1", "ATCRA7XX", "ATAT1",
-                "ATSTFF", "STI"
+                "ATSTFF", "STI", "ATAT0"
             ]
         );
         let settings = &elm.link().elm.settings;
@@ -137,6 +137,7 @@ mod setup {
             "ATFCSH7E0",
             "ATFCSM1",
             "ATFCSM0",
+            "ATAT0",
             "ATCRA7EX",
             "ATCRA7E8",
             "ATCRA77E",
@@ -1505,6 +1506,17 @@ mod pacing {
                 "{rate:?}"
             );
         }
+    }
+
+    #[test]
+    fn adaptive_timing_is_off_only_when_pacing() {
+        // A learned timeout shorter than the gap would end a paced reply early (PR #70, Codex).
+        let elm = Elm::connect(FakeLink::at_baud(long_replies(), 9600)).unwrap();
+        assert_eq!(commands(&elm).last().map(String::as_str), Some("ATAT0"));
+        let mut stn = long_replies();
+        stn.sti = Some("STN2232 v5.12.4".into());
+        let elm = Elm::connect(FakeLink::new(stn)).unwrap();
+        assert!(!commands(&elm).iter().any(|c| c == "ATAT0"));
     }
 
     #[test]
