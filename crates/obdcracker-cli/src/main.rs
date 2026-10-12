@@ -540,10 +540,13 @@ fn print_sweep(module: &UdsModule, found: &sweep::Sweep, last: u16) -> ExitCode 
                 )
             {
                 let ran = std::env::args_os().map(|arg| arg.to_string_lossy().into_owned());
-                eprintln!(
-                    "to go on: {}",
-                    resume_command(ran, stop.at, last, cfg!(windows))
-                );
+                match resume_command(ran, stop.at, last, cfg!(windows)) {
+                    Some(command) => eprintln!("to go on: {command}"),
+                    None => eprintln!(
+                        "to go on: run the same command with --range {:04X}-{last:04X}",
+                        stop.at
+                    ),
+                }
             }
             ExitCode::FAILURE
         }
@@ -680,13 +683,13 @@ fn run_scan<T: Transport>(
 }
 
 // The command that ran, with its `--range` starting at `from`, for a shell to run again: a
-// Windows one if `windows`.
+// Windows one if `windows`. None if a word can't be written so every such shell reads it as is.
 fn resume_command(
     ran: impl IntoIterator<Item = String>,
     from: u16,
     last: u16,
     windows: bool,
-) -> String {
+) -> Option<String> {
     let range = format!("{from:04X}-{last:04X}");
     let mut ran = ran.into_iter();
     // The program as installed, not however this run reached it.
@@ -703,27 +706,35 @@ fn resume_command(
         });
         range_next = word == "--range";
     }
-    words
-        .iter()
-        .map(|word| shell_word(word, windows))
-        .collect::<Vec<_>>()
-        .join(" ")
+    Some(
+        words
+            .iter()
+            .map(|word| shell_word(word, windows))
+            .collect::<Option<Vec<_>>>()?
+            .join(" "),
+    )
 }
 
 // `word` as one shell word: as is if no shell treats any of it specially, in double quotes if it
 // only has spaces too (POSIX shells, PowerShell and cmd all read those), else quoted for the
 // platform's shell. On Windows a backslash is an ordinary character (`\\.\COM10`), and cmd
-// groups words only with double quotes, so those are used, any inside doubled.
-fn shell_word(word: &str, windows: bool) -> String {
+// groups words only with double quotes; but inside them PowerShell still expands `$` and `` ` ``
+// and cmd `%`, and they can't hold a `"` both read alike, so such a word gives None.
+fn shell_word(word: &str, windows: bool) -> Option<String> {
     let plain =
         |c: char| c.is_ascii_alphanumeric() || "-_./=:,+@".contains(c) || (windows && c == '\\');
-    if !word.is_empty() && word.chars().all(plain) {
+    Some(if !word.is_empty() && word.chars().all(plain) {
         word.to_owned()
-    } else if windows || word.chars().all(|c| plain(c) || c == ' ') {
-        format!("\"{}\"", word.replace('"', "\"\""))
+    } else if windows {
+        if word.contains(['$', '`', '%', '"']) {
+            return None;
+        }
+        format!("\"{word}\"")
+    } else if word.chars().all(|c| plain(c) || c == ' ') {
+        format!("\"{word}\"")
     } else {
         format!("'{}'", word.replace('\'', r"'\''"))
-    }
+    })
 }
 
 // Looks for modules in the profile's discovery range, and with `wide` its wide range too, and
@@ -1002,7 +1013,7 @@ mod tests {
             "--extended",
         ]);
         assert_eq!(
-            resume_command(ran, 0x0123, 0x0FFF, false),
+            resume_command(ran, 0x0123, 0x0FFF, false).unwrap(),
             "obdcracker --serial /dev/ttyUSB0 --profile a7 --audit-log car4-hud.jsonl sweep \
              --module \"head-up display\" --range 0123-0FFF --extended"
         );
@@ -1016,15 +1027,26 @@ mod tests {
             "x",
         ]);
         assert_eq!(
-            resume_command(ran, 0x0080, 0x00FF, false),
+            resume_command(ran, 0x0080, 0x00FF, false).unwrap(),
             "obdcracker --sim a7 sweep --range=0080-00FF --module x"
         );
         // A word a shell would expand is quoted so it isn't.
         let ran = args(&["obdcracker", "--tcp", "a$b", "sweep", "--range", "0-1"]);
         assert_eq!(
-            resume_command(ran.clone(), 1, 1, false),
+            resume_command(ran.clone(), 1, 1, false).unwrap(),
             "obdcracker --tcp 'a$b' sweep --range 0001-0001"
         );
+        // Windows shells expand `$` (PowerShell) and `%` (cmd) even in double quotes.
+        assert_eq!(resume_command(ran, 1, 1, true), None);
+        let ran = args(&[
+            "obdcracker",
+            "--audit-log",
+            "%run%.jsonl",
+            "sweep",
+            "--range",
+            "0-1",
+        ]);
+        assert_eq!(resume_command(ran, 1, 1, true), None);
         // cmd.exe groups only with double quotes, and a backslash is part of a path there.
         let ran = args(&[
             r"C:\tools\obdcracker.exe",
@@ -1039,7 +1061,7 @@ mod tests {
             "0000-0FFF",
         ]);
         assert_eq!(
-            resume_command(ran, 0x0123, 0x0FFF, true),
+            resume_command(ran, 0x0123, 0x0FFF, true).unwrap(),
             r#"obdcracker --serial \\.\COM10 --audit-log "C:\car 4\hud.jsonl" sweep --module "head-up display" --range 0123-0FFF"#
         );
     }

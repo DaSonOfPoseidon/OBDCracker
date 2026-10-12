@@ -284,6 +284,7 @@ fn read_each(
                 return halt(found, resume, stopped(Err(e)));
             }
         };
+        progress(*did);
         // After an unanswered read, a refusal or another DID's value may be the late answer to
         // that one. Asking again could leave this DID's own answer queued for the next.
         if !quiet.is_empty()
@@ -292,7 +293,6 @@ fn read_each(
             found.extend(unanswered(&mut quiet));
             return halt(found, *did, Why::Unmatched(e));
         }
-        progress(*did);
         match value {
             Err(e @ (ReadError::NoReply | ReadError::StillPending)) => {
                 quiet.push((*did, e));

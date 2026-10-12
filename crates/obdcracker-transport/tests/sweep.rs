@@ -441,16 +441,20 @@ fn a_refusal_right_after_an_unanswered_read_stops_the_sweep_there() {
         [0x22, 0x06, 0x00] => Vec::new(),
         _ => reply(&[0x7F, 0x22, 0x31]),
     });
-    let got = sweep_dids(
+    let mut read = Vec::new();
+    let got = sweep_dids_reporting(
         &mut car,
         &Policy::read_only(),
         &engine(),
         0x0600..=0x0602,
         TIMING,
         &SweepOptions::default(),
+        |did| read.push(did),
     )
     .unwrap();
     assert_eq!(got.found, [(0x0600, Err(ReadError::NoReply))]);
+    // 0x0601 was read, though its answer can't be trusted.
+    assert_eq!(read, [0x0600, 0x0601]);
     let stop = got.stop.unwrap();
     assert_eq!(stop.at, 0x0601);
     assert!(matches!(stop.why, Why::Unmatched(ReadError::Reply(_))));
