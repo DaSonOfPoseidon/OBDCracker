@@ -461,31 +461,45 @@ impl FakeElm {
             self.print("NO DATA");
         }
         let gap_us = self.st_min_us().max(FRAME_TIME_US);
-        'replies: for (source, payload) in replies {
+        // Each frame line and when it arrives, in µs. Modules answer at once, so with the buffer
+        // modelled their frames interleave, each module's spaced by the gap its flow control
+        // asked for; otherwise each reply is printed whole, in turn.
+        let mut lines = Vec::new();
+        for (index, (source, payload)) in replies.into_iter().enumerate() {
             let frames = frames(&payload);
             if frames.len() > 1 {
                 self.flow_control_for.push(source);
             }
-            // Bytes still in the buffer, in millionths of a byte, as the frames arrive.
-            let mut queued: u64 = 0;
-            for frame in frames {
+            for (k, frame) in frames.into_iter().enumerate() {
                 let line = if self.settings.headers {
                     format!("{source:03X} {}", hex(&frame))
                 } else {
                     hex(&frame)
                 };
-                if let Some(rate) = self.drain_rate {
-                    // Each frame after the first waits out the gap the flow control asked for,
-                    // while the link drains the buffer.
-                    queued = queued.saturating_sub(u64::from(rate) * gap_us);
-                    queued += (line.len() as u64 + 1) * 1_000_000;
-                    if queued > OUTPUT_BUFFER as u64 * 1_000_000 {
-                        self.print("BUFFER FULL");
-                        break 'replies;
-                    }
-                }
-                self.print(&line);
+                let (index, k) = (index as u64, k as u64);
+                let at = if self.drain_rate.is_some() {
+                    k * gap_us + index
+                } else {
+                    index << 32 | k
+                };
+                lines.push((at, line));
             }
+        }
+        lines.sort_by_key(|(at, _)| *at);
+        // Bytes still in the buffer, in millionths of a byte, as the frames arrive.
+        let mut queued: u64 = 0;
+        let mut last = 0;
+        for (at, line) in lines {
+            if let Some(rate) = self.drain_rate {
+                queued = queued.saturating_sub(u64::from(rate) * (at - last));
+                last = at;
+                queued += (line.len() as u64 + 1) * 1_000_000;
+                if queued > OUTPUT_BUFFER as u64 * 1_000_000 {
+                    self.print("BUFFER FULL");
+                    break;
+                }
+            }
+            self.print(&line);
         }
         if !self.hang_after_request {
             self.prompt();

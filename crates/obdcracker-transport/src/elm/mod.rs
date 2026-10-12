@@ -105,6 +105,8 @@ const KILL: &[u8] = b"XX\r";
 // The characters a consecutive frame takes as the adapter prints it, with headers and spaces on
 // and linefeeds off: `7E8 21 41 41 41 41 41 41 41 \r`.
 const FRAME_LINE: u32 = 29;
+// How many emissions ECUs can answer one broadcast: 0x7E8..=0x7EF.
+const OBD_RESPONDERS: u32 = 8;
 // The link's byte rate when it can't be known: 9600 baud, the slowest an ELM327 starts at.
 const SLOWEST_RATE: u32 = 9600 / 10;
 // The byte rate at and above which an STN was seen to print a long reply with no gap between
@@ -138,7 +140,8 @@ const STN_UNPACED_RATE: u32 = 115_200 / 10;
 /// OBD-II IDs (0x7DF and 0x7E0..=0x7E7) to the ID it picks by the standard, and for any other
 /// module to the module's request ID. Each says continue, with no block limit, and a gap
 /// between frames (`STmin`) of the time the adapter takes to print one frame on the link
-/// ([`Link::byte_rate`], or 9600 baud when unknown), up to 127 ms. Frames arrive faster than a
+/// ([`Link::byte_rate`], or 9600 baud when unknown), up to 127 ms; for a broadcast, the time to
+/// print one frame from each of the 8 emissions ECUs, which may all answer at once. Frames arrive faster than a
 /// slow link carries them away as text, and a plain ELM327 holds only 512 bytes before it
 /// prints `BUFFER FULL` and drops the rest. An STN chip on a link of 115200 baud or faster gets
 /// no gap, which a real one handled (#49).
@@ -189,18 +192,19 @@ pub struct Elm<L> {
     banner: String,
     // Its `STI` answer, if it's an STN chip.
     stn: Option<String>,
-    // The gap between consecutive frames its flow control asks for, in ms.
-    st_min: u8,
+    // The link's byte rate, if replies are paced to it.
+    pace: Option<u32>,
     senders: Vec<(u32, Reassembler<Vec<u8>>)>,
 }
 
-// Where the adapter sends ISO-TP flow control frames.
+// Where the adapter sends ISO-TP flow control frames, and the gap between consecutive frames
+// (STmin, ms) they ask for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Flow {
     // To the ID ISO 15765-4 gives, for the OBD-II IDs
-    Standard,
+    Standard(u8),
     // To this request ID
-    To(u32),
+    To(u32, u8),
 }
 
 /// What an adapter says about itself. Reading it puts nothing on the bus.
@@ -237,7 +241,7 @@ impl<L: Link> Elm<L> {
             broken: None,
             banner: String::new(),
             stn: None,
-            st_min: 0,
+            pace: None,
             senders: Vec::new(),
         };
         elm.drain_stale()?;
@@ -249,7 +253,7 @@ impl<L: Link> Elm<L> {
         // Only an STN chip names itself so; a clone may answer anything.
         let stn = elm.command("STI")?.join(" ");
         elm.stn = stn.starts_with("STN").then_some(stn);
-        elm.st_min = st_min(elm.stn.is_some(), elm.link.byte_rate());
+        elm.pace = pace(elm.stn.is_some(), elm.link.byte_rate());
         Ok(elm)
     }
 
@@ -650,23 +654,31 @@ impl<L: Link> Elm<L> {
             self.expect_ok(&format!("ATSH{id:03X}"))?;
             self.header = Some(id);
         }
+        // Every emissions ECU may answer a broadcast with a long reply at once, their frames
+        // interleaved, so each is paced for all of them. Only the addressed module answers a
+        // physical request.
+        let responders = match request.target() {
+            Target::ObdFunctional => OBD_RESPONDERS,
+            Target::Physical(_) => 1,
+        };
+        let gap = st_min(self.pace, responders);
         let flow = if id == 0x7DF || (0x7E0..=0x7E7).contains(&id) {
-            Flow::Standard
+            Flow::Standard(gap)
         } else {
-            Flow::To(id)
+            Flow::To(id, gap)
         };
         if self.flow != Some(flow) {
             // Continue to send, no block limit, and the gap. `AT FC SD` keeps two non-hex
             // letters (T, S), so one flipped bit can't make it a bus request.
-            let data = format!("ATFCSD3000{:02X}", self.st_min);
+            let data = format!("ATFCSD3000{gap:02X}");
             match flow {
-                Flow::Standard if self.st_min == 0 => self.expect_ok("ATFCSM0")?,
+                Flow::Standard(0) => self.expect_ok("ATFCSM0")?,
                 // The adapter picks the header, the driver the data.
-                Flow::Standard => {
+                Flow::Standard(_) => {
                     self.expect_ok(&data)?;
                     self.expect_ok("ATFCSM2")?;
                 }
-                Flow::To(id) => {
+                Flow::To(id, _) => {
                     self.expect_ok(&format!("ATFCSH{id:03X}"))?;
                     self.expect_ok(&data)?;
                     self.expect_ok("ATFCSM1")?;
@@ -689,15 +701,20 @@ impl<L: Link> Elm<L> {
     }
 }
 
-// The gap between consecutive frames, in ms, that keeps the adapter's output buffer from
-// filling: the time to print one frame line at the link's byte rate, rounded up, at most 127 ms
-// (the most STmin allows). None for an STN on a fast link.
-fn st_min(stn: bool, byte_rate: Option<u32>) -> u8 {
+// The link's byte rate if replies are paced to it: always, except for an STN on a fast link.
+fn pace(stn: bool, byte_rate: Option<u32>) -> Option<u32> {
     let rate = byte_rate.filter(|&rate| rate > 0).unwrap_or(SLOWEST_RATE);
-    if stn && rate >= STN_UNPACED_RATE {
+    (!stn || rate < STN_UNPACED_RATE).then_some(rate)
+}
+
+// The gap between one module's consecutive frames, in ms, that keeps the adapter's output buffer
+// from filling while `responders` modules send at once: the time to print that many frame lines
+// at the link's byte rate, rounded up, at most 127 ms (the most STmin allows).
+fn st_min(pace: Option<u32>, responders: u32) -> u8 {
+    let Some(rate) = pace else {
         return 0;
-    }
-    let ms = (FRAME_LINE * 1000).div_ceil(rate);
+    };
+    let ms = (FRAME_LINE * 1000 * responders).div_ceil(rate);
     u8::try_from(ms.min(0x7F)).unwrap_or(0x7F)
 }
 

@@ -134,6 +134,7 @@ mod setup {
             "ATSH714",
             "ATFCSD300000",
             "ATFCSD300003",
+            "ATFCSD300015",
             "ATFCSM1",
             "ATFCSM2",
             "ATFCSM0",
@@ -392,15 +393,18 @@ mod requests {
             commands(&elm)[setup..],
             [
                 // OBD-II IDs: the adapter's own ISO 15765-4 flow control, with a gap between
-                // frames (#23). A broadcast shows every emissions ECU's reply, a physical
+                // frames (#23), 8 times as long for a broadcast that every emissions ECU may
+                // answer at once. A broadcast shows every emissions ECU's reply, a physical
                 // request only its own ECU's.
                 "ATSH7DF",
-                "ATFCSD300003",
+                "ATFCSD300015",
                 "ATFCSM2",
                 "ATCRA7EX",
                 "0902",
                 "0902",
                 "ATSH7E0",
+                "ATFCSD300003",
+                "ATFCSM2",
                 "ATCRA7E8",
                 "0902",
                 // Any other module: flow control goes to the module's request ID. Without a
@@ -1390,6 +1394,66 @@ mod pacing {
                 assert_eq!(reply.payload.len(), 4095, "{baud} baud, {target:?}");
             }
         }
+    }
+
+    // Every emissions ECU answers a broadcast 09 02 with the longest reply, all at once.
+    fn eight_long_replies() -> FakeElm {
+        FakeElm::new(Box::new(|header, request| {
+            if header != 0x7DF || request != [0x09, 0x02] {
+                return Vec::new();
+            }
+            let mut payload = vec![0x49, 0x02, 0x01];
+            payload.resize(4095, 0x41);
+            (0x7E8..=0x7EF).map(|id| (id, payload.clone())).collect()
+        }))
+    }
+
+    #[test]
+    fn a_broadcast_is_paced_for_every_emissions_ecu_answering_at_once() {
+        // Up to 8 ECUs (0x7E8..=0x7EF) can each send a long reply to one broadcast, their frames
+        // interleaved, so each gets 8 times the gap (PR #70, Codex).
+        for (baud, st_min) in [(38_400, "3D"), (115_200, "15")] {
+            let mut elm = Elm::connect(FakeLink::at_baud(eight_long_replies(), baud)).unwrap();
+            let setup = commands(&elm).len();
+            elm.send(&approve(Target::ObdFunctional, &[0x09, 0x02]))
+                .unwrap();
+            let mut sources = Vec::new();
+            while let Ok(reply) = elm.recv(Duration::from_secs(30)) {
+                assert_eq!(reply.payload.len(), 4095);
+                sources.push(reply.source);
+            }
+            sources.sort_unstable();
+            assert_eq!(sources, (0x7E8..=0x7EF).collect::<Vec<_>>(), "{baud}");
+            assert!(
+                commands(&elm)[setup..].contains(&format!("ATFCSD3000{st_min}")),
+                "{baud}: {:?}",
+                &commands(&elm)[setup..]
+            );
+        }
+        // At 9600 baud that would be 242 ms, more than STmin allows, so it's 127 ms: enough
+        // for 4 ECUs at once.
+        let mut link = FakeLink::new(eight_long_replies());
+        link.byte_rate = Some(960);
+        let mut elm = Elm::connect(link).unwrap();
+        let setup = commands(&elm).len();
+        elm.send(&approve(Target::ObdFunctional, &[0x09, 0x02]))
+            .unwrap();
+        while elm.recv(Duration::from_secs(1)).is_ok() {}
+        assert!(commands(&elm)[setup..].iter().any(|c| c == "ATFCSD30007F"));
+    }
+
+    #[test]
+    fn the_fake_adapter_overflows_when_a_broadcast_is_paced_for_one_ecu() {
+        let mut elm = eight_long_replies();
+        elm.drain_rate = Some(11_520);
+        elm.settings.headers = true;
+        elm.settings.protocol = Some("6".into());
+        let mut out = Vec::new();
+        for line in ["ATFCSD300003", "ATFCSM2", "0902"] {
+            elm.write(format!("{line}\r").as_bytes());
+            out.extend(elm.read(usize::MAX));
+        }
+        assert!(String::from_utf8(out).unwrap().contains("BUFFER FULL"));
     }
 
     // The flow control data each target gets on a plain ELM327.
