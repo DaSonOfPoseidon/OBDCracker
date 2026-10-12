@@ -197,6 +197,9 @@ Each entry names the class, what to check, and where it bit us.
 
 ## Links and adapters
 
+- **An audit log that sees only what the code reads misses the evidence.** The ELM driver dropped reply lines nobody
+  read before the next request, and adapter commands never reached the log, so a late reply or a changed setting left
+  no trace. Log what the adapter did, not just what the caller used.
 - **An adapter's learned timeout can hide a slow module.** The ELM327's adaptive timing (`AT AT1`) shortens its wait
   to fit the modules that answered fast, so a module that wakes slowly reads as absent. Before acting on "nothing is
   there", as discovery's wide pass does, look again with the adapter's longest wait.
