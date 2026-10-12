@@ -182,6 +182,29 @@ impl Transport for Chatty {
     fn take_events(&mut self) -> Vec<LinkEvent> {
         std::mem::take(&mut self.events)
     }
+
+    fn settle(&mut self) -> Result<(), Error> {
+        self.events.push(LinkEvent::Unread {
+            at: std::time::UNIX_EPOCH,
+            line: "7E9 03 7F 22 31".to_owned(),
+        });
+        Ok(())
+    }
+}
+
+#[test]
+fn what_is_left_when_the_session_ends_is_logged() {
+    let log = temp_log("settle");
+    let chatty = Chatty {
+        events: Vec::new(),
+        fail: false,
+    };
+    drop(Audited::open(&log, chatty, "mock").unwrap());
+    let audit = std::fs::read_to_string(&log).unwrap();
+    assert!(
+        audit.contains(r#""dir":"unread","line":"7E9 03 7F 22 31""#),
+        "{audit}"
+    );
 }
 
 #[test]

@@ -13,14 +13,16 @@ use crate::{Error, LinkEvent, Response, Transport, hex};
 /// still on record. After every call it also logs the transport's [`LinkEvent`]s: commands to
 /// the adapter (`"dir":"cmd"`), reply lines nobody read before the next request
 /// (`"dir":"unread"`), and how many events were lost (`"dir":"lost"`). Each line's `ts_ms` is
-/// when it happened, so an event can be logged after a later request.
+/// when it happened (for a reply line, when the driver read it from the link), so an event can
+/// be logged after a later request. When dropped, it has the transport read what's left of the
+/// last request ([`Transport::settle`]) and logs that too.
 ///
 /// Errors from `send` and `recv` are logged too (`"dir":"err"`, with `"op"` naming the call), so
 /// the log shows when an adapter misheard a request it may already have sent. A
 /// [`Error::Timeout`] from `recv` isn't, since every exchange ends waiting for replies that don't
 /// come.
 #[derive(Debug)]
-pub struct Audited<T> {
+pub struct Audited<T: Transport> {
     inner: T,
     log: File,
     // Already escaped for a JSON string, so every line stays valid JSON whatever the link is
@@ -141,6 +143,22 @@ impl<T: Transport> Transport for Audited<T> {
     fn take_events(&mut self) -> Vec<LinkEvent> {
         // Already logged.
         Vec::new()
+    }
+
+    fn settle(&mut self) -> Result<(), Error> {
+        let settled = self.inner.settle();
+        let logged = self.record_events();
+        settled.map_err(|e| self.record_error("settle", None, e))?;
+        logged
+    }
+}
+
+impl<T: Transport> Drop for Audited<T> {
+    // What's left of the last request is logged before the session ends. Nothing can report a
+    // failure from here.
+    fn drop(&mut self) {
+        let _ = self.inner.settle();
+        let _ = self.record_events();
     }
 }
 

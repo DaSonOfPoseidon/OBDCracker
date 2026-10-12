@@ -84,6 +84,16 @@ pub trait Transport {
     fn take_events(&mut self) -> Vec<LinkEvent> {
         Vec::new()
     }
+    /// Reads whatever is left of the last request's replies, so it can be reported
+    /// ([`LinkEvent::Unread`]) before the session ends: [`Audited`] calls it when dropped. Sends
+    /// nothing on the bus. The default does nothing.
+    ///
+    /// # Errors
+    ///
+    /// The adapter failed while finishing the request.
+    fn settle(&mut self) -> Result<(), Error> {
+        Ok(())
+    }
 }
 
 /// Something an adapter did besides carrying a request or a reply.
@@ -103,7 +113,7 @@ pub enum LinkEvent {
     /// A line the adapter printed for a request after nothing read it any more, dropped before
     /// the next request: such as a late reply, or one from a module nobody waited for.
     Unread {
-        /// When it was read from the adapter.
+        /// When the driver read it from the link, which may be before it was dropped.
         at: SystemTime,
         /// The line as the adapter printed it.
         line: String,

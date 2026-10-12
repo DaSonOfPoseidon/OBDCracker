@@ -173,7 +173,10 @@ const STN_UNPACED_RATE: u32 = 115_200 / 10;
 pub struct Elm<L> {
     link: L,
     splitter: LineSplitter,
-    events: VecDeque<Event>,
+    // What the adapter printed, read but not used yet, with when it was read.
+    events: VecDeque<(SystemTime, Event)>,
+    // When the event last taken from `events` was read.
+    event_at: SystemTime,
     header: Option<u32>,
     flow: Option<Flow>,
     // The `AT CRA` pattern in effect.
@@ -236,6 +239,7 @@ impl<L: Link> Elm<L> {
             link,
             splitter: LineSplitter::default(),
             events: VecDeque::new(),
+            event_at: SystemTime::UNIX_EPOCH,
             header: None,
             flow: None,
             filter: WIDE_FILTER.to_owned(),
@@ -566,7 +570,7 @@ impl<L: Link> Elm<L> {
                     // Not the request's echo, which `reply_line` checks.
                     if self.echo.is_none() {
                         self.note(LinkEvent::Unread {
-                            at: SystemTime::now(),
+                            at: self.event_at,
                             line: text.clone(),
                         });
                     }
@@ -602,9 +606,11 @@ impl<L: Link> Elm<L> {
             };
             let n = self.read(&mut buf, left)?;
             self.splitter.push(&buf[..n], &mut events);
-            self.events.extend(events.drain(..));
+            let now = SystemTime::now();
+            self.events
+                .extend(events.drain(..).map(|event| (now, event)));
         }
-        let what = match self.events.pop_front() {
+        let what = match self.events.pop_front().map(|(_, event)| event) {
             Some(Event::Line(line)) => line,
             Some(Event::Prompt) => ">".into(),
             Some(Event::Overlong) => "an overlong line".into(),
@@ -641,7 +647,8 @@ impl<L: Link> Elm<L> {
         let mut buf = [0; 256];
         let mut events = Vec::new();
         loop {
-            if let Some(event) = self.events.pop_front() {
+            if let Some((at, event)) = self.events.pop_front() {
+                self.event_at = at;
                 return Ok(Some(event));
             }
             let Some(left) = deadline
@@ -655,7 +662,9 @@ impl<L: Link> Elm<L> {
                 self.last_byte = Some(Instant::now());
             }
             self.splitter.push(&buf[..n], &mut events);
-            self.events.extend(events.drain(..));
+            let now = SystemTime::now();
+            self.events
+                .extend(events.drain(..).map(|event| (now, event)));
         }
     }
 
@@ -838,6 +847,11 @@ impl<L: Link> Transport for Elm<L> {
         self.expect_ok(if on { "ATAT0" } else { "ATAT1" })
     }
 
+    // The rest of the last request's output is read, and reported as unread.
+    fn settle(&mut self) -> Result<(), Error> {
+        if self.busy { self.ready() } else { Ok(()) }
+    }
+
     fn take_events(&mut self) -> Vec<LinkEvent> {
         let mut events = std::mem::take(&mut self.log);
         if self.lost > 0 {
@@ -913,7 +927,9 @@ impl<L: Link> Elm<L> {
             // The line's carriage return completes it, and its echo is checked again then.
             let mut events = Vec::new();
             self.splitter.push(&echoed, &mut events);
-            self.events.extend(events);
+            let now = SystemTime::now();
+            self.events
+                .extend(events.into_iter().map(|event| (now, event)));
             return Ok(());
         }
         let why = if echoed.is_empty() {

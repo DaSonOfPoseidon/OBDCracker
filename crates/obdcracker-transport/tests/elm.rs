@@ -1725,6 +1725,62 @@ mod events {
     }
 
     #[test]
+    fn unread_lines_keep_the_time_they_arrived() {
+        // The second ECU's reply starts arriving with the first: its first line is read and
+        // queued but unused while the caller waits, then dropped by the next request. Its time
+        // is when it was read, not when it was dropped. (Lines still in the link's buffer are
+        // read, and timed, only then.)
+        let mut elm = connect(car());
+        elm.send(&approve(Target::ObdFunctional, &[0x09, 0x02]))
+            .unwrap();
+        elm.recv(Duration::from_secs(1)).unwrap();
+        let arrived_by = std::time::SystemTime::now();
+        std::thread::sleep(Duration::from_millis(50));
+        elm.take_events();
+        elm.send(&approve(Target::ObdFunctional, &[0x09, 0x02]))
+            .unwrap();
+        let times: Vec<_> = elm
+            .take_events()
+            .into_iter()
+            .filter_map(|e| match e {
+                LinkEvent::Unread { at, .. } => Some(at),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            times.first().is_some_and(|at| *at <= arrived_by),
+            "{times:?}"
+        );
+    }
+
+    #[test]
+    fn settling_reports_what_is_left_of_the_last_request() {
+        // The session ends after the first reply: what's left is still reported.
+        let mut elm = connect(car());
+        elm.send(&approve(Target::ObdFunctional, &[0x09, 0x02]))
+            .unwrap();
+        let first = elm.recv(Duration::from_secs(1)).unwrap();
+        elm.take_events();
+        elm.settle().unwrap();
+        let other = if first.source == 0x7E8 { "7E9" } else { "7E8" };
+        let unread: Vec<String> = elm
+            .take_events()
+            .into_iter()
+            .filter_map(|e| match e {
+                LinkEvent::Unread { line, .. } => Some(line),
+                _ => None,
+            })
+            .collect();
+        assert_ne!(unread, Vec::<String>::new());
+        assert!(unread.iter().all(|l| l.starts_with(other)), "{unread:?}");
+        // Nothing is left, and nothing more is sent.
+        let written = elm.link().elm.commands.len();
+        elm.settle().unwrap();
+        assert_eq!(elm.take_events(), []);
+        assert_eq!(elm.link().elm.commands.len(), written);
+    }
+
+    #[test]
     fn an_untaken_report_is_bounded() {
         // Nobody takes the events: they stop growing, and say how many were lost.
         let mut elm = connect(car());
