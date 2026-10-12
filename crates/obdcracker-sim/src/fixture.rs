@@ -6,7 +6,7 @@ use obdcracker_core::obd;
 use serde::Deserialize;
 
 use crate::FixtureError;
-use crate::ecu::{Did, Obd};
+use crate::ecu::{Did, Obd, RawReply};
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -29,11 +29,27 @@ pub(crate) struct EcuFixture {
     // The ReadDTCInformation reports it answers; the others get NRC 0x12.
     #[serde(default = "every_dtc_report")]
     dtc_reports: Vec<u8>,
+    // How many response-pending replies come before each positive DTC report.
+    #[serde(default)]
+    dtc_pending: u8,
     obd: Option<ObdFixture>,
     #[serde(rename = "did", default)]
     dids: Vec<DidFixture>,
     #[serde(rename = "dtc", default)]
     dtcs: Vec<DtcFixture>,
+    #[serde(rename = "raw", default)]
+    raw: Vec<RawFixture>,
+}
+
+// A reply the car sent that the sim can't build, such as one too short to decode: sent as is
+// to exactly this request.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawFixture {
+    request: String,
+    reply: String,
+    #[serde(default)]
+    pending: u8,
 }
 
 // The ReadDTCInformation reports the sim implements: count by status mask, DTCs by status mask,
@@ -55,6 +71,8 @@ pub(crate) struct DtcService {
     pub(crate) availability: u8,
     pub(crate) reports: Vec<u8>,
     pub(crate) dtcs: Vec<(u32, u8)>,
+    // Response-pending replies before each positive report.
+    pub(crate) pending: u8,
 }
 
 #[derive(Debug, Deserialize)]
@@ -90,6 +108,8 @@ struct DidFixture {
     session: SessionFixture,
     #[serde(default)]
     pending: u8,
+    // Refused with this NRC instead of answered.
+    nrc: Option<u8>,
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -268,14 +288,17 @@ impl ObdFixture {
 
 impl DidFixture {
     fn build(&self) -> Result<Did, FixtureError> {
-        let data = match (&self.text, &self.hex) {
-            (Some(text), None) if !text.trim().is_empty() && is_printable(text) => {
-                text.as_bytes().to_vec()
+        let data = match (&self.text, &self.hex, self.nrc) {
+            (Some(text), None, None) if !text.trim().is_empty() && is_printable(text) => {
+                Ok(text.as_bytes().to_vec())
             }
-            (None, Some(hex)) => hex_bytes(hex)?,
+            (None, Some(hex), None) => Ok(hex_bytes(hex)?),
+            // 0x00 isn't an NRC, and 0x78 (response-pending) isn't a refusal.
+            (None, None, Some(nrc)) if nrc != 0x00 && nrc != 0x78 => Err(nrc),
             _ => {
                 return Err(FixtureError::Value(format!(
-                    "DID 0x{:04X} needs one non-blank printable text or hex value",
+                    "DID 0x{:04X} needs one non-blank printable text or hex value, or an NRC \
+                     other than 0x00 and 0x78",
                     self.id
                 )));
             }
@@ -284,6 +307,24 @@ impl DidFixture {
             id: self.id,
             data,
             extended_only: self.session == SessionFixture::Extended,
+            pending: self.pending,
+        })
+    }
+}
+
+impl RawFixture {
+    fn build(&self) -> Result<RawReply, FixtureError> {
+        let request = hex_bytes(&self.request)?;
+        let reply = hex_bytes(&self.reply)?;
+        if !obdcracker_core::response::answers(&request, &reply) {
+            return Err(value_error(
+                "raw reply doesn't answer its request",
+                &self.reply,
+            ));
+        }
+        Ok(RawReply {
+            request,
+            reply,
             pending: self.pending,
         })
     }
@@ -305,6 +346,24 @@ impl EcuFixture {
             }
         }
         self.dids.iter().map(DidFixture::build).collect()
+    }
+
+    pub(crate) fn raw(&self) -> Result<Vec<RawReply>, FixtureError> {
+        let raw = self
+            .raw
+            .iter()
+            .map(RawFixture::build)
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut seen = HashSet::new();
+        for entry in &raw {
+            if !seen.insert(&entry.request) {
+                return Err(FixtureError::Value(format!(
+                    "module {}: raw request {:02X?} is listed twice",
+                    self.module, entry.request
+                )));
+            }
+        }
+        Ok(raw)
     }
 
     pub(crate) fn dtc_service(&self) -> Result<DtcService, FixtureError> {
@@ -339,6 +398,7 @@ impl EcuFixture {
             availability: self.status_availability,
             reports: self.dtc_reports.clone(),
             dtcs,
+            pending: self.dtc_pending,
         })
     }
 

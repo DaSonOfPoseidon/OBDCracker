@@ -7,15 +7,20 @@
 # engine idling. A DID that isn't listed was refused with NRC 0x31 (request out of range), as the
 # car refused it.
 #
+# Quirks the car showed, which the sim reproduces:
+# - The transmission sent one response-pending (7F 19 78) before its DTC list, and so did the
+#   brakes, airbag and parking brake in #54 (`dtc_pending`). The engine did too in #54, with the
+#   engine idling, but not in #49, which its values come from.
+# - The airbag answered 19 01 AF with 59 01 00 00, too short to decode, after one response-pending
+#   (`[[ecu.raw]]`).
+# - The night vision module refused F190 with NRC 0x22 (conditions not correct), not 0x31.
+#
 # Differences from the car, because the sim can't express them yet:
 # - The engine also lists mode 09 PID 0B in its PID 00 bitmap; the sim builds that bitmap from the
 #   PIDs it has, so 0B is missing.
-# - The transmission sent one response-pending (7F 19 78) before its DTC list, and so did the
-#   brakes, airbag and parking brake in #54; the sim models response-pending only for DIDs.
 # - Whether a module answers ReadDTCInformation 0x0A (supported DTCs) is untested; only 0x02 is
 #   listed, plus 0x01 for the one module that answered it (the sensor cluster). The others refused
-#   0x01 (NRC 0x12), except the airbag, whose reply (59 01 00 00) was too short to decode.
-# - The night vision module refused F190 with NRC 0x22 (conditions not correct), not 0x31.
+#   0x01 (NRC 0x12).
 # - #54 didn't read the coding (0600) of the modules it found, so the sim refuses it for them.
 #
 # The first four modules' UDS DTCs are each one's full table as `19 02 FF` returned it. Every status
@@ -198,6 +203,7 @@ hex = "1A 2A 40 12 05 66 01 05 00 00"
 [[ecu]]
 module = "transmission"
 dtc_reports = [0x02]
+dtc_pending = 1
 status_availability = 0xFF
 dtc = [
   { code = 0x0020B0, status = 0x50 },
@@ -678,6 +684,7 @@ hex = "45 56 5F 52 43 45 50 53 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 0
 [[ecu]]
 module = "brakes"
 dtc_reports = [0x02]
+dtc_pending = 1
 status_availability = 0x99
 
 [[ecu.did]]
@@ -712,6 +719,7 @@ hex = "45 56 5F 45 53 50 50 72 65 6D 69 41 55 35 37 58 00"
 [[ecu]]
 module = "airbag"
 dtc_reports = [0x02]
+dtc_pending = 1
 status_availability = 0x99
 
 [[ecu.did]]
@@ -746,6 +754,12 @@ text = "Airbag10.43  "
 id = 0xF19E
 # "EV_AirbaAU10BPAAU64X" and 0x00
 hex = "45 56 5F 41 69 72 62 61 41 55 31 30 42 50 41 41 55 36 34 58 00"
+
+# Too short to decode: a count report needs a format byte and a 2-byte count (#54).
+[[ecu.raw]]
+request = "19 01 AF"
+reply = "59 01 00 00"
+pending = 1
 
 [[ecu]]
 module = "rear climate"
@@ -975,6 +989,10 @@ dtc = [
 ]
 
 [[ecu.did]]
+id = 0xF190
+nrc = 0x22
+
+[[ecu.did]]
 id = 0xF187
 text = "4H0907547F "
 
@@ -1086,6 +1104,7 @@ hex = "45 56 5F 41 69 72 43 6F 6E 64 69 43 6F 6D 66 6F 55 44 53 00"
 [[ecu]]
 module = "parking brake"
 dtc_reports = [0x02]
+dtc_pending = 1
 status_availability = 0x99
 
 [[ecu.did]]

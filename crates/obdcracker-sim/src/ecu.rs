@@ -39,9 +39,18 @@ pub(crate) struct Obd {
 #[derive(Debug)]
 pub(crate) struct Did {
     pub(crate) id: u16,
-    pub(crate) data: Vec<u8>,
+    // Its value, or the NRC the module refuses it with.
+    pub(crate) data: Result<Vec<u8>, u8>,
     pub(crate) extended_only: bool,
     // How many response-pending replies come before the answer.
+    pub(crate) pending: u8,
+}
+
+// A reply the car sent that the sim can't build, to exactly this request.
+#[derive(Debug)]
+pub(crate) struct RawReply {
+    pub(crate) request: Vec<u8>,
+    pub(crate) reply: Vec<u8>,
     pub(crate) pending: u8,
 }
 
@@ -54,6 +63,7 @@ pub struct Ecu {
     pub(crate) obd: Option<Obd>,
     pub(crate) dids: Vec<Did>,
     pub(crate) dtc: DtcService,
+    pub(crate) raw: Vec<RawReply>,
     pub(crate) session: Session,
     pub(crate) fault: Option<Fault>,
     // How long a non-default session lasts without a request (S3server), and when the last one came.
@@ -147,6 +157,11 @@ impl Ecu {
         let Some((&sid, data)) = request.split_first() else {
             return Vec::new();
         };
+        if let Some(raw) = self.raw.iter().find(|raw| raw.request == request) {
+            let mut replies = vec![negative(sid, Nrc::ResponsePending); usize::from(raw.pending)];
+            replies.push(raw.reply.clone());
+            return replies;
+        }
         match sid {
             0x01 | 0x03 | 0x09 => match &self.obd {
                 Some(obd) => obd.answer(sid, data).into_iter().collect(),
@@ -194,7 +209,9 @@ impl Ecu {
         if !self.dtc.reports.contains(&sub) {
             return one(negative(0x19, Nrc::SubFunctionNotSupported));
         }
-        if raw & SUPPRESS_POSITIVE != 0 {
+        let mut replies = vec![negative(0x19, Nrc::ResponsePending); usize::from(self.dtc.pending)];
+        // ISO 14229-1: after response-pending the positive reply is sent even with the bit set.
+        if raw & SUPPRESS_POSITIVE != 0 && self.dtc.pending == 0 {
             return Vec::new();
         }
         let availability = self.dtc.availability;
@@ -215,7 +232,8 @@ impl Ecu {
                 reply.push(status);
             }
         }
-        one(reply)
+        replies.push(reply);
+        replies
     }
 
     fn read_dids(&self, data: &[u8]) -> Vec<Vec<u8>> {
@@ -232,10 +250,15 @@ impl Ecu {
                 did.id == id && (!did.extended_only || self.session == Session::Extended)
             });
             if let Some(did) = readable {
+                let data = match &did.data {
+                    Ok(data) => data,
+                    // ISO 14229-1 checks conditions for the whole request.
+                    Err(nrc) => return one(vec![NEGATIVE, 0x22, *nrc]),
+                };
                 found = true;
                 pending = pending.max(did.pending);
                 reply.extend(id.to_be_bytes());
-                reply.extend(&did.data);
+                reply.extend(data);
             }
         }
         // ISO 14229-1: unsupported DIDs are left out; if none is supported, the request is refused.

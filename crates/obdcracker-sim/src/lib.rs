@@ -137,14 +137,18 @@ impl SimBus {
                         did: did.id,
                     });
                 }
+                // A refused DID has no value to check.
+                let Ok(data) = &did.data else {
+                    continue;
+                };
                 // A standard DID keeps its ISO 14229-1 format even when the profile lists it.
                 let text = standard_decode(did.id) == Some(Decode::Text)
                     || def.is_some_and(|def| def.decode == Decode::Text);
                 let fits = if did.id == uds::did::VIN {
-                    obd::check_vin(&did.data).is_ok() || obd::is_vin_placeholder(&did.data)
+                    obd::check_vin(data).is_ok() || obd::is_vin_placeholder(data)
                 } else {
                     // Text that is only padding decodes as empty.
-                    !text || uds::decode_text(&did.data).is_ok_and(|text| !text.is_empty())
+                    !text || uds::decode_text(data).is_ok_and(|text| !text.is_empty())
                 };
                 if !fits {
                     return Err(FixtureError::Value(format!(
@@ -154,13 +158,13 @@ impl SimBus {
                 }
                 // A multi-DID read is split by the profile's lengths, so the value must match.
                 if let Some(length) = def.and_then(|def| def.length)
-                    && did.data.len() != usize::from(length)
+                    && data.len() != usize::from(length)
                 {
                     return Err(FixtureError::Value(format!(
                         "module {}: DID 0x{:04X} is {} bytes, but the profile says {length}",
                         spec.module,
                         did.id,
-                        did.data.len()
+                        data.len()
                     )));
                 }
             }
@@ -176,6 +180,7 @@ impl SimBus {
                 obd,
                 dids,
                 dtc: spec.dtc_service()?,
+                raw: spec.raw()?,
                 session: Session::Default,
                 fault: None,
                 s3: ecu::S3_DEFAULT,
