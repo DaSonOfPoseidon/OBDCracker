@@ -94,6 +94,11 @@ Each entry names the class, what to check, and where it bit us.
 - **Match a reply to its request by what it echoes**, not only the service ID: the PID (mode 09), a requested PID
   (mode 01), a requested DID (0x22) or the subfunction. A late reply to an earlier request has the same SID
   (`response::answers`).
+- **A deadline on the far side of the bus needs a margin for the trip.** The guard checked S3 against its own
+  clock, so a `3E 00` sent just in time could reach the module after its session lapsed. The module answered it
+  in the default session anyway, so nothing showed. And timing from the request rather than the answer counted a
+  long response-pending wait as idle time, which forced a needless `10 03`. Time from when the other side last
+  acted (its answer), and stop trusting the deadline early enough for a message to get there (#68, Codex).
 - **The suppress-positive-response bit (bit 7) is not echoed.** It applies to every UDS service with a subfunction,
   0x19 included. A request with the bit set gets no positive reply, so only a refusal answers it; masking the bit
   off instead lets a late positive reply to an earlier, unsuppressed request through. A refusal is still sent when

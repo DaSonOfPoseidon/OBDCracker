@@ -331,3 +331,25 @@ fn guard_leaves_a_session_whose_entry_got_a_reply_to_something_else() {
     assert_eq!(sent(&bus).last().unwrap(), &[0x10, 0x01]);
     assert_eq!(session(&bus), Session::Default);
 }
+
+#[test]
+fn keep_alive_close_to_s3_reenters_instead() {
+    // 250 ms idle is under S3 (300 ms), but a `3E 00` could arrive after it, and a module in the
+    // default session answers TesterPresent too. Past the margin, the guard enters again.
+    let mut bus = car();
+    let mut guard = ExtendedSession::enter(
+        &mut bus,
+        &Policy::read_only(),
+        ENGINE,
+        Timing::default(),
+        GUARD,
+    )
+    .unwrap();
+    sleep(Duration::from_millis(250));
+    guard.keep_alive().unwrap();
+    drop(guard);
+    assert_eq!(
+        sent(&bus),
+        [vec![0x10, 0x03], vec![0x10, 0x03], vec![0x10, 0x01]]
+    );
+}

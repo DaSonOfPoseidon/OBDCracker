@@ -123,3 +123,72 @@ fn a_malformed_refusal_counts_as_no_answer_and_is_left() {
     );
     assert_eq!(sent(&adapter), [vec![0x10, 0x03], vec![0x10, 0x01]]);
 }
+
+// A module whose every reply takes `delay` to arrive.
+struct Slow {
+    inner: Mock,
+    delay: Duration,
+}
+
+impl obdcracker_transport::Transport for Slow {
+    fn send(
+        &mut self,
+        request: &obdcracker_safety::Approved,
+    ) -> Result<(), obdcracker_transport::Error> {
+        self.inner.send(request)
+    }
+
+    fn recv(&mut self, timeout: Duration) -> Result<Response, obdcracker_transport::Error> {
+        sleep(self.delay);
+        self.inner.recv(timeout)
+    }
+}
+
+#[test]
+fn a_long_response_pending_wait_does_not_lapse_the_session() {
+    // Response-pending replies keep the module's session alive (ISO 14229-2), so a read that
+    // takes longer than S3 to answer needs no new `10 03` afterwards.
+    let short = S3 {
+        keepalive: Duration::from_millis(40),
+        timeout: Duration::from_millis(120),
+    };
+    let patient = Timing {
+        p2: Duration::from_millis(500),
+        p2_star: Duration::from_millis(500),
+        max_pending: 3,
+    };
+    let mut adapter = Slow {
+        inner: mock(&[
+            &[0x50, 0x03, 0x00, 0x32, 0x01, 0xF4],
+            &[0x7F, 0x22, 0x78],
+            &[0x7F, 0x22, 0x78],
+            &[0x62, 0xF1, 0x87, 0x41],
+            &[0x62, 0xF1, 0x87, 0x41],
+        ]),
+        delay: Duration::from_millis(60),
+    };
+    let read = Policy::read_only()
+        .approve(ENGINE, &[0x22, 0xF1, 0x87])
+        .unwrap();
+    let mut guard =
+        ExtendedSession::enter(&mut adapter, &Policy::read_only(), ENGINE, patient, short).unwrap();
+    // About 180 ms from the request to the answer, longer than S3.
+    guard.exchange(&read).unwrap();
+    guard.exchange(&read).unwrap();
+    drop(guard);
+    let sent: Vec<Vec<u8>> = adapter
+        .inner
+        .sent()
+        .iter()
+        .map(|r| r.payload().to_vec())
+        .collect();
+    assert_eq!(
+        sent,
+        [
+            vec![0x10, 0x03],
+            vec![0x22, 0xF1, 0x87],
+            vec![0x22, 0xF1, 0x87],
+            vec![0x10, 0x01]
+        ]
+    );
+}
