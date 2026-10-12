@@ -55,9 +55,11 @@ from developers being careful:
   whatever answered along with the profile's modules. On the A7 that's 0x700 to 0x769, replies at +0x6A: no ID it sends
   on is ever a reply ID. A module whose request ID is past 0x769 isn't found by that pass.
 - `scan --discover --wide` then looks further, at 0x76A to 0x795 on the A7 (replies up to 0x7FF), where VW's MQB
-  cars put the MMI (0x773). Those request IDs are the first pass's reply IDs, so it tries only those that no module it
-  knows of (listed in the profile, or just found) answers on, and none whose reply would be an OBD-II ID. A module
-  that speaks only KWP2000/TP2.0, as some older MMIs may, doesn't answer either pass.
+  cars put the MMI (0x773). Those request IDs are the first pass's reply IDs. It skips those a module it knows of
+  (listed in the profile, or just found) answers on, and any whose reply would be an OBD-II ID. A module that stayed
+  silent in the first pass could still own one, so `--wide` is opt-in and may send a read on that module's reply ID:
+  a frame no module receives, since modules only send on theirs. A module that speaks only KWP2000/TP2.0, as some
+  older MMIs may, doesn't answer either pass.
 - Every frame sent or received in a real session is appended to an audit log, along with any adapter error (such as an
   adapter mishearing a request it may already have sent).
 - **One gap: ELM327/STN adapters that echo whole lines.** Their serial line has no checksum. On an adapter that echoes

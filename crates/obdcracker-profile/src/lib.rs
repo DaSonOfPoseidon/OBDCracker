@@ -55,8 +55,10 @@ pub struct Discovery {
     pub reply_offset: u32,
     /// Where a second, wider pass ends, if there is one ([`Profile::wide_candidates`]). It starts
     /// right after [`Discovery::last_request_id`], with the same reply offset, and must lie
-    /// within the first pass's reply IDs: the wider pass only tries those no module it knows of
-    /// (listed, or found by the first pass) answers on.
+    /// within the first pass's reply IDs. The wider pass skips those a known module (listed, or
+    /// found by the first pass) answers on, but a module that exists and stayed silent in the
+    /// first pass may still own one, so it can send on that module's reply ID. It's opt-in: a
+    /// stray read there is a frame no module receives, as modules only send on their reply IDs.
     #[serde(default)]
     pub wide_last_request_id: Option<u32>,
 }
@@ -350,8 +352,9 @@ impl Profile {
     /// after the discovery range with its reply ID, in order, leaving out any whose request or
     /// reply ID a known module uses another way, or that is an OBD-II ID (0x7DF..=0x7EF), or
     /// whose reply is past 0x7FF. Known modules are the profile's and `found`, which should be
-    /// everything the first pass found: the wide request IDs are the first pass's reply IDs, and
-    /// only that pass shows which of them a module answers on.
+    /// everything the first pass found. The wide request IDs are the first pass's reply IDs, and
+    /// a module that didn't answer the first pass (asleep, too slow, or not speaking UDS) may
+    /// still reply on one: see [`Discovery::wide_last_request_id`].
     #[must_use]
     pub fn wide_candidates(&self, found: &[ModuleIds]) -> Vec<ModuleIds> {
         let Some(Discovery {

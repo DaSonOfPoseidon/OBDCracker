@@ -90,7 +90,8 @@ enum Command {
         #[arg(long)]
         extended: bool,
         /// With --discover, then look further: each request ID after the discovery range (on the
-        /// A7, 0x76A to 0x795) that no module found or listed answers on, such as the MMI's
+        /// A7, 0x76A to 0x795) that no module found or listed answers on, such as the MMI's.
+        /// These are the first range's reply IDs, so a module that stayed silent there may own one
         #[arg(long, requires = "discover")]
         wide: bool,
     },

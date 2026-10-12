@@ -1411,8 +1411,10 @@ decode = "hex"
 #
 # `scan --discover --wide` then tries 0x76A..=0x795 (replies up to 0x7FF), for modules such as the
 # MMI (5F), which VW's MQB cars put at 0x773/0x7DD; the C7's IDs aren't confirmed. Those request IDs
-# are the first pass's reply IDs, so the wide pass skips each one a module it knows of (listed
-# above, or found by the first pass) answers on, and each whose reply would be an OBD-II ID.
+# are the first pass's reply IDs. The wide pass skips each one a module it knows of (listed above,
+# or found by the first pass) answers on, and each whose reply would be an OBD-II ID, but a module
+# silent in the first pass could still own one. The user accepted that (2026-10-12): such a read
+# is a frame no module receives, since modules only send on their reply IDs.
 [discovery]
 first_request_id = 0x700
 last_request_id = 0x769
