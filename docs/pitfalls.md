@@ -99,6 +99,11 @@ Each entry names the class, what to check, and where it bit us.
   service from the reply, or keep the request with it.
 - **Splitting a list to process it in groups reorders it.** `scan` read extended-session DIDs after the others and
   appended them, so values left their documented order. Put them back in the original order after the last group.
+- **Cleanup that runs on drop can't report a failure.** A guard's `Drop` sends `10 01`, but nothing sees what
+  happened, so an adapter that failed there went unnoticed and a module that refused to leave the session looked
+  fine. Where the outcome matters, clean up explicitly and pass the result on; leave `Drop` as the last resort.
+- **"Busy, repeat request" (NRC 0x21) isn't an answer.** Recording it as the DID's value and moving on misses the
+  DID and keeps a busy module busy. Stop or wait, then ask again.
 - **A refusal doesn't say which request it refuses.** UDS `7F 22 31` names the service, not the DID, so after a read
   times out its late refusal can arrive as the next read's answer. Asking again doesn't fix it: the retry takes the
   first answer, and the duplicate's answer is left queued for the read after. Once replies may be out of step, stop,

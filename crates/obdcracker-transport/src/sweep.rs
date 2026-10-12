@@ -35,6 +35,10 @@ pub struct Sweep {
     pub found: Vec<(u16, Result<Vec<u8>, ReadError>)>,
     /// Where the sweep stopped early, if it did: sweep again from [`Stop::at`] to go on.
     pub stop: Option<Stop>,
+    /// With [`SweepOptions::extended`]: why the module may still be in the extended session
+    /// afterwards, as it refused `10 01` or didn't answer it. It returns to the default session by
+    /// itself once S3 runs out without a `TesterPresent` (5 s by default).
+    pub still_extended: Option<ReadError>,
 }
 
 impl Sweep {
@@ -67,7 +71,8 @@ pub enum Why {
     /// The module stopped answering ([`ReadError::NoReply`] or [`ReadError::StillPending`],
     /// [`QUIET_LIMIT`] times in a row),
     /// refused `22` itself (service not supported, in this session or at all, or a bad format),
-    /// or refused the extended session or didn't confirm it.
+    /// said it was busy (NRC 0x21: sweep again from [`Stop::at`] a little later), or refused the
+    /// extended session or didn't confirm it.
     Module(ReadError),
     /// Right after a DID went unanswered, the next read got a refusal or another DID's value,
     /// which may be the late answer to the earlier one: UDS refusals don't name the DID. Later
@@ -91,7 +96,9 @@ impl std::fmt::Display for Why {
 
 // Refusals of the request as a whole rather than of one DID (ISO 14229-1): the service or the
 // session doesn't allow it, or the request's format is wrong. Every later read would get the same.
-const SERVICE_REFUSALS: [Nrc; 4] = [
+// Busy, repeat request: asking the next DID at once would only keep the module busy.
+const SERVICE_REFUSALS: [Nrc; 5] = [
+    Nrc::BusyRepeatRequest,
     Nrc::ServiceNotSupported,
     Nrc::SubFunctionNotSupported,
     Nrc::IncorrectMessageLength,
@@ -152,6 +159,7 @@ pub fn sweep_dids_reporting<T: Transport + ?Sized>(
         .collect::<Result<Vec<_>, FingerprintError>>()?;
     let Some(&first) = requests.first().map(|(did, _)| did) else {
         return Ok(Sweep {
+            still_extended: None,
             found: Vec::new(),
             stop: None,
         });
@@ -169,6 +177,7 @@ pub fn sweep_dids_reporting<T: Transport + ?Sized>(
             // Dropping a session that may have been entered sent `10 01`.
             Err(e) => {
                 return Ok(Sweep {
+                    still_extended: None,
                     found: Vec::new(),
                     stop: Some(Stop {
                         at: first,
@@ -180,32 +189,37 @@ pub fn sweep_dids_reporting<T: Transport + ?Sized>(
         let sweep = read_each(&mut session, &requests, &mut progress);
         // A module that doesn't confirm `10 01` leaves the session after S3. An adapter that
         // fails then is in an unknown state, which matters more than why the sweep stopped.
-        if let Err(e) = session.end()
-            && let Err(FingerprintError::Transport(e)) = session_error(e)
-        {
-            let stop = match sweep.stop {
-                Some(
-                    stop @ Stop {
-                        why: Why::Adapter(_),
-                        ..
+        return Ok(match session.end().map_err(session_error) {
+            Err(Ok(e)) => Sweep {
+                still_extended: Some(e),
+                ..sweep
+            },
+            Err(Err(FingerprintError::Transport(e))) => {
+                let stop = match sweep.stop {
+                    Some(
+                        stop @ Stop {
+                            why: Why::Adapter(_),
+                            ..
+                        },
+                    ) => stop,
+                    Some(Stop { at, .. }) => Stop {
+                        at,
+                        why: Why::Adapter(e),
                     },
-                ) => stop,
-                Some(Stop { at, .. }) => Stop {
-                    at,
-                    why: Why::Adapter(e),
-                },
-                // Everything was read; sweeping again from the last DID repeats one read.
-                None => Stop {
-                    at: *range.end(),
-                    why: Why::Adapter(e),
-                },
-            };
-            return Ok(Sweep {
-                found: sweep.found,
-                stop: Some(stop),
-            });
-        }
-        return Ok(sweep);
+                    // Everything was read; sweeping again from the last DID repeats one read.
+                    None => Stop {
+                        at: *range.end(),
+                        why: Why::Adapter(e),
+                    },
+                };
+                Sweep {
+                    stop: Some(stop),
+                    ..sweep
+                }
+            }
+            // The other failures can't happen: the session's requests were approved up front.
+            Ok(()) | Err(Err(_)) => sweep,
+        });
     }
     let mut direct = Direct {
         transport,
@@ -250,6 +264,7 @@ fn read_each(
             Ok(value) => value,
             Err(e) => {
                 return Sweep {
+                    still_extended: None,
                     found,
                     stop: Some(Stop {
                         at: resume,
@@ -265,6 +280,7 @@ fn read_each(
         {
             found.extend(unanswered(&mut quiet));
             return Sweep {
+                still_extended: None,
                 found,
                 stop: Some(Stop {
                     at: *did,
@@ -278,6 +294,7 @@ fn read_each(
                 quiet.push((*did, e));
                 if quiet.len() == QUIET_LIMIT {
                     return Sweep {
+                        still_extended: None,
                         found,
                         stop: Some(Stop {
                             at: resume,
@@ -292,12 +309,13 @@ fn read_each(
             {
                 found.extend(unanswered(&mut quiet));
             }
-            // A refusal of `22` itself, not of this DID: nothing more will read.
+            // A refusal of `22` itself, not of this DID: nothing more will read now.
             Err(e @ ReadError::Reply(ReplyError::Negative(refusal)))
                 if SERVICE_REFUSALS.contains(&refusal.nrc) =>
             {
                 found.extend(unanswered(&mut quiet));
                 return Sweep {
+                    still_extended: None,
                     found,
                     stop: Some(Stop {
                         at: *did,
@@ -309,6 +327,7 @@ fn read_each(
             // and nothing since the last answer was.
             Err(e @ ReadError::SessionRefused(_)) => {
                 return Sweep {
+                    still_extended: None,
                     found,
                     stop: Some(Stop {
                         at: resume,
@@ -324,5 +343,9 @@ fn read_each(
     }
     // Fewer than QUIET_LIMIT unanswered at the end: listed, as there's nothing to resume.
     found.extend(unanswered(&mut quiet));
-    Sweep { found, stop: None }
+    Sweep {
+        found,
+        stop: None,
+        still_extended: None,
+    }
 }

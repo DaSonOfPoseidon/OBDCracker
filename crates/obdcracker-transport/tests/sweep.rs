@@ -488,3 +488,75 @@ fn a_module_stuck_on_response_pending_stops_the_sweep() {
     assert_eq!(got.answered(), 0);
     assert_eq!(car.sent.len(), 3);
 }
+
+#[test]
+fn a_busy_module_stops_the_sweep_at_that_did() {
+    // `7F 22 21` asks to repeat the request later: not an answer, and asking the next DID at
+    // once only keeps a busy module busy.
+    let mut car = Car::new(|_, request| match request {
+        [0x22, 0x06, 0x00] => reply(&[0x62, 0x06, 0x00, 0x12]),
+        [0x22, ..] => reply(&[0x7F, 0x22, 0x21]),
+        _ => Vec::new(),
+    });
+    let got = sweep_dids(
+        &mut car,
+        &Policy::read_only(),
+        &engine(),
+        0x0600..=0x0603,
+        TIMING,
+        &SweepOptions::default(),
+    )
+    .unwrap();
+    assert_eq!(got.found, [(0x0600, Ok(vec![0x12]))]);
+    assert_eq!(
+        got.stop,
+        Some(Stop {
+            at: 0x0601,
+            why: Why::Module(ReadError::Reply(ReplyError::Negative(NegativeResponse {
+                sid: 0x22,
+                nrc: Nrc::BusyRepeatRequest,
+            })))
+        })
+    );
+    assert_eq!(car.sent.len(), 2);
+}
+
+#[test]
+fn a_module_that_refuses_to_leave_the_extended_session_is_reported() {
+    let mut car = Car::new(|_, request| match request {
+        [0x10, 0x03] => reply(&[0x50, 0x03, 0x00, 0x32, 0x01, 0xF4]),
+        [0x10, 0x01] => reply(&[0x7F, 0x10, 0x22]),
+        [0x22, 0x06, 0x00] => reply(&[0x62, 0x06, 0x00, 0x12]),
+        _ => Vec::new(),
+    });
+    let got = sweep_dids(
+        &mut car,
+        &Policy::read_only(),
+        &engine(),
+        0x0600..=0x0600,
+        TIMING,
+        &extended(),
+    )
+    .unwrap();
+    assert_eq!(got.found, [(0x0600, Ok(vec![0x12]))]);
+    assert_eq!(got.stop, None);
+    assert!(
+        matches!(got.still_extended, Some(ReadError::SessionRefused(_))),
+        "{:?}",
+        got.still_extended
+    );
+}
+
+#[test]
+fn a_module_that_leaves_the_extended_session_is_not_still_in_it() {
+    let got = sweep_dids(
+        &mut car(),
+        &Policy::read_only(),
+        &engine(),
+        0x0600..=0x0601,
+        TIMING,
+        &extended(),
+    )
+    .unwrap();
+    assert_eq!(got.still_extended, None);
+}

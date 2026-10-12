@@ -7,6 +7,7 @@ use std::time::Duration;
 use clap::builder::PossibleValuesParser;
 use clap::{Parser, Subcommand};
 use obdcracker_core::obd;
+use obdcracker_core::response::{Error as ReplyError, Nrc};
 use obdcracker_core::uds::DiagnosticSession;
 use obdcracker_profile::{Decode, DidSession, Profile, Protocol};
 use obdcracker_safety::{ModuleIds, Policy, Target};
@@ -487,17 +488,11 @@ fn run_sweep<T: Transport>(
         );
         return ExitCode::SUCCESS;
     }
-    print_sweep(&module, &found, name, last, extended)
+    print_sweep(&module, &found, last)
 }
 
 // Lists what a sweep found, and how to resume one that stopped.
-fn print_sweep(
-    module: &UdsModule,
-    found: &sweep::Sweep,
-    name: &str,
-    last: u16,
-    extended: bool,
-) -> ExitCode {
+fn print_sweep(module: &UdsModule, found: &sweep::Sweep, last: u16) -> ExitCode {
     for (did, value) in &found.found {
         match value {
             Ok(data) => println!(
@@ -519,22 +514,33 @@ fn print_sweep(
             String::new()
         }
     );
+    if let Some(e) = &found.still_extended {
+        eprintln!(
+            "warning: {} may still be in the extended session ({e}); it returns to the default \
+             session by itself within about 5 s",
+            module.name
+        );
+    }
     match &found.stop {
         None => ExitCode::SUCCESS,
         Some(stop) => {
             eprintln!("stopped at {:04X}: {}", stop.at, stop.why);
             // A module that refused `22` or the session refuses it again; the rest may pass.
-            if matches!(
-                stop.why,
-                sweep::Why::Module(ReadError::NoReply | ReadError::StillPending)
-                    | sweep::Why::Unmatched(_)
-                    | sweep::Why::Adapter(_)
-            ) {
-                eprintln!(
-                    "to go on: sweep --module {name:?} --range {:04X}-{last:04X}{}",
-                    stop.at,
-                    if extended { " --extended" } else { "" }
-                );
+            let busy = matches!(
+                &stop.why,
+                sweep::Why::Module(ReadError::Reply(ReplyError::Negative(refusal)))
+                    if refusal.nrc == Nrc::BusyRepeatRequest
+            );
+            if busy
+                || matches!(
+                    stop.why,
+                    sweep::Why::Module(ReadError::NoReply | ReadError::StillPending)
+                        | sweep::Why::Unmatched(_)
+                        | sweep::Why::Adapter(_)
+                )
+            {
+                let ran = std::env::args_os().map(|arg| arg.to_string_lossy().into_owned());
+                eprintln!("to go on: {}", resume_command(ran, stop.at, last));
             }
             ExitCode::FAILURE
         }
@@ -667,6 +673,44 @@ fn run_scan<T: Transport>(
             eprintln!("{e}");
             ExitCode::FAILURE
         }
+    }
+}
+
+// The command that ran, with its `--range` starting at `from`, for a shell to run again.
+fn resume_command(ran: impl IntoIterator<Item = String>, from: u16, last: u16) -> String {
+    let range = format!("{from:04X}-{last:04X}");
+    let mut ran = ran.into_iter();
+    // The program as installed, not however this run reached it.
+    ran.next();
+    let mut words = vec!["obdcracker".to_owned()];
+    let mut range_next = false;
+    for word in ran {
+        words.push(if range_next {
+            range.clone()
+        } else if word.starts_with("--range=") {
+            format!("--range={range}")
+        } else {
+            word.clone()
+        });
+        range_next = word == "--range";
+    }
+    words
+        .iter()
+        .map(|word| shell_word(word))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+// `word` as one shell word: as is if no shell treats any of it specially, in double quotes if it
+// only has spaces too (POSIX shells, PowerShell and cmd all read those), else in POSIX quotes.
+fn shell_word(word: &str) -> String {
+    let plain = |c: char| c.is_ascii_alphanumeric() || "-_./=:,+@".contains(c);
+    if !word.is_empty() && word.chars().all(plain) {
+        word.to_owned()
+    } else if word.chars().all(|c| plain(c) || c == ' ') {
+        format!("\"{word}\"")
+    } else {
+        format!("'{}'", word.replace('\'', r"'\''"))
     }
 }
 
@@ -917,5 +961,57 @@ fn print_scan(found: &Scan) {
             }
             Err(e) => println!("{id:03X} {name} DTCs ({e})"),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::resume_command;
+
+    fn args(words: &[&str]) -> Vec<String> {
+        words.iter().map(|&w| w.to_owned()).collect()
+    }
+
+    #[test]
+    fn the_resume_command_is_the_one_that_ran_from_where_it_stopped() {
+        let ran = args(&[
+            "/usr/local/bin/obdcracker",
+            "--serial",
+            "/dev/ttyUSB0",
+            "--profile",
+            "a7",
+            "--audit-log",
+            "car4-hud.jsonl",
+            "sweep",
+            "--module",
+            "head-up display",
+            "--range",
+            "0000-0FFF",
+            "--extended",
+        ]);
+        assert_eq!(
+            resume_command(ran, 0x0123, 0x0FFF),
+            "obdcracker --serial /dev/ttyUSB0 --profile a7 --audit-log car4-hud.jsonl sweep \
+             --module \"head-up display\" --range 0123-0FFF --extended"
+        );
+        let ran = args(&[
+            "obdcracker",
+            "--sim",
+            "a7",
+            "sweep",
+            "--range=0-ff",
+            "--module",
+            "x",
+        ]);
+        assert_eq!(
+            resume_command(ran, 0x0080, 0x00FF),
+            "obdcracker --sim a7 sweep --range=0080-00FF --module x"
+        );
+        // A word a shell would expand is quoted so it isn't.
+        let ran = args(&["obdcracker", "--tcp", "a$b", "sweep", "--range", "0-1"]);
+        assert_eq!(
+            resume_command(ran, 1, 1),
+            "obdcracker --tcp 'a$b' sweep --range 0001-0001"
+        );
     }
 }

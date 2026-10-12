@@ -202,10 +202,14 @@ impl<'a, T: Transport + ?Sized> ExtendedSession<'a, T> {
                 Err(SessionError::Refused(reply))
             }
             Err(e) => {
-                // No answer doesn't mean the module didn't switch: only its reply may be lost.
-                // Dropping the session sends `10 01`.
-                session.ended = false;
-                Err(e)
+                // No answer doesn't mean the module didn't switch: only its reply may be lost,
+                // so leave. An adapter failure then matters more than the missing answer.
+                match session.request(&session.leave.clone()) {
+                    Err(SessionError::Transport(failure @ Error::Adapter(_))) => {
+                        Err(SessionError::Transport(failure))
+                    }
+                    _ => Err(e),
+                }
             }
         }
     }
