@@ -99,11 +99,12 @@ impl std::fmt::Display for Why {
 // Refusals of the request as a whole rather than of one DID (ISO 14229-1): the service or the
 // session doesn't allow it, or the request's format is wrong. Every later read would get the same.
 // Busy, repeat request: asking the next DID at once would only keep the module busy.
-const SERVICE_REFUSALS: [Nrc; 5] = [
+const SERVICE_REFUSALS: [Nrc; 6] = [
     Nrc::BusyRepeatRequest,
     Nrc::ServiceNotSupported,
     Nrc::SubFunctionNotSupported,
     Nrc::IncorrectMessageLength,
+    Nrc::SubFunctionNotSupportedInActiveSession,
     Nrc::ServiceNotSupportedInActiveSession,
 ];
 

@@ -304,7 +304,7 @@ proptest! {
 #[test]
 fn a_refusal_of_the_service_stops_the_sweep() {
     // Refusing `22` itself, not one DID, means nothing more will read in this session.
-    for nrc in [0x11, 0x12, 0x13, 0x7F] {
+    for nrc in [0x11, 0x12, 0x13, 0x7E, 0x7F] {
         let mut car = Car::new(move |_, request| match request {
             [0x22, 0x06, 0x00] => reply(&[0x62, 0x06, 0x00, 0x12]),
             [0x22, ..] => reply(&[0x7F, 0x22, nrc]),
