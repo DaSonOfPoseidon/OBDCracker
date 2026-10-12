@@ -66,6 +66,10 @@ Each entry names the class, what to check, and where it bit us.
 - **Don't over-restrict.** Know the protocol before rejecting something: Toyota body modules legitimately share
   CAN ID 0x750 with different extended-address bytes.
 
+- **State computed on read must also be stored.** The sim's `session()` reported a lapsed session as default
+  without storing it, so raising S3 afterwards brought the expired session back (#68, Codex). Write the derived
+  state back before changing anything it depends on.
+
 ## Arithmetic and time
 
 - **Compare against a limit before incrementing.** `pending += 1; if pending > max` overflows when a caller sets
@@ -90,6 +94,19 @@ Each entry names the class, what to check, and where it bit us.
 - **Match a reply to its request by what it echoes**, not only the service ID: the PID (mode 09), a requested PID
   (mode 01), a requested DID (0x22) or the subfunction. A late reply to an earlier request has the same SID
   (`response::answers`).
+- **A deadline on the far side of the bus needs a margin for the trip, and the earliest safe time.** The guard
+  checked S3 against its own clock, so a `3E 00` sent just in time could reach the module after its session
+  lapsed. The module answered it in the default session anyway, so nothing showed. The next fix timed S3 from
+  the answer's arrival, but an ELM can take 18 s to print a long answer the module sent at once. When you can't
+  see when the other side acted, take the earliest moment it could have (the request), and stop trusting the
+  deadline early enough for the next message to get there. Pick the failure that costs least: a needless `10 03`,
+  not a read sent into the default session (#68, three Codex rounds).
+- **Use the limits the other side declares.** A module's `50 03` gives its own P2 and P2*; ignoring them timed
+  out a module that said it needs 100 ms. Extend the caller's timing by the excess over the standard defaults,
+  so an adapter's allowance stays on top (#68, Codex).
+- **Keep cleanup armed until it has worked.** `end()` marked the guard finished before sending `10 01`, so a
+  failed send left nothing to retry it, and `end` had consumed the guard. Disarm only after a definite answer
+  (#68, Codex).
 - **The suppress-positive-response bit (bit 7) is not echoed.** It applies to every UDS service with a subfunction,
   0x19 included. A request with the bit set gets no positive reply, so only a refusal answers it; masking the bit
   off instead lets a late positive reply to an earlier, unsuppressed request through. A refusal is still sent when
@@ -97,6 +114,11 @@ Each entry names the class, what to check, and where it bit us.
   (ISO 14229-1), so it answers the request then (`response::answers_after_pending`). Check claims about the
   standard against a source before writing them down; this entry first said 0x19 had no such bit, then missed the
   0x78 exception (PR #9, PR #11).
+- **No answer isn't no effect.** A request that timed out may still have reached the module and taken effect;
+  only its reply may be lost. Undo what it could have done: `ExtendedSession::enter` sends `10 01` after an
+  unanswered `10 03`, and skips it only for a well-formed refusal (`7F 10 <NRC>`) (#68, Codex and the review
+  gate). The reverse holds too: never count an
+  unanswered or refused request as having worked (the guard's S3 clock only restarts on positive replies).
 - **A DTC status mask of 0xFF isn't "every stored fault".** The "test not completed" bits (4 and 6) are set on every
   code a module hasn't tested yet, so `19 02 FF` returns its whole DTC table: about 330 codes across four A7
   modules, none failed, pending or confirmed (#49). Ask for the fault bits (`FAULT_MASK`, 0xAF), and still filter

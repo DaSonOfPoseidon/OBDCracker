@@ -287,3 +287,69 @@ mod read_dtc_information {
         assert!(!status.warning_indicator_requested());
     }
 }
+
+mod session {
+    use core::time::Duration;
+
+    use obdcracker_core::response::{Error, NegativeResponse, Nrc};
+    use obdcracker_core::uds::{
+        DiagnosticSession, SessionTiming, decode_session_timing, session_control, tester_present,
+    };
+
+    #[test]
+    fn decodes_the_timing_a_module_gives() {
+        // P2server_max in ms, P2*server_max in 10 ms units (ISO 14229-2).
+        assert_eq!(
+            decode_session_timing(
+                &[0x50, 0x03, 0x00, 0x32, 0x01, 0xF4],
+                DiagnosticSession::Extended
+            ),
+            Ok(SessionTiming {
+                p2: Duration::from_millis(50),
+                p2_star: Duration::from_secs(5),
+            })
+        );
+        assert_eq!(
+            decode_session_timing(
+                &[0x50, 0x01, 0xFF, 0xFF, 0xFF, 0xFF],
+                DiagnosticSession::Default
+            ),
+            Ok(SessionTiming {
+                p2: Duration::from_millis(65_535),
+                p2_star: Duration::from_millis(655_350),
+            })
+        );
+    }
+
+    #[test]
+    fn rejects_a_session_timing_reply_that_does_not_fit() {
+        let extended = DiagnosticSession::Extended;
+        // Another session's echo.
+        assert_eq!(
+            decode_session_timing(&[0x50, 0x01, 0x00, 0x32, 0x01, 0xF4], extended),
+            Err(Error::Malformed)
+        );
+        for short in [&[0x50][..], &[0x50, 0x03], &[0x50, 0x03, 0x00, 0x32, 0x01]] {
+            assert_eq!(decode_session_timing(short, extended), Err(Error::TooShort));
+        }
+        assert_eq!(
+            decode_session_timing(&[0x50, 0x03, 0x00, 0x32, 0x01, 0xF4, 0x00], extended),
+            Err(Error::Malformed)
+        );
+        assert_eq!(
+            decode_session_timing(&[0x7F, 0x10, 0x22], extended),
+            Err(Error::Negative(NegativeResponse {
+                sid: 0x10,
+                nrc: Nrc::ConditionsNotCorrect,
+            }))
+        );
+    }
+
+    #[test]
+    fn builds_the_requests() {
+        assert_eq!(session_control(DiagnosticSession::Default), [0x10, 0x01]);
+        assert_eq!(session_control(DiagnosticSession::Extended), [0x10, 0x03]);
+        // Not `3E 80`: a suppressed reply makes an ELM adapter wait out its timeout.
+        assert_eq!(tester_present(), [0x3E, 0x00]);
+    }
+}

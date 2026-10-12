@@ -15,11 +15,13 @@ pub mod fingerprint;
 pub mod link;
 mod mock;
 pub mod scan;
+mod session;
 
 pub use audit::Audited;
 pub use dry_run::DryRun;
 pub use exchange::{Expect, Timing, exchange};
 pub use mock::Mock;
+pub use session::{ExtendedSession, S3, SessionError};
 
 /// A reply from one module: the CAN ID it came from and its reassembled payload.
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -131,6 +131,11 @@ raw-frame escape hatch, so no program built on these crates can send something t
 unlocked by cargo features plus a runtime unlock, and flashing stays banned until its design doc exists. If you need raw
 CAN for something else, use your own driver alongside this one.
 
+Reads that need the extended diagnostic session go through `transport::ExtendedSession`. It enters the session
+(`10 03`), and its `keep_alive` sends TesterPresent (`3E 00`) between requests so the module doesn't drop back after
+S3 (5 s). If the session has lapsed anyway, the guard enters it again before the next request. Dropping the guard
+returns the module to the default session (`10 01`).
+
 The crates will be published to crates.io once the M1 codec API settles. Until then, depend on the git repo.
 
 ## Layout

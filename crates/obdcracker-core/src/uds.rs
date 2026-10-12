@@ -5,6 +5,7 @@
 
 use core::fmt;
 use core::slice;
+use core::time::Duration;
 
 use crate::obd::Dtc;
 use crate::response::{Error, positive, printable};
@@ -60,6 +61,77 @@ pub mod did {
 pub fn read_did(did: u16) -> [u8; 3] {
     let [high, low] = did.to_be_bytes();
     [READ_DATA_BY_IDENTIFIER, high, low]
+}
+
+/// The `DiagnosticSessionControl` service.
+pub const DIAGNOSTIC_SESSION_CONTROL: u8 = 0x10;
+
+/// The `TesterPresent` service.
+pub const TESTER_PRESENT: u8 = 0x3E;
+
+/// A diagnostic session a tester may switch a module to. The programming session isn't one:
+/// the policy bans it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum DiagnosticSession {
+    /// The session a module starts in and returns to (0x01).
+    Default,
+    /// The extended diagnostic session (0x03), which unlocks more reads.
+    Extended,
+}
+
+/// A `DiagnosticSessionControl` request, with the positive reply asked for.
+#[must_use]
+pub fn session_control(session: DiagnosticSession) -> [u8; 2] {
+    let sub = match session {
+        DiagnosticSession::Default => 0x01,
+        DiagnosticSession::Extended => 0x03,
+    };
+    [DIAGNOSTIC_SESSION_CONTROL, sub]
+}
+
+/// The reply timing a module gives in its positive answer to `DiagnosticSessionControl`, for the
+/// session it entered (ISO 14229-2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SessionTiming {
+    /// `P2server_max`: how long the module may take to answer, or send response-pending.
+    pub p2: Duration,
+    /// `P2*server_max`: how long the module may take to answer after response-pending.
+    pub p2_star: Duration,
+}
+
+/// Decodes the timing in a positive answer to [`session_control`] for `session`:
+/// `50 <session> <P2 in ms, 2 bytes> <P2* in 10 ms units, 2 bytes>`.
+///
+/// # Errors
+///
+/// A refusal, a reply for another service or session, or a reply that isn't exactly that long.
+pub fn decode_session_timing(
+    reply: &[u8],
+    session: DiagnosticSession,
+) -> Result<SessionTiming, Error> {
+    let data = positive(DIAGNOSTIC_SESSION_CONTROL, reply)?;
+    let [echo, p2_high, p2_low, star_high, star_low] = *data else {
+        return Err(if data.len() < 5 {
+            Error::TooShort
+        } else {
+            Error::Malformed
+        });
+    };
+    if echo != session_control(session)[1] {
+        return Err(Error::Malformed);
+    }
+    Ok(SessionTiming {
+        p2: Duration::from_millis(u64::from(u16::from_be_bytes([p2_high, p2_low]))),
+        p2_star: Duration::from_millis(u64::from(u16::from_be_bytes([star_high, star_low])) * 10),
+    })
+}
+
+/// A `TesterPresent` request, `3E 00`, which keeps a non-default session open. The positive
+/// reply isn't suppressed (`3E 80`): an ELM adapter waits out its whole timeout for a reply that
+/// never comes.
+#[must_use]
+pub fn tester_present() -> [u8; 2] {
+    [TESTER_PRESENT, 0x00]
 }
 
 // The DID echoed at the start of `data`, and the bytes after it.

@@ -24,7 +24,7 @@
 
 use std::collections::VecDeque;
 use std::fmt;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use obdcracker_core::isotp::Addressing;
 use obdcracker_core::{obd, uds};
@@ -101,6 +101,8 @@ impl From<ProfileError> for FixtureError {
 ///
 /// A broadcast OBD-II request is answered by every module with OBD-II data, in fixture order.
 /// A request to an ID no module listens on gets no reply.
+/// A module leaves a non-default diagnostic session after S3 without a request: 5 s, as
+/// ISO 14229-2 gives it, unless [`Ecu::set_s3`] changes it.
 #[derive(Debug)]
 pub struct SimBus {
     ecus: Vec<Ecu>,
@@ -176,6 +178,8 @@ impl SimBus {
                 dtc: spec.dtc_service()?,
                 session: Session::Default,
                 fault: None,
+                s3: ecu::S3_DEFAULT,
+                last_request: Instant::now(),
                 name: spec.module,
             });
         }
