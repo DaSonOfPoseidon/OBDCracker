@@ -555,6 +555,23 @@ fn rejects_a_discovery_range_that_would_send_on_a_reply_id() {
     );
 }
 
+#[test]
+fn rejects_a_discovery_candidate_that_reverses_a_listed_module() {
+    // A module at 0x770 that replies on 0x700, and a candidate 0x700 -> 0x770: the candidate
+    // would send on the module's reply ID. `candidates` leaves it out (its reply is the
+    // module's request ID), but the range is still wrong and must be refused.
+    let toml = format!(
+        "{MINIMAL}\n[[module]]\nname = \"reversed\"\nrequest_id = 0x770\nresponse_id = 0x700\n\
+         protocol = \"uds\"\n\n[discovery]\nfirst_request_id = 0x700\nlast_request_id = 0x700\n\
+         reply_offset = 0x70\n"
+    );
+    assert!(
+        matches!(Profile::from_toml(&toml), Err(ProfileError::Discovery(_))),
+        "{:?}",
+        Profile::from_toml(&toml)
+    );
+}
+
 // `with_discovery`, plus a wide range up to `wide_last`.
 fn with_wide_discovery(first: u32, last: u32, offset: u32, wide_last: u32) -> String {
     format!(

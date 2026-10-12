@@ -509,7 +509,9 @@ impl Profile {
             )));
         }
         // Each ID in the range must be one the policy accepts, whether or not `candidates`
-        // leaves it out.
+        // leaves it out, and never a listed module's reply ID. `candidates` leaves out one whose
+        // reply is a listed module's request ID by design (a module found past the range, then
+        // listed), so that alone isn't refused.
         for request in discovery.first_request_id..=discovery.last_request_id {
             let candidate = ModuleIds {
                 request,
@@ -518,6 +520,15 @@ impl Profile {
             Policy::read_only()
                 .narrowed_to(&[candidate])
                 .map_err(ProfileError::Discovery)?;
+            if self
+                .modules
+                .iter()
+                .any(|module| module.response_id == request)
+            {
+                return Err(ProfileError::Discovery(NarrowingError::RequestIsReply(
+                    request,
+                )));
+            }
         }
         // The safety policy's own checks: every request ID one it accepts, and no ID both a
         // request and a reply.
