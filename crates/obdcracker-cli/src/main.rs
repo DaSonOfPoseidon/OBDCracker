@@ -725,6 +725,10 @@ fn resume_command(
 // (and reads typographic quotes as quotes), cmd `%` (and `!` with delayed expansion), so any
 // other word gives None rather than trusting a list of what's special.
 fn shell_word(word: &str, windows: bool) -> Option<String> {
+    // PowerShell reads a leading `@` as splatting or an array.
+    if windows && word.starts_with('@') {
+        return None;
+    }
     let plain =
         |c: char| c.is_ascii_alphanumeric() || "-_./=:,+@".contains(c) || (windows && c == '\\');
     Some(if !word.is_empty() && word.chars().all(plain) {
@@ -1049,6 +1053,8 @@ mod tests {
             "car\u{2019}s log.jsonl",
             "a^b c",
             "(car).jsonl",
+            // PowerShell reads a leading `@` as splatting or an array.
+            "@args",
             "caf\u{E9}.jsonl",
         ] {
             let ran = args(&["obdcracker", "--audit-log", word, "sweep", "--range", "0-1"]);
