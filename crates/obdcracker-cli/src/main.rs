@@ -20,7 +20,9 @@ use obdcracker_transport::scan::{
     self, DidFormat, ExtraDid, PidValue, Scan, ScanModule, ScanOptions,
 };
 use obdcracker_transport::sweep::{self, SweepOptions};
-use obdcracker_transport::{Audited, DryRun, Expect, S3, Timing, Transport, exchange, hex};
+use obdcracker_transport::{
+    Audited, DryRun, Expect, S3, Timing, Transport, exchange, hex, log_failure,
+};
 
 // OBDLink USB adapters' rate.
 const DEFAULT_BAUD: u32 = 115_200;
@@ -187,10 +189,20 @@ fn ports() -> ExitCode {
 
 fn adapter<L: Link>(cli: &Cli, link: L) -> ExitCode {
     let kind = link.kind();
-    let mut elm = match Elm::connect(link) {
+    let mut elm = match Elm::connect_reporting(link) {
         Ok(elm) => elm,
-        Err(e) => {
-            eprintln!("{e}");
+        Err(failed) => {
+            // What the adapter was sent and said before it failed is evidence too.
+            if let Err(e) = log_failure(
+                &cli.audit_log,
+                kind.name(),
+                failed.events,
+                "connect",
+                &failed.error,
+            ) {
+                eprintln!("can't write audit log {}: {e}", cli.audit_log.display());
+            }
+            eprintln!("{}", failed.error);
             return ExitCode::FAILURE;
         }
     };

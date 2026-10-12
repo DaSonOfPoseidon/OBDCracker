@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use obdcracker_safety::Approved;
 use obdcracker_safety::{Policy, Target};
-use obdcracker_transport::{Audited, Error, Mock, Response, Transport};
+use obdcracker_transport::{Audited, Error, LinkEvent, Mock, Response, Transport, log_failure};
 
 fn temp_log(name: &str) -> PathBuf {
     let path = std::env::temp_dir().join(format!(
@@ -148,4 +148,152 @@ fn a_timeout_isnt_an_error_worth_logging() {
         Error::Timeout
     );
     assert_eq!(std::fs::read_to_string(&log).unwrap(), "");
+}
+
+// Reports adapter commands and an unread reply line with every send, and can fail the send.
+struct Chatty {
+    events: Vec<LinkEvent>,
+    fail: bool,
+}
+
+impl Transport for Chatty {
+    fn send(&mut self, _: &Approved) -> Result<(), Error> {
+        let at = std::time::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+        self.events.push(LinkEvent::Unread {
+            at,
+            line: "7E9 03 41 0C 00".to_owned(),
+        });
+        self.events.push(LinkEvent::Command {
+            at,
+            command: "ATSH7E0".to_owned(),
+            answer: vec!["OK".to_owned(), "say \"hi\"".to_owned()],
+        });
+        self.events.push(LinkEvent::Lost(3));
+        if self.fail {
+            return Err(Error::Adapter("BUFFER FULL".to_owned()));
+        }
+        Ok(())
+    }
+
+    fn recv(&mut self, _: Duration) -> Result<Response, Error> {
+        Err(Error::Timeout)
+    }
+
+    fn take_events(&mut self) -> Vec<LinkEvent> {
+        std::mem::take(&mut self.events)
+    }
+
+    fn settle(&mut self) -> Result<(), Error> {
+        self.events.push(LinkEvent::Unread {
+            at: std::time::UNIX_EPOCH,
+            line: "7E9 03 7F 22 31".to_owned(),
+        });
+        Ok(())
+    }
+}
+
+#[test]
+fn what_is_left_when_the_session_ends_is_logged() {
+    let log = temp_log("settle");
+    let chatty = Chatty {
+        events: Vec::new(),
+        fail: false,
+    };
+    drop(Audited::open(&log, chatty, "mock").unwrap());
+    let audit = std::fs::read_to_string(&log).unwrap();
+    assert!(
+        audit.contains(r#""dir":"unread","line":"7E9 03 7F 22 31""#),
+        "{audit}"
+    );
+}
+
+#[test]
+fn logs_adapter_commands_and_unread_reply_lines() {
+    for fail in [false, true] {
+        let log = temp_log(&format!("events-{fail}"));
+        let chatty = Chatty {
+            events: Vec::new(),
+            fail,
+        };
+        let mut audited = Audited::open(&log, chatty, "mock").unwrap();
+        let rpm = Policy::read_only()
+            .approve(Target::Physical(0x7E0), &[0x01, 0x0C])
+            .unwrap();
+        assert_eq!(audited.send(&rpm).is_err(), fail);
+        let audit = std::fs::read_to_string(&log).unwrap();
+        let lines: Vec<_> = audit.lines().collect();
+        assert!(lines[0].contains(r#""dir":"tx""#), "{audit}");
+        // When it happened, not when it was logged.
+        assert!(
+            lines[1].starts_with(
+                r#"{"ts_ms":1700000000000,"dir":"unread","line":"7E9 03 41 0C 00","link":"mock"}"#
+            ),
+            "{audit}"
+        );
+        assert!(
+            lines[2].starts_with(
+                r#"{"ts_ms":1700000000000,"dir":"cmd","cmd":"ATSH7E0","answer":"OK / say \"hi\"","link":"mock"}"#
+            ),
+            "{audit}"
+        );
+        assert!(
+            lines[3].ends_with(r#""dir":"lost","count":3,"link":"mock"}"#),
+            "{audit}"
+        );
+        if fail {
+            assert!(lines[4].contains(r#""dir":"err""#), "{audit}");
+        }
+        assert_eq!(lines.len(), if fail { 5 } else { 4 }, "{audit}");
+    }
+}
+
+#[test]
+fn a_transport_that_failed_before_it_could_be_wrapped_is_logged() {
+    let log = temp_log("failure");
+    let events = vec![LinkEvent::Command {
+        at: std::time::UNIX_EPOCH,
+        command: "ATSP6".to_owned(),
+        answer: vec!["?".to_owned()],
+    }];
+    let error = Error::Adapter("the adapter doesn't support ATSP6".to_owned());
+    log_failure(&log, "usb-serial", events, "connect", &error).unwrap();
+    let audit = std::fs::read_to_string(&log).unwrap();
+    let lines: Vec<_> = audit.lines().collect();
+    assert_eq!(lines.len(), 2, "{audit}");
+    assert!(
+        lines[0].contains(r#""dir":"cmd","cmd":"ATSP6","answer":"?","link":"usb-serial""#),
+        "{audit}"
+    );
+    assert!(
+        lines[1].contains(r#""dir":"err","op":"connect","error":"adapter error: the adapter doesn't support ATSP6""#),
+        "{audit}"
+    );
+}
+
+// Fails while finishing its last request.
+struct FailsToSettle;
+
+impl Transport for FailsToSettle {
+    fn send(&mut self, _: &Approved) -> Result<(), Error> {
+        Ok(())
+    }
+
+    fn recv(&mut self, _: Duration) -> Result<Response, Error> {
+        Err(Error::Timeout)
+    }
+
+    fn settle(&mut self) -> Result<(), Error> {
+        Err(Error::Adapter("the link closed".to_owned()))
+    }
+}
+
+#[test]
+fn a_failure_finishing_the_last_request_is_logged() {
+    let log = temp_log("settle-fails");
+    drop(Audited::open(&log, FailsToSettle, "mock").unwrap());
+    let audit = std::fs::read_to_string(&log).unwrap();
+    assert!(
+        audit.contains(r#""dir":"err","op":"settle","error":"adapter error: the link closed""#),
+        "{audit}"
+    );
 }

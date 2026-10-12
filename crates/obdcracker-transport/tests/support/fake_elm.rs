@@ -619,6 +619,8 @@ pub struct FakeLink {
     pub scheduled: VecDeque<(std::time::Instant, Vec<u8>)>,
     /// What the link says its byte rate is.
     pub byte_rate: Option<u32>,
+    /// When set, every write fails, though reads still work.
+    pub fail_writes: bool,
 }
 
 impl FakeLink {
@@ -635,6 +637,7 @@ impl FakeLink {
             corrupt_next_write: None,
             scheduled: VecDeque::new(),
             byte_rate: Some(115_200 / 10),
+            fail_writes: false,
         }
     }
 
@@ -649,7 +652,7 @@ impl FakeLink {
 
 impl Link for FakeLink {
     fn write_all(&mut self, bytes: &[u8], _driver: Driver) -> io::Result<()> {
-        if self.closed {
+        if self.closed || self.fail_writes {
             return Err(io::ErrorKind::BrokenPipe.into());
         }
         self.written.extend_from_slice(bytes);

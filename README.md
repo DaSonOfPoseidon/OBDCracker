@@ -71,7 +71,10 @@ from developers being careful:
   busy, or the adapter fails, and prints the command to go on with when that can help. `--extended` sweeps in the
   extended session, entered and left as `scan --extended` does, and warns if the module may not have left it.
 - Every frame sent or received in a real session is appended to an audit log, along with any adapter error (such as an
-  adapter mishearing a request it may already have sent).
+  adapter mishearing a request it may already have sent), every command to the adapter (`"dir":"cmd"`, such as
+  `AT SH 7E0`, with its answer), and every reply line the adapter printed after nothing read it any more
+  (`"dir":"unread"`, such as a late reply). It holds only what the adapter hears through its receive filter, not the
+  whole bus.
 - **One gap: ELM327/STN adapters that echo whole lines.** Their serial line has no checksum. On an adapter that echoes
   each character as it reads it (the OBDLink EX does), the driver checks a request's echo before sending its carriage
   return, so a misheard request never reaches the bus (#34). One that echoes only whole lines sends a request before

@@ -12,13 +12,13 @@
 pub mod codec;
 
 use std::collections::VecDeque;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use obdcracker_core::isotp::{Addressing, MAX_SHORT_PAYLOAD, Progress, Reassembler};
 use obdcracker_safety::{Approved, Target};
 
 use crate::link::{Driver, Link, LinkKind};
-use crate::{Error, Response, Timing, Transport, hex};
+use crate::{Error, LinkEvent, Response, Timing, Transport, hex};
 use codec::{Event, Line, LineSplitter, Status, parse_line};
 
 // Run after the reset, in order. Each must answer OK. One flipped bit must not turn any of them
@@ -54,6 +54,10 @@ const KEPT_DEFAULTS: &[(u8, u8, &str)] = &[
 // and every OBD-II emissions ECU's.
 const WIDE_FILTER: &str = "7XX";
 const OBD_FILTER: &str = "7EX";
+
+/// The most [`LinkEvent`]s an [`Elm`] keeps until they're taken
+/// ([`Transport::take_events`]); it counts any more as lost.
+pub const MAX_EVENTS: usize = 4096;
 
 /// The longest the adapter waits for a reply, or for more replies after one: `AT ST FF`.
 pub const ADAPTER_TIMEOUT: Duration = Duration::from_millis(0xFF * 4);
@@ -118,9 +122,11 @@ const STN_UNPACED_RATE: u32 = 115_200 / 10;
 /// [`Elm::connect`] fails.
 ///
 /// Replies still arriving when the next request is sent are dropped: checked for signs of a
-/// reset, but not returned, so an [`crate::Audited`] wrapper doesn't log them. Call
-/// [`Transport::recv`] until it times out to get them all. Returning them later would let a
-/// late reply to a repeated request pass for a fresh one.
+/// reset, but not returned, as that would let a late reply to a repeated request pass for a
+/// fresh one. Their lines are reported as [`LinkEvent::Unread`] instead, which an
+/// [`crate::Audited`] wrapper logs, along with every command sent to the adapter
+/// ([`Transport::take_events`]); dropping the wrapper reads what's left of the last request
+/// first ([`Transport::settle`]).
 ///
 /// Requests must fit one CAN frame: up to 7 bytes. That covers the OBD-II reads and UDS 0x22
 /// with up to 3 DIDs, but not every request the policy allows (0x22 with 4 DIDs is 9 bytes).
@@ -169,7 +175,10 @@ const STN_UNPACED_RATE: u32 = 115_200 / 10;
 pub struct Elm<L> {
     link: L,
     splitter: LineSplitter,
-    events: VecDeque<Event>,
+    // What the adapter printed, read but not used yet, with when it was read.
+    events: VecDeque<(SystemTime, Event)>,
+    // When the event last taken from `events` was read.
+    event_at: SystemTime,
     header: Option<u32>,
     flow: Option<Flow>,
     // The `AT CRA` pattern in effect.
@@ -194,7 +203,24 @@ pub struct Elm<L> {
     stn: Option<String>,
     // The link's byte rate, if replies are paced to it.
     pace: Option<u32>,
-    senders: Vec<(u32, Reassembler<Vec<u8>>)>,
+    // Each module answering the request in progress.
+    senders: Vec<Sender>,
+    // Lines of the request in progress that are in no reply yet, in the order they were read,
+    // with when, and the number each was given; reported as unread once the request is over.
+    heard: Vec<(u64, SystemTime, String)>,
+    next_heard: u64,
+    // What it did besides requests and replies, until taken, and how many more were dropped.
+    log: Vec<LinkEvent>,
+    lost: usize,
+}
+
+// A module answering the request in progress.
+#[derive(Debug)]
+struct Sender {
+    id: u32,
+    reassembler: Reassembler<Vec<u8>>,
+    // The numbers of the `heard` lines of its reply so far.
+    lines: Vec<u64>,
 }
 
 // Where the adapter sends ISO-TP flow control frames.
@@ -204,6 +230,15 @@ enum Flow {
     Standard,
     // To this request ID, with this gap between frames (STmin, ms)
     To(u32, u8),
+}
+
+/// Why [`Elm::connect_reporting`] failed, and what the adapter was sent and answered first.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConnectFailed {
+    /// Why it failed.
+    pub error: Error,
+    /// The commands sent and the lines read, oldest first.
+    pub events: Vec<LinkEvent>,
 }
 
 /// What an adapter says about itself. Reading it puts nothing on the bus.
@@ -223,12 +258,25 @@ impl<L: Link> Elm<L> {
     /// Resets the adapter and sets it up for CAN. Nothing is put on the bus.
     ///
     /// Fails if no ELM327 answers, or if the adapter refuses any setup command (some clones
-    /// don't implement everything they claim).
+    /// don't implement everything they claim). [`Elm::connect_reporting`] also returns the
+    /// commands sent before the failure.
     pub fn connect(link: L) -> Result<Self, Error> {
+        Self::connect_reporting(link).map_err(|failed| failed.error)
+    }
+
+    /// [`Elm::connect`], returning with a failure what the adapter was sent and answered up to
+    /// it ([`LinkEvent`]s), as nothing else can take them: for the audit log
+    /// ([`crate::log_failure`]).
+    ///
+    /// # Errors
+    ///
+    /// As [`Elm::connect`].
+    pub fn connect_reporting(link: L) -> Result<Self, ConnectFailed> {
         let mut elm = Self {
             link,
             splitter: LineSplitter::default(),
             events: VecDeque::new(),
+            event_at: SystemTime::UNIX_EPOCH,
             header: None,
             flow: None,
             filter: WIDE_FILTER.to_owned(),
@@ -242,7 +290,22 @@ impl<L: Link> Elm<L> {
             stn: None,
             pace: None,
             senders: Vec::new(),
+            heard: Vec::new(),
+            next_heard: 0,
+            log: Vec::new(),
+            lost: 0,
         };
+        match elm.set_up() {
+            Ok(()) => Ok(elm),
+            Err(error) => Err(ConnectFailed {
+                error,
+                events: elm.take_events(),
+            }),
+        }
+    }
+
+    fn set_up(&mut self) -> Result<(), Error> {
+        let elm = self;
         elm.drain_stale()?;
         elm.reset()?;
         elm.check_defaults()?;
@@ -261,7 +324,7 @@ impl<L: Link> Elm<L> {
         if elm.pace.is_some() {
             elm.expect_ok("ATAT0")?;
         }
-        Ok(elm)
+        Ok(())
     }
 
     /// Timing for [`crate::exchange`] through this adapter. The adapter decides when a request
@@ -326,20 +389,49 @@ impl<L: Link> Elm<L> {
         for _ in 0..RESET_TRIES {
             self.splitter.clear();
             self.events.clear();
-            self.write(b"ATZ\r")?;
+            let at = SystemTime::now();
+            // Some of it may have reached the adapter even if the write failed.
+            if let Err(e) = self.write(b"ATZ\r") {
+                self.note(LinkEvent::Command {
+                    at,
+                    command: "ATZ".to_owned(),
+                    answer: Vec::new(),
+                });
+                return Err(e);
+            }
             let deadline = Instant::now() + RESET_WAIT;
             let mut banner = None;
-            while let Some(event) = self.next_event(deadline)? {
+            // What it printed, for the report; a flood isn't kept.
+            let mut answer = Vec::new();
+            let reset = loop {
+                let event = match self.next_event(deadline) {
+                    Ok(Some(event)) => event,
+                    Ok(None) => break Ok(false),
+                    Err(e) => break Err(e),
+                };
+                if let Event::Line(line) = &event
+                    && answer.len() < MAX_ANSWER_LINES
+                {
+                    answer.push(line.clone());
+                }
                 match event {
                     Event::Line(line) if line.starts_with("ELM327") => banner = Some(line),
                     Event::Prompt => {
                         if let Some(banner) = banner.take() {
                             self.banner = banner;
-                            return Ok(());
+                            break Ok(true);
                         }
                     }
                     _ => {}
                 }
+            };
+            self.note(LinkEvent::Command {
+                at,
+                command: "ATZ".to_owned(),
+                answer,
+            });
+            if reset? {
+                return Ok(());
             }
         }
         Err(Error::Adapter(
@@ -389,16 +481,37 @@ impl<L: Link> Elm<L> {
         Ok(())
     }
 
-    // Sends an AT or ST command and returns its answer, after checking the echo.
+    // Sends an AT or ST command and returns its answer, after checking the echo. The command
+    // and as much of its answer as was read are reported (`LinkEvent::Command`).
     fn command(&mut self, command: &str) -> Result<Vec<String>, Error> {
         // An all-hex line is a bus request, which only `send` may write.
         if command.bytes().all(|b| b.is_ascii_hexdigit()) {
             return Err(Error::Adapter(format!("{command} isn't a command")));
         }
         self.ready()?;
+        let at = SystemTime::now();
+        let mut lines = Vec::new();
+        let answered = self.command_answer(command, &mut lines);
+        self.note(LinkEvent::Command {
+            at,
+            command: command.to_owned(),
+            answer: lines.clone(),
+        });
+        answered.map(|()| lines)
+    }
+
+    fn note(&mut self, event: LinkEvent) {
+        if self.log.len() < MAX_EVENTS {
+            self.log.push(event);
+        } else {
+            self.lost += 1;
+        }
+    }
+
+    // Writes `command` and reads its answer's lines into `lines`.
+    fn command_answer(&mut self, command: &str, lines: &mut Vec<String>) -> Result<(), Error> {
         self.write(format!("{command}\r").as_bytes())?;
         let deadline = Instant::now() + COMMAND_WAIT;
-        let mut lines = Vec::new();
         let mut echoed = false;
         loop {
             match self.next_event(deadline)? {
@@ -453,7 +566,7 @@ impl<L: Link> Elm<L> {
                 }
             }
         }
-        Ok(lines)
+        Ok(())
     }
 
     // Any answer but OK leaves the adapter's settings unknown: it may have reset, or kept the
@@ -500,7 +613,8 @@ impl<L: Link> Elm<L> {
             return self.check_idle();
         }
         // The rest of the last request's replies are dropped, but a reset among them still
-        // counts.
+        // counts. Unfinished replies' lines were read first, so they're reported first.
+        self.drop_senders();
         let deadline = Instant::now() + LONGEST_REQUEST;
         loop {
             match self.next_request_event(deadline)? {
@@ -512,6 +626,13 @@ impl<L: Link> Elm<L> {
                     break;
                 }
                 Some(Event::Line(text)) => {
+                    // Not the request's echo, which `reply_line` checks.
+                    if self.echo.is_none() {
+                        self.note(LinkEvent::Unread {
+                            at: self.event_at,
+                            line: text.clone(),
+                        });
+                    }
                     self.reply_line(&text)?;
                 }
                 // It can't be read, so it could hide a reset.
@@ -521,7 +642,6 @@ impl<L: Link> Elm<L> {
             }
         }
         self.busy = false;
-        self.senders.clear();
         self.check_idle()
     }
 
@@ -544,9 +664,11 @@ impl<L: Link> Elm<L> {
             };
             let n = self.read(&mut buf, left)?;
             self.splitter.push(&buf[..n], &mut events);
-            self.events.extend(events.drain(..));
+            let now = SystemTime::now();
+            self.events
+                .extend(events.drain(..).map(|event| (now, event)));
         }
-        let what = match self.events.pop_front() {
+        let what = match self.events.pop_front().map(|(_, event)| event) {
             Some(Event::Line(line)) => line,
             Some(Event::Prompt) => ">".into(),
             Some(Event::Overlong) => "an overlong line".into(),
@@ -583,7 +705,8 @@ impl<L: Link> Elm<L> {
         let mut buf = [0; 256];
         let mut events = Vec::new();
         loop {
-            if let Some(event) = self.events.pop_front() {
+            if let Some((at, event)) = self.events.pop_front() {
+                self.event_at = at;
                 return Ok(Some(event));
             }
             let Some(left) = deadline
@@ -597,7 +720,9 @@ impl<L: Link> Elm<L> {
                 self.last_byte = Some(Instant::now());
             }
             self.splitter.push(&buf[..n], &mut events);
-            self.events.extend(events.drain(..));
+            let now = SystemTime::now();
+            self.events
+                .extend(events.drain(..).map(|event| (now, event)));
         }
     }
 
@@ -632,26 +757,67 @@ impl<L: Link> Elm<L> {
         }
     }
 
-    // Feeds one frame to its module's reassembler and returns the reply it completes.
-    fn feed(&mut self, source: u32, data: &[u8]) -> Option<Response> {
-        let index = match self.senders.iter().position(|(id, _)| *id == source) {
+    // Feeds one frame, printed as `line`, to its module's reassembler and returns the reply it
+    // completes. Lines that end up in no reply are reported as unread.
+    fn feed(&mut self, source: u32, data: &[u8], line: &str) -> Option<Response> {
+        let number = self.hear(line);
+        let index = match self.senders.iter().position(|s| s.id == source) {
             Some(index) => index,
             None if self.senders.len() < MAX_SENDERS => {
                 let buf = vec![0; MAX_SHORT_PAYLOAD];
-                self.senders
-                    .push((source, Reassembler::new(buf, Addressing::Normal)));
+                self.senders.push(Sender {
+                    id: source,
+                    reassembler: Reassembler::new(buf, Addressing::Normal),
+                    lines: Vec::new(),
+                });
                 self.senders.len() - 1
             }
             None => return None,
         };
+        let sender = &mut self.senders[index];
+        // A single or first frame starts a new transfer, abandoning any unfinished one.
+        if data.first().is_some_and(|pci| pci >> 4 <= 1) {
+            sender.lines.clear();
+        }
+        sender.lines.push(number);
         // A frame that doesn't fit its module's transfer drops that transfer only; the
         // reassembler starts over at the module's next single or first frame.
-        match self.senders[index].1.feed(data) {
-            Ok(Progress::Complete(payload)) => Some(Response {
-                source,
-                payload: payload.to_vec(),
-            }),
-            _ => None,
+        match sender.reassembler.feed(data) {
+            Ok(Progress::Complete(payload)) => {
+                let reply = Response {
+                    source,
+                    payload: payload.to_vec(),
+                };
+                let used = std::mem::take(&mut sender.lines);
+                self.heard.retain(|(number, ..)| !used.contains(number));
+                Some(reply)
+            }
+            Ok(_) => None,
+            Err(_) => {
+                sender.lines.clear();
+                None
+            }
+        }
+    }
+
+    // Keeps a line of the request in progress, read at `event_at`, until it's known whether
+    // it's part of a reply. Returns its number.
+    fn hear(&mut self, line: &str) -> u64 {
+        let number = self.next_heard;
+        self.next_heard += 1;
+        if self.heard.len() < MAX_EVENTS {
+            self.heard.push((number, self.event_at, line.to_owned()));
+        } else {
+            self.lost += 1;
+        }
+        number
+    }
+
+    // Forgets every module's reply in progress, reporting the lines in no reply.
+    fn drop_senders(&mut self) {
+        self.senders.clear();
+        for (_, at, line) in std::mem::take(&mut self.heard) {
+            self.note(LinkEvent::Unread { at, line });
         }
     }
 
@@ -767,7 +933,7 @@ impl<L: Link> Transport for Elm<L> {
         self.quiet = Duration::ZERO;
         self.echo = Some(line);
         self.busy = true;
-        self.senders.clear();
+        self.drop_senders();
         Ok(())
     }
 
@@ -780,6 +946,23 @@ impl<L: Link> Transport for Elm<L> {
         self.expect_ok(if on { "ATAT0" } else { "ATAT1" })
     }
 
+    // The rest of the last request's output is read, and reported as unread.
+    fn settle(&mut self) -> Result<(), Error> {
+        // Even if the adapter broke and nothing more can be read.
+        if self.broken.is_some() {
+            self.drop_senders();
+        }
+        if self.busy { self.ready() } else { Ok(()) }
+    }
+
+    fn take_events(&mut self) -> Vec<LinkEvent> {
+        let mut events = std::mem::take(&mut self.log);
+        if self.lost > 0 {
+            events.push(LinkEvent::Lost(std::mem::take(&mut self.lost)));
+        }
+        events
+    }
+
     fn recv(&mut self, timeout: Duration) -> Result<Response, Error> {
         self.ready_to_receive()?;
         let deadline = Instant::now() + timeout.min(LONGEST_WAIT);
@@ -789,6 +972,7 @@ impl<L: Link> Transport for Elm<L> {
                 Some(Event::Prompt) => {
                     self.prompt_after_request()?;
                     self.busy = false;
+                    self.drop_senders();
                     return Err(Error::Timeout);
                 }
                 // It can't be read, so it could hide a reset.
@@ -798,7 +982,7 @@ impl<L: Link> Transport for Elm<L> {
                 // `None` is the echo.
                 Some(Event::Line(text)) => match self.reply_line(&text)? {
                     Some(Line::Frame(frame)) => {
-                        if let Some(reply) = self.feed(frame.id(), frame.data()) {
+                        if let Some(reply) = self.feed(frame.id(), frame.data(), &text) {
                             return Ok(reply);
                         }
                     }
@@ -812,7 +996,11 @@ impl<L: Link> Transport for Elm<L> {
                     Some(Line::Status(status)) if status.is_failure() => {
                         return Err(Error::Adapter(format!("the adapter said {status}")));
                     }
-                    _ => {}
+                    // Such as NO DATA: heard, but no reply.
+                    Some(_) => {
+                        self.hear(&text);
+                    }
+                    None => {}
                 },
             }
         }
@@ -847,7 +1035,9 @@ impl<L: Link> Elm<L> {
             // The line's carriage return completes it, and its echo is checked again then.
             let mut events = Vec::new();
             self.splitter.push(&echoed, &mut events);
-            self.events.extend(events);
+            let now = SystemTime::now();
+            self.events
+                .extend(events.into_iter().map(|event| (now, event)));
             return Ok(());
         }
         let why = if echoed.is_empty() {

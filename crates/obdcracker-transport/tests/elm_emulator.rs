@@ -147,7 +147,12 @@ fn reads_through_an_independent_elm327() {
     }
 
     let audit = std::fs::read_to_string(&log).unwrap();
-    assert_eq!(audit.lines().count(), 20, "{audit}");
+    // Each request and its reply; adapter commands are logged too, as many as setup needs.
+    let traffic = audit
+        .lines()
+        .filter(|line| line.contains(r#""dir":"tx""#) || line.contains(r#""dir":"rx""#))
+        .count();
+    assert_eq!(traffic, 20, "{audit}");
     assert!(
         audit
             .lines()

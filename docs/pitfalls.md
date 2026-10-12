@@ -197,6 +197,9 @@ Each entry names the class, what to check, and where it bit us.
 
 ## Links and adapters
 
+- **An audit log that sees only what the code reads misses the evidence.** The ELM driver dropped reply lines nobody
+  read before the next request, and adapter commands never reached the log, so a late reply or a changed setting left
+  no trace. Log what the adapter did, not just what the caller used.
 - **An adapter's learned timeout can hide a slow module.** The ELM327's adaptive timing (`AT AT1`) shortens its wait
   to fit the modules that answered fast, so a module that wakes slowly reads as absent. Before acting on "nothing is
   there", as discovery's wide pass does, look again with the adapter's longest wait.
@@ -221,6 +224,10 @@ Each entry names the class, what to check, and where it bit us.
   When bytes arrive, restart from the last byte, not from the end of the wait it came in: a wait that heard one
   stray NUL still ended in silence, and discarding it let bytes just under twice the limit apart run forever (M3
   branch, Codex).
+- **A log of what was heard must cover what was half-used.** The audit log reported lines left unread at the next
+  request, but frames already fed to a reassembler for a reply that never completed (another module's interleaved
+  frames, a transfer dropped mid-way, a sixteenth-plus sender) and status lines such as `NO DATA` vanished. Keep each
+  input's raw form until it's part of something logged, and report it when it's dropped (PR #78).
 - **Don't hand back stale data to make a log complete.** Replies drained before the next request aren't returned:
   queueing them would let a late reply to a repeated request pass for a fresh one. Document what the audit log
   records instead (M3 branch, Codex).

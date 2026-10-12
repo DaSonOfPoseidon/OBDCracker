@@ -8,8 +8,8 @@ use std::time::{Duration, Instant};
 use obdcracker_safety::{Approved, ModuleIds, Policy, Target};
 use obdcracker_transport::elm::Elm;
 use obdcracker_transport::link::{Driver, Link, LinkKind};
-use obdcracker_transport::{Audited, Error, Expect, Response, Transport, exchange};
-use support::fake_elm::{BANNER, FakeElm, FakeLink};
+use obdcracker_transport::{Audited, Error, Expect, Response, Transport, exchange, hex};
+use support::fake_elm::{BANNER, FakeElm, FakeLink, frames};
 
 const VIN: &[u8] = b"\x49\x02\x01WAUZZZ4G1EN000000";
 
@@ -1659,6 +1659,301 @@ mod clones {
         assert!(
             elm.send(&approve(Target::ObdFunctional, &[0x09, 0x02]))
                 .is_err()
+        );
+    }
+}
+
+mod events {
+    use super::*;
+    use obdcracker_transport::LinkEvent;
+
+    fn commands_in(events: &[LinkEvent]) -> Vec<&str> {
+        events
+            .iter()
+            .filter_map(|e| match e {
+                LinkEvent::Command { command, .. } => Some(command.as_str()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn every_adapter_command_is_reported_with_its_answer() {
+        let mut elm = connect(car());
+        let events = elm.take_events();
+        assert_eq!(commands_in(&events), commands(&elm));
+        assert!(
+            events.iter().any(|e| matches!(
+                e,
+                LinkEvent::Command { command, answer, .. }
+                    if command == "ATSP6" && answer == &["OK".to_owned()]
+            )),
+            "{events:?}"
+        );
+        // Taken once.
+        assert_eq!(elm.take_events(), []);
+        elm.send(&approve(Target::Physical(0x7E0), &[0x09, 0x02]))
+            .unwrap();
+        let events = elm.take_events();
+        assert!(commands_in(&events).contains(&"ATSH7E0"), "{events:?}");
+    }
+
+    #[test]
+    fn reply_lines_nobody_read_are_reported_not_lost() {
+        // Two ECUs answer the broadcast; only the first reply is read before the next request.
+        let mut elm = connect(car());
+        elm.send(&approve(Target::ObdFunctional, &[0x09, 0x02]))
+            .unwrap();
+        let first = elm.recv(Duration::from_secs(1)).unwrap();
+        elm.take_events();
+        elm.send(&approve(Target::ObdFunctional, &[0x09, 0x02]))
+            .unwrap();
+        let unread: Vec<String> = elm
+            .take_events()
+            .into_iter()
+            .filter_map(|e| match e {
+                LinkEvent::Unread { line, .. } => Some(line),
+                _ => None,
+            })
+            .collect();
+        let other = if first.source == 0x7E8 { "7E9" } else { "7E8" };
+        assert_ne!(unread, Vec::<String>::new());
+        assert!(
+            unread.iter().all(|line| line.starts_with(other)),
+            "{unread:?}"
+        );
+    }
+
+    #[test]
+    fn frames_of_a_reply_left_incomplete_are_reported() {
+        // Paced, the two ECUs' frames interleave, so the second's first frames are read (and
+        // fed to its reassembler) before the first's reply completes. Abandoning that reply
+        // must still report every one of its lines.
+        let mut elm = Elm::connect(FakeLink::at_baud(car(), 115_200)).unwrap();
+        elm.send(&approve(Target::ObdFunctional, &[0x09, 0x02]))
+            .unwrap();
+        let first = elm.recv(Duration::from_secs(1)).unwrap();
+        elm.take_events();
+        elm.send(&approve(Target::ObdFunctional, &[0x09, 0x02]))
+            .unwrap();
+        let other = if first.source == 0x7E8 { "7E9" } else { "7E8" };
+        let unread: Vec<String> = elm
+            .take_events()
+            .into_iter()
+            .filter_map(|e| match e {
+                LinkEvent::Unread { line, .. } => Some(line),
+                _ => None,
+            })
+            .collect();
+        let expected: Vec<String> = frames(VIN)
+            .iter()
+            .map(|frame| format!("{other} {}", hex(frame)))
+            .collect();
+        assert_eq!(unread, expected);
+    }
+
+    fn unread_in(events: Vec<LinkEvent>) -> Vec<String> {
+        events
+            .into_iter()
+            .filter_map(|e| match e {
+                LinkEvent::Unread { line, .. } => Some(line),
+                _ => None,
+            })
+            .collect()
+    }
+
+    // Three ECUs answer a broadcast with a 20-byte reply, each in three frames.
+    fn three_ecus() -> FakeElm {
+        FakeElm::new(Box::new(|header, request| {
+            if header == 0x7DF && request == [0x09, 0x02] {
+                [0x7E8, 0x7E9, 0x7EA]
+                    .into_iter()
+                    .map(|source| (source, VIN.to_vec()))
+                    .collect()
+            } else {
+                Vec::new()
+            }
+        }))
+    }
+
+    #[test]
+    fn unfinished_replies_are_reported_in_the_order_they_arrived() {
+        // Paced, the ECUs' frames interleave: the first's reply completes on its third frame,
+        // by when the other two have sent two frames each, and their last frames follow.
+        let mut elm = Elm::connect(FakeLink::at_baud(three_ecus(), 115_200)).unwrap();
+        elm.send(&approve(Target::ObdFunctional, &[0x09, 0x02]))
+            .unwrap();
+        assert_eq!(elm.recv(Duration::from_secs(1)).unwrap().source, 0x7E8);
+        elm.take_events();
+        elm.settle().unwrap();
+        let frames = frames(VIN);
+        let expected: Vec<String> = frames
+            .iter()
+            .flat_map(|frame| ["7E9", "7EA"].map(|source| format!("{source} {}", hex(frame))))
+            .collect();
+        assert_eq!(unread_in(elm.take_events()), expected);
+    }
+
+    #[test]
+    fn a_broken_adapter_still_reports_what_it_had_heard() {
+        // The second ECU's reply is longer, so it's still unfinished when the first's completes.
+        let mut elm = Elm::connect(FakeLink::at_baud(
+            FakeElm::new(Box::new(|header, _| {
+                if header == 0x7DF {
+                    vec![(0x7E8, VIN.to_vec()), (0x7E9, [VIN, VIN].concat())]
+                } else {
+                    Vec::new()
+                }
+            })),
+            115_200,
+        ))
+        .unwrap();
+        elm.send(&approve(Target::ObdFunctional, &[0x09, 0x02]))
+            .unwrap();
+        assert_eq!(elm.recv(Duration::from_secs(1)).unwrap().source, 0x7E8);
+        elm.take_events();
+        elm.link_mut().closed = true;
+        assert!(matches!(
+            elm.recv(Duration::from_secs(1)),
+            Err(Error::Adapter(_))
+        ));
+        assert!(elm.settle().is_err());
+        let unread = unread_in(elm.take_events());
+        let sent: Vec<String> = frames(&[VIN, VIN].concat())
+            .iter()
+            .map(|frame| format!("7E9 {}", hex(frame)))
+            .collect();
+        assert!(unread.len() >= 2 && sent.starts_with(&unread), "{unread:?}");
+    }
+
+    #[test]
+    fn a_status_line_that_isnt_a_failure_is_reported() {
+        let mut elm = connect(car());
+        elm.send(&approve(Target::Physical(0x7E0), &[0x01, 0x00]))
+            .unwrap();
+        assert_eq!(elm.recv(Duration::from_secs(1)), Err(Error::Timeout));
+        let unread: Vec<String> = elm
+            .take_events()
+            .into_iter()
+            .filter_map(|e| match e {
+                LinkEvent::Unread { line, .. } => Some(line),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(unread, ["NO DATA"]);
+    }
+
+    #[test]
+    fn unread_lines_keep_the_time_they_arrived() {
+        // The second ECU's reply starts arriving with the first: its first line is read and
+        // queued but unused while the caller waits, then dropped by the next request. Its time
+        // is when it was read, not when it was dropped. (Lines still in the link's buffer are
+        // read, and timed, only then.)
+        let mut elm = connect(car());
+        elm.send(&approve(Target::ObdFunctional, &[0x09, 0x02]))
+            .unwrap();
+        elm.recv(Duration::from_secs(1)).unwrap();
+        let arrived_by = std::time::SystemTime::now();
+        std::thread::sleep(Duration::from_millis(50));
+        elm.take_events();
+        elm.send(&approve(Target::ObdFunctional, &[0x09, 0x02]))
+            .unwrap();
+        let times: Vec<_> = elm
+            .take_events()
+            .into_iter()
+            .filter_map(|e| match e {
+                LinkEvent::Unread { at, .. } => Some(at),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            times.first().is_some_and(|at| *at <= arrived_by),
+            "{times:?}"
+        );
+    }
+
+    #[test]
+    fn settling_reports_what_is_left_of_the_last_request() {
+        // The session ends after the first reply: what's left is still reported.
+        let mut elm = connect(car());
+        elm.send(&approve(Target::ObdFunctional, &[0x09, 0x02]))
+            .unwrap();
+        let first = elm.recv(Duration::from_secs(1)).unwrap();
+        elm.take_events();
+        elm.settle().unwrap();
+        let other = if first.source == 0x7E8 { "7E9" } else { "7E8" };
+        let unread: Vec<String> = elm
+            .take_events()
+            .into_iter()
+            .filter_map(|e| match e {
+                LinkEvent::Unread { line, .. } => Some(line),
+                _ => None,
+            })
+            .collect();
+        assert_ne!(unread, Vec::<String>::new());
+        assert!(unread.iter().all(|l| l.starts_with(other)), "{unread:?}");
+        // Nothing is left, and nothing more is sent.
+        let written = elm.link().elm.commands.len();
+        elm.settle().unwrap();
+        assert_eq!(elm.take_events(), []);
+        assert_eq!(elm.link().elm.commands.len(), written);
+    }
+
+    #[test]
+    fn a_failed_setup_still_reports_the_commands_it_sent() {
+        // The adapter refuses `AT SP 6` mid-setup: the commands up to it, and its answer, come
+        // back with the error, as nothing else can take them.
+        let mut adapter = FakeElm::silent();
+        adapter.unsupported.push("ATSP6".into());
+        let Err(failed) = Elm::connect_reporting(FakeLink::new(adapter)) else {
+            panic!("connected");
+        };
+        assert!(
+            failed.error.to_string().contains("ATSP6"),
+            "{}",
+            failed.error
+        );
+        assert_eq!(
+            commands_in(&failed.events),
+            ["ATZ", "ATPPS", "ATL0", "ATS1", "ATH1", "ATSP6"]
+        );
+        assert!(
+            matches!(
+                failed.events.last(),
+                Some(LinkEvent::Command { answer, .. }) if answer == &["?".to_owned()]
+            ),
+            "{:?}",
+            failed.events.last()
+        );
+    }
+
+    #[test]
+    fn a_reset_whose_write_fails_is_still_reported() {
+        // Part of `ATZ` may have reached the adapter before the link failed.
+        let mut link = FakeLink::new(FakeElm::silent());
+        link.fail_writes = true;
+        let Err(failed) = Elm::connect_reporting(link) else {
+            panic!("connected");
+        };
+        assert_eq!(commands_in(&failed.events), ["ATZ"], "{:?}", failed.events);
+    }
+
+    #[test]
+    fn an_untaken_report_is_bounded() {
+        // Nobody takes the events: they stop growing, and say how many were lost.
+        let mut elm = connect(car());
+        for _ in 0..1500 {
+            elm.send(&approve(Target::Physical(0x7E0), &[0x09, 0x02]))
+                .unwrap();
+            elm.send(&approve(Target::Physical(0x7E1), &[0x09, 0x02]))
+                .unwrap();
+        }
+        let events = elm.take_events();
+        assert!(events.len() <= obdcracker_transport::elm::MAX_EVENTS + 1);
+        assert!(
+            matches!(events.last(), Some(LinkEvent::Lost(n)) if *n > 0),
+            "{:?}",
+            events.last()
         );
     }
 }

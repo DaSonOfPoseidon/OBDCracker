@@ -230,7 +230,20 @@ fn tcp_vin_reads_through_an_elm_adapter_and_warns_about_wireless() {
     );
 
     let audit = std::fs::read_to_string(&log).unwrap();
-    let lines: Vec<_> = audit.lines().collect();
+    // The adapter's setup is logged too, before the request.
+    let setup = audit
+        .lines()
+        .take_while(|l| l.contains(r#""dir":"cmd""#))
+        .count();
+    assert!(
+        audit.lines().next().unwrap().contains(r#""cmd":"ATZ""#),
+        "{audit}"
+    );
+    let lines: Vec<_> = audit
+        .lines()
+        .skip(setup)
+        .filter(|l| !l.contains(r#""dir":"cmd""#))
+        .collect();
     assert_eq!(lines.len(), 3, "{audit}");
     assert!(lines[0].contains(r#""dir":"tx","id":"7DF","payload":"09 02","link":"tcp""#));
     assert!(lines[1].contains(r#""dir":"rx","id":"7E8""#) && lines[1].contains(r#""link":"tcp""#));
