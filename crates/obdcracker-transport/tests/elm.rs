@@ -1450,3 +1450,99 @@ mod pacing {
         );
     }
 }
+
+// Clone adapters, from real transcripts in python-OBD's tracker (#44). Each must either work, or
+// fail closed with a message that names the problem.
+mod clones {
+    use super::*;
+
+    fn clone_of(version: &str) -> FakeElm {
+        let mut elm = car();
+        elm.banner = format!("ELM327 {version}");
+        elm
+    }
+
+    #[test]
+    fn noise_before_the_banner_is_ignored() {
+        // python-OBD #205: `\xfc\r\rELM327 v1.5\r\r>`
+        let mut elm = clone_of("v2.1");
+        elm.reset_noise = b"\xfc\r".to_vec();
+        let mut elm = connect(elm);
+        assert_eq!(elm.info().unwrap().id, "ELM327 v2.1");
+        let reply = exchange(
+            &mut elm,
+            &approve(Target::ObdFunctional, &[0x09, 0x02]),
+            Expect::ObdEcus,
+            Elm::<FakeLink>::timing(),
+        )
+        .unwrap();
+        assert_eq!(reply.len(), 2);
+    }
+
+    #[test]
+    fn a_clone_that_claims_a_version_it_doesnt_implement_is_told_so() {
+        // Most clones say v1.5, a version Elm Electronics never released, and refuse `X` digits
+        // in `AT CRA`; some say v2.1 and still do (python-OBD #132, #188).
+        for version in ["v1.5", "v2.1"] {
+            let mut elm = clone_of(version);
+            elm.unsupported.push("ATCRA7XX".into());
+            let err = Elm::connect(FakeLink::new(elm)).unwrap_err().to_string();
+            for needed in ["ATCRA7XX", "ELM327 v2.0", "STN", version] {
+                assert!(err.contains(needed), "{version}: {err}");
+            }
+        }
+    }
+
+    #[test]
+    fn an_answer_without_its_prompt_says_so() {
+        // python-OBD #160, #205: `ATE0\rOK` and then nothing. Without the prompt the driver can't
+        // tell whether more is coming, so it stops rather than write over it.
+        let mut elm = car();
+        elm.unfinished.push("ATH1".into());
+        let err = Elm::connect(FakeLink::new(elm)).unwrap_err().to_string();
+        assert!(err.contains("ATH1") && err.contains("prompt"), "{err}");
+        assert!(!err.contains("no ELM327"), "{err}");
+    }
+
+    #[test]
+    fn a_command_echoed_and_never_answered_says_so() {
+        let mut elm = car();
+        elm.mute.push("ATH1".into());
+        let err = Elm::connect(FakeLink::new(elm)).unwrap_err().to_string();
+        assert!(err.contains("echoed ATH1 but never answered"), "{err}");
+    }
+
+    #[test]
+    fn an_empty_answer_is_no_reply_and_the_adapter_stays_usable() {
+        // python-OBD #205: `0100` answered with an empty line and a prompt.
+        let mut elm = connect(car());
+        elm.link_mut().elm.empty_answers = true;
+        let err = exchange(
+            &mut elm,
+            &approve(Target::Physical(0x7E0), &[0x09, 0x02]),
+            Expect::Module(0x7E8),
+            Elm::<FakeLink>::timing(),
+        )
+        .unwrap_err();
+        assert!(matches!(err, Error::Timeout), "{err}");
+        elm.link_mut().elm.empty_answers = false;
+        elm.send(&approve(Target::Physical(0x7E0), &[0x09, 0x02]))
+            .unwrap();
+        assert_eq!(elm.recv(Duration::from_secs(1)).unwrap().source, 0x7E8);
+    }
+
+    #[test]
+    fn a_link_that_drops_mid_request_names_the_link() {
+        // python-OBD #188: Bluetooth links that drop after a few seconds of polling.
+        let mut elm = connect(car());
+        elm.send(&approve(Target::ObdFunctional, &[0x09, 0x02]))
+            .unwrap();
+        elm.link_mut().closed = true;
+        let err = elm.recv(Duration::from_secs(1)).unwrap_err().to_string();
+        assert!(err.contains("usb-serial link"), "{err}");
+        assert!(
+            elm.send(&approve(Target::ObdFunctional, &[0x09, 0x02]))
+                .is_err()
+        );
+    }
+}

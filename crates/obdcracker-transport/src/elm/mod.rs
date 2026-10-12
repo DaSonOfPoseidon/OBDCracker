@@ -390,6 +390,18 @@ impl<L: Link> Elm<L> {
         let mut echoed = false;
         loop {
             match self.next_event(deadline)? {
+                // Without the prompt the answer may not be over, so the next command can't tell
+                // where its own starts. Some clones leave it off (python-OBD #160, #205).
+                None if !lines.is_empty() || (echoed && self.splitter.partial().is_some()) => {
+                    return Err(self.break_down(format!(
+                        "the adapter answered {command} but never printed its prompt (>)"
+                    )));
+                }
+                None if echoed => {
+                    return Err(self.break_down(format!(
+                        "the adapter echoed {command} but never answered it"
+                    )));
+                }
                 None => {
                     return Err(self.break_down(format!("no answer to {command}")));
                 }
@@ -441,11 +453,28 @@ impl<L: Link> Elm<L> {
         }
         Err(
             self.break_down(if lines.iter().map(String::as_str).eq(["?"]) {
-                format!("the adapter doesn't support {command}")
+                format!(
+                    "the adapter doesn't support {command}{}",
+                    self.needs_hint(command)
+                )
             } else {
                 format!("{command} failed: {}", lines.join(" / "))
             }),
         )
+    }
+
+    // What a refused command says about the adapter: `X` digits in `AT CRA` arrived in ELM327
+    // v2.0, and most clones that claim it (or v1.5, which was never released) refuse them.
+    fn needs_hint(&self, command: &str) -> String {
+        if command.starts_with("ATCRA") && command.contains('X') {
+            format!(
+                "; this driver needs an ELM327 v2.0 or later, or an STN chip (OBDLink). This one \
+                 says it's {}, but many clones claim a version they don't implement",
+                self.banner
+            )
+        } else {
+            String::new()
+        }
     }
 
     // Fails if the adapter can't be trusted; otherwise waits for any request still running.

@@ -18,6 +18,7 @@ pub type Responder = Box<dyn FnMut(u32, &[u8]) -> Vec<(u32, Vec<u8>)> + Send>;
 pub const BANNER: &str = "ELM327 v2.0";
 
 /// The fake adapter's state, as the datasheet describes it after a reset.
+#[allow(clippy::struct_excessive_bools)]
 pub struct FakeElm {
     responder: Responder,
     input: Vec<u8>,
@@ -64,6 +65,19 @@ pub struct FakeElm {
     /// buffer (ELM327DS v2.0, p. 80), or `None` to print without a limit. Frames that arrive
     /// faster than the buffer drains overflow it, and the adapter prints `BUFFER FULL`.
     pub drain_rate: Option<u32>,
+    /// What the adapter calls itself after a reset and to `ATI`. Clones often claim a version
+    /// they don't implement, such as `ELM327 v1.5` or `ELM327 v2.1` (python-OBD #188, #205).
+    pub banner: String,
+    /// Bytes printed before the banner on a reset, as clones do (`\xfc\r\r`, python-OBD #205).
+    pub reset_noise: Vec<u8>,
+    /// Commands whose answer ends without its carriage return and prompt (`ATE0\rOK` and then
+    /// nothing, python-OBD #160, #205).
+    pub unfinished: Vec<String>,
+    /// Commands that are echoed and then never answered at all.
+    pub mute: Vec<String>,
+    /// Answer every bus request with an empty line, as clones do when nothing answers
+    /// (`0100` → `\r\r>`, python-OBD #205).
+    pub empty_answers: bool,
 }
 
 // The adapter's output buffer, in bytes (ELM327DS v2.0, p. 80).
@@ -149,6 +163,11 @@ impl FakeElm {
             after_prompt: Vec::new(),
             echo_at_line_end: false,
             drain_rate: None,
+            banner: BANNER.to_owned(),
+            reset_noise: Vec::new(),
+            unfinished: Vec::new(),
+            mute: Vec::new(),
+            empty_answers: false,
         }
     }
 
@@ -256,6 +275,13 @@ impl FakeElm {
             self.prompt();
             return;
         }
+        if self.mute.contains(&line) {
+            return;
+        }
+        if self.unfinished.contains(&line) {
+            self.output.extend(b"OK");
+            return;
+        }
         if let Some(at) = line.strip_prefix("AT") {
             self.at(at);
         } else if line == "STI" {
@@ -276,13 +302,16 @@ impl FakeElm {
                     self.settings.echo = value == 0x00;
                 }
                 self.last = None;
+                self.output.extend(self.reset_noise.clone());
                 self.print("");
-                self.print(BANNER);
+                let banner = self.banner.clone();
+                self.print(&banner);
                 self.prompt();
                 return;
             }
             "I" => {
-                self.print(BANNER);
+                let banner = self.banner.clone();
+                self.print(&banner);
                 self.prompt();
                 return;
             }
@@ -423,6 +452,11 @@ impl FakeElm {
             .into_iter()
             .filter(|(source, _)| self.settings.shows(*source))
             .collect();
+        if self.empty_answers {
+            self.print("");
+            self.prompt();
+            return;
+        }
         if replies.is_empty() {
             self.print("NO DATA");
         }
