@@ -396,3 +396,30 @@ fn scan_reads_extended_dids_and_leaves_the_module_in_the_default_session() {
     options.extended = Some(GUARD);
     assert_eq!(coding(&options), Ok(DidValue::Bytes((1..=10).collect())));
 }
+
+// A sweep finds the coding only in the extended session, and leaves the engine in the default one.
+#[test]
+fn sweep_finds_extended_dids_only_in_the_extended_session() {
+    use obdcracker_transport::fingerprint::UdsModule;
+    use obdcracker_transport::sweep::{SweepOptions, sweep_dids};
+
+    let found = |options: &SweepOptions| {
+        let mut bus = car();
+        let got = sweep_dids(
+            &mut bus,
+            &Policy::read_only(),
+            &UdsModule::obd_engine(),
+            0x05FE..=0x0602,
+            Timing::default(),
+            options,
+        )
+        .unwrap();
+        assert_eq!(got.stop, None);
+        assert_eq!(session(&bus), Session::Default);
+        got.found
+    };
+    assert_eq!(found(&SweepOptions::default()), []);
+    let mut options = SweepOptions::default();
+    options.extended = Some(GUARD);
+    assert_eq!(found(&options), [(CODING, Ok((1..=10).collect()))]);
+}
