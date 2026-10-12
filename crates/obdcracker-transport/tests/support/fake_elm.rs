@@ -38,6 +38,8 @@ pub struct FakeElm {
     /// The module each flow control frame the adapter sent was for: every sender of a
     /// multi-frame reply that passed the receive filter.
     pub flow_control_for: Vec<u32>,
+    /// The CAN ID each of those flow control frames went to.
+    pub flow_control_ids: Vec<u32>,
     /// Commands this adapter doesn't support (it answers `?`), as a clone might.
     pub unsupported: Vec<String>,
     /// What `STI` answers; `None` for a plain ELM327.
@@ -152,6 +154,7 @@ impl FakeElm {
             commands: Vec::new(),
             sent: Vec::new(),
             flow_control_for: Vec::new(),
+            flow_control_ids: Vec::new(),
             unsupported: Vec::new(),
             sti: None,
             interrupted: 0,
@@ -465,10 +468,19 @@ impl FakeElm {
         // modelled their frames interleave, each module's spaced by the gap its flow control
         // asked for; otherwise each reply is printed whole, in turn.
         let mut lines = Vec::new();
+        let header = self.settings.header;
         for (index, (source, payload)) in replies.into_iter().enumerate() {
-            let frames = frames(&payload);
+            let mut frames = frames(&payload);
             if frames.len() > 1 {
                 self.flow_control_for.push(source);
+                let to = self.flow_control_to(source);
+                self.flow_control_ids.push(to);
+                // The module goes on only if the flow control came to its own request ID: the
+                // header, or for a broadcast the OBD-II one (ISO 15765-4: reply ID - 8).
+                let request_id = if header == 0x7DF { source - 8 } else { header };
+                if to != request_id {
+                    frames.truncate(1);
+                }
             }
             for (k, frame) in frames.into_iter().enumerate() {
                 let line = if self.settings.headers {
@@ -508,6 +520,19 @@ impl FakeElm {
 }
 
 impl FakeElm {
+    // Where the adapter sends flow control for a First Frame from `source` (datasheet p. 48):
+    // mode 0 to the OBD-II request ID for an OBD-II reply ID, mode 1 to `AT FC SH`, and mode 2
+    // to the First Frame's own ID, unchanged.
+    fn flow_control_to(&self, source: u32) -> u32 {
+        match self.settings.fc_mode {
+            0 if (0x7E8..=0x7EF).contains(&source) => source - 8,
+            // The datasheet doesn't say; nothing a module would expect.
+            0 => 0,
+            1 => self.settings.fc_header.unwrap_or(0),
+            _ => source,
+        }
+    }
+
     // The gap between consecutive frames that the adapter's flow control asks for: none with its
     // own ISO 15765-4 handling (mode 0), else the STmin in `AT FC SD` (ISO 15765-2).
     fn st_min_us(&self) -> u64 {

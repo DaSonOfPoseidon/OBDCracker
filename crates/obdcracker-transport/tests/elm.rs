@@ -134,9 +134,8 @@ mod setup {
             "ATSH714",
             "ATFCSD300000",
             "ATFCSD300003",
-            "ATFCSD300015",
+            "ATFCSH7E0",
             "ATFCSM1",
-            "ATFCSM2",
             "ATFCSM0",
             "ATCRA7EX",
             "ATCRA7E8",
@@ -392,19 +391,19 @@ mod requests {
         assert_eq!(
             commands(&elm)[setup..],
             [
-                // OBD-II IDs: the adapter's own ISO 15765-4 flow control, with a gap between
-                // frames (#23), 8 times as long for a broadcast that every emissions ECU may
-                // answer at once. A broadcast shows every emissions ECU's reply, a physical
-                // request only its own ECU's.
+                // A broadcast: the adapter's own ISO 15765-4 flow control, the only kind that
+                // reaches each ECU's request ID, and it shows every emissions ECU's reply.
                 "ATSH7DF",
-                "ATFCSD300015",
-                "ATFCSM2",
+                "ATFCSM0",
                 "ATCRA7EX",
                 "0902",
                 "0902",
+                // A physical request: flow control to the module's request ID, with a gap
+                // between frames (#23), and only its own ECU's replies show.
                 "ATSH7E0",
+                "ATFCSH7E0",
                 "ATFCSD300003",
-                "ATFCSM2",
+                "ATFCSM1",
                 "ATCRA7E8",
                 "0902",
                 // Any other module: flow control goes to the module's request ID. Without a
@@ -417,8 +416,9 @@ mod requests {
                 "0902",
                 "0902",
                 "ATSH7E1",
+                "ATFCSH7E1",
                 "ATFCSD300003",
-                "ATFCSM2",
+                "ATFCSM1",
                 "ATCRA7E9",
                 "0902",
             ]
@@ -1393,6 +1393,7 @@ mod pacing {
                     .unwrap_or_else(|e| panic!("{baud} baud, {target:?}: {e}"));
                 assert_eq!(reply.payload.len(), 4095, "{baud} baud, {target:?}");
             }
+            assert_eq!(elm.link().elm.flow_control_ids, [0x7E0, 0x714], "{baud}");
         }
     }
 
@@ -1409,43 +1410,31 @@ mod pacing {
     }
 
     #[test]
-    fn a_broadcast_is_paced_for_every_emissions_ecu_answering_at_once() {
-        // Up to 8 ECUs (0x7E8..=0x7EF) can each send a long reply to one broadcast, their frames
-        // interleaved, so each gets 8 times the gap (PR #70, Codex).
-        for (baud, st_min) in [(38_400, "3D"), (115_200, "15")] {
-            let mut elm = Elm::connect(FakeLink::at_baud(eight_long_replies(), baud)).unwrap();
-            let setup = commands(&elm).len();
-            elm.send(&approve(Target::ObdFunctional, &[0x09, 0x02]))
-                .unwrap();
-            let mut sources = Vec::new();
-            while let Ok(reply) = elm.recv(Duration::from_secs(30)) {
-                assert_eq!(reply.payload.len(), 4095);
-                sources.push(reply.source);
-            }
-            sources.sort_unstable();
-            assert_eq!(sources, (0x7E8..=0x7EF).collect::<Vec<_>>(), "{baud}");
-            assert!(
-                commands(&elm)[setup..].contains(&format!("ATFCSD3000{st_min}")),
-                "{baud}: {:?}",
-                &commands(&elm)[setup..]
-            );
-        }
-        // At 9600 baud that would be 242 ms, more than STmin allows, so it's 127 ms: enough
-        // for 4 ECUs at once.
-        let mut link = FakeLink::new(eight_long_replies());
-        link.byte_rate = Some(960);
-        let mut elm = Elm::connect(link).unwrap();
+    fn a_broadcast_gets_the_adapters_own_flow_control_to_each_ecu() {
+        // Only the adapter's ISO 15765-4 handling (mode 0) reaches each answering ECU's own
+        // request ID, so a broadcast isn't paced, even on a plain ELM327 (PR #70, Codex).
+        let mut elm = Elm::connect(FakeLink::new(eight_long_replies())).unwrap();
         let setup = commands(&elm).len();
         elm.send(&approve(Target::ObdFunctional, &[0x09, 0x02]))
             .unwrap();
-        while elm.recv(Duration::from_secs(1)).is_ok() {}
-        assert!(commands(&elm)[setup..].iter().any(|c| c == "ATFCSD30007F"));
+        let mut sources = Vec::new();
+        while let Ok(reply) = elm.recv(Duration::from_secs(5)) {
+            assert_eq!(reply.payload.len(), 4095);
+            sources.push(reply.source);
+        }
+        sources.sort_unstable();
+        assert_eq!(sources, (0x7E8..=0x7EF).collect::<Vec<_>>());
+        assert_eq!(commands(&elm)[setup..setup + 2], ["ATSH7DF", "ATFCSM0"]);
+        let mut to = elm.link().elm.flow_control_ids.clone();
+        to.sort_unstable();
+        assert_eq!(to, (0x7E0..=0x7E7).collect::<Vec<_>>());
     }
 
     #[test]
-    fn the_fake_adapter_overflows_when_a_broadcast_is_paced_for_one_ecu() {
+    fn flow_control_mode_2_would_stall_every_reply() {
+        // Mode 2 keeps the First Frame's own ID (datasheet p. 48): flow control for 7E8's
+        // reply goes to 7E8, not 7E0, and the ECU never sends the rest.
         let mut elm = eight_long_replies();
-        elm.drain_rate = Some(11_520);
         elm.settings.headers = true;
         elm.settings.protocol = Some("6".into());
         let mut out = Vec::new();
@@ -1453,7 +1442,26 @@ mod pacing {
             elm.write(format!("{line}\r").as_bytes());
             out.extend(elm.read(usize::MAX));
         }
-        assert!(String::from_utf8(out).unwrap().contains("BUFFER FULL"));
+        assert_eq!(elm.flow_control_ids, (0x7E8..=0x7EF).collect::<Vec<_>>());
+        let out = String::from_utf8(out).unwrap();
+        assert!(!out.contains(" 21 "), "{out}");
+    }
+
+    #[test]
+    fn a_broadcast_that_overflows_a_slow_link_says_so() {
+        // Eight ECUs' long replies at once are too much for 9600 baud.
+        let mut elm = Elm::connect(FakeLink::at_baud(eight_long_replies(), 9600)).unwrap();
+        elm.send(&approve(Target::ObdFunctional, &[0x09, 0x02]))
+            .unwrap();
+        let err = loop {
+            if let Err(e) = elm.recv(Duration::from_secs(5)) {
+                break e.to_string();
+            }
+        };
+        assert!(
+            err.contains("BUFFER FULL") && err.contains("faster baud rate"),
+            "{err}"
+        );
     }
 
     // The flow control data each target gets on a plain ELM327.
@@ -1486,9 +1494,10 @@ mod pacing {
             assert_eq!(
                 flow_commands(link),
                 [
-                    // OBD-II IDs: the adapter picks the header, the driver the gap
+                    // To each module's own request ID
+                    "ATFCSH7E0".to_owned(),
                     format!("ATFCSD3000{st_min}"),
-                    "ATFCSM2".to_owned(),
+                    "ATFCSM1".to_owned(),
                     "ATFCSH714".to_owned(),
                     format!("ATFCSD3000{st_min}"),
                     "ATFCSM1".to_owned(),
@@ -1512,14 +1521,14 @@ mod pacing {
         let mut clone = long_replies();
         clone.sti = Some("OK".into());
         assert_eq!(
-            flow_commands(FakeLink::at_baud(clone, 115_200))[0],
+            flow_commands(FakeLink::at_baud(clone, 115_200))[1],
             "ATFCSD300003"
         );
         // Untested any slower, so it's paced like any other adapter.
         let mut stn = long_replies();
         stn.sti = Some("STN2232 v5.12.4".into());
         assert_eq!(
-            flow_commands(FakeLink::at_baud(stn, 38_400))[0],
+            flow_commands(FakeLink::at_baud(stn, 38_400))[1],
             "ATFCSD300008"
         );
     }
