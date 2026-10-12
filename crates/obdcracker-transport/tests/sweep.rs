@@ -399,4 +399,6 @@ fn unanswered_dids_are_listed_or_resumed_never_lost() {
         ]
     );
     assert_eq!(got.stop, None);
+    // Only 0x0600 answered.
+    assert_eq!(got.answered(), 1);
 }

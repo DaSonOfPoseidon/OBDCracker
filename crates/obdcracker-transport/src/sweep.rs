@@ -36,6 +36,18 @@ pub struct Sweep {
     pub stop: Option<Stop>,
 }
 
+impl Sweep {
+    /// How many DIDs in [`Sweep::found`] the module answered, with a value or a refusal: all
+    /// but those listed as [`ReadError::NoReply`].
+    #[must_use]
+    pub fn answered(&self) -> usize {
+        self.found
+            .iter()
+            .filter(|(_, value)| *value != Err(ReadError::NoReply))
+            .count()
+    }
+}
+
 /// Where and why a sweep stopped before the end of its range.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Stop {

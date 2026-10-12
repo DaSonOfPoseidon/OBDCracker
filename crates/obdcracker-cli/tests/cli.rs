@@ -744,6 +744,14 @@ fn sim_sweep_lists_the_dids_a_module_has() {
     );
     // DIDs out of range aren't listed.
     assert!(!stdout.contains("F180"), "{stdout}");
+    let listed = stdout
+        .lines()
+        .filter(|l| l.starts_with("785 head-up display "))
+        .count();
+    assert!(
+        stdout.contains(&format!("sweep: {listed} DIDs answered\n")),
+        "{stdout}"
+    );
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
         stderr.contains("sweep: 16 reads of head-up display (71B)"),

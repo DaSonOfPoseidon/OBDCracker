@@ -487,6 +487,17 @@ fn run_sweep<T: Transport>(
         );
         return ExitCode::SUCCESS;
     }
+    print_sweep(&module, &found, name, last, extended)
+}
+
+// Lists what a sweep found, and how to resume one that stopped.
+fn print_sweep(
+    module: &UdsModule,
+    found: &sweep::Sweep,
+    name: &str,
+    last: u16,
+    extended: bool,
+) -> ExitCode {
     for (did, value) in &found.found {
         match value {
             Ok(data) => println!(
@@ -498,8 +509,17 @@ fn run_sweep<T: Transport>(
             Err(e) => println!("{:03X} {} {did:04X} ({e})", module.response_id, module.name),
         }
     }
-    println!("sweep: {} DIDs answered", found.found.len());
-    match found.stop {
+    let unanswered = found.found.len() - found.answered();
+    println!(
+        "sweep: {} DIDs answered{}",
+        found.answered(),
+        if unanswered > 0 {
+            format!(", {unanswered} unanswered (worth reading again)")
+        } else {
+            String::new()
+        }
+    );
+    match &found.stop {
         None => ExitCode::SUCCESS,
         Some(stop) => {
             eprintln!("stopped at {:04X}: {}", stop.at, stop.why);
