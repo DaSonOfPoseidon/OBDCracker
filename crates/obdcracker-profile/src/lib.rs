@@ -393,6 +393,22 @@ impl Profile {
             .collect()
     }
 
+    /// The first pass's candidates to look for again, more patiently, before the wide pass:
+    /// those not in `found` whose reply ID one of [`Profile::wide_candidates`]`(found)` would be
+    /// sent to. A module the first pass missed (asleep, or slow to answer) still answers there,
+    /// so finding it first keeps the wide pass off its reply ID. It can't help with a module that
+    /// doesn't answer `22 F187` at all.
+    #[must_use]
+    pub fn recheck_candidates(&self, found: &[ModuleIds]) -> Vec<ModuleIds> {
+        let wide = self.wide_candidates(found);
+        self.candidates()
+            .into_iter()
+            .filter(|candidate| {
+                !found.contains(candidate) && wide.iter().any(|w| w.request == candidate.reply)
+            })
+            .collect()
+    }
+
     /// Like [`Profile::narrow`], but also allows `extra`: modules discovery found, or candidates
     /// to look for.
     ///
