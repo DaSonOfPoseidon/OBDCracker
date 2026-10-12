@@ -52,12 +52,13 @@ from developers being careful:
   on is ever a reply ID. A module whose request ID is past 0x769 isn't found.
 - Every frame sent or received in a real session is appended to an audit log, along with any adapter error (such as an
   adapter mishearing a request it may already have sent).
-- **One gap: ELM327/STN adapters.** Their serial line has no checksum, and the adapter sends a request before the
-  driver can check its echo, so a single bit error can turn an approved read into another request, a locked or
-  banned one included (a reset, clearing DTCs, one write). It can't complete a flash sequence, and the driver stops
-  at the first mismatched echo. It's a rare, accepted risk, reasoned in [`docs/elm327.md`](docs/elm327.md); #34
-  closes it by checking the echo before the request is sent. Prefer a USB or Wi-Fi adapter over a direct serial
-  cable.
+- **One gap: ELM327/STN adapters that echo whole lines.** Their serial line has no checksum. On an adapter that echoes
+  each character as it reads it (the OBDLink EX does), the driver checks a request's echo before sending its carriage
+  return, so a misheard request never reaches the bus (#34). One that echoes only whole lines sends a request before
+  the driver can check it, so a single bit error can turn an approved read into another request, a locked or banned
+  one included (a reset, clearing DTCs, one write). It can't complete a flash sequence, and the driver stops at the
+  first mismatched echo. It's a rare, accepted risk, reasoned in [`docs/elm327.md`](docs/elm327.md). Prefer a USB or
+  Wi-Fi adapter over a direct serial cable.
 
 New capabilities are developed test-first: golden-frame unit tests, then property tests and fuzzing of response parsers,
 then a simulated ECU (`obdcracker-sim`), then a dry run on the car, and only then a live session.
