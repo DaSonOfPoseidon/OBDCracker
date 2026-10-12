@@ -42,7 +42,8 @@ pub(crate) struct EcuFixture {
 }
 
 // A reply the car sent that the sim can't build, such as one too short to decode: sent as is
-// to exactly this request.
+// to exactly this request, after `pending` response-pending replies. Not for session control,
+// which changes the module's state.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawFixture {
@@ -106,6 +107,7 @@ struct DidFixture {
     hex: Option<String>,
     #[serde(default)]
     session: SessionFixture,
+    // Response-pending replies before the answer or refusal.
     #[serde(default)]
     pending: u8,
     // Refused with this NRC instead of answered.
@@ -316,7 +318,20 @@ impl RawFixture {
     fn build(&self) -> Result<RawReply, FixtureError> {
         let request = hex_bytes(&self.request)?;
         let reply = hex_bytes(&self.reply)?;
-        if !obdcracker_core::response::answers(&request, &reply) {
+        // Session control changes the module's state, which a raw reply would skip.
+        if request.first() == Some(&0x10) {
+            return Err(value_error(
+                "a raw reply can't stand in for session control",
+                &self.request,
+            ));
+        }
+        // After response-pending, the final reply comes even to a suppressed request.
+        let answers = if self.pending > 0 {
+            obdcracker_core::response::answers_after_pending
+        } else {
+            obdcracker_core::response::answers
+        };
+        if !answers(&request, &reply) {
             return Err(value_error(
                 "raw reply doesn't answer its request",
                 &self.reply,

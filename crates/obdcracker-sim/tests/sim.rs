@@ -882,10 +882,32 @@ fn quirk_settings_are_checked() {
         "[[ecu]]\nmodule = \"engine\"\n[[ecu.raw]]\nrequest = \"19 01 AF\"\nreply = \"59 02 00\"\n",
         "[[ecu]]\nmodule = \"engine\"\n[[ecu.raw]]\nrequest = \"19 01 AF\"\nreply = \"59 01 00 00\"\n[[ecu.raw]]\nrequest = \"19 01 AF\"\nreply = \"59 01 00 01\"\n",
         "[[ecu]]\nmodule = \"engine\"\n[[ecu.raw]]\nrequest = \"\"\nreply = \"59 01 00 00\"\n",
+        // Session control changes the module's state, which a raw reply would skip.
+        "[[ecu]]\nmodule = \"engine\"\n[[ecu.raw]]\nrequest = \"10 03\"\nreply = \"50 03 00 32 01 F4\"\n",
     ] {
         assert!(
             matches!(SimBus::new(&a7, bad), Err(FixtureError::Value(_))),
             "{bad}"
         );
     }
+}
+
+#[test]
+fn a_refused_did_can_send_response_pending_first() {
+    let fixture =
+        "[[ecu]]\nmodule = \"engine\"\n[[ecu.did]]\nid = 0xF190\nnrc = 0x22\npending = 2\n";
+    let mut bus = SimBus::new(&Profile::builtin("a7").unwrap(), fixture).unwrap();
+    let replies = payloads(&ask(&mut bus, ENGINE, &uds::read_did(0xF190)));
+    assert_eq!(replies.len(), 3, "{replies:02X?}");
+    assert!(nrc(&replies[0], 0x22).is_pending());
+    assert!(nrc(&replies[1], 0x22).is_pending());
+    assert_eq!(nrc(&replies[2], 0x22), Nrc::ConditionsNotCorrect);
+}
+
+#[test]
+fn a_raw_reply_after_response_pending_answers_a_suppressed_request() {
+    // After response-pending, the final positive reply is sent even with bit 7 set.
+    let fixture = "[[ecu]]\nmodule = \"engine\"\n[[ecu.raw]]\nrequest = \"19 81 AF\"\n\
+                   reply = \"59 01 00 00\"\npending = 1\n";
+    assert!(SimBus::new(&Profile::builtin("a7").unwrap(), fixture).is_ok());
 }

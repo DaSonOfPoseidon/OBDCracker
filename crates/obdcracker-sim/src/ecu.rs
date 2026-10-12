@@ -253,7 +253,12 @@ impl Ecu {
                 let data = match &did.data {
                     Ok(data) => data,
                     // ISO 14229-1 checks conditions for the whole request.
-                    Err(nrc) => return one(vec![NEGATIVE, 0x22, *nrc]),
+                    Err(nrc) => {
+                        let mut replies =
+                            vec![negative(0x22, Nrc::ResponsePending); usize::from(did.pending)];
+                        replies.push(vec![NEGATIVE, 0x22, *nrc]);
+                        return replies;
+                    }
                 };
                 found = true;
                 pending = pending.max(did.pending);
