@@ -7,7 +7,7 @@ use obdcracker_core::obd::{self, Unit, Value};
 use obdcracker_core::response::{Error as ReplyError, Nrc};
 use obdcracker_core::uds::{self, DtcFormat, DtcStatus};
 use obdcracker_profile::{Profile, ProfileError};
-use obdcracker_safety::{Policy, Target};
+use obdcracker_safety::{Approved, Policy, Target};
 use obdcracker_sim::{Fault, FixtureError, Session, SimBus};
 use obdcracker_transport::{Error, Expect, Response, Timing, Transport, exchange};
 use proptest::prelude::*;
@@ -778,24 +778,44 @@ proptest! {
         let Ok(request) = Policy::read_only().approve(target, &payload) else {
             return Ok(());
         };
-        let mut bus = a7();
-        bus.send(&request).unwrap();
-        while let Ok(reply) = bus.recv(TIMEOUT) {
-            let first = reply.payload[0];
-            if first == 0x7F {
-                prop_assert_eq!(reply.payload.len(), 3);
-                prop_assert_eq!(reply.payload[1], sid);
-            } else {
-                prop_assert_eq!(first, sid + 0x40);
-            }
-            prop_assert!(
-                obdcracker_core::response::answers(&payload, &reply.payload),
-                "{:02X?} doesn't answer {:02X?}",
-                reply.payload,
-                payload
-            );
-        }
+        check_replies(&request).map_err(TestCaseError::fail)?;
     }
+}
+
+// Every reply the simulated A7 sends to `request` is well formed and answers it: after
+// response-pending, the final reply comes even to a suppressed request.
+fn check_replies(request: &Approved) -> Result<(), String> {
+    let payload = request.payload();
+    let sid = payload[0];
+    let mut bus = a7();
+    bus.send(request).unwrap();
+    let mut pending = false;
+    while let Ok(reply) = bus.recv(TIMEOUT) {
+        let reply = reply.payload;
+        let shape = match reply[0] {
+            0x7F => reply.len() == 3 && reply[1] == sid,
+            first => first == sid + 0x40,
+        };
+        let answers = if pending {
+            obdcracker_core::response::answers_after_pending(payload, &reply)
+        } else {
+            obdcracker_core::response::answers(payload, &reply)
+        };
+        if !shape || !answers {
+            return Err(format!("{reply:02X?} doesn't answer {payload:02X?}"));
+        }
+        pending |= reply.len() == 3 && reply[0] == 0x7F && reply[2] == 0x78;
+    }
+    Ok(())
+}
+
+#[test]
+fn a_suppressed_dtc_request_gets_its_report_after_response_pending() {
+    // The transmission sends response-pending before each DTC report (session 3).
+    let request = Policy::read_only()
+        .approve(TRANSMISSION, &[0x19, 0x82, 0xAF])
+        .unwrap();
+    check_replies(&request).unwrap();
 }
 
 // What session 3 (#54) showed that a plain fixture couldn't say: response-pending before a DTC
