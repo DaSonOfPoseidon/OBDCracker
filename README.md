@@ -65,10 +65,10 @@ from developers being careful:
 - `sweep --module <NAME> --range FIRST-LAST` looks for the DIDs one profile module has that no profile lists yet,
   such as the head-up display's adaptation values. It reads each DID in the range (`22 xxxx`), one request each, and
   lists those the module answers, skipping refusals as out of range (NRC 0x31). It asks for an explicit range and
-  prints how many reads that is first. It stops early, keeping what it found and saying where to resume, if the
-  module goes quiet (3 reads in a row with no final answer), refuses `22` itself (such as "service not supported in active
-  session"), or the adapter fails. `--extended` sweeps in the extended session, entered and left as
-  `scan --extended` does.
+  prints how many reads that is first. It stops early, keeping what it found, if the module goes quiet (3 reads in a
+  row with no final answer), refuses `22` itself (such as "service not supported in active session"), says it's
+  busy, or the adapter fails, and prints the command to go on with when that can help. `--extended` sweeps in the
+  extended session, entered and left as `scan --extended` does, and warns if the module may not have left it.
 - Every frame sent or received in a real session is appended to an audit log, along with any adapter error (such as an
   adapter mishearing a request it may already have sent).
 - **One gap: ELM327/STN adapters that echo whole lines.** Their serial line has no checksum. On an adapter that echoes
