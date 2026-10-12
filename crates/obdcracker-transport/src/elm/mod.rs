@@ -374,7 +374,15 @@ impl<L: Link> Elm<L> {
             self.splitter.clear();
             self.events.clear();
             let at = SystemTime::now();
-            self.write(b"ATZ\r")?;
+            // Some of it may have reached the adapter even if the write failed.
+            if let Err(e) = self.write(b"ATZ\r") {
+                self.note(LinkEvent::Command {
+                    at,
+                    command: "ATZ".to_owned(),
+                    answer: Vec::new(),
+                });
+                return Err(e);
+            }
             let deadline = Instant::now() + RESET_WAIT;
             let mut banner = None;
             // What it printed, for the report; a flood isn't kept.

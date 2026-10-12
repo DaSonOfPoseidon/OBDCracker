@@ -1809,6 +1809,17 @@ mod events {
     }
 
     #[test]
+    fn a_reset_whose_write_fails_is_still_reported() {
+        // Part of `ATZ` may have reached the adapter before the link failed.
+        let mut link = FakeLink::new(FakeElm::silent());
+        link.fail_writes = true;
+        let Err(failed) = Elm::connect_reporting(link) else {
+            panic!("connected");
+        };
+        assert_eq!(commands_in(&failed.events), ["ATZ"], "{:?}", failed.events);
+    }
+
+    #[test]
     fn an_untaken_report_is_bounded() {
         // Nobody takes the events: they stop growing, and say how many were lost.
         let mut elm = connect(car());
