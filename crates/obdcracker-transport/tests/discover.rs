@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use obdcracker_core::response::{Error as ReplyError, NegativeResponse, Nrc};
 use obdcracker_safety::{Approved, ModuleIds, Policy, Rejection};
-use obdcracker_transport::discover::{Found, discover};
+use obdcracker_transport::discover::{Found, PATIENT_P2, discover, discover_patiently};
 use obdcracker_transport::fingerprint::{DidValue, FingerprintError, ReadError};
 use obdcracker_transport::{Error, Response, Timing, Transport, hex};
 
@@ -17,6 +17,8 @@ struct Car {
     replies: VecDeque<Response>,
     sent: Vec<String>,
     fail_after: Option<usize>,
+    // The shortest timeout each receive was given.
+    shortest_wait: Option<Duration>,
 }
 
 impl Car {
@@ -26,6 +28,7 @@ impl Car {
             replies: VecDeque::new(),
             sent: Vec::new(),
             fail_after: None,
+            shortest_wait: None,
         }
     }
 }
@@ -42,8 +45,14 @@ impl Transport for Car {
         Ok(())
     }
 
-    fn recv(&mut self, _timeout: Duration) -> Result<Response, Error> {
+    fn recv(&mut self, timeout: Duration) -> Result<Response, Error> {
+        self.shortest_wait = Some(self.shortest_wait.map_or(timeout, |w| w.min(timeout)));
         self.replies.pop_front().ok_or(Error::Timeout)
+    }
+
+    fn patient(&mut self, on: bool) -> Result<(), Error> {
+        self.sent.push(format!("patient {on}"));
+        Ok(())
     }
 }
 
@@ -174,4 +183,50 @@ fn nothing_answering_finds_nothing() {
         []
     );
     assert_eq!(car.sent.len(), 5);
+}
+
+#[test]
+fn a_patient_pass_waits_longer_and_always_ends_patience() {
+    let candidates = [
+        ModuleIds {
+            request: 0x709,
+            reply: 0x773,
+        },
+        ModuleIds {
+            request: 0x70A,
+            reply: 0x774,
+        },
+    ];
+    let policy = Policy::read_only().narrowed_to(&candidates).unwrap();
+    let mut car = Car::new(|id, _| match id {
+        0x70A => vec![reply(0x774, &[0x62, 0xF1, 0x87, b'X'])],
+        _ => Vec::new(),
+    });
+    let found = discover_patiently(&mut car, &policy, &candidates, TIMING).unwrap();
+    assert_eq!(found.len(), 1);
+    assert_eq!(found[0].request_id, 0x70A);
+    assert_eq!(
+        car.sent,
+        [
+            "patient true",
+            "709 22 F1 87",
+            "70A 22 F1 87",
+            "patient false"
+        ]
+    );
+    // Each receive gets what's left of P2.
+    assert!(
+        car.shortest_wait > PATIENT_P2.checked_sub(Duration::from_millis(100)),
+        "{:?}",
+        car.shortest_wait
+    );
+    // An adapter failure still ends patience, and is what's reported.
+    let mut car = Car::new(|_, _| Vec::new());
+    car.fail_after = Some(2);
+    let error = discover_patiently(&mut car, &policy, &candidates, TIMING).unwrap_err();
+    assert!(
+        matches!(error, FingerprintError::Transport(Error::Adapter(_))),
+        "{error:?}"
+    );
+    assert_eq!(car.sent.last().map(String::as_str), Some("patient false"));
 }

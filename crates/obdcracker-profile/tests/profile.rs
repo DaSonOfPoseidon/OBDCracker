@@ -640,6 +640,40 @@ fn a_wide_discovery_policy_allows_wide_candidates_and_what_was_found() {
 }
 
 #[test]
+fn recheck_candidates_are_the_silent_first_pass_ids_whose_reply_the_wide_pass_would_send_on() {
+    // Pass 1 covers 0x700..=0x769, replies 0x76A..=0x7D3; the wide pass sends to 0x76A..=0x795.
+    let profile = Profile::from_toml(&with_wide_discovery(0x700, 0x769, 0x6A, 0x795)).unwrap();
+    let found = [ModuleIds {
+        request: 0x705,
+        reply: 0x76F,
+    }];
+    let recheck = profile.recheck_candidates(&found);
+    let wide = profile.wide_candidates(&found);
+    // Exactly the first-pass candidates whose reply ID a wide candidate sends to.
+    let expected: Vec<ModuleIds> = profile
+        .candidates()
+        .into_iter()
+        .filter(|c| wide.iter().any(|w| w.request == c.reply))
+        .collect();
+    assert_eq!(recheck, expected);
+    assert_eq!(recheck.first().map(|c| c.request), Some(0x700));
+    // 0x709's reply, 0x773, is where VW's MQB MMI answers.
+    assert!(recheck.contains(&ModuleIds {
+        request: 0x709,
+        reply: 0x773
+    }));
+    // The module found answers on 0x76F, so the wide pass skips it and there's nothing to recheck.
+    assert!(!recheck.iter().any(|c| c.request == 0x705));
+    // The gateway (0x710) answers on 0x77A, which the wide pass skips too.
+    assert!(!recheck.iter().any(|c| c.request == 0x710));
+    // Replies past 0x795 aren't sent to.
+    assert!(recheck.iter().all(|c| c.reply <= 0x795), "{recheck:?}");
+    // No wide range, nothing to recheck.
+    let narrow = Profile::from_toml(&with_discovery(0x700, 0x769, 0x6A)).unwrap();
+    assert_eq!(narrow.recheck_candidates(&[]), []);
+}
+
+#[test]
 fn a_module_listed_in_the_wide_range_keeps_the_first_pass_off_its_request_id() {
     // Once wide discovery finds a module at 0x773, the profile can list it: the first pass then
     // skips 0x709, whose reply ID that is.

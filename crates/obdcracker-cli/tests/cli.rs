@@ -580,6 +580,11 @@ fn sim_scan_discover_wide_looks_past_the_discovery_range_without_sending_on_a_re
         stdout.contains("discovery: 22 of 106 request IDs answered"),
         "{stdout}"
     );
+    // The silent first-pass IDs whose reply IDs the wide pass sends on are asked again first.
+    assert!(
+        stdout.contains("recheck, waiting longer: 0 of 21 request IDs answered"),
+        "{stdout}"
+    );
     // The simulated A7 has nothing past 0x769.
     assert!(
         stdout
@@ -592,8 +597,9 @@ fn sim_scan_discover_wide_looks_past_the_discovery_range_without_sending_on_a_re
         "{stdout}"
     );
     let audit = std::fs::read_to_string(&log).unwrap();
-    // The wide pass: the reads of F187 right after the first pass's 106, before the scan.
-    let wide: Vec<u32> = audit
+    // The recheck and wide passes: the reads of F187 right after the first pass's 106, before
+    // the scan.
+    let after: Vec<u32> = audit
         .lines()
         .filter(|l| l.contains(r#""dir":"tx""#))
         .skip(0x6A)
@@ -603,6 +609,15 @@ fn sim_scan_discover_wide_looks_past_the_discovery_range_without_sending_on_a_re
             u32::from_str_radix(&id[..3], 16).unwrap()
         })
         .collect();
+    let (recheck, wide) = after.split_at(after.iter().take_while(|id| **id <= 0x769).count());
+    // Each recheck is for a reply ID the wide pass then sends on, and the wide pass sends on
+    // no other first-pass reply ID that nothing answered on.
+    let mut replies: Vec<u32> = recheck.iter().map(|id| id + 0x6A).collect();
+    replies.sort_unstable();
+    let mut first_pass_replies: Vec<u32> = wide.iter().copied().filter(|id| *id <= 0x7D3).collect();
+    first_pass_replies.sort_unstable();
+    assert_eq!(replies, first_pass_replies, "{recheck:X?} then {wide:X?}");
+    assert_eq!(recheck.len(), 21, "{recheck:X?}");
     assert_eq!(wide.first(), Some(&0x76A), "{wide:X?}");
     // Up to 0x795, with the MMI's MQB ID among them.
     assert!(wide.contains(&0x773), "{wide:X?}");

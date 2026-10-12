@@ -771,6 +771,15 @@ impl<L: Link> Transport for Elm<L> {
         Ok(())
     }
 
+    // Adaptive timing off waits the whole `AT ST FF` (about 1 s) for each reply. When pacing,
+    // it's always off (see `connect`).
+    fn patient(&mut self, on: bool) -> Result<(), Error> {
+        if self.pace.is_some() {
+            return Ok(());
+        }
+        self.expect_ok(if on { "ATAT0" } else { "ATAT1" })
+    }
+
     fn recv(&mut self, timeout: Duration) -> Result<Response, Error> {
         self.ready_to_receive()?;
         let deadline = Instant::now() + timeout.min(LONGEST_WAIT);

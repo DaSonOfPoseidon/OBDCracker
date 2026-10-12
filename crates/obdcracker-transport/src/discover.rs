@@ -5,6 +5,8 @@ use obdcracker_core::uds::{self, did};
 use obdcracker_safety::{ModuleIds, Policy, Rejection, Target};
 
 use crate::fingerprint::{DidValue, FingerprintError, ReadError, ask, decode_did_value};
+use std::time::Duration;
+
 use crate::{Timing, Transport};
 
 /// A module that answered.
@@ -16,6 +18,39 @@ pub struct Found {
     pub response_id: u32,
     /// Its spare part number (F187), or the refusal it answered with.
     pub part_number: Result<DidValue, ReadError>,
+}
+
+/// The least P2 [`discover_patiently`] waits for each reply: a module just woken, or slow to
+/// answer, still has time.
+pub const PATIENT_P2: Duration = Duration::from_secs(1);
+
+/// [`discover`], waiting longer for each reply: at least [`PATIENT_P2`], with the transport made
+/// [`Transport::patient`] for the pass. For candidates a quicker pass may have missed. Patience
+/// ends afterwards whatever happens; a discovery error is reported over a failure to end it.
+///
+/// # Errors
+///
+/// As [`discover`], or the transport can't be made patient or stop being so.
+pub fn discover_patiently<T: Transport + ?Sized>(
+    transport: &mut T,
+    policy: &Policy,
+    candidates: &[ModuleIds],
+    timing: Timing,
+) -> Result<Vec<Found>, FingerprintError> {
+    let timing = Timing {
+        p2: timing.p2.max(PATIENT_P2),
+        ..timing
+    };
+    transport
+        .patient(true)
+        .map_err(FingerprintError::Transport)?;
+    let found = discover(transport, policy, candidates, timing);
+    let ended = transport
+        .patient(false)
+        .map_err(FingerprintError::Transport);
+    let found = found?;
+    ended?;
+    Ok(found)
 }
 
 /// Reads the spare part number from each candidate, in order, and returns those that answered.

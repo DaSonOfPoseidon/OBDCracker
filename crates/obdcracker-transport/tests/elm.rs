@@ -114,6 +114,8 @@ mod setup {
         )
         .unwrap();
         while elm.recv(Duration::from_secs(1)).is_ok() {}
+        elm.patient(true).unwrap();
+        elm.patient(false).unwrap();
         commands(&elm)
             .iter()
             .filter(|c| !c.bytes().all(|b| b.is_ascii_hexdigit()))
@@ -1517,6 +1519,25 @@ mod pacing {
         stn.sti = Some("STN2232 v5.12.4".into());
         let elm = Elm::connect(FakeLink::new(stn)).unwrap();
         assert!(!commands(&elm).iter().any(|c| c == "ATAT0"));
+    }
+
+    #[test]
+    fn patience_turns_adaptive_timing_off_and_back_on_unless_pacing() {
+        // An adaptive timeout learned from fast modules can end a slow one's wait early, so
+        // a patient read waits the whole `AT ST FF`.
+        let mut stn = car();
+        stn.sti = Some("STN2232 v5.12.4".into());
+        let mut elm = connect(stn);
+        elm.patient(true).unwrap();
+        assert_eq!(commands(&elm).last().map(String::as_str), Some("ATAT0"));
+        elm.patient(false).unwrap();
+        assert_eq!(commands(&elm).last().map(String::as_str), Some("ATAT1"));
+        // Paced, adaptive timing is always off: nothing to change.
+        let mut elm = Elm::connect(FakeLink::at_baud(long_replies(), 9600)).unwrap();
+        let before = commands(&elm).len();
+        elm.patient(true).unwrap();
+        elm.patient(false).unwrap();
+        assert_eq!(commands(&elm).len(), before);
     }
 
     #[test]
