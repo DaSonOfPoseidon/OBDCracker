@@ -714,3 +714,140 @@ fn dry_run_scan_extended_lists_the_session_reads() {
         "{stdout}"
     );
 }
+
+#[test]
+fn sim_sweep_lists_the_dids_a_module_has() {
+    let log = temp_log("sweep");
+    let out = obdcracker(&[
+        "--sim",
+        "a7",
+        "--audit-log",
+        log.to_str().unwrap(),
+        "sweep",
+        "--module",
+        "head-up display",
+        "--range",
+        "F180-F18F",
+    ]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    // 4G8919604K and a space, as the car sent it in #54.
+    assert!(
+        stdout
+            .lines()
+            .any(|l| l == "785 head-up display F187 [34 47 38 39 31 39 36 30 34 4B 20]"),
+        "{stdout}"
+    );
+    // DIDs out of range aren't listed.
+    assert!(!stdout.contains("F180"), "{stdout}");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("sweep: 16 reads of head-up display (71B)"),
+        "{stderr}"
+    );
+    // One read per DID, each to the HUD.
+    let audit = std::fs::read_to_string(&log).unwrap();
+    let sent: Vec<&str> = audit
+        .lines()
+        .filter(|l| l.contains(r#""dir":"tx""#))
+        .collect();
+    assert_eq!(sent.len(), 16);
+    assert!(sent.iter().all(|l| l.contains(r#""id":"71B""#)), "{sent:?}");
+}
+
+#[test]
+fn dry_run_sweep_says_what_a_live_one_reads() {
+    let out = obdcracker(&[
+        "--dry-run",
+        "--profile",
+        "a7",
+        "sweep",
+        "--module",
+        "engine",
+        "--range",
+        "0600-06FF",
+    ]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("7E0 03 22 06 00"), "{stdout}");
+    assert!(
+        stdout.contains("a live sweep reads every DID from 22 0600 to 22 06FF"),
+        "{stdout}"
+    );
+}
+
+#[test]
+fn sweep_refuses_bad_ranges_modules_and_a_missing_profile() {
+    for args in [
+        &[
+            "--dry-run",
+            "--profile",
+            "a7",
+            "sweep",
+            "--module",
+            "engine",
+            "--range",
+            "06FF-0600",
+        ][..],
+        &[
+            "--dry-run",
+            "--profile",
+            "a7",
+            "sweep",
+            "--module",
+            "engine",
+            "--range",
+            "+600-0700",
+        ],
+        &[
+            "--dry-run",
+            "--profile",
+            "a7",
+            "sweep",
+            "--module",
+            "engine",
+            "--range",
+            "0600",
+        ],
+        &[
+            "--dry-run",
+            "--profile",
+            "a7",
+            "sweep",
+            "--module",
+            "engine",
+            "--range",
+            "10000-10001",
+        ],
+        &[
+            "--dry-run",
+            "--profile",
+            "a7",
+            "sweep",
+            "--module",
+            "radio",
+            "--range",
+            "0600-0601",
+        ],
+        &[
+            "--dry-run",
+            "sweep",
+            "--module",
+            "engine",
+            "--range",
+            "0600-0601",
+        ],
+    ] {
+        let out = obdcracker(args);
+        assert_eq!(out.status.code(), Some(2), "{args:?}");
+        assert!(String::from_utf8_lossy(&out.stdout).is_empty(), "{args:?}");
+    }
+}

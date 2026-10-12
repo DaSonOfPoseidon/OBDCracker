@@ -18,6 +18,7 @@ use obdcracker_transport::link::{Link, SerialLink, TcpLink};
 use obdcracker_transport::scan::{
     self, DidFormat, ExtraDid, PidValue, Scan, ScanModule, ScanOptions,
 };
+use obdcracker_transport::sweep::{self, SweepOptions};
 use obdcracker_transport::{Audited, DryRun, Expect, S3, Timing, Transport, exchange, hex};
 
 // OBDLink USB adapters' rate.
@@ -94,6 +95,21 @@ enum Command {
         /// These are the first range's reply IDs, so a module that stayed silent there may own one
         #[arg(long, requires = "discover")]
         wide: bool,
+    },
+    /// Look for the DIDs a module has: read each DID in a range (UDS 0x22), one request each, and
+    /// list those it answers. Reads only. Needs a profile (--profile or --sim) that lists the
+    /// module
+    Sweep {
+        /// The module's name in the profile, such as "head-up display"
+        #[arg(long)]
+        module: String,
+        /// The DIDs to read, as hex: FIRST-LAST, such as 0600-06FF. A whole range is 65536 reads
+        #[arg(long, value_parser = parse_did_range)]
+        range: (u16, u16),
+        /// Read in the extended diagnostic session: switch the module to it first (UDS 0x10 03),
+        /// keep it there with a tester-present request (0x3E 00), and switch it back (0x10 01)
+        #[arg(long)]
+        extended: bool,
     },
     /// List this computer's serial ports
     Ports,
@@ -216,6 +232,14 @@ fn run<T: Transport>(cli: &Cli, transport: T, link: &str, timing: Timing) -> Exi
     {
         return run_scan(cli, &mut transport, timing, discover, wide, extended);
     }
+    if let Command::Sweep {
+        module,
+        range,
+        extended,
+    } = &cli.command
+    {
+        return run_sweep(cli, &mut transport, timing, module, *range, *extended);
+    }
     let (target, payload, expect) = match cli.command {
         Command::Vin => (
             Target::ObdFunctional,
@@ -223,7 +247,11 @@ fn run<T: Transport>(cli: &Cli, transport: T, link: &str, timing: Timing) -> Exi
             Expect::ObdEcus,
         ),
         // Handled before any transport is opened, or above.
-        Command::Ports | Command::Adapter | Command::Fingerprint | Command::Scan { .. } => {
+        Command::Ports
+        | Command::Adapter
+        | Command::Fingerprint
+        | Command::Scan { .. }
+        | Command::Sweep { .. } => {
             unreachable!()
         }
     };
@@ -356,6 +384,130 @@ fn print_fingerprint(found: &Fingerprint) {
     }
     for module in &found.modules {
         print_dids(module.response_id, &module.name, &module.dids);
+    }
+}
+
+// `FIRST-LAST`, each up to four hex digits, FIRST no later than LAST.
+fn parse_did_range(text: &str) -> Result<(u16, u16), String> {
+    let did = |part: &str| {
+        // Only hex digits: from_str_radix also takes a leading `+`.
+        if (1..=4).contains(&part.len()) && part.bytes().all(|b| b.is_ascii_hexdigit()) {
+            u16::from_str_radix(part, 16).map_err(|e| e.to_string())
+        } else {
+            Err(format!("{part:?} isn't a DID: up to four hex digits"))
+        }
+    };
+    let (first, last) = text
+        .split_once('-')
+        .ok_or_else(|| format!("{text:?} isn't a range: give FIRST-LAST, such as 0600-06FF"))?;
+    let (first, last) = (did(first)?, did(last)?);
+    if first > last {
+        return Err(format!(
+            "the range starts at {first:04X}, after its end {last:04X}"
+        ));
+    }
+    Ok((first, last))
+}
+
+// Reads each DID in the range from one profile module and lists those it has.
+fn run_sweep<T: Transport>(
+    cli: &Cli,
+    transport: &mut T,
+    timing: Timing,
+    name: &str,
+    (first, last): (u16, u16),
+    extended: bool,
+) -> ExitCode {
+    let usage = |e: String| {
+        eprintln!("{e}");
+        ExitCode::from(2)
+    };
+    let Some(profile_name) = cli.profile.as_ref().or(cli.sim.as_ref()) else {
+        return usage("sweep needs a profile that lists the module (--profile or --sim)".into());
+    };
+    let profile = match Profile::builtin(profile_name) {
+        Ok(profile) => profile,
+        Err(e) => return usage(format!("profile {profile_name}: {e}")),
+    };
+    let Some(module) = profile.module(name) else {
+        return usage(format!(
+            "profile {profile_name} has no module named {name:?}"
+        ));
+    };
+    if module.protocol != Protocol::Uds || module.extended_address.is_some() {
+        return usage(format!("{name} isn't plain UDS, which sweep needs"));
+    }
+    let module = UdsModule {
+        name: module.name.clone(),
+        request_id: module.request_id,
+        response_id: module.response_id,
+    };
+    let policy = match policy(cli) {
+        Ok(policy) => policy,
+        Err(e) => return usage(e),
+    };
+    let count = u32::from(last) - u32::from(first) + 1;
+    // About what an ELM adapter takes per refused read.
+    eprintln!(
+        "sweep: {count} reads of {} ({:03X}), about {} min",
+        module.name,
+        module.request_id,
+        (count * 50).div_ceil(60_000)
+    );
+    let mut options = SweepOptions::default();
+    if extended {
+        options.extended = Some(S3::default());
+    }
+    let progress = |did: u16| {
+        if did & 0xFF == 0xFF && did != last {
+            eprintln!("sweep: read up to {did:04X}");
+        }
+    };
+    let found = match sweep::sweep_dids_reporting(
+        transport,
+        &policy,
+        &module,
+        first..=last,
+        timing,
+        &options,
+        progress,
+    ) {
+        Ok(found) => found,
+        Err(e) => {
+            eprintln!("{e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    if cli.dry_run {
+        println!("dry run: nothing was sent");
+        // Nothing answers a dry run, so the sweep stopped after a few reads.
+        println!(
+            "a live sweep reads every DID from 22 {first:04X} to 22 {last:04X}, one request each, \
+             and stops early if the module stops answering"
+        );
+        return ExitCode::SUCCESS;
+    }
+    for (did, value) in &found.found {
+        match value {
+            Ok(data) => println!(
+                "{:03X} {} {did:04X} [{}]",
+                module.response_id,
+                module.name,
+                hex(data)
+            ),
+            Err(e) => println!("{:03X} {} {did:04X} ({e})", module.response_id, module.name),
+        }
+    }
+    println!("sweep: {} DIDs answered", found.found.len());
+    match found.stop {
+        None => ExitCode::SUCCESS,
+        Some(stop) => {
+            eprintln!(
+                "stopped at {:04X}: {}; to go on, sweep --range {:04X}-{last:04X}",
+                stop.at, stop.why, stop.at
+            );
+            ExitCode::FAILURE
+        }
     }
 }
 
