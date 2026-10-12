@@ -255,7 +255,14 @@ fn guard_reports_a_module_that_does_not_answer() {
         GUARD,
     )
     .unwrap_err();
-    assert_eq!(error, SessionError::Transport(Error::Timeout));
+    // Neither `10 03` nor `10 01` was confirmed, so it may be in the extended session.
+    assert_eq!(
+        error,
+        SessionError::Unconfirmed {
+            entry: Box::new(SessionError::Transport(Error::Timeout)),
+            leave: Box::new(SessionError::Transport(Error::Timeout)),
+        }
+    );
 }
 
 #[test]
@@ -306,7 +313,14 @@ fn guard_leaves_a_session_whose_entry_went_unanswered() {
         GUARD,
     )
     .unwrap_err();
-    assert_eq!(error, SessionError::Transport(Error::Timeout));
+    // Neither `10 03` nor `10 01` was confirmed, so it may be in the extended session.
+    assert_eq!(
+        error,
+        SessionError::Unconfirmed {
+            entry: Box::new(SessionError::Transport(Error::Timeout)),
+            leave: Box::new(SessionError::Transport(Error::Timeout)),
+        }
+    );
     assert_eq!(sent(&bus), [vec![0x10, 0x03], vec![0x10, 0x01]]);
     assert_eq!(session(&bus), Session::Default);
 }

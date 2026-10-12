@@ -174,14 +174,21 @@ pub fn sweep_dids_reporting<T: Transport + ?Sized>(
         }
         let mut session = match ExtendedSession::enter(transport, policy, target, timing, s3) {
             Ok(session) => session,
-            // Dropping a session that may have been entered sent `10 01`.
+            // A session that may have been entered was left, or why it may not have been is
+            // reported.
             Err(e) => {
+                let (entry, still_extended) = match e {
+                    SessionError::Unconfirmed { entry, leave } => {
+                        (*entry, session_error(*leave).ok())
+                    }
+                    e => (e, None),
+                };
                 return Ok(Sweep {
-                    still_extended: None,
+                    still_extended,
                     found: Vec::new(),
                     stop: Some(Stop {
                         at: first,
-                        why: stopped(session_error(e)),
+                        why: stopped(session_error(entry)),
                     }),
                 });
             }

@@ -560,3 +560,33 @@ fn a_module_that_leaves_the_extended_session_is_not_still_in_it() {
     .unwrap();
     assert_eq!(got.still_extended, None);
 }
+
+#[test]
+fn an_unconfirmed_entry_and_leave_say_the_module_may_still_be_extended() {
+    let mut car = Car::new(|_, request| match request {
+        [0x10, 0x03] => reply(&[0x7F, 0x10, 0x22, 0x00]),
+        [0x10, 0x01] => reply(&[0x7F, 0x10, 0x22]),
+        _ => Vec::new(),
+    });
+    let got = sweep_dids(
+        &mut car,
+        &Policy::read_only(),
+        &engine(),
+        0x0600..=0x0601,
+        TIMING,
+        &extended(),
+    )
+    .unwrap();
+    assert_eq!(
+        got.stop,
+        Some(Stop {
+            at: 0x0600,
+            why: Why::Module(ReadError::NoReply)
+        })
+    );
+    assert!(
+        matches!(got.still_extended, Some(ReadError::SessionRefused(_))),
+        "{:?}",
+        got.still_extended
+    );
+}

@@ -396,6 +396,9 @@ pub(crate) fn session_error(e: SessionError) -> Result<ReadError, ScanError> {
         SessionError::Transport(Error::Timeout) => Ok(ReadError::NoReply),
         SessionError::Transport(Error::StillPending) => Ok(ReadError::StillPending),
         SessionError::Transport(e) => Err(FingerprintError::Transport(e)),
+        // What matters for the values is that the session wasn't entered. The module leaves it
+        // by itself after S3 if it did.
+        SessionError::Unconfirmed { entry, .. } => session_error(*entry),
         // A refusal of `10 03` or `3E 00`, or a positive answer whose timing couldn't be decoded:
         // decoded as an answer to the service it names.
         SessionError::Refused(reply) => {

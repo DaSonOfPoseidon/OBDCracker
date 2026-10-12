@@ -62,6 +62,15 @@ pub enum SessionError {
     Refused(Vec<u8>),
     /// The adapter failed, or the module didn't answer in time.
     Transport(Error),
+    /// The module didn't confirm entering the session (`entry`), so it was asked to leave, and
+    /// didn't confirm that either (`leave`): it may stay in the extended session until S3 runs
+    /// out without a `TesterPresent`.
+    Unconfirmed {
+        /// Why entering wasn't confirmed.
+        entry: Box<SessionError>,
+        /// Why leaving wasn't.
+        leave: Box<SessionError>,
+    },
 }
 
 impl fmt::Display for SessionError {
@@ -77,6 +86,9 @@ impl fmt::Display for SessionError {
                 crate::hex(reply)
             ),
             Self::Transport(e) => e.fmt(f),
+            Self::Unconfirmed { entry, leave } => {
+                write!(f, "{entry}; leaving the session then failed too: {leave}")
+            }
         }
     }
 }
@@ -205,10 +217,14 @@ impl<'a, T: Transport + ?Sized> ExtendedSession<'a, T> {
                 // No answer doesn't mean the module didn't switch: only its reply may be lost,
                 // so leave. An adapter failure then matters more than the missing answer.
                 match session.request(&session.leave.clone()) {
+                    Ok(()) => Err(e),
                     Err(SessionError::Transport(failure @ Error::Adapter(_))) => {
                         Err(SessionError::Transport(failure))
                     }
-                    _ => Err(e),
+                    Err(leave) => Err(SessionError::Unconfirmed {
+                        entry: Box::new(e),
+                        leave: Box::new(leave),
+                    }),
                 }
             }
         }
