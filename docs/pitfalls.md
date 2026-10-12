@@ -182,6 +182,9 @@ Each entry names the class, what to check, and where it bit us.
 
 ## Links and adapters
 
+- **An adapter's learned timeout can hide a slow module.** The ELM327's adaptive timing (`AT AT1`) shortens its wait
+  to fit the modules that answered fast, so a module that wakes slowly reads as absent. Before acting on "nothing is
+  there", as discovery's wide pass does, look again with the adapter's longest wait.
 - **Every read and write on a link needs a bound, not just the bus waits.** A peer that stops reading blocks a write
   forever once buffers fill (set a write timeout), and some calls ignore that timeout altogether: serial2's `flush`
   waits for the OS queue to drain with no limit. Check each I/O call's docs for what its timeout covers (M3 branch,

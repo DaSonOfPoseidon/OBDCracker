@@ -57,8 +57,10 @@ from developers being careful:
 - `scan --discover --wide` then looks further, at 0x76A to 0x795 on the A7 (replies up to 0x7FF), where VW's MQB
   cars put the MMI (0x773). Those request IDs are the first pass's reply IDs. It skips those a module it knows of
   (listed in the profile, or just found) answers on, and any whose reply would be an OBD-II ID. A module that stayed
-  silent in the first pass could still own one, so `--wide` is opt-in and may send a read on that module's reply ID:
-  a frame no module receives, since modules only send on theirs. A module that speaks only KWP2000/TP2.0, as some
+  silent in the first pass could still own one, so before the wide pass it asks each of those first-pass IDs again,
+  waiting about 1 s for each (with the ELM's adaptive timing off), to find a module that was only slow. One that
+  doesn't answer `22 F1 87` at all could still own one, so `--wide` is opt-in and may send a read on that module's
+  reply ID: a frame no module receives, since modules only send on theirs. A module that speaks only KWP2000/TP2.0, as some
   older MMIs may, doesn't answer either pass.
 - Every frame sent or received in a real session is appended to an audit log, along with any adapter error (such as an
   adapter mishearing a request it may already have sent).

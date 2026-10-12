@@ -57,7 +57,9 @@ pub struct Discovery {
     /// right after [`Discovery::last_request_id`], with the same reply offset, and must lie
     /// within the first pass's reply IDs. The wider pass skips those a known module (listed, or
     /// found by the first pass) answers on, but a module that exists and stayed silent in the
-    /// first pass may still own one, so it can send on that module's reply ID. It's opt-in: a
+    /// first pass may still own one, so it can send on that module's reply ID. Looking again,
+    /// more patiently, first ([`Profile::recheck_candidates`]) finds one that was only slow; one
+    /// that doesn't answer `22 F187` at all stays unseen. It's opt-in: a
     /// stray read there is a frame no module receives, as modules only send on their reply IDs.
     #[serde(default)]
     pub wide_last_request_id: Option<u32>,

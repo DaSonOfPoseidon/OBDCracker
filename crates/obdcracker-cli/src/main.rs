@@ -528,7 +528,26 @@ fn discover_modules<T: Transport>(
         timing,
         &profile,
         "discovery",
+        false,
     )?;
+    if wide {
+        // Before sending on a first-pass reply ID, look again, more patiently, for a module
+        // that may own it but was slow to answer.
+        let known: Vec<ModuleIds> = found.iter().map(module_ids).collect();
+        let recheck = profile.recheck_candidates(&known);
+        if !recheck.is_empty() {
+            let again = discover_pass(
+                transport,
+                &policy,
+                &recheck,
+                timing,
+                &profile,
+                "recheck, waiting longer",
+                true,
+            )?;
+            found.extend(again);
+        }
+    }
     if !wide {
         return Ok((unlisted(&profile, &found), policy));
     }
@@ -552,6 +571,7 @@ fn discover_modules<T: Transport>(
         timing,
         &profile,
         "wide discovery",
+        false,
     )?;
     known.extend(more.iter().map(module_ids));
     found.extend(more);
@@ -565,7 +585,8 @@ fn module_ids(found: &discover::Found) -> ModuleIds {
     }
 }
 
-// One discovery pass over `candidates`, printing each module that answers.
+// One discovery pass over `candidates`, printing each module that answers. A `patient` pass
+// waits longer for each reply.
 fn discover_pass<T: Transport>(
     transport: &mut T,
     policy: &Policy,
@@ -573,8 +594,14 @@ fn discover_pass<T: Transport>(
     timing: Timing,
     profile: &Profile,
     pass: &str,
+    patient: bool,
 ) -> Result<Vec<discover::Found>, ExitCode> {
-    let found = discover::discover(transport, policy, candidates, timing).map_err(|e| {
+    let discover = if patient {
+        discover::discover_patiently
+    } else {
+        discover::discover
+    };
+    let found = discover(transport, policy, candidates, timing).map_err(|e| {
         eprintln!("{e}");
         ExitCode::FAILURE
     })?;
