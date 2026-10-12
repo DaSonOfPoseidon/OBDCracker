@@ -4,8 +4,9 @@ A laptop tool that talks to a car's diagnostic bus through the OBD2 port using a
 It works with any adapter, any OS (macOS, Windows, Linux) and any manufacturer. OBD-II is the baseline every car shares,
 and manufacturer diagnostics are added as vehicle profiles. The development testbed is a 2014 Audi A7 3.0 TDI (C7).
 
-> **Status:** early. The ELM327/STN driver works over USB serial and Wi-Fi (TCP) against simulated and emulated
-> adapters, but it hasn't been used on a car yet. Only read-only requests are allowed.
+> **Status:** early. The ELM327/STN driver works over USB serial and Wi-Fi (TCP), and has run three read-only sessions
+> on the 2014 A7 over USB (OBDLink EX): fingerprinting, and a scan of the modules behind its gateway. Only read-only
+> requests are allowed.
 
 ## Safety model
 
@@ -204,14 +205,14 @@ independent implementation. That last test is opt-in (`#[ignore]`) and runs in a
 
 | Layer | Protocol | Used by | Status |
 |---|---|---|---|
-| Physical | CAN 500 kbit/s (OBD pins 6/14), 11- and 29-bit IDs | every US car since 2008 | planned (11-bit first) |
+| Physical | CAN 500 kbit/s (OBD pins 6/14), 11- and 29-bit IDs | every US car since 2008 | 11-bit done through the ELM driver; 29-bit planned |
 | Physical | K-line (pin 7): ISO 9141-2, ISO 14230, VW KW1281 | pre-CAN cars, a few older modules | if a profile needs it |
 | Physical | DoIP (ISO 13400, Ethernet on pins 3/11/12/13) | newer cars (around 2020+) | not yet; the transport trait leaves room |
 | Physical | CAN FD | newer cars | not yet |
 | Transport | ISO-TP (ISO 15765-2), normal and extended addressing | almost everyone; Toyota uses extended addressing | done (classic CAN, both addressing modes) |
 | Transport | VW TP2.0 | older VAG module designs | after the A7 module scan |
 | Diagnostic | OBD-II (SAE J1979) | every car | decoding done for mode 01 (supported PIDs, load, coolant, RPM, speed, intake temp, MAF, throttle and pedal positions, run time, distances, warm-ups, barometric pressure, catalyst, ambient and oil temperatures, injection timing, fuel rate, torque, module voltage), mode 03 DTCs, mode 09 VIN, CALID, CVN and ECU name |
-| Diagnostic | UDS (ISO 14229) | most modules from about 2010 | decoding done for 0x22 (single and multi-DID), 0x19 (0x01, 0x02, 0x0A) and negative response codes |
+| Diagnostic | UDS (ISO 14229) | most modules from about 2010 | decoding done for 0x22 (single and multi-DID), 0x19 (0x01, 0x02, 0x0A) and negative response codes; the extended session (0x10 03, kept with 0x3E 00, left with 0x10 01) for reads that need it |
 | Diagnostic | KWP2000 (ISO 14230-3) over CAN | VAG TP2.0 modules, Toyota enhanced diagnostics before about 2018 | planned, with its own allowlist |
 
 The OBD port only reaches what the car's gateway passes on, which is the diagnostic bus. Internal buses (body CAN, FlexRay,
