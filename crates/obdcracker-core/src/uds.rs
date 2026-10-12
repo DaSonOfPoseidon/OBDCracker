@@ -5,6 +5,7 @@
 
 use core::fmt;
 use core::slice;
+use core::time::Duration;
 
 use crate::obd::Dtc;
 use crate::response::{Error, positive, printable};
@@ -86,6 +87,43 @@ pub fn session_control(session: DiagnosticSession) -> [u8; 2] {
         DiagnosticSession::Extended => 0x03,
     };
     [DIAGNOSTIC_SESSION_CONTROL, sub]
+}
+
+/// The reply timing a module gives in its positive answer to `DiagnosticSessionControl`, for the
+/// session it entered (ISO 14229-2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SessionTiming {
+    /// `P2server_max`: how long the module may take to answer, or send response-pending.
+    pub p2: Duration,
+    /// `P2*server_max`: how long the module may take to answer after response-pending.
+    pub p2_star: Duration,
+}
+
+/// Decodes the timing in a positive answer to [`session_control`] for `session`:
+/// `50 <session> <P2 in ms, 2 bytes> <P2* in 10 ms units, 2 bytes>`.
+///
+/// # Errors
+///
+/// A refusal, a reply for another service or session, or a reply that isn't exactly that long.
+pub fn decode_session_timing(
+    reply: &[u8],
+    session: DiagnosticSession,
+) -> Result<SessionTiming, Error> {
+    let data = positive(DIAGNOSTIC_SESSION_CONTROL, reply)?;
+    let [echo, p2_high, p2_low, star_high, star_low] = *data else {
+        return Err(if data.len() < 5 {
+            Error::TooShort
+        } else {
+            Error::Malformed
+        });
+    };
+    if echo != session_control(session)[1] {
+        return Err(Error::Malformed);
+    }
+    Ok(SessionTiming {
+        p2: Duration::from_millis(u64::from(u16::from_be_bytes([p2_high, p2_low]))),
+        p2_star: Duration::from_millis(u64::from(u16::from_be_bytes([star_high, star_low])) * 10),
+    })
 }
 
 /// A `TesterPresent` request, `3E 00`, which keeps a non-default session open. The positive

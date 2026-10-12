@@ -8,7 +8,7 @@ use proptest::prelude::*;
 // Arbitrary replies, half of them starting with a plausible service ID so decoding gets past
 // the first check.
 fn any_reply() -> impl Strategy<Value = Vec<u8>> {
-    let sid = prop::sample::select(vec![0x41u8, 0x43, 0x49, 0x59, 0x62, 0x7F]);
+    let sid = prop::sample::select(vec![0x41u8, 0x43, 0x49, 0x50, 0x59, 0x62, 0x7F]);
     prop_oneof![
         prop::collection::vec(any::<u8>(), 0..64),
         (sid, prop::collection::vec(any::<u8>(), 0..64)).prop_map(|(sid, mut rest)| {
@@ -23,6 +23,13 @@ proptest! {
     fn answers_never_panics(request in any_reply(), reply in any_reply()) {
         let _ = obdcracker_core::response::answers(&request, &reply);
         let _ = obdcracker_core::response::answers_after_pending(&request, &reply);
+    }
+
+    #[test]
+    fn session_timing_decoder_never_panics(reply in any_reply()) {
+        for session in [uds::DiagnosticSession::Default, uds::DiagnosticSession::Extended] {
+            let _ = uds::decode_session_timing(&reply, session);
+        }
     }
 
     #[test]
