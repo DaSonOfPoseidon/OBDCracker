@@ -91,6 +91,11 @@ Each entry names the class, what to check, and where it bit us.
   for as long as any ECU advertises the next page. One ECU's answer to a page it never advertised, or a page after
   its own chain broke, was still counted. Accept a page from an ECU only if that ECU said it comes next (#48, Codex).
 - **Deadlines must shrink back** once the reason to extend them is gone (P2 again after the pending ECU answers).
+- **Decode a reply as an answer to the request that got it.** One `SessionError::Refused` carries replies to both
+  `10 03` and `3E 00`; decoding every one as a `10` answer turned a `7F 3E 22` into "wrong service". Take the
+  service from the reply, or keep the request with it.
+- **Splitting a list to process it in groups reorders it.** `scan` read extended-session DIDs after the others and
+  appended them, so values left their documented order. Put them back in the original order after the last group.
 - **Match a reply to its request by what it echoes**, not only the service ID: the PID (mode 09), a requested PID
   (mode 01), a requested DID (0x22) or the subfunction. A late reply to an earlier request has the same SID
   (`response::answers`).

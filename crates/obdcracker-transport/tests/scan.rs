@@ -1218,3 +1218,68 @@ fn a_module_that_answered_nothing_isnt_switched() {
     assert!(!car.sent.iter().any(|sent| sent.starts_with("7E0 10")));
     assert!(!got.modules[0].answered);
 }
+
+#[test]
+fn values_keep_their_order_whatever_session_reads_them() {
+    // An extended DID listed before a default one.
+    let mut module = engine_with_extended();
+    module.extra_dids.push(ExtraDid {
+        id: 0x0700,
+        format: DidFormat::Hex,
+        length: None,
+        session: DiagnosticSession::Default,
+    });
+    let expected: Vec<u16> = SCAN_DIDS
+        .iter()
+        .copied()
+        .chain([0x0600, 0x0601, 0x0602, 0x0700])
+        .collect();
+    for options in [ScanOptions::default(), extended()] {
+        let mut car = session_car(ENTERED);
+        let got = scan_with(
+            &mut car,
+            &Policy::read_only(),
+            std::slice::from_ref(&module),
+            TIMING,
+            &options,
+        )
+        .unwrap();
+        let order: Vec<u16> = got.modules[0].dids.iter().map(|(id, _)| *id).collect();
+        assert_eq!(order, expected, "{options:?}");
+    }
+}
+
+#[test]
+fn a_refused_tester_present_is_reported_as_its_own_refusal() {
+    let mut car = session_car(ENTERED);
+    let mut answer = std::mem::replace(&mut car.answer, Box::new(|_, _| Vec::new()));
+    car.answer = Box::new(move |id, request| {
+        if request == [0x3E, 0x00] {
+            vec![reply(0x7E8, &[0x7F, 0x3E, 0x22])]
+        } else {
+            answer(id, request)
+        }
+    });
+    let mut options = ScanOptions::default();
+    options.extended = Some(S3 {
+        keepalive: Duration::ZERO,
+        timeout: Duration::from_secs(3600),
+    });
+    let got = scan_with(
+        &mut car,
+        &Policy::read_only(),
+        &[engine_with_extended()],
+        TIMING,
+        &options,
+    )
+    .unwrap();
+    assert_eq!(
+        value(&got, 0x0600),
+        Err(ReadError::SessionRefused(ReplyError::Negative(
+            NegativeResponse {
+                sid: 0x3E,
+                nrc: Nrc::ConditionsNotCorrect,
+            }
+        )))
+    );
+}

@@ -138,8 +138,9 @@ pub enum ReadError {
     /// Only the extended diagnostic session reads it, and the scan wasn't asked to enter it
     /// ([`crate::scan::ScanOptions::extended`]). Nothing was sent for it.
     NeedsExtendedSession,
-    /// The module refused to enter the extended diagnostic session (`10 03`), or its answer
-    /// couldn't be decoded, so nothing that needs the session was read.
+    /// The module refused to enter the extended diagnostic session (`10 03`) or to stay in it
+    /// (`3E 00`), or its answer couldn't be decoded, so this value, which needs the session,
+    /// wasn't read. The error names the refused service.
     SessionRefused(response::Error),
     /// The CVNs don't pair with the calibration IDs: J1979 gives one CVN per calibration ID, so
     /// neither can be trusted to say which calibration a CVN checks. The raw replies are in the
@@ -159,7 +160,7 @@ impl fmt::Display for ReadError {
             Self::StillPending => crate::Error::StillPending.fmt(f),
             Self::Reply(e) => e.fmt(f),
             Self::NeedsExtendedSession => f.write_str("not read: needs the extended session"),
-            Self::SessionRefused(e) => write!(f, "can't enter the extended session: {e}"),
+            Self::SessionRefused(e) => write!(f, "not read: extended session: {e}"),
             Self::CountMismatch { calids, cvns } => {
                 write!(f, "{cvns} CVNs for {calids} calibration IDs")
             }

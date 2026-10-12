@@ -217,45 +217,7 @@ pub fn scan_with<T: Transport + ?Sized>(
     let dtc_request = approve(Target::ObdFunctional, &obd::stored_dtcs())?;
     let module_requests = modules
         .iter()
-        .map(|scanned| {
-            let target = Target::Physical(scanned.module.request_id);
-            let did_requests = |dids: Vec<ExtraDid>| {
-                let batches = batches_of(&dids)
-                    .into_iter()
-                    .map(|batch| {
-                        let mut payload = vec![uds::READ_DATA_BY_IDENTIFIER];
-                        for &index in &batch {
-                            payload.extend(dids[index].id.to_be_bytes());
-                        }
-                        Ok((batch, approve(target, &payload)?))
-                    })
-                    .collect::<Result<Vec<_>, ScanError>>()?;
-                let dids = dids
-                    .into_iter()
-                    .map(|extra| Ok((extra, approve(target, &uds::read_did(extra.id))?)))
-                    .collect::<Result<Vec<_>, ScanError>>()?;
-                Ok::<_, ScanError>(DidRequests { dids, batches })
-            };
-            let (extended, default): (Vec<_>, Vec<_>) = dids_of(scanned)
-                .into_iter()
-                .partition(|did| did.session == DiagnosticSession::Extended);
-            let extended = did_requests(extended)?;
-            if options.extended.is_some() && !extended.dids.is_empty() {
-                // What `ExtendedSession` sends, checked now so nothing is sent if it can't be.
-                let enter = approve(target, &uds::session_control(DiagnosticSession::Extended))?;
-                approve(target, &uds::tester_present())?;
-                approve(target, &uds::session_control(DiagnosticSession::Default))?;
-                if enter.reply_id().is_none() {
-                    return Err(FingerprintError::Session(SessionError::UnknownReplyId));
-                }
-            }
-            Ok(ModuleRequests {
-                default: did_requests(default)?,
-                extended,
-                count: approve(target, &uds::dtc_count_by_status_mask(FAULT_MASK))?,
-                dtcs: approve(target, &uds::dtcs_by_status_mask(FAULT_MASK))?,
-            })
-        })
+        .map(|scanned| module_requests(policy, scanned, options))
         .collect::<Result<Vec<ModuleRequests>, ScanError>>()?;
 
     let supported = supported_pids(transport, &pid_requests, timing)?;
@@ -308,9 +270,64 @@ pub fn scan_with<T: Transport + ?Sized>(
     })
 }
 
+// Approves every request scan may send a module: its DID reads, in batches and alone, the
+// extended session's own requests if it will be used, and the DTC reads.
+fn module_requests(
+    policy: &Policy,
+    scanned: &ScanModule,
+    options: &ScanOptions,
+) -> Result<ModuleRequests, ScanError> {
+    let approve = |target, payload: &[u8]| {
+        policy
+            .approve(target, payload)
+            .map_err(FingerprintError::Rejected)
+    };
+    let target = Target::Physical(scanned.module.request_id);
+    let did_requests = |dids: Vec<ExtraDid>| {
+        let batches = batches_of(&dids)
+            .into_iter()
+            .map(|batch| {
+                let mut payload = vec![uds::READ_DATA_BY_IDENTIFIER];
+                for &index in &batch {
+                    payload.extend(dids[index].id.to_be_bytes());
+                }
+                Ok((batch, approve(target, &payload)?))
+            })
+            .collect::<Result<Vec<_>, ScanError>>()?;
+        let dids = dids
+            .into_iter()
+            .map(|extra| Ok((extra, approve(target, &uds::read_did(extra.id))?)))
+            .collect::<Result<Vec<_>, ScanError>>()?;
+        Ok::<_, ScanError>(DidRequests { dids, batches })
+    };
+    let dids = dids_of(scanned);
+    let order = dids.iter().map(|did| did.id).collect();
+    let (extended, default): (Vec<_>, Vec<_>) = dids
+        .into_iter()
+        .partition(|did| did.session == DiagnosticSession::Extended);
+    let extended = did_requests(extended)?;
+    if options.extended.is_some() && !extended.dids.is_empty() {
+        // What `ExtendedSession` sends, checked now so nothing is sent if it can't be.
+        let enter = approve(target, &uds::session_control(DiagnosticSession::Extended))?;
+        approve(target, &uds::tester_present())?;
+        approve(target, &uds::session_control(DiagnosticSession::Default))?;
+        if enter.reply_id().is_none() {
+            return Err(FingerprintError::Session(SessionError::UnknownReplyId));
+        }
+    }
+    Ok(ModuleRequests {
+        order,
+        default: did_requests(default)?,
+        extended,
+        count: approve(target, &uds::dtc_count_by_status_mask(FAULT_MASK))?,
+        dtcs: approve(target, &uds::dtcs_by_status_mask(FAULT_MASK))?,
+    })
+}
+
 // A module's requests, all approved: its DID reads in the default session and in the extended
-// one, the DTC count and the DTC list.
+// one, the DTC count and the DTC list. `order` is the order its DIDs' values are given in.
 struct ModuleRequests {
+    order: Vec<u16>,
     default: DidRequests,
     extended: DidRequests,
     count: Approved,
@@ -379,12 +396,22 @@ fn session_error(e: SessionError) -> Result<ReadError, ScanError> {
         SessionError::Transport(Error::Timeout) => Ok(ReadError::NoReply),
         SessionError::Transport(Error::StillPending) => Ok(ReadError::StillPending),
         SessionError::Transport(e) => Err(FingerprintError::Transport(e)),
-        // A refusal, or a positive answer whose timing couldn't be decoded.
-        SessionError::Refused(reply) => Ok(ReadError::SessionRefused(
-            response::positive(uds::DIAGNOSTIC_SESSION_CONTROL, &reply)
-                .err()
-                .unwrap_or(ReplyError::Malformed),
-        )),
+        // A refusal of `10 03` or `3E 00`, or a positive answer whose timing couldn't be decoded:
+        // decoded as an answer to the service it names.
+        SessionError::Refused(reply) => {
+            let sid = match *reply.as_slice() {
+                // A refusal: `7F <service ID> <code>`.
+                [0x7F, sid, ..] => sid,
+                // A positive answer's service ID is the request's plus 0x40.
+                [sid, ..] => sid.wrapping_sub(0x40),
+                [] => uds::DIAGNOSTIC_SESSION_CONTROL,
+            };
+            Ok(ReadError::SessionRefused(
+                response::positive(sid, &reply)
+                    .err()
+                    .unwrap_or(ReplyError::Malformed),
+            ))
+        }
         e => Err(FingerprintError::Session(e)),
     }
 }
@@ -589,6 +616,8 @@ fn scan_module<T: Transport + ?Sized>(
         }
     }
     let answered = answered(&dids, batch_answered);
+    // Each session's values were read apart: back to SCAN_DIDS, then the profile's.
+    dids.sort_by_key(|(id, _)| requests.order.iter().position(|did| did == id));
     Ok(ModuleScan {
         name: module.name.clone(),
         response_id,
