@@ -9,7 +9,7 @@ use clap::{Parser, Subcommand};
 use obdcracker_core::obd;
 use obdcracker_core::uds::DiagnosticSession;
 use obdcracker_profile::{Decode, DidSession, Profile, Protocol};
-use obdcracker_safety::{Policy, Target};
+use obdcracker_safety::{ModuleIds, Policy, Target};
 use obdcracker_sim::SimBus;
 use obdcracker_transport::discover;
 use obdcracker_transport::elm::Elm;
@@ -89,6 +89,11 @@ enum Command {
         /// a tester-present request (0x3E 00), and switched back (0x10 01)
         #[arg(long)]
         extended: bool,
+        /// With --discover, then look further: each request ID after the discovery range (on the
+        /// A7, 0x76A to 0x795) that no module found or listed answers on, such as the MMI's.
+        /// These are the first range's reply IDs, so a module that stayed silent there may own one
+        #[arg(long, requires = "discover")]
+        wide: bool,
     },
     /// List this computer's serial ports
     Ports,
@@ -203,8 +208,13 @@ fn run<T: Transport>(cli: &Cli, transport: T, link: &str, timing: Timing) -> Exi
     if let Command::Fingerprint = cli.command {
         return run_fingerprint(cli, &mut transport, timing);
     }
-    if let Command::Scan { discover, extended } = cli.command {
-        return run_scan(cli, &mut transport, timing, discover, extended);
+    if let Command::Scan {
+        discover,
+        wide,
+        extended,
+    } = cli.command
+    {
+        return run_scan(cli, &mut transport, timing, discover, wide, extended);
     }
     let (target, payload, expect) = match cli.command {
         Command::Vin => (
@@ -416,6 +426,7 @@ fn run_scan<T: Transport>(
     transport: &mut T,
     timing: Timing,
     discover: bool,
+    wide: bool,
     extended: bool,
 ) -> ExitCode {
     let (mut modules, mut policy) = match scan_modules(cli).and_then(|m| Ok((m, policy(cli)?))) {
@@ -426,7 +437,7 @@ fn run_scan<T: Transport>(
         }
     };
     if discover {
-        match discover_modules(cli, transport, timing) {
+        match discover_modules(cli, transport, timing, wide) {
             Ok((found, discovery_policy)) => {
                 modules.extend(found);
                 policy = discovery_policy;
@@ -477,12 +488,14 @@ fn run_scan<T: Transport>(
     }
 }
 
-// Looks for modules in the profile's discovery range and prints each that answers. Returns those
-// the profile doesn't list, to scan with the rest, and the policy that allows them.
+// Looks for modules in the profile's discovery range, and with `wide` its wide range too, and
+// prints each that answers. Returns those the profile doesn't list, to scan with the rest, and the
+// policy that allows them.
 fn discover_modules<T: Transport>(
     cli: &Cli,
     transport: &mut T,
     timing: Timing,
+    wide: bool,
 ) -> Result<(Vec<ScanModule>, Policy), ExitCode> {
     let usage = |e: String| {
         eprintln!("{e}");
@@ -500,14 +513,71 @@ fn discover_modules<T: Transport>(
             "--discover needs a profile with a discovery range, and {name} has none"
         )));
     }
+    if wide && profile.wide_candidates(&[]).is_empty() {
+        return Err(usage(format!(
+            "--wide needs a profile with a wide discovery range, and {name} has none"
+        )));
+    }
     let policy = profile
         .narrow_for_discovery(Policy::read_only())
         .map_err(|e| usage(format!("profile {name}: {e}")))?;
-    let found = discover::discover(transport, &policy, &candidates, timing).map_err(|e| {
+    let mut found = discover_pass(
+        transport,
+        &policy,
+        &candidates,
+        timing,
+        &profile,
+        "discovery",
+    )?;
+    if !wide {
+        return Ok((unlisted(&profile, &found), policy));
+    }
+    // The wide range's request IDs are the first pass's reply IDs: skip those a module found
+    // there answers on.
+    let mut known: Vec<ModuleIds> = found.iter().map(module_ids).collect();
+    let wide_candidates = profile.wide_candidates(&known);
+    let narrow = |extra: &[ModuleIds]| {
+        profile
+            .narrow_with(Policy::read_only(), extra)
+            .map_err(|e| {
+                eprintln!("profile {name}: {e}");
+                ExitCode::FAILURE
+            })
+    };
+    let wide_policy = narrow(&[known.as_slice(), &wide_candidates].concat())?;
+    let more = discover_pass(
+        transport,
+        &wide_policy,
+        &wide_candidates,
+        timing,
+        &profile,
+        "wide discovery",
+    )?;
+    known.extend(more.iter().map(module_ids));
+    found.extend(more);
+    Ok((unlisted(&profile, &found), narrow(&known)?))
+}
+
+fn module_ids(found: &discover::Found) -> ModuleIds {
+    ModuleIds {
+        request: found.request_id,
+        reply: found.response_id,
+    }
+}
+
+// One discovery pass over `candidates`, printing each module that answers.
+fn discover_pass<T: Transport>(
+    transport: &mut T,
+    policy: &Policy,
+    candidates: &[ModuleIds],
+    timing: Timing,
+    profile: &Profile,
+    pass: &str,
+) -> Result<Vec<discover::Found>, ExitCode> {
+    let found = discover::discover(transport, policy, candidates, timing).map_err(|e| {
         eprintln!("{e}");
         ExitCode::FAILURE
     })?;
-    let mut unlisted = Vec::new();
     for module in &found {
         let listed = profile
             .modules
@@ -527,23 +597,34 @@ fn discover_modules<T: Transport>(
             "{:03X} found at {:03X}{known}, F187 {part}",
             module.response_id, module.request_id
         );
-        if listed.is_none() {
-            unlisted.push(ScanModule {
-                module: UdsModule {
-                    name: format!("module-{:03X}", module.request_id),
-                    request_id: module.request_id,
-                    response_id: module.response_id,
-                },
-                extra_dids: Vec::new(),
-            });
-        }
     }
     println!(
-        "discovery: {} of {} request IDs answered",
+        "{pass}: {} of {} request IDs answered",
         found.len(),
         candidates.len()
     );
-    Ok((unlisted, policy))
+    Ok(found)
+}
+
+// The modules found that the profile doesn't list, to scan.
+fn unlisted(profile: &Profile, found: &[discover::Found]) -> Vec<ScanModule> {
+    found
+        .iter()
+        .filter(|module| {
+            !profile
+                .modules
+                .iter()
+                .any(|listed| listed.request_id == module.request_id)
+        })
+        .map(|module| ScanModule {
+            module: UdsModule {
+                name: format!("module-{:03X}", module.request_id),
+                request_id: module.request_id,
+                response_id: module.response_id,
+            },
+            extra_dids: Vec::new(),
+        })
+        .collect()
 }
 
 fn print_scan(found: &Scan) {

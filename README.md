@@ -53,7 +53,13 @@ from developers being careful:
 - `scan --discover` first looks for modules the profile doesn't list. It reads the part number (`22 F1 87`) from each
   request ID in the profile's discovery range, one at a time and through the policy narrowed to those IDs, then scans
   whatever answered along with the profile's modules. On the A7 that's 0x700 to 0x769, replies at +0x6A: no ID it sends
-  on is ever a reply ID. A module whose request ID is past 0x769 isn't found.
+  on is ever a reply ID. A module whose request ID is past 0x769 isn't found by that pass.
+- `scan --discover --wide` then looks further, at 0x76A to 0x795 on the A7 (replies up to 0x7FF), where VW's MQB
+  cars put the MMI (0x773). Those request IDs are the first pass's reply IDs. It skips those a module it knows of
+  (listed in the profile, or just found) answers on, and any whose reply would be an OBD-II ID. A module that stayed
+  silent in the first pass could still own one, so `--wide` is opt-in and may send a read on that module's reply ID:
+  a frame no module receives, since modules only send on theirs. A module that speaks only KWP2000/TP2.0, as some
+  older MMIs may, doesn't answer either pass.
 - Every frame sent or received in a real session is appended to an audit log, along with any adapter error (such as an
   adapter mishearing a request it may already have sent).
 - **One gap: ELM327/STN adapters that echo whole lines.** Their serial line has no checksum. On an adapter that echoes
@@ -100,6 +106,7 @@ obdcracker --dry-run --profile a7 scan # what scan would send; opens no adapter
 obdcracker --serial <PORT> --profile a7 scan
 obdcracker --serial <PORT> --profile a7 scan --discover  # also look for modules the profile doesn't list
 obdcracker --serial <PORT> --profile a7 scan --extended  # also read the profile's extended-session DIDs
+obdcracker --serial <PORT> --profile a7 scan --discover --wide  # and past the discovery range
 ```
 
 ## Using it as a library

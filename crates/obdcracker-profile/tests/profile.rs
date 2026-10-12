@@ -555,6 +555,147 @@ fn rejects_a_discovery_range_that_would_send_on_a_reply_id() {
     );
 }
 
+#[test]
+fn rejects_a_discovery_candidate_that_reverses_a_listed_module() {
+    // A module at 0x770 that replies on 0x700, and a candidate 0x700 -> 0x770: the candidate
+    // would send on the module's reply ID. `candidates` leaves it out (its reply is the
+    // module's request ID), but the range is still wrong and must be refused.
+    let toml = format!(
+        "{MINIMAL}\n[[module]]\nname = \"reversed\"\nrequest_id = 0x770\nresponse_id = 0x700\n\
+         protocol = \"uds\"\n\n[discovery]\nfirst_request_id = 0x700\nlast_request_id = 0x700\n\
+         reply_offset = 0x70\n"
+    );
+    assert!(
+        matches!(Profile::from_toml(&toml), Err(ProfileError::Discovery(_))),
+        "{:?}",
+        Profile::from_toml(&toml)
+    );
+}
+
+// `with_discovery`, plus a wide range up to `wide_last`.
+fn with_wide_discovery(first: u32, last: u32, offset: u32, wide_last: u32) -> String {
+    format!(
+        "{}wide_last_request_id = {wide_last}\n",
+        with_discovery(first, last, offset)
+    )
+}
+
+#[test]
+fn wide_candidates_skip_every_known_request_and_reply_id() {
+    // Pass 1 covers 0x700..=0x769, replies 0x76A..=0x7D3; the wide range takes all of those.
+    let profile = Profile::from_toml(&with_wide_discovery(0x700, 0x769, 0x6A, 0x7D3)).unwrap();
+    // A module pass 1 found that the profile doesn't list.
+    let found = [ModuleIds {
+        request: 0x705,
+        reply: 0x76F,
+    }];
+    let wide = profile.wide_candidates(&found);
+    let requests: Vec<u32> = wide.iter().map(|c| c.request).collect();
+    assert_eq!(requests.first(), Some(&0x76A));
+    assert!(wide.iter().all(|c| c.reply == c.request + 0x6A), "{wide:?}");
+    // Every reply fits an 11-bit ID: 0x795 + 0x6A = 0x7FF.
+    assert_eq!(requests.last(), Some(&0x795));
+    for skipped in [
+        0x76F, // the found module's reply ID
+        0x77A, // the gateway's reply ID
+        0x7E8, // the engine's reply ID
+        0x775, // its reply would be 0x7DF, the OBD-II broadcast
+        0x77E, // its reply would be 0x7E8, an OBD-II reply ID
+        0x776, // its reply would be 0x7E0, the engine's request ID
+    ] {
+        assert!(
+            !requests.contains(&skipped),
+            "{skipped:03X} in {requests:X?}"
+        );
+    }
+    // 0x773 is pass 1's reply ID for 0x709, but nothing answered there.
+    assert!(requests.contains(&0x773));
+    // No wide range, no wide candidates.
+    let narrow = Profile::from_toml(&with_discovery(0x700, 0x769, 0x6A)).unwrap();
+    assert_eq!(narrow.wide_candidates(&[]), []);
+}
+
+#[test]
+fn a_wide_discovery_policy_allows_wide_candidates_and_what_was_found() {
+    let profile = Profile::from_toml(&with_wide_discovery(0x700, 0x769, 0x6A, 0x795)).unwrap();
+    let read = [0x22, 0xF1, 0x87];
+    let found = [ModuleIds {
+        request: 0x705,
+        reply: 0x76F,
+    }];
+    let mut extra = found.to_vec();
+    extra.extend(profile.wide_candidates(&found));
+    let policy = profile.narrow_with(Policy::read_only(), &extra).unwrap();
+    let mmi = policy.approve(Target::Physical(0x773), &read).unwrap();
+    assert_eq!(mmi.reply_id(), Some(0x7DD));
+    let module = policy.approve(Target::Physical(0x705), &read).unwrap();
+    assert_eq!(module.reply_id(), Some(0x76F));
+    // Pass 1's other candidates aren't allowed any more, and replies never are.
+    for refused in [0x700, 0x76F, 0x77A] {
+        assert!(
+            policy.approve(Target::Physical(refused), &read).is_err(),
+            "{refused:03X}"
+        );
+    }
+}
+
+#[test]
+fn a_module_listed_in_the_wide_range_keeps_the_first_pass_off_its_request_id() {
+    // Once wide discovery finds a module at 0x773, the profile can list it: the first pass then
+    // skips 0x709, whose reply ID that is.
+    let toml = format!(
+        "{}\n[[module]]\nname = \"mmi\"\nrequest_id = 0x773\nresponse_id = 0x7DD\n\
+         protocol = \"uds\"\n",
+        with_wide_discovery(0x700, 0x769, 0x6A, 0x795)
+    );
+    let profile = Profile::from_toml(&toml).unwrap();
+    let first: Vec<u32> = profile.candidates().iter().map(|c| c.request).collect();
+    assert_eq!(first.len(), 0x6A - 1);
+    assert!(!first.contains(&0x709));
+    let wide = profile.wide_candidates(&[]);
+    assert!(wide.contains(&ModuleIds {
+        request: 0x773,
+        reply: 0x7DD
+    }));
+    profile.narrow_for_discovery(Policy::read_only()).unwrap();
+}
+
+#[test]
+fn rejects_a_wide_range_outside_the_first_passs_reply_ids() {
+    for (last, wide_last) in [
+        (0x709, 0x709),
+        (0x709, 0x700),
+        (0x709, 0x800),
+        // The first pass listens on 0x76A..=0x773, so 0x70A wasn't checked for a reply.
+        (0x709, 0x70A),
+        // 0x76A..=0x7D4: one past the first pass's last reply ID, 0x7D3.
+        (0x769, 0x7D4),
+    ] {
+        assert!(
+            matches!(
+                Profile::from_toml(&with_wide_discovery(0x700, last, 0x6A, wide_last)),
+                Err(ProfileError::WideDiscoveryRange)
+            ),
+            "{last:03X} then up to {wide_last:03X}"
+        );
+    }
+}
+
+#[test]
+fn the_a7_profile_looks_wider_only_where_no_known_module_answers() {
+    let a7 = Profile::builtin("a7").unwrap();
+    let wide = a7.wide_candidates(&[]);
+    let requests: Vec<u32> = wide.iter().map(|c| c.request).collect();
+    assert_eq!(requests.first(), Some(&0x76A));
+    assert_eq!(requests.last(), Some(&0x795));
+    // VW's MQB MMI IDs (5F), unconfirmed on the C7.
+    assert!(requests.contains(&0x773));
+    for module in &a7.modules {
+        assert!(!requests.contains(&module.response_id), "{}", module.name);
+    }
+    a7.narrow_with(Policy::read_only(), &wide).unwrap();
+}
+
 // Each A7 DID length is what the car sent, counted from the data, not the whole reply (#62).
 // Every length must come from a real reply, and every real reply must have that length.
 #[test]

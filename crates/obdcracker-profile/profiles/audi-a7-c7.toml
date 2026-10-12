@@ -1407,8 +1407,16 @@ decode = "hex"
 # + 0x6A. 0x700..=0x769 is as far as that goes safely: the replies (0x76A..=0x7D3) are never a
 # request ID, so nothing sent looks like another module's reply. It covers the modules above and
 # opendbc's VW firmware query addresses (0x712 steering, 0x715 airbag, 0x74F camera, 0x757 radar;
-# see THIRD_PARTY.md). A module whose request ID is past 0x769 isn't found.
+# see THIRD_PARTY.md).
+#
+# `scan --discover --wide` then tries 0x76A..=0x795 (replies up to 0x7FF), for modules such as the
+# MMI (5F), which VW's MQB cars put at 0x773/0x7DD; the C7's IDs aren't confirmed. Those request IDs
+# are the first pass's reply IDs. The wide pass skips each one a module it knows of (listed above,
+# or found by the first pass) answers on, and each whose reply would be an OBD-II ID, but a module
+# silent in the first pass could still own one. The user accepted that (2026-10-12): such a read
+# is a frame no module receives, since modules only send on their reply IDs.
 [discovery]
 first_request_id = 0x700
 last_request_id = 0x769
 reply_offset = 0x6A
+wide_last_request_id = 0x795
