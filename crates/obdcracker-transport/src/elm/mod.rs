@@ -102,6 +102,14 @@ const ECHO_WAIT: Duration = Duration::from_secs(1);
 // no single flipped bit of this leaves a line of hex digits, then the carriage return the adapter
 // needs before it drops the line (an STN holds an unfinished line indefinitely, #54).
 const KILL: &[u8] = b"XX\r";
+// The characters a consecutive frame takes as the adapter prints it, with headers and spaces on
+// and linefeeds off: `7E8 21 41 41 41 41 41 41 41 \r`.
+const FRAME_LINE: u32 = 29;
+// The link's byte rate when it can't be known: 9600 baud, the slowest an ELM327 starts at.
+const SLOWEST_RATE: u32 = 9600 / 10;
+// The byte rate at and above which an STN was seen to print a long reply with no gap between
+// frames (#49: about 770 bytes at 115200 baud, no `BUFFER FULL`).
+const STN_UNPACED_RATE: u32 = 115_200 / 10;
 
 /// An ELM327-compatible adapter on CAN (ISO 15765-4, 11-bit IDs, 500 kbit/s).
 ///
@@ -127,8 +135,13 @@ const KILL: &[u8] = b"XX\r";
 /// busy bus isn't acknowledged in the tester's name.
 ///
 /// The adapter sends ISO-TP flow control frames itself, which no audit log records: for the
-/// OBD-II IDs (0x7DF and 0x7E0..=0x7E7) its standard ones, and for any other module
-/// `30 00 00` (continue, no block limit, no gap) to the module's request ID.
+/// OBD-II IDs (0x7DF and 0x7E0..=0x7E7) to the ID it picks by the standard, and for any other
+/// module to the module's request ID. Each says continue, with no block limit, and a gap
+/// between frames (`STmin`) of the time the adapter takes to print one frame on the link
+/// ([`Link::byte_rate`], or 9600 baud when unknown), up to 127 ms. Frames arrive faster than a
+/// slow link carries them away as text, and a plain ELM327 holds only 512 bytes before it
+/// prints `BUFFER FULL` and drops the rest. An STN chip on a link of 115200 baud or faster gets
+/// no gap, which a real one handled (#49).
 ///
 /// The adapter's state is unknown, and every later call fails without writing anything (connect
 /// again), if:
@@ -174,15 +187,19 @@ pub struct Elm<L> {
     broken: Option<String>,
     // What it printed when it was reset, such as `ELM327 v1.4b`.
     banner: String,
+    // Its `STI` answer, if it's an STN chip.
+    stn: Option<String>,
+    // The gap between consecutive frames its flow control asks for, in ms.
+    st_min: u8,
     senders: Vec<(u32, Reassembler<Vec<u8>>)>,
 }
 
 // Where the adapter sends ISO-TP flow control frames.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Flow {
-    // The adapter's own ISO 15765-4 handling, for the OBD-II IDs
+    // To the ID ISO 15765-4 gives, for the OBD-II IDs
     Standard,
-    // `30 00 00` to this request ID
+    // To this request ID
     To(u32),
 }
 
@@ -219,6 +236,8 @@ impl<L: Link> Elm<L> {
             last_byte: None,
             broken: None,
             banner: String::new(),
+            stn: None,
+            st_min: 0,
             senders: Vec::new(),
         };
         elm.drain_stale()?;
@@ -227,6 +246,9 @@ impl<L: Link> Elm<L> {
         for command in SETUP {
             elm.expect_ok(command)?;
         }
+        let stn = elm.command("STI")?.join(" ");
+        elm.stn = (stn != "?" && !stn.is_empty()).then_some(stn);
+        elm.st_min = st_min(elm.stn.is_some(), elm.link.byte_rate());
         Ok(elm)
     }
 
@@ -246,17 +268,15 @@ impl<L: Link> Elm<L> {
         }
     }
 
-    /// Asks the adapter what it is and what voltage it sees.
+    /// Asks the adapter what voltage it sees, and says what it is.
     ///
-    /// The ID is the banner from the reset: asking again with `ATI` would make a reset now look
-    /// like an answer.
+    /// The ID is the banner from the reset and the STN version is `STI`'s answer from
+    /// [`Elm::connect`]: asking again with `ATI` would make a reset now look like an answer.
     pub fn info(&mut self) -> Result<AdapterInfo, Error> {
-        let id = self.banner.clone();
-        let stn = self.command("STI")?.join(" ");
         let voltage = self.command("ATRV")?.join(" ");
         Ok(AdapterInfo {
-            id,
-            stn: (stn != "?" && !stn.is_empty()).then_some(stn),
+            id: self.banner.clone(),
+            stn: self.stn.clone(),
             voltage: (voltage != "?" && !voltage.is_empty()).then_some(voltage),
         })
     }
@@ -606,11 +626,19 @@ impl<L: Link> Elm<L> {
             Flow::To(id)
         };
         if self.flow != Some(flow) {
+            // Continue to send, no block limit, and the gap. `AT FC SD` keeps two non-hex
+            // letters (T, S), so one flipped bit can't make it a bus request.
+            let data = format!("ATFCSD3000{:02X}", self.st_min);
             match flow {
-                Flow::Standard => self.expect_ok("ATFCSM0")?,
+                Flow::Standard if self.st_min == 0 => self.expect_ok("ATFCSM0")?,
+                // The adapter picks the header, the driver the data.
+                Flow::Standard => {
+                    self.expect_ok(&data)?;
+                    self.expect_ok("ATFCSM2")?;
+                }
                 Flow::To(id) => {
                     self.expect_ok(&format!("ATFCSH{id:03X}"))?;
-                    self.expect_ok("ATFCSD300000")?;
+                    self.expect_ok(&data)?;
                     self.expect_ok("ATFCSM1")?;
                 }
             }
@@ -629,6 +657,18 @@ impl<L: Link> Elm<L> {
         }
         Ok(())
     }
+}
+
+// The gap between consecutive frames, in ms, that keeps the adapter's output buffer from
+// filling: the time to print one frame line at the link's byte rate, rounded up, at most 127 ms
+// (the most STmin allows). None for an STN on a fast link.
+fn st_min(stn: bool, byte_rate: Option<u32>) -> u8 {
+    let rate = byte_rate.filter(|&rate| rate > 0).unwrap_or(SLOWEST_RATE);
+    if stn && rate >= STN_UNPACED_RATE {
+        return 0;
+    }
+    let ms = (FRAME_LINE * 1000).div_ceil(rate);
+    u8::try_from(ms.min(0x7F)).unwrap_or(0x7F)
 }
 
 // Whether an `AT CRA` pattern shows frames from `id`.

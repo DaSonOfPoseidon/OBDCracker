@@ -70,7 +70,7 @@ mod setup {
             commands(&elm),
             [
                 "ATZ", "ATPPS", "ATL0", "ATS1", "ATH1", "ATSP6", "ATR1", "ATCRA7XX", "ATAT1",
-                "ATSTFF"
+                "ATSTFF", "STI"
             ]
         );
         let settings = &elm.link().elm.settings;
@@ -83,9 +83,18 @@ mod setup {
     }
 
     // Every line the driver writes other than a request: the reset, the setup, `info`, and the
-    // header and flow control settings for each kind of target.
+    // header and flow control settings for each kind of target, on a plain ELM327 (paced) and
+    // on an STN (not).
     fn every_command() -> Vec<String> {
-        let mut elm = connect(car());
+        let mut stn = car();
+        stn.sti = Some("STN2232 v5.12.4".into());
+        let mut all = commands_for(car());
+        all.extend(commands_for(stn));
+        all
+    }
+
+    fn commands_for(adapter: FakeElm) -> Vec<String> {
+        let mut elm = connect(adapter);
         elm.info().unwrap();
         for target in [
             Target::ObdFunctional,
@@ -124,7 +133,9 @@ mod setup {
             "STI",
             "ATSH714",
             "ATFCSD300000",
+            "ATFCSD300003",
             "ATFCSM1",
+            "ATFCSM2",
             "ATFCSM0",
             "ATCRA7EX",
             "ATCRA7E8",
@@ -377,10 +388,12 @@ mod requests {
         assert_eq!(
             commands(&elm)[setup..],
             [
-                // OBD-II IDs: the adapter's own ISO 15765-4 flow control. A broadcast shows
-                // every emissions ECU's reply, a physical request only its own ECU's.
+                // OBD-II IDs: the adapter's own ISO 15765-4 flow control, with a gap between
+                // frames (#23). A broadcast shows every emissions ECU's reply, a physical
+                // request only its own ECU's.
                 "ATSH7DF",
-                "ATFCSM0",
+                "ATFCSD300003",
+                "ATFCSM2",
                 "ATCRA7EX",
                 "0902",
                 "0902",
@@ -391,13 +404,14 @@ mod requests {
                 // profile its reply ID isn't known, so every diagnostic ID shows.
                 "ATSH714",
                 "ATFCSH714",
-                "ATFCSD300000",
+                "ATFCSD300003",
                 "ATFCSM1",
                 "ATCRA7XX",
                 "0902",
                 "0902",
                 "ATSH7E1",
-                "ATFCSM0",
+                "ATFCSD300003",
+                "ATFCSM2",
                 "ATCRA7E9",
                 "0902",
             ]
@@ -1094,14 +1108,10 @@ mod misbehaving {
     fn an_answer_too_long_for_any_command_fails_closed() {
         // Thousands of short lines, as a broken or hostile adapter could send without end: the
         // answer must stay bounded.
-        let mut elm = connect(car());
-        elm.link_mut().elm.sti = Some(vec!["A"; 10_000].join("\r"));
-        let err = elm.info().unwrap_err();
+        let mut elm = car();
+        elm.sti = Some(vec!["A"; 10_000].join("\r"));
+        let err = Elm::connect(FakeLink::new(elm)).unwrap_err();
         assert!(err.to_string().contains("too long"), "{err}");
-        assert!(
-            elm.send(&approve(Target::ObdFunctional, &[0x09, 0x02]))
-                .is_err()
-        );
     }
 
     #[test]
@@ -1311,5 +1321,132 @@ impl Link for Scripted {
 impl std::fmt::Debug for Scripted {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Scripted").finish_non_exhaustive()
+    }
+}
+
+// The adapter's 512-byte output buffer (#23): frames arrive at bus speed, but leave as text at the
+// link's speed, so a long reply can overflow it unless the module is paced.
+mod pacing {
+    use super::*;
+
+    // The engine (7E0/7E8) and the instruments (714/77E) each answer 22 F1 87 with the longest
+    // reply ISO-TP's short first frame allows.
+    fn long_replies() -> FakeElm {
+        FakeElm::new(Box::new(|header, request| {
+            if request != [0x22, 0xF1, 0x87] {
+                return Vec::new();
+            }
+            let mut payload = vec![0x62, 0xF1, 0x87];
+            payload.resize(4095, 0x41);
+            match header {
+                0x7E0 => vec![(0x7E8, payload)],
+                0x714 => vec![(0x77E, payload)],
+                _ => Vec::new(),
+            }
+        }))
+    }
+
+    // The instruments' reply ID comes from a profile, so the receive filter shows only it.
+    fn read_long(elm: &mut Elm<FakeLink>, target: Target) -> Result<Response, Error> {
+        let policy = if target == Target::Physical(0x714) {
+            Policy::read_only().narrowed_to(&[INSTRUMENTS]).unwrap()
+        } else {
+            Policy::read_only()
+        };
+        elm.send(&policy.approve(target, &[0x22, 0xF1, 0x87]).unwrap())?;
+        elm.recv(Duration::from_secs(30))
+    }
+
+    #[test]
+    fn the_fake_adapter_overflows_without_pacing() {
+        // The fake's buffer model, checked on its own: every frame back to back at 9600 baud.
+        let mut elm = FakeElm::new(Box::new(|_, _| {
+            let mut payload = vec![0x62, 0xF1, 0x87];
+            payload.resize(4095, 0x41);
+            vec![(0x77E, payload)]
+        }));
+        elm.drain_rate = Some(960);
+        elm.settings.headers = true;
+        elm.settings.protocol = Some("6".into());
+        let mut out = Vec::new();
+        for line in ["ATFCSH714", "ATFCSD300000", "ATFCSM1", "ATSH714", "22F187"] {
+            elm.write(format!("{line}\r").as_bytes());
+            out.extend(elm.read(usize::MAX));
+        }
+        let out = String::from_utf8(out).unwrap();
+        assert!(out.contains("BUFFER FULL"), "{out}");
+    }
+
+    #[test]
+    fn the_longest_reply_reads_on_a_plain_elm327_at_every_common_baud_rate() {
+        for baud in [9600, 38_400, 115_200] {
+            let mut elm = Elm::connect(FakeLink::at_baud(long_replies(), baud)).unwrap();
+            for target in [Target::Physical(0x7E0), Target::Physical(0x714)] {
+                let reply = read_long(&mut elm, target)
+                    .unwrap_or_else(|e| panic!("{baud} baud, {target:?}: {e}"));
+                assert_eq!(reply.payload.len(), 4095, "{baud} baud, {target:?}");
+            }
+        }
+    }
+
+    // The flow control data each target gets on a plain ELM327.
+    fn flow_commands(link: FakeLink) -> Vec<String> {
+        let mut elm = Elm::connect(link).unwrap();
+        let setup = commands(&elm).len();
+        for target in [Target::Physical(0x7E0), Target::Physical(0x714)] {
+            read_long(&mut elm, target).unwrap();
+        }
+        commands(&elm)[setup..]
+            .iter()
+            .filter(|c| c.starts_with("ATFC"))
+            .cloned()
+            .collect()
+    }
+
+    #[test]
+    fn the_gap_between_frames_is_the_time_to_print_one_at_the_links_rate() {
+        // A frame line is 29 characters: `7E8 21 41 41 41 41 41 41 41 \r`, 10 bits each.
+        for (rate, st_min) in [
+            (Some(960), "1F"),    // 9600 baud: 30.2 ms
+            (Some(3840), "08"),   // 38400: 7.6 ms
+            (Some(11_520), "03"), // 115200: 2.5 ms
+            (None, "1F"),         // unknown, such as Wi-Fi: as slow as 9600
+            (Some(0), "1F"),
+            (Some(100), "7F"), // 1000 baud would need 290 ms: the most STmin allows
+        ] {
+            let mut link = FakeLink::new(long_replies());
+            link.byte_rate = rate;
+            assert_eq!(
+                flow_commands(link),
+                [
+                    // OBD-II IDs: the adapter picks the header, the driver the gap
+                    format!("ATFCSD3000{st_min}"),
+                    "ATFCSM2".to_owned(),
+                    "ATFCSH714".to_owned(),
+                    format!("ATFCSD3000{st_min}"),
+                    "ATFCSM1".to_owned(),
+                ],
+                "{rate:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_stn_at_115200_baud_or_faster_isnt_paced() {
+        // #49: an OBDLink EX (STN2232) printed a 770-byte reply at 115200 with no BUFFER FULL.
+        // The fake's buffer is an ELM327's; an STN's is bigger, so it isn't modelled here.
+        let mut stn = long_replies();
+        stn.sti = Some("STN2232 v5.12.4".into());
+        assert_eq!(
+            flow_commands(FakeLink::new(stn)),
+            ["ATFCSM0", "ATFCSH714", "ATFCSD300000", "ATFCSM1"]
+        );
+        // Untested any slower, so it's paced like any other adapter.
+        let mut stn = long_replies();
+        stn.sti = Some("STN2232 v5.12.4".into());
+        assert_eq!(
+            flow_commands(FakeLink::at_baud(stn, 38_400))[0],
+            "ATFCSD300008"
+        );
     }
 }
