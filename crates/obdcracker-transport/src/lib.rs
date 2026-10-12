@@ -2,7 +2,7 @@
 //! anything on the bus that the policy hasn't allowed.
 
 use std::fmt;
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use obdcracker_safety::Approved;
 
@@ -78,6 +78,38 @@ pub trait Transport {
         let _ = on;
         Ok(())
     }
+    /// What the adapter did besides carrying requests and replies since this was last called,
+    /// oldest first, for the audit log ([`Audited`] takes them after every call). The default
+    /// has none.
+    fn take_events(&mut self) -> Vec<LinkEvent> {
+        Vec::new()
+    }
+}
+
+/// Something an adapter did besides carrying a request or a reply.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum LinkEvent {
+    /// A command to the adapter itself, such as an ELM327's `AT SH 7E0`, and the lines it
+    /// answered with (as many as were read, if it failed). Commands never reach the bus.
+    Command {
+        /// When it was sent.
+        at: SystemTime,
+        /// The command, as written.
+        command: String,
+        /// Its answer's lines, such as `OK`.
+        answer: Vec<String>,
+    },
+    /// A line the adapter printed for a request after nothing read it any more, dropped before
+    /// the next request: such as a late reply, or one from a module nobody waited for.
+    Unread {
+        /// When it was read from the adapter.
+        at: SystemTime,
+        /// The line as the adapter printed it.
+        line: String,
+    },
+    /// How many events were dropped because nothing took them in time.
+    Lost(usize),
 }
 
 /// Bytes as space-separated upper-case hex, the way CAN tools print them: `02 09 02`.

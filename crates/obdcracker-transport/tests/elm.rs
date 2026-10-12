@@ -1662,3 +1662,84 @@ mod clones {
         );
     }
 }
+
+mod events {
+    use super::*;
+    use obdcracker_transport::LinkEvent;
+
+    fn commands_in(events: &[LinkEvent]) -> Vec<&str> {
+        events
+            .iter()
+            .filter_map(|e| match e {
+                LinkEvent::Command { command, .. } => Some(command.as_str()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn every_adapter_command_is_reported_with_its_answer() {
+        let mut elm = connect(car());
+        let events = elm.take_events();
+        assert_eq!(commands_in(&events), commands(&elm));
+        assert!(
+            events.iter().any(|e| matches!(
+                e,
+                LinkEvent::Command { command, answer, .. }
+                    if command == "ATSP6" && answer == &["OK".to_owned()]
+            )),
+            "{events:?}"
+        );
+        // Taken once.
+        assert_eq!(elm.take_events(), []);
+        elm.send(&approve(Target::Physical(0x7E0), &[0x09, 0x02]))
+            .unwrap();
+        let events = elm.take_events();
+        assert!(commands_in(&events).contains(&"ATSH7E0"), "{events:?}");
+    }
+
+    #[test]
+    fn reply_lines_nobody_read_are_reported_not_lost() {
+        // Two ECUs answer the broadcast; only the first reply is read before the next request.
+        let mut elm = connect(car());
+        elm.send(&approve(Target::ObdFunctional, &[0x09, 0x02]))
+            .unwrap();
+        let first = elm.recv(Duration::from_secs(1)).unwrap();
+        elm.take_events();
+        elm.send(&approve(Target::ObdFunctional, &[0x09, 0x02]))
+            .unwrap();
+        let unread: Vec<String> = elm
+            .take_events()
+            .into_iter()
+            .filter_map(|e| match e {
+                LinkEvent::Unread { line, .. } => Some(line),
+                _ => None,
+            })
+            .collect();
+        let other = if first.source == 0x7E8 { "7E9" } else { "7E8" };
+        assert_ne!(unread, Vec::<String>::new());
+        assert!(
+            unread.iter().all(|line| line.starts_with(other)),
+            "{unread:?}"
+        );
+    }
+
+    #[test]
+    fn an_untaken_report_is_bounded() {
+        // Nobody takes the events: they stop growing, and say how many were lost.
+        let mut elm = connect(car());
+        for _ in 0..1500 {
+            elm.send(&approve(Target::Physical(0x7E0), &[0x09, 0x02]))
+                .unwrap();
+            elm.send(&approve(Target::Physical(0x7E1), &[0x09, 0x02]))
+                .unwrap();
+        }
+        let events = elm.take_events();
+        assert!(events.len() <= obdcracker_transport::elm::MAX_EVENTS + 1);
+        assert!(
+            matches!(events.last(), Some(LinkEvent::Lost(n)) if *n > 0),
+            "{:?}",
+            events.last()
+        );
+    }
+}

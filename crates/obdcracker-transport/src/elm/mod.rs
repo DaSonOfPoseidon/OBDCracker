@@ -12,13 +12,13 @@
 pub mod codec;
 
 use std::collections::VecDeque;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use obdcracker_core::isotp::{Addressing, MAX_SHORT_PAYLOAD, Progress, Reassembler};
 use obdcracker_safety::{Approved, Target};
 
 use crate::link::{Driver, Link, LinkKind};
-use crate::{Error, Response, Timing, Transport, hex};
+use crate::{Error, LinkEvent, Response, Timing, Transport, hex};
 use codec::{Event, Line, LineSplitter, Status, parse_line};
 
 // Run after the reset, in order. Each must answer OK. One flipped bit must not turn any of them
@@ -54,6 +54,10 @@ const KEPT_DEFAULTS: &[(u8, u8, &str)] = &[
 // and every OBD-II emissions ECU's.
 const WIDE_FILTER: &str = "7XX";
 const OBD_FILTER: &str = "7EX";
+
+/// The most [`LinkEvent`]s an [`Elm`] keeps until they're taken
+/// ([`Transport::take_events`]); it counts any more as lost.
+pub const MAX_EVENTS: usize = 4096;
 
 /// The longest the adapter waits for a reply, or for more replies after one: `AT ST FF`.
 pub const ADAPTER_TIMEOUT: Duration = Duration::from_millis(0xFF * 4);
@@ -195,6 +199,9 @@ pub struct Elm<L> {
     // The link's byte rate, if replies are paced to it.
     pace: Option<u32>,
     senders: Vec<(u32, Reassembler<Vec<u8>>)>,
+    // What it did besides requests and replies, until taken, and how many more were dropped.
+    log: Vec<LinkEvent>,
+    lost: usize,
 }
 
 // Where the adapter sends ISO-TP flow control frames.
@@ -242,6 +249,8 @@ impl<L: Link> Elm<L> {
             stn: None,
             pace: None,
             senders: Vec::new(),
+            log: Vec::new(),
+            lost: 0,
         };
         elm.drain_stale()?;
         elm.reset()?;
@@ -326,20 +335,41 @@ impl<L: Link> Elm<L> {
         for _ in 0..RESET_TRIES {
             self.splitter.clear();
             self.events.clear();
+            let at = SystemTime::now();
             self.write(b"ATZ\r")?;
             let deadline = Instant::now() + RESET_WAIT;
             let mut banner = None;
-            while let Some(event) = self.next_event(deadline)? {
+            // What it printed, for the report; a flood isn't kept.
+            let mut answer = Vec::new();
+            let reset = loop {
+                let event = match self.next_event(deadline) {
+                    Ok(Some(event)) => event,
+                    Ok(None) => break Ok(false),
+                    Err(e) => break Err(e),
+                };
+                if let Event::Line(line) = &event
+                    && answer.len() < MAX_ANSWER_LINES
+                {
+                    answer.push(line.clone());
+                }
                 match event {
                     Event::Line(line) if line.starts_with("ELM327") => banner = Some(line),
                     Event::Prompt => {
                         if let Some(banner) = banner.take() {
                             self.banner = banner;
-                            return Ok(());
+                            break Ok(true);
                         }
                     }
                     _ => {}
                 }
+            };
+            self.note(LinkEvent::Command {
+                at,
+                command: "ATZ".to_owned(),
+                answer,
+            });
+            if reset? {
+                return Ok(());
             }
         }
         Err(Error::Adapter(
@@ -389,16 +419,37 @@ impl<L: Link> Elm<L> {
         Ok(())
     }
 
-    // Sends an AT or ST command and returns its answer, after checking the echo.
+    // Sends an AT or ST command and returns its answer, after checking the echo. The command
+    // and as much of its answer as was read are reported (`LinkEvent::Command`).
     fn command(&mut self, command: &str) -> Result<Vec<String>, Error> {
         // An all-hex line is a bus request, which only `send` may write.
         if command.bytes().all(|b| b.is_ascii_hexdigit()) {
             return Err(Error::Adapter(format!("{command} isn't a command")));
         }
         self.ready()?;
+        let at = SystemTime::now();
+        let mut lines = Vec::new();
+        let answered = self.command_answer(command, &mut lines);
+        self.note(LinkEvent::Command {
+            at,
+            command: command.to_owned(),
+            answer: lines.clone(),
+        });
+        answered.map(|()| lines)
+    }
+
+    fn note(&mut self, event: LinkEvent) {
+        if self.log.len() < MAX_EVENTS {
+            self.log.push(event);
+        } else {
+            self.lost += 1;
+        }
+    }
+
+    // Writes `command` and reads its answer's lines into `lines`.
+    fn command_answer(&mut self, command: &str, lines: &mut Vec<String>) -> Result<(), Error> {
         self.write(format!("{command}\r").as_bytes())?;
         let deadline = Instant::now() + COMMAND_WAIT;
-        let mut lines = Vec::new();
         let mut echoed = false;
         loop {
             match self.next_event(deadline)? {
@@ -453,7 +504,7 @@ impl<L: Link> Elm<L> {
                 }
             }
         }
-        Ok(lines)
+        Ok(())
     }
 
     // Any answer but OK leaves the adapter's settings unknown: it may have reset, or kept the
@@ -512,6 +563,13 @@ impl<L: Link> Elm<L> {
                     break;
                 }
                 Some(Event::Line(text)) => {
+                    // Not the request's echo, which `reply_line` checks.
+                    if self.echo.is_none() {
+                        self.note(LinkEvent::Unread {
+                            at: SystemTime::now(),
+                            line: text.clone(),
+                        });
+                    }
                     self.reply_line(&text)?;
                 }
                 // It can't be read, so it could hide a reset.
@@ -778,6 +836,14 @@ impl<L: Link> Transport for Elm<L> {
             return Ok(());
         }
         self.expect_ok(if on { "ATAT0" } else { "ATAT1" })
+    }
+
+    fn take_events(&mut self) -> Vec<LinkEvent> {
+        let mut events = std::mem::take(&mut self.log);
+        if self.lost > 0 {
+            events.push(LinkEvent::Lost(std::mem::take(&mut self.lost)));
+        }
+        events
     }
 
     fn recv(&mut self, timeout: Duration) -> Result<Response, Error> {
