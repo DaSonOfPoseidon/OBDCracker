@@ -10,6 +10,7 @@ use super::{Driver, Link, LinkKind, WRITE_TIMEOUT};
 #[derive(Debug)]
 pub struct SerialLink {
     port: SerialPort,
+    baud: u32,
 }
 
 impl SerialLink {
@@ -19,7 +20,7 @@ impl SerialLink {
         let mut port = SerialPort::open(path, baud)?;
         // An adapter holding off the host could otherwise block a write forever.
         port.set_write_timeout(WRITE_TIMEOUT)?;
-        Ok(Self { port })
+        Ok(Self { port, baud })
     }
 
     /// The serial ports this computer has. Not every OS can list them.
@@ -50,6 +51,11 @@ impl Link for SerialLink {
     fn kind(&self) -> LinkKind {
         LinkKind::UsbSerial
     }
+
+    fn byte_rate(&self) -> Option<u32> {
+        // 10 bits a byte: a start bit, 8 data bits and a stop bit.
+        Some(self.baud / 10)
+    }
 }
 
 #[cfg(all(test, unix))]
@@ -58,7 +64,13 @@ mod tests {
 
     fn pair() -> (SerialLink, SerialPort) {
         let (ours, theirs) = SerialPort::pair().unwrap();
-        (SerialLink { port: ours }, theirs)
+        (
+            SerialLink {
+                port: ours,
+                baud: 115_200,
+            },
+            theirs,
+        )
     }
 
     #[test]

@@ -52,12 +52,13 @@ from developers being careful:
   on is ever a reply ID. A module whose request ID is past 0x769 isn't found.
 - Every frame sent or received in a real session is appended to an audit log, along with any adapter error (such as an
   adapter mishearing a request it may already have sent).
-- **One gap: ELM327/STN adapters.** Their serial line has no checksum, and the adapter sends a request before the
-  driver can check its echo, so a single bit error can turn an approved read into another request, a locked or
-  banned one included (a reset, clearing DTCs, one write). It can't complete a flash sequence, and the driver stops
-  at the first mismatched echo. It's a rare, accepted risk, reasoned in [`docs/elm327.md`](docs/elm327.md); #34
-  closes it by checking the echo before the request is sent. Prefer a USB or Wi-Fi adapter over a direct serial
-  cable.
+- **One gap: ELM327/STN adapters that echo whole lines.** Their serial line has no checksum. On an adapter that echoes
+  each character as it reads it (the OBDLink EX does), the driver checks a request's echo before sending its carriage
+  return, so a misheard request never reaches the bus (#34). One that echoes only whole lines sends a request before
+  the driver can check it, so a single bit error can turn an approved read into another request, a locked or banned
+  one included (a reset, clearing DTCs, one write). It can't complete a flash sequence, and the driver stops at the
+  first mismatched echo. It's a rare, accepted risk, reasoned in [`docs/elm327.md`](docs/elm327.md). Prefer a USB or
+  Wi-Fi adapter over a direct serial cable.
 
 New capabilities are developed test-first: golden-frame unit tests, then property tests and fuzzing of response parsers,
 then a simulated ECU (`obdcracker-sim`), then a dry run on the car, and only then a live session.
@@ -159,7 +160,7 @@ adapter's command set. The ELM driver takes any two-way byte stream, so serial, 
 |---|---|---|---|---|
 | `mock` | none (tests) | — | all | done |
 | `sim` | none: a simulated car from a vehicle profile and a fixture (`--sim a7`) | — | all | done |
-| `elm` | ELM327 v2.0+ / STN (e.g. OBDLink EX, MX+, CX) | USB serial, Wi-Fi (TCP); Bluetooth LE and Classic planned | all | done for USB serial and TCP; not yet tried on a car |
+| `elm` | ELM327 v2.0+ / STN (e.g. OBDLink EX, MX+, CX) | USB serial, Wi-Fi (TCP); Bluetooth LE and Classic planned | all | done for USB serial and TCP; three read-only sessions on the A7 over USB (OBDLink EX). Clones that refuse `AT CRA` with `X` digits are refused at connect ([clone policy](docs/elm327.md#clones)) |
 | `gsusb` | CANable / candleLight (USB-C) and an OBD2-to-DB9 cable | USB | all | planned, with listen-only mode |
 | `socketcan` | any SocketCAN interface | kernel | Linux | planned |
 | `j2534` | J2534 pass-thru (Tactrix OpenPort, Toyota Mini VCI, VAS 5054A clones) | vendor DLL | Windows | later |
@@ -176,7 +177,10 @@ obdcracker --tcp 192.168.0.10:35000 vin            # a Wi-Fi adapter
 ```
 
 The ELM driver only sends single-frame requests (up to 7 bytes: the OBD-II reads, and UDS 0x22 with up to 3 DIDs), never
-lets the adapter search for a protocol, and stops if the adapter stops answering. [`docs/elm327.md`](docs/elm327.md)
+lets the adapter search for a protocol, and stops if the adapter stops answering. On a plain ELM327 it paces a physical
+request's long reply to the link's speed, so its 512-byte buffer doesn't overflow (down to about 2300 baud). Broadcasts
+can't be paced: several ECUs' multi-frame replies at once on a slow link can still overflow it, which the driver
+reports as `BUFFER FULL` (#71). [`docs/elm327.md`](docs/elm327.md)
 lists the adapter behaviour it relies on, with datasheet pages. It's tested against a fake adapter written from the
 datasheet, against the simulated A7, and against [ELM327-emulator](https://github.com/Ircama/ELM327-emulator), an
 independent implementation. That last test is opt-in (`#[ignore]`) and runs in a CI job that doesn't block merging yet.

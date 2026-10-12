@@ -43,6 +43,13 @@ pub trait Link {
     fn read(&mut self, buf: &mut [u8], timeout: Duration, driver: Driver) -> io::Result<usize>;
     /// How the adapter is connected.
     fn kind(&self) -> LinkKind;
+    /// How many bytes a second the link carries from the adapter, if known: a serial port's
+    /// baud rate over 10 (8N1). `None` when it can't be known, such as a Wi-Fi adapter, whose
+    /// chip may sit behind a slow serial line of its own. The ELM driver paces long replies to
+    /// it (see [`crate::elm::Elm`]).
+    fn byte_rate(&self) -> Option<u32> {
+        None
+    }
 }
 
 impl<L: Link + ?Sized> Link for Box<L> {
@@ -56,6 +63,10 @@ impl<L: Link + ?Sized> Link for Box<L> {
 
     fn kind(&self) -> LinkKind {
         (**self).kind()
+    }
+
+    fn byte_rate(&self) -> Option<u32> {
+        (**self).byte_rate()
     }
 }
 

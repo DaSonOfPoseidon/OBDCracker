@@ -18,6 +18,7 @@ pub type Responder = Box<dyn FnMut(u32, &[u8]) -> Vec<(u32, Vec<u8>)> + Send>;
 pub const BANNER: &str = "ELM327 v2.0";
 
 /// The fake adapter's state, as the datasheet describes it after a reset.
+#[allow(clippy::struct_excessive_bools)]
 pub struct FakeElm {
     responder: Responder,
     input: Vec<u8>,
@@ -37,6 +38,8 @@ pub struct FakeElm {
     /// The module each flow control frame the adapter sent was for: every sender of a
     /// multi-frame reply that passed the receive filter.
     pub flow_control_for: Vec<u32>,
+    /// The CAN ID each of those flow control frames went to.
+    pub flow_control_ids: Vec<u32>,
     /// Commands this adapter doesn't support (it answers `?`), as a clone might.
     pub unsupported: Vec<String>,
     /// What `STI` answers; `None` for a plain ELM327.
@@ -60,7 +63,29 @@ pub struct FakeElm {
     /// `OBDLink EX` (and the ELM327) echoes each character as it arrives, and holds the line
     /// until the carriage return, however long that takes (#54).
     pub echo_at_line_end: bool,
+    /// How many bytes a second the link to the host drains from the adapter's 512-byte output
+    /// buffer (ELM327DS v2.0, p. 80), or `None` to print without a limit. Frames that arrive
+    /// faster than the buffer drains overflow it, and the adapter prints `BUFFER FULL`.
+    pub drain_rate: Option<u32>,
+    /// What the adapter calls itself after a reset and to `ATI`. Clones often claim a version
+    /// they don't implement, such as `ELM327 v1.5` or `ELM327 v2.1` (python-OBD #188, #205).
+    pub banner: String,
+    /// Bytes printed before the banner on a reset, as clones do (`\xfc\r\r`, python-OBD #205).
+    pub reset_noise: Vec<u8>,
+    /// Commands whose answer ends without its carriage return and prompt (`ATE0\rOK` and then
+    /// nothing, python-OBD #160, #205).
+    pub unfinished: Vec<String>,
+    /// Commands that are echoed and then never answered at all.
+    pub mute: Vec<String>,
+    /// Answer every bus request with an empty line, as clones do when nothing answers
+    /// (`0100` → `\r\r>`, python-OBD #205).
+    pub empty_answers: bool,
 }
+
+// The adapter's output buffer, in bytes (ELM327DS v2.0, p. 80).
+pub const OUTPUT_BUFFER: usize = 512;
+// How long a CAN frame takes on the bus at 500 kbit/s, about 130 bits with stuffing, in µs.
+const FRAME_TIME_US: u64 = 260;
 
 // What `AT PPS` prints for a v2.0 ELM327 with every parameter off (datasheet p. 57).
 const PP_FACTORY: [u8; 0x30] = [
@@ -129,6 +154,7 @@ impl FakeElm {
             commands: Vec::new(),
             sent: Vec::new(),
             flow_control_for: Vec::new(),
+            flow_control_ids: Vec::new(),
             unsupported: Vec::new(),
             sti: None,
             interrupted: 0,
@@ -139,6 +165,12 @@ impl FakeElm {
             after_echo: Vec::new(),
             after_prompt: Vec::new(),
             echo_at_line_end: false,
+            drain_rate: None,
+            banner: BANNER.to_owned(),
+            reset_noise: Vec::new(),
+            unfinished: Vec::new(),
+            mute: Vec::new(),
+            empty_answers: false,
         }
     }
 
@@ -246,6 +278,13 @@ impl FakeElm {
             self.prompt();
             return;
         }
+        if self.mute.contains(&line) {
+            return;
+        }
+        if self.unfinished.contains(&line) {
+            self.output.extend(b"OK");
+            return;
+        }
         if let Some(at) = line.strip_prefix("AT") {
             self.at(at);
         } else if line == "STI" {
@@ -266,13 +305,16 @@ impl FakeElm {
                     self.settings.echo = value == 0x00;
                 }
                 self.last = None;
+                self.output.extend(self.reset_noise.clone());
                 self.print("");
-                self.print(BANNER);
+                let banner = self.banner.clone();
+                self.print(&banner);
                 self.prompt();
                 return;
             }
             "I" => {
-                self.print(BANNER);
+                let banner = self.banner.clone();
+                self.print(&banner);
                 self.prompt();
                 return;
             }
@@ -301,10 +343,19 @@ impl FakeElm {
                 self.settings.headers = cmd == "H1";
                 true
             }
-            "R1" | "AT1" | "STFF" => true,
+            "R1" | "AT0" | "AT1" | "STFF" => true,
             "FCSM0" => {
                 self.settings.fc_mode = 0;
                 true
+            }
+            "FCSM2" => {
+                // Mode 2 needs the data first; the adapter sets the header (datasheet p. 48).
+                if self.settings.fc_data.is_some() {
+                    self.settings.fc_mode = 2;
+                    true
+                } else {
+                    false
+                }
             }
             "FCSM1" => {
                 // Mode 1 needs the header and data first (datasheet p. 48).
@@ -404,25 +455,101 @@ impl FakeElm {
             .into_iter()
             .filter(|(source, _)| self.settings.shows(*source))
             .collect();
+        if self.empty_answers {
+            self.print("");
+            self.prompt();
+            return;
+        }
         if replies.is_empty() {
             self.print("NO DATA");
         }
-        for (source, payload) in replies {
-            let frames = frames(&payload);
+        let gap_us = self.st_min_us().max(FRAME_TIME_US);
+        // Each frame line and when it arrives, in µs. Modules answer at once, so with the buffer
+        // modelled their frames interleave, each module's spaced by the gap its flow control
+        // asked for; otherwise each reply is printed whole, in turn.
+        let mut lines = Vec::new();
+        let header = self.settings.header;
+        for (index, (source, payload)) in replies.into_iter().enumerate() {
+            let mut frames = frames(&payload);
             if frames.len() > 1 {
                 self.flow_control_for.push(source);
+                let to = self.flow_control_to(source);
+                self.flow_control_ids.push(to);
+                // The module goes on only if the flow control came to its own request ID: the
+                // header, or for a broadcast the OBD-II one (ISO 15765-4: reply ID - 8).
+                let request_id = if header == 0x7DF { source - 8 } else { header };
+                if to != request_id {
+                    frames.truncate(1);
+                }
             }
-            for frame in frames {
+            for (k, frame) in frames.into_iter().enumerate() {
                 let line = if self.settings.headers {
                     format!("{source:03X} {}", hex(&frame))
                 } else {
                     hex(&frame)
                 };
-                self.print(&line);
+                let (index, k) = (index as u64, k as u64);
+                let at = if self.drain_rate.is_some() {
+                    k * gap_us + index
+                } else {
+                    index << 32 | k
+                };
+                lines.push((at, line));
             }
+        }
+        lines.sort_by_key(|(at, _)| *at);
+        // Bytes still in the buffer, in millionths of a byte, as the frames arrive.
+        let mut queued: u64 = 0;
+        let mut last = 0;
+        for (at, line) in lines {
+            if let Some(rate) = self.drain_rate {
+                queued = queued.saturating_sub(u64::from(rate) * (at - last));
+                last = at;
+                queued += (line.len() as u64 + 1) * 1_000_000;
+                if queued > OUTPUT_BUFFER as u64 * 1_000_000 {
+                    self.print("BUFFER FULL");
+                    break;
+                }
+            }
+            self.print(&line);
         }
         if !self.hang_after_request {
             self.prompt();
+        }
+    }
+}
+
+impl FakeElm {
+    // Where the adapter sends flow control for a First Frame from `source` (datasheet p. 48):
+    // mode 0 to the OBD-II request ID for an OBD-II reply ID, mode 1 to `AT FC SH`, and mode 2
+    // to the First Frame's own ID, unchanged.
+    fn flow_control_to(&self, source: u32) -> u32 {
+        match self.settings.fc_mode {
+            0 if (0x7E8..=0x7EF).contains(&source) => source - 8,
+            // The datasheet doesn't say; nothing a module would expect.
+            0 => 0,
+            1 => self.settings.fc_header.unwrap_or(0),
+            _ => source,
+        }
+    }
+
+    // The gap between consecutive frames that the adapter's flow control asks for: none with its
+    // own ISO 15765-4 handling (mode 0), else the STmin in `AT FC SD` (ISO 15765-2).
+    fn st_min_us(&self) -> u64 {
+        if self.settings.fc_mode == 0 {
+            return 0;
+        }
+        let st_min = self
+            .settings
+            .fc_data
+            .as_deref()
+            .and_then(parse_hex)
+            .and_then(|data| data.get(2).copied())
+            .unwrap_or(0);
+        match st_min {
+            0..=0x7F => u64::from(st_min) * 1000,
+            0xF1..=0xF9 => u64::from(st_min - 0xF0) * 100,
+            _ => 127_000,
         }
     }
 }
@@ -490,6 +617,8 @@ pub struct FakeLink {
     /// Bytes that arrive at these times, whatever the adapter prints. A read waits for the next
     /// one, up to its timeout.
     pub scheduled: VecDeque<(std::time::Instant, Vec<u8>)>,
+    /// What the link says its byte rate is.
+    pub byte_rate: Option<u32>,
 }
 
 impl FakeLink {
@@ -505,7 +634,16 @@ impl FakeLink {
             inject: Vec::new(),
             corrupt_next_write: None,
             scheduled: VecDeque::new(),
+            byte_rate: Some(115_200 / 10),
         }
+    }
+
+    /// A link at `baud` bits a second, which drains the adapter's output buffer at that rate.
+    pub fn at_baud(mut elm: FakeElm, baud: u32) -> Self {
+        elm.drain_rate = Some(baud / 10);
+        let mut link = Self::new(elm);
+        link.byte_rate = Some(baud / 10);
+        link
     }
 }
 
@@ -559,6 +697,10 @@ impl Link for FakeLink {
 
     fn kind(&self) -> LinkKind {
         LinkKind::UsbSerial
+    }
+
+    fn byte_rate(&self) -> Option<u32> {
+        self.byte_rate
     }
 }
 

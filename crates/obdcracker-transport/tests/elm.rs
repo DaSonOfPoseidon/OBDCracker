@@ -70,7 +70,7 @@ mod setup {
             commands(&elm),
             [
                 "ATZ", "ATPPS", "ATL0", "ATS1", "ATH1", "ATSP6", "ATR1", "ATCRA7XX", "ATAT1",
-                "ATSTFF"
+                "ATSTFF", "STI", "ATAT0"
             ]
         );
         let settings = &elm.link().elm.settings;
@@ -83,9 +83,18 @@ mod setup {
     }
 
     // Every line the driver writes other than a request: the reset, the setup, `info`, and the
-    // header and flow control settings for each kind of target.
+    // header and flow control settings for each kind of target, on a plain ELM327 (paced) and
+    // on an STN (not).
     fn every_command() -> Vec<String> {
-        let mut elm = connect(car());
+        let mut stn = car();
+        stn.sti = Some("STN2232 v5.12.4".into());
+        let mut all = commands_for(car());
+        all.extend(commands_for(stn));
+        all
+    }
+
+    fn commands_for(adapter: FakeElm) -> Vec<String> {
+        let mut elm = connect(adapter);
         elm.info().unwrap();
         for target in [
             Target::ObdFunctional,
@@ -124,8 +133,11 @@ mod setup {
             "STI",
             "ATSH714",
             "ATFCSD300000",
+            "ATFCSD300003",
+            "ATFCSH7E0",
             "ATFCSM1",
             "ATFCSM0",
+            "ATAT0",
             "ATCRA7EX",
             "ATCRA7E8",
             "ATCRA77E",
@@ -263,10 +275,13 @@ mod setup {
         let info = connect(stn).info().unwrap();
         assert_eq!(info.stn.as_deref(), Some("STN1155 v5.6.19"));
 
-        // A clone that answers STI with nothing at all isn't an STN.
-        let mut clone = connect(FakeElm::silent());
-        clone.link_mut().elm.sti = Some(String::new());
-        assert_eq!(clone.info().unwrap().stn, None);
+        // A clone that answers STI with nothing at all, or with anything but an STN's name,
+        // isn't an STN.
+        for answer in ["", "OK", "v1.5"] {
+            let mut clone = FakeElm::silent();
+            clone.sti = Some(answer.into());
+            assert_eq!(connect(clone).info().unwrap().stn, None, "{answer:?}");
+        }
     }
 
     #[test]
@@ -377,27 +392,34 @@ mod requests {
         assert_eq!(
             commands(&elm)[setup..],
             [
-                // OBD-II IDs: the adapter's own ISO 15765-4 flow control. A broadcast shows
-                // every emissions ECU's reply, a physical request only its own ECU's.
+                // A broadcast: the adapter's own ISO 15765-4 flow control, the only kind that
+                // reaches each ECU's request ID, and it shows every emissions ECU's reply.
                 "ATSH7DF",
                 "ATFCSM0",
                 "ATCRA7EX",
                 "0902",
                 "0902",
+                // A physical request: flow control to the module's request ID, with a gap
+                // between frames (#23), and only its own ECU's replies show.
                 "ATSH7E0",
+                "ATFCSH7E0",
+                "ATFCSD300003",
+                "ATFCSM1",
                 "ATCRA7E8",
                 "0902",
                 // Any other module: flow control goes to the module's request ID. Without a
                 // profile its reply ID isn't known, so every diagnostic ID shows.
                 "ATSH714",
                 "ATFCSH714",
-                "ATFCSD300000",
+                "ATFCSD300003",
                 "ATFCSM1",
                 "ATCRA7XX",
                 "0902",
                 "0902",
                 "ATSH7E1",
-                "ATFCSM0",
+                "ATFCSH7E1",
+                "ATFCSD300003",
+                "ATFCSM1",
                 "ATCRA7E9",
                 "0902",
             ]
@@ -1094,14 +1116,10 @@ mod misbehaving {
     fn an_answer_too_long_for_any_command_fails_closed() {
         // Thousands of short lines, as a broken or hostile adapter could send without end: the
         // answer must stay bounded.
-        let mut elm = connect(car());
-        elm.link_mut().elm.sti = Some(vec!["A"; 10_000].join("\r"));
-        let err = elm.info().unwrap_err();
+        let mut elm = car();
+        elm.sti = Some(vec!["A"; 10_000].join("\r"));
+        let err = Elm::connect(FakeLink::new(elm)).unwrap_err();
         assert!(err.to_string().contains("too long"), "{err}");
-        assert!(
-            elm.send(&approve(Target::ObdFunctional, &[0x09, 0x02]))
-                .is_err()
-        );
     }
 
     #[test]
@@ -1311,5 +1329,315 @@ impl Link for Scripted {
 impl std::fmt::Debug for Scripted {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Scripted").finish_non_exhaustive()
+    }
+}
+
+// The adapter's 512-byte output buffer (#23): frames arrive at bus speed, but leave as text at the
+// link's speed, so a long reply can overflow it unless the module is paced.
+mod pacing {
+    use super::*;
+
+    // The engine (7E0/7E8) and the instruments (714/77E) each answer 22 F1 87 with the longest
+    // reply ISO-TP's short first frame allows.
+    fn long_replies() -> FakeElm {
+        FakeElm::new(Box::new(|header, request| {
+            if request != [0x22, 0xF1, 0x87] {
+                return Vec::new();
+            }
+            let mut payload = vec![0x62, 0xF1, 0x87];
+            payload.resize(4095, 0x41);
+            match header {
+                0x7E0 => vec![(0x7E8, payload)],
+                0x714 => vec![(0x77E, payload)],
+                _ => Vec::new(),
+            }
+        }))
+    }
+
+    // The instruments' reply ID comes from a profile, so the receive filter shows only it.
+    fn read_long(elm: &mut Elm<FakeLink>, target: Target) -> Result<Response, Error> {
+        let policy = if target == Target::Physical(0x714) {
+            Policy::read_only().narrowed_to(&[INSTRUMENTS]).unwrap()
+        } else {
+            Policy::read_only()
+        };
+        elm.send(&policy.approve(target, &[0x22, 0xF1, 0x87]).unwrap())?;
+        elm.recv(Duration::from_secs(30))
+    }
+
+    #[test]
+    fn the_fake_adapter_overflows_without_pacing() {
+        // The fake's buffer model, checked on its own: every frame back to back at 9600 baud.
+        let mut elm = FakeElm::new(Box::new(|_, _| {
+            let mut payload = vec![0x62, 0xF1, 0x87];
+            payload.resize(4095, 0x41);
+            vec![(0x77E, payload)]
+        }));
+        elm.drain_rate = Some(960);
+        elm.settings.headers = true;
+        elm.settings.protocol = Some("6".into());
+        let mut out = Vec::new();
+        for line in ["ATFCSH714", "ATFCSD300000", "ATFCSM1", "ATSH714", "22F187"] {
+            elm.write(format!("{line}\r").as_bytes());
+            out.extend(elm.read(usize::MAX));
+        }
+        let out = String::from_utf8(out).unwrap();
+        assert!(out.contains("BUFFER FULL"), "{out}");
+    }
+
+    #[test]
+    fn the_longest_reply_reads_on_a_plain_elm327_at_every_common_baud_rate() {
+        for baud in [9600, 38_400, 115_200] {
+            let mut elm = Elm::connect(FakeLink::at_baud(long_replies(), baud)).unwrap();
+            for target in [Target::Physical(0x7E0), Target::Physical(0x714)] {
+                let reply = read_long(&mut elm, target)
+                    .unwrap_or_else(|e| panic!("{baud} baud, {target:?}: {e}"));
+                assert_eq!(reply.payload.len(), 4095, "{baud} baud, {target:?}");
+            }
+            assert_eq!(elm.link().elm.flow_control_ids, [0x7E0, 0x714], "{baud}");
+        }
+    }
+
+    // Every emissions ECU answers a broadcast 09 02 with the longest reply, all at once.
+    fn eight_long_replies() -> FakeElm {
+        FakeElm::new(Box::new(|header, request| {
+            if header != 0x7DF || request != [0x09, 0x02] {
+                return Vec::new();
+            }
+            let mut payload = vec![0x49, 0x02, 0x01];
+            payload.resize(4095, 0x41);
+            (0x7E8..=0x7EF).map(|id| (id, payload.clone())).collect()
+        }))
+    }
+
+    #[test]
+    fn a_broadcast_gets_the_adapters_own_flow_control_to_each_ecu() {
+        // Only the adapter's ISO 15765-4 handling (mode 0) reaches each answering ECU's own
+        // request ID, so a broadcast isn't paced, even on a plain ELM327 (PR #70, Codex).
+        let mut elm = Elm::connect(FakeLink::new(eight_long_replies())).unwrap();
+        let setup = commands(&elm).len();
+        elm.send(&approve(Target::ObdFunctional, &[0x09, 0x02]))
+            .unwrap();
+        let mut sources = Vec::new();
+        while let Ok(reply) = elm.recv(Duration::from_secs(5)) {
+            assert_eq!(reply.payload.len(), 4095);
+            sources.push(reply.source);
+        }
+        sources.sort_unstable();
+        assert_eq!(sources, (0x7E8..=0x7EF).collect::<Vec<_>>());
+        assert_eq!(commands(&elm)[setup..setup + 2], ["ATSH7DF", "ATFCSM0"]);
+        let mut to = elm.link().elm.flow_control_ids.clone();
+        to.sort_unstable();
+        assert_eq!(to, (0x7E0..=0x7E7).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn flow_control_mode_2_would_stall_every_reply() {
+        // Mode 2 keeps the First Frame's own ID (datasheet p. 48): flow control for 7E8's
+        // reply goes to 7E8, not 7E0, and the ECU never sends the rest.
+        let mut elm = eight_long_replies();
+        elm.settings.headers = true;
+        elm.settings.protocol = Some("6".into());
+        let mut out = Vec::new();
+        for line in ["ATFCSD300003", "ATFCSM2", "0902"] {
+            elm.write(format!("{line}\r").as_bytes());
+            out.extend(elm.read(usize::MAX));
+        }
+        assert_eq!(elm.flow_control_ids, (0x7E8..=0x7EF).collect::<Vec<_>>());
+        let out = String::from_utf8(out).unwrap();
+        assert!(!out.contains(" 21 "), "{out}");
+    }
+
+    #[test]
+    fn a_broadcast_that_overflows_a_slow_link_says_so() {
+        // Eight ECUs' long replies at once are too much for 9600 baud.
+        let mut elm = Elm::connect(FakeLink::at_baud(eight_long_replies(), 9600)).unwrap();
+        elm.send(&approve(Target::ObdFunctional, &[0x09, 0x02]))
+            .unwrap();
+        let err = loop {
+            if let Err(e) = elm.recv(Duration::from_secs(5)) {
+                break e.to_string();
+            }
+        };
+        assert!(
+            err.contains("BUFFER FULL") && err.contains("faster baud rate"),
+            "{err}"
+        );
+    }
+
+    // The flow control data each target gets on a plain ELM327.
+    fn flow_commands(link: FakeLink) -> Vec<String> {
+        let mut elm = Elm::connect(link).unwrap();
+        let setup = commands(&elm).len();
+        for target in [Target::Physical(0x7E0), Target::Physical(0x714)] {
+            read_long(&mut elm, target).unwrap();
+        }
+        commands(&elm)[setup..]
+            .iter()
+            .filter(|c| c.starts_with("ATFC"))
+            .cloned()
+            .collect()
+    }
+
+    #[test]
+    fn the_gap_between_frames_is_the_time_to_print_one_at_the_links_rate() {
+        // A frame line is 29 characters: `7E8 21 41 41 41 41 41 41 41 \r`, 10 bits each.
+        for (rate, st_min) in [
+            (Some(960), "1F"),    // 9600 baud: 30.2 ms
+            (Some(3840), "08"),   // 38400: 7.6 ms
+            (Some(11_520), "03"), // 115200: 2.5 ms
+            (None, "1F"),         // unknown, such as Wi-Fi: as slow as 9600
+            (Some(0), "1F"),
+            (Some(100), "7F"), // 1000 baud would need 290 ms: the most STmin allows
+        ] {
+            let mut link = FakeLink::new(long_replies());
+            link.byte_rate = rate;
+            assert_eq!(
+                flow_commands(link),
+                [
+                    // To each module's own request ID
+                    "ATFCSH7E0".to_owned(),
+                    format!("ATFCSD3000{st_min}"),
+                    "ATFCSM1".to_owned(),
+                    "ATFCSH714".to_owned(),
+                    format!("ATFCSD3000{st_min}"),
+                    "ATFCSM1".to_owned(),
+                ],
+                "{rate:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn adaptive_timing_is_off_only_when_pacing() {
+        // A learned timeout shorter than the gap would end a paced reply early (PR #70, Codex).
+        let elm = Elm::connect(FakeLink::at_baud(long_replies(), 9600)).unwrap();
+        assert_eq!(commands(&elm).last().map(String::as_str), Some("ATAT0"));
+        let mut stn = long_replies();
+        stn.sti = Some("STN2232 v5.12.4".into());
+        let elm = Elm::connect(FakeLink::new(stn)).unwrap();
+        assert!(!commands(&elm).iter().any(|c| c == "ATAT0"));
+    }
+
+    #[test]
+    fn an_stn_at_115200_baud_or_faster_isnt_paced() {
+        // #49: an OBDLink EX (STN2232) printed a 770-byte reply at 115200 with no BUFFER FULL.
+        // The fake's buffer is an ELM327's; an STN's is bigger, so it isn't modelled here.
+        let mut stn = long_replies();
+        stn.sti = Some("STN2232 v5.12.4".into());
+        assert_eq!(
+            flow_commands(FakeLink::new(stn)),
+            ["ATFCSM0", "ATFCSH714", "ATFCSD300000", "ATFCSM1"]
+        );
+        // A clone that answers STI with something else isn't an STN.
+        let mut clone = long_replies();
+        clone.sti = Some("OK".into());
+        assert_eq!(
+            flow_commands(FakeLink::at_baud(clone, 115_200))[1],
+            "ATFCSD300003"
+        );
+        // Untested any slower, so it's paced like any other adapter.
+        let mut stn = long_replies();
+        stn.sti = Some("STN2232 v5.12.4".into());
+        assert_eq!(
+            flow_commands(FakeLink::at_baud(stn, 38_400))[1],
+            "ATFCSD300008"
+        );
+    }
+}
+
+// Clone adapters, from real transcripts in python-OBD's tracker (#44). Each must either work, or
+// fail closed with a message that names the problem.
+mod clones {
+    use super::*;
+
+    fn clone_of(version: &str) -> FakeElm {
+        let mut elm = car();
+        elm.banner = format!("ELM327 {version}");
+        elm
+    }
+
+    #[test]
+    fn noise_before_the_banner_is_ignored() {
+        // python-OBD #205: `\xfc\r\rELM327 v1.5\r\r>`
+        let mut elm = clone_of("v2.1");
+        elm.reset_noise = b"\xfc\r".to_vec();
+        let mut elm = connect(elm);
+        assert_eq!(elm.info().unwrap().id, "ELM327 v2.1");
+        let reply = exchange(
+            &mut elm,
+            &approve(Target::ObdFunctional, &[0x09, 0x02]),
+            Expect::ObdEcus,
+            Elm::<FakeLink>::timing(),
+        )
+        .unwrap();
+        assert_eq!(reply.len(), 2);
+    }
+
+    #[test]
+    fn a_clone_that_claims_a_version_it_doesnt_implement_is_told_so() {
+        // Most clones say v1.5, a version Elm Electronics never released, and refuse `X` digits
+        // in `AT CRA`; some say v2.1 and still do (python-OBD #132, #188).
+        for version in ["v1.5", "v2.1"] {
+            let mut elm = clone_of(version);
+            elm.unsupported.push("ATCRA7XX".into());
+            let err = Elm::connect(FakeLink::new(elm)).unwrap_err().to_string();
+            for needed in ["ATCRA7XX", "ELM327 v2.0", "STN", version] {
+                assert!(err.contains(needed), "{version}: {err}");
+            }
+        }
+    }
+
+    #[test]
+    fn an_answer_without_its_prompt_says_so() {
+        // python-OBD #160, #205: `ATE0\rOK` and then nothing. Without the prompt the driver can't
+        // tell whether more is coming, so it stops rather than write over it.
+        let mut elm = car();
+        elm.unfinished.push("ATH1".into());
+        let err = Elm::connect(FakeLink::new(elm)).unwrap_err().to_string();
+        assert!(err.contains("ATH1") && err.contains("prompt"), "{err}");
+        assert!(!err.contains("no ELM327"), "{err}");
+    }
+
+    #[test]
+    fn a_command_echoed_and_never_answered_says_so() {
+        let mut elm = car();
+        elm.mute.push("ATH1".into());
+        let err = Elm::connect(FakeLink::new(elm)).unwrap_err().to_string();
+        assert!(err.contains("echoed ATH1 but never answered"), "{err}");
+    }
+
+    #[test]
+    fn an_empty_answer_is_no_reply_and_the_adapter_stays_usable() {
+        // python-OBD #205: `0100` answered with an empty line and a prompt.
+        let mut elm = connect(car());
+        elm.link_mut().elm.empty_answers = true;
+        let err = exchange(
+            &mut elm,
+            &approve(Target::Physical(0x7E0), &[0x09, 0x02]),
+            Expect::Module(0x7E8),
+            Elm::<FakeLink>::timing(),
+        )
+        .unwrap_err();
+        assert!(matches!(err, Error::Timeout), "{err}");
+        elm.link_mut().elm.empty_answers = false;
+        elm.send(&approve(Target::Physical(0x7E0), &[0x09, 0x02]))
+            .unwrap();
+        assert_eq!(elm.recv(Duration::from_secs(1)).unwrap().source, 0x7E8);
+    }
+
+    #[test]
+    fn a_link_that_drops_mid_request_names_the_link() {
+        // python-OBD #188: Bluetooth links that drop after a few seconds of polling.
+        let mut elm = connect(car());
+        elm.send(&approve(Target::ObdFunctional, &[0x09, 0x02]))
+            .unwrap();
+        elm.link_mut().closed = true;
+        let err = elm.recv(Duration::from_secs(1)).unwrap_err().to_string();
+        assert!(err.contains("usb-serial link"), "{err}");
+        assert!(
+            elm.send(&approve(Target::ObdFunctional, &[0x09, 0x02]))
+                .is_err()
+        );
     }
 }

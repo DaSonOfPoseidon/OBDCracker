@@ -32,8 +32,8 @@ struct Cli {
     #[arg(long, value_name = "PORT", group = "adapter")]
     serial: Option<PathBuf>,
 
-    /// The serial port's baud rate [default: 115200, for `OBDLink` adapters; ELM327 clones often
-    /// use 38400]
+    /// The serial port's baud rate [default: 115200, for `OBDLink` adapters; ELM327 clones use
+    /// 38400, 9600, 230400 or 500000]
     #[arg(long, requires = "serial", conflicts_with_all = ["tcp", "dry_run", "sim"])]
     baud: Option<u32>,
 

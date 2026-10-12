@@ -102,6 +102,14 @@ const ECHO_WAIT: Duration = Duration::from_secs(1);
 // no single flipped bit of this leaves a line of hex digits, then the carriage return the adapter
 // needs before it drops the line (an STN holds an unfinished line indefinitely, #54).
 const KILL: &[u8] = b"XX\r";
+// The characters a consecutive frame takes as the adapter prints it, with headers and spaces on
+// and linefeeds off: `7E8 21 41 41 41 41 41 41 41 \r`.
+const FRAME_LINE: u32 = 29;
+// The link's byte rate when it can't be known: 9600 baud, the slowest an ELM327 starts at.
+const SLOWEST_RATE: u32 = 9600 / 10;
+// The byte rate at and above which an STN was seen to print a long reply with no gap between
+// frames (#49: about 770 bytes at 115200 baud, no `BUFFER FULL`).
+const STN_UNPACED_RATE: u32 = 115_200 / 10;
 
 /// An ELM327-compatible adapter on CAN (ISO 15765-4, 11-bit IDs, 500 kbit/s).
 ///
@@ -126,9 +134,17 @@ const KILL: &[u8] = b"XX\r";
 /// otherwise. Frames it doesn't show get no flow control, so another module's long reply on a
 /// busy bus isn't acknowledged in the tester's name.
 ///
-/// The adapter sends ISO-TP flow control frames itself, which no audit log records: for the
-/// OBD-II IDs (0x7DF and 0x7E0..=0x7E7) its standard ones, and for any other module
-/// `30 00 00` (continue, no block limit, no gap) to the module's request ID.
+/// The adapter sends ISO-TP flow control frames itself, which no audit log records: for a
+/// broadcast (0x7DF), its standard ones to each ECU, and for a physical request to the module's
+/// request ID. Each says continue, with no block limit. A physical request's also asks for a gap
+/// between frames (`STmin`) of the time the adapter takes to print one frame on the link
+/// ([`Link::byte_rate`], or 9600 baud when unknown), up to 127 ms. A broadcast's can't: only
+/// the adapter's standard flow control reaches each ECU's own request ID, and it asks for no
+/// gap. OBD-II broadcast replies are short, but several ECUs sending multi-frame replies at
+/// once on a slow link can still fill the buffer. Frames arrive faster than a
+/// slow link carries them away as text, and a plain ELM327 holds only 512 bytes before it
+/// prints `BUFFER FULL` and drops the rest. An STN chip on a link of 115200 baud or faster gets
+/// no gap, which a real one handled (#49).
 ///
 /// The adapter's state is unknown, and every later call fails without writing anything (connect
 /// again), if:
@@ -174,16 +190,20 @@ pub struct Elm<L> {
     broken: Option<String>,
     // What it printed when it was reset, such as `ELM327 v1.4b`.
     banner: String,
+    // Its `STI` answer, if it's an STN chip.
+    stn: Option<String>,
+    // The link's byte rate, if replies are paced to it.
+    pace: Option<u32>,
     senders: Vec<(u32, Reassembler<Vec<u8>>)>,
 }
 
 // Where the adapter sends ISO-TP flow control frames.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Flow {
-    // The adapter's own ISO 15765-4 handling, for the OBD-II IDs
+    // To the ID ISO 15765-4 gives, for the OBD-II IDs, with no gap between frames
     Standard,
-    // `30 00 00` to this request ID
-    To(u32),
+    // To this request ID, with this gap between frames (STmin, ms)
+    To(u32, u8),
 }
 
 /// What an adapter says about itself. Reading it puts nothing on the bus.
@@ -219,6 +239,8 @@ impl<L: Link> Elm<L> {
             last_byte: None,
             broken: None,
             banner: String::new(),
+            stn: None,
+            pace: None,
             senders: Vec::new(),
         };
         elm.drain_stale()?;
@@ -226,6 +248,18 @@ impl<L: Link> Elm<L> {
         elm.check_defaults()?;
         for command in SETUP {
             elm.expect_ok(command)?;
+        }
+        // Only an STN chip names itself so; a clone may answer anything.
+        let stn = elm.command("STI")?.join(" ");
+        elm.stn = stn.starts_with("STN").then_some(stn);
+        elm.pace = pace(elm.stn.is_some(), elm.link.byte_rate());
+        // Adaptive timing learns the timeout from response times and may set it below the gap
+        // a paced module leaves between frames, ending the reply early (ELM327DS p. 12; the
+        // OBDLink FRPM says the same timer waits for each next frame). So it's off when pacing,
+        // and the timeout is always `AT ST FF`: every request then waits about 1 s after its
+        // last reply.
+        if elm.pace.is_some() {
+            elm.expect_ok("ATAT0")?;
         }
         Ok(elm)
     }
@@ -246,17 +280,15 @@ impl<L: Link> Elm<L> {
         }
     }
 
-    /// Asks the adapter what it is and what voltage it sees.
+    /// Asks the adapter what voltage it sees, and says what it is.
     ///
-    /// The ID is the banner from the reset: asking again with `ATI` would make a reset now look
-    /// like an answer.
+    /// The ID is the banner from the reset and the STN version is `STI`'s answer from
+    /// [`Elm::connect`]: asking again with `ATI` would make a reset now look like an answer.
     pub fn info(&mut self) -> Result<AdapterInfo, Error> {
-        let id = self.banner.clone();
-        let stn = self.command("STI")?.join(" ");
         let voltage = self.command("ATRV")?.join(" ");
         Ok(AdapterInfo {
-            id,
-            stn: (stn != "?" && !stn.is_empty()).then_some(stn),
+            id: self.banner.clone(),
+            stn: self.stn.clone(),
             voltage: (voltage != "?" && !voltage.is_empty()).then_some(voltage),
         })
     }
@@ -370,6 +402,18 @@ impl<L: Link> Elm<L> {
         let mut echoed = false;
         loop {
             match self.next_event(deadline)? {
+                // Without the prompt the answer may not be over, so the next command can't tell
+                // where its own starts. Some clones leave it off (python-OBD #160, #205).
+                None if !lines.is_empty() || (echoed && self.splitter.partial().is_some()) => {
+                    return Err(self.break_down(format!(
+                        "the adapter answered {command} but never printed its prompt (>)"
+                    )));
+                }
+                None if echoed => {
+                    return Err(self.break_down(format!(
+                        "the adapter echoed {command} but never answered it"
+                    )));
+                }
                 None => {
                     return Err(self.break_down(format!("no answer to {command}")));
                 }
@@ -421,11 +465,28 @@ impl<L: Link> Elm<L> {
         }
         Err(
             self.break_down(if lines.iter().map(String::as_str).eq(["?"]) {
-                format!("the adapter doesn't support {command}")
+                format!(
+                    "the adapter doesn't support {command}{}",
+                    self.needs_hint(command)
+                )
             } else {
                 format!("{command} failed: {}", lines.join(" / "))
             }),
         )
+    }
+
+    // What a refused command says about the adapter: `X` digits in `AT CRA` arrived in ELM327
+    // v2.0, and most clones that claim it (or v1.5, which was never released) refuse them.
+    fn needs_hint(&self, command: &str) -> String {
+        if command.starts_with("ATCRA") && command.contains('X') {
+            format!(
+                "; this driver needs an ELM327 v2.0 or later, or an STN chip (OBDLink). This one \
+                 says it's {}, but many clones claim a version they don't implement",
+                self.banner
+            )
+        } else {
+            String::new()
+        }
     }
 
     // Fails if the adapter can't be trusted; otherwise waits for any request still running.
@@ -600,17 +661,24 @@ impl<L: Link> Elm<L> {
             self.expect_ok(&format!("ATSH{id:03X}"))?;
             self.header = Some(id);
         }
-        let flow = if id == 0x7DF || (0x7E0..=0x7E7).contains(&id) {
+        // A broadcast's flow control must go to each answering ECU's own request ID, which only
+        // the adapter's ISO 15765-4 handling does, with no gap. Mode 2 (driver's data, adapter's
+        // header) can't: it sends to the First Frame's own ID (p. 48). So only a physical
+        // request is paced: mode 1, to its request ID.
+        let gap = st_min(self.pace);
+        let flow = if id == 0x7DF || (gap == 0 && (0x7E0..=0x7E7).contains(&id)) {
             Flow::Standard
         } else {
-            Flow::To(id)
+            Flow::To(id, gap)
         };
         if self.flow != Some(flow) {
             match flow {
                 Flow::Standard => self.expect_ok("ATFCSM0")?,
-                Flow::To(id) => {
+                Flow::To(id, gap) => {
+                    // Continue to send, no block limit, and the gap. `AT FC SD` keeps two
+                    // non-hex letters (T, S), so one flipped bit can't make it a bus request.
                     self.expect_ok(&format!("ATFCSH{id:03X}"))?;
-                    self.expect_ok("ATFCSD300000")?;
+                    self.expect_ok(&format!("ATFCSD3000{gap:02X}"))?;
                     self.expect_ok("ATFCSM1")?;
                 }
             }
@@ -629,6 +697,23 @@ impl<L: Link> Elm<L> {
         }
         Ok(())
     }
+}
+
+// The link's byte rate if replies are paced to it: always, except for an STN on a fast link.
+fn pace(stn: bool, byte_rate: Option<u32>) -> Option<u32> {
+    let rate = byte_rate.filter(|&rate| rate > 0).unwrap_or(SLOWEST_RATE);
+    (!stn || rate < STN_UNPACED_RATE).then_some(rate)
+}
+
+// The gap between a module's consecutive frames, in ms, that keeps the adapter's output buffer
+// from filling: the time to print one frame line at the link's byte rate, rounded up, at most
+// 127 ms (the most STmin allows).
+fn st_min(pace: Option<u32>) -> u8 {
+    let Some(rate) = pace else {
+        return 0;
+    };
+    let ms = (FRAME_LINE * 1000).div_ceil(rate);
+    u8::try_from(ms.min(0x7F)).unwrap_or(0x7F)
 }
 
 // Whether an `AT CRA` pattern shows frames from `id`.
@@ -707,6 +792,13 @@ impl<L: Link> Transport for Elm<L> {
                         if let Some(reply) = self.feed(frame.id(), frame.data()) {
                             return Ok(reply);
                         }
+                    }
+                    Some(Line::Status(Status::BufferFull)) => {
+                        return Err(Error::Adapter(
+                            "the adapter said BUFFER FULL: its link is too slow for the replies, \
+                             and some were lost; use a faster baud rate"
+                                .into(),
+                        ));
                     }
                     Some(Line::Status(status)) if status.is_failure() => {
                         return Err(Error::Adapter(format!("the adapter said {status}")));
