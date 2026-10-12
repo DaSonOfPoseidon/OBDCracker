@@ -539,8 +539,11 @@ fn print_sweep(module: &UdsModule, found: &sweep::Sweep, last: u16) -> ExitCode 
                         | sweep::Why::Adapter(_)
                 )
             {
-                let ran = std::env::args_os().map(|arg| arg.to_string_lossy().into_owned());
-                match resume_command(ran, stop.at, last, cfg!(windows)) {
+                // An argument that isn't UTF-8 can't be printed as it was given.
+                let ran: Option<Vec<String>> = std::env::args_os()
+                    .map(|arg| arg.into_string().ok())
+                    .collect();
+                match ran.and_then(|ran| resume_command(ran, stop.at, last, cfg!(windows))) {
                     Some(command) => eprintln!("to go on: {command}"),
                     None => eprintln!(
                         "to go on: run the same command with --range {:04X}-{last:04X}",

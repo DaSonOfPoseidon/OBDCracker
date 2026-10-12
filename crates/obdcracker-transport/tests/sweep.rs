@@ -637,3 +637,30 @@ fn a_general_reject_is_listed_and_stops_the_sweep_after_it() {
     assert_eq!(got.found, [(0x0603, Err(reject))]);
     assert_eq!(got.stop, None);
 }
+
+#[test]
+fn replies_stay_suspect_after_an_unanswered_read_even_past_a_value() {
+    // 0x0600 goes unanswered, 0x0601 answers with its own value, then 0x0602 is refused: that
+    // refusal may still be 0x0600's late one, so the sweep stops there.
+    let mut car = Car::new(|_, request| match request {
+        [0x22, 0x06, 0x00] => Vec::new(),
+        [0x22, 0x06, 0x01] => reply(&[0x62, 0x06, 0x01, 0x42]),
+        _ => reply(&[0x7F, 0x22, 0x31]),
+    });
+    let got = sweep_dids(
+        &mut car,
+        &Policy::read_only(),
+        &engine(),
+        0x0600..=0x0603,
+        TIMING,
+        &SweepOptions::default(),
+    )
+    .unwrap();
+    assert_eq!(
+        got.found,
+        [(0x0600, Err(ReadError::NoReply)), (0x0601, Ok(vec![0x42]))]
+    );
+    let stop = got.stop.unwrap();
+    assert_eq!(stop.at, 0x0602);
+    assert!(matches!(stop.why, Why::Unmatched(_)), "{:?}", stop.why);
+}

@@ -76,8 +76,8 @@ pub enum Why {
     /// and [`Stop::at`] is the next one), or refused the
     /// extended session or didn't confirm it.
     Module(ReadError),
-    /// Right after a DID went unanswered, the next read got a refusal or another DID's value,
-    /// which may be the late answer to the earlier one: UDS refusals don't name the DID. Later
+    /// After a DID went unanswered, a later read got a refusal or another DID's value, which may
+    /// be the late answer to the earlier one: UDS refusals don't name the DID. Later
     /// replies may then answer earlier requests, so the sweep stops. Sweeping again from
     /// [`Stop::at`] on a fresh connection asks that DID first.
     Unmatched(ReadError),
@@ -266,6 +266,9 @@ fn read_each(
     // DIDs that got no final answer (no reply, or response-pending past the limit) since the
     // last answer. Each ends up listed with its error or covered by `Stop::at`, never neither.
     let mut quiet: Vec<(u16, ReadError)> = Vec::new();
+    // Whether any read went without a final answer: its answer may still come, as another's,
+    // at any later read on this connection.
+    let mut out_of_step = false;
     let unanswered = |quiet: &mut Vec<(u16, ReadError)>| {
         quiet
             .drain(..)
@@ -286,16 +289,16 @@ fn read_each(
         };
         progress(*did);
         // After an unanswered read, a refusal or another DID's value may be the late answer to
-        // that one. Asking again could leave this DID's own answer queued for the next.
-        if !quiet.is_empty()
-            && let Err(e @ ReadError::Reply(_)) = value
-        {
+        // that one, even past answers that were plainly this connection's own. Asking again
+        // could leave this DID's own answer queued for the next.
+        if out_of_step && let Err(e @ ReadError::Reply(_)) = value {
             found.extend(unanswered(&mut quiet));
             return halt(found, *did, Why::Unmatched(e));
         }
         match value {
             Err(e @ (ReadError::NoReply | ReadError::StillPending)) => {
                 quiet.push((*did, e));
+                out_of_step = true;
                 if quiet.len() == QUIET_LIMIT {
                     return halt(found, resume, Why::Module(e));
                 }
