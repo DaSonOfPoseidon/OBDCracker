@@ -1,7 +1,7 @@
 //! Parsing and validating vehicle profiles, and the built-in A7 profile.
 
 use obdcracker_core::isotp::Addressing;
-use obdcracker_profile::{Decode, Profile, ProfileError, Protocol, standard_decode};
+use obdcracker_profile::{Decode, DidSession, Profile, ProfileError, Protocol, standard_decode};
 use obdcracker_safety::{ModuleIds, Policy, Target};
 use proptest::prelude::*;
 
@@ -383,6 +383,30 @@ fn standard_dids_keep_their_iso_format() {
     assert_eq!(standard_decode(0xF190), Some(Decode::Text));
     assert_eq!(standard_decode(0xF18B), None);
     assert_eq!(standard_decode(0x0600), None);
+}
+
+#[test]
+fn a_did_can_need_the_extended_session() {
+    let toml = MINIMAL.replace(
+        "decode = \"text\"",
+        "decode = \"text\"\nsession = \"extended\"",
+    );
+    let profile = Profile::from_toml(&toml).unwrap();
+    assert_eq!(profile.modules[0].dids[0].session, DidSession::Extended);
+    // Without one, the default session reads it.
+    assert_eq!(
+        Profile::from_toml(MINIMAL).unwrap().modules[0].dids[0].session,
+        DidSession::Default
+    );
+    // The programming session isn't one a DID can name.
+    let toml = MINIMAL.replace(
+        "decode = \"text\"",
+        "decode = \"text\"\nsession = \"programming\"",
+    );
+    assert!(matches!(
+        Profile::from_toml(&toml),
+        Err(ProfileError::Toml(_))
+    ));
 }
 
 #[test]
