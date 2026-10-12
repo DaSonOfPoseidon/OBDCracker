@@ -29,8 +29,8 @@ pub struct SweepOptions {
 pub struct Sweep {
     /// Each DID the module has, in order: its value, or why it refused it. A DID refused as out
     /// of range (NRC 0x31) isn't there, so it isn't listed. A DID that went unanswered is
-    /// listed as [`ReadError::NoReply`] when a later one answered, as it may be worth reading
-    /// again.
+    /// listed as [`ReadError::NoReply`], as it may be worth reading again, unless the sweep
+    /// stopped before an answer came after it: then [`Stop::at`] is at or before it.
     pub found: Vec<(u16, Result<Vec<u8>, ReadError>)>,
     /// Where the sweep stopped early, if it did: sweep again from [`Stop::at`] to go on.
     pub stop: Option<Stop>,
@@ -39,7 +39,8 @@ pub struct Sweep {
 /// Where and why a sweep stopped before the end of its range.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Stop {
-    /// The first DID it didn't read.
+    /// Where to resume: the first DID it didn't read, or the first of the unanswered DIDs just
+    /// before it.
     pub at: u16,
     /// Why it stopped.
     pub why: Why,
@@ -48,8 +49,9 @@ pub struct Stop {
 /// Why a sweep stopped early.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Why {
-    /// The module stopped answering ([`ReadError::NoReply`] [`QUIET_LIMIT`] times in a row), or
-    /// refused the extended session or didn't confirm it.
+    /// The module stopped answering ([`ReadError::NoReply`] [`QUIET_LIMIT`] times in a row),
+    /// refused `22` itself (service not supported, in this session or at all, or a bad format),
+    /// or refused the extended session or didn't confirm it.
     Module(ReadError),
     /// The adapter failed, such as `BUFFER FULL`; its state may be unknown, so connect again.
     Adapter(Error),
@@ -65,6 +67,15 @@ impl std::fmt::Display for Why {
     }
 }
 
+// Refusals of the request as a whole rather than of one DID (ISO 14229-1): the service or the
+// session doesn't allow it, or the request's format is wrong. Every later read would get the same.
+const SERVICE_REFUSALS: [Nrc; 4] = [
+    Nrc::ServiceNotSupported,
+    Nrc::SubFunctionNotSupported,
+    Nrc::IncorrectMessageLength,
+    Nrc::ServiceNotSupportedInActiveSession,
+];
+
 /// How many DIDs in a row may go unanswered before a sweep takes the module to be gone.
 pub const QUIET_LIMIT: usize = 3;
 
@@ -74,7 +85,8 @@ pub const QUIET_LIMIT: usize = 3;
 /// [`SweepOptions::extended`] so are the session's own requests; the policy must then know the
 /// module's reply ID (narrow it with the vehicle profile), or [`FingerprintError::Session`] is
 /// returned with nothing sent. The sweep stops early, keeping what it found, when the module
-/// goes quiet ([`QUIET_LIMIT`]), refuses the session, or the adapter fails ([`Stop`]).
+/// goes quiet ([`QUIET_LIMIT`]), refuses `22` itself or the session, or the adapter fails
+/// ([`Stop`]).
 ///
 /// # Errors
 ///
@@ -183,8 +195,18 @@ fn read_each(
     progress: &mut impl FnMut(u16),
 ) -> Sweep {
     let mut found = Vec::new();
-    let mut quiet = Vec::new();
+    // DIDs that went unanswered since the last answer. Each ends up listed as `NoReply` or
+    // covered by `Stop::at`, never neither.
+    let mut quiet: Vec<u16> = Vec::new();
+    let unanswered = |quiet: &mut Vec<u16>| {
+        quiet
+            .drain(..)
+            .map(|did| (did, Err(ReadError::NoReply)))
+            .collect::<Vec<_>>()
+    };
     for (did, request) in requests {
+        // Where to resume after a stop that no answer came before: the first unanswered DID.
+        let resume = quiet.first().copied().unwrap_or(*did);
         let value = match asker.ask(request, |payload| {
             Ok(uds::decode_did(payload, *did)?.to_vec())
         }) {
@@ -193,7 +215,7 @@ fn read_each(
                 return Sweep {
                     found,
                     stop: Some(Stop {
-                        at: *did,
+                        at: resume,
                         why: stopped(Err(e)),
                     }),
                 };
@@ -207,18 +229,23 @@ fn read_each(
                     return Sweep {
                         found,
                         stop: Some(Stop {
-                            at: quiet[0],
+                            at: resume,
                             why: Why::Module(ReadError::NoReply),
                         }),
                     };
                 }
-                continue;
             }
-            // Not there.
+            // Not there, but the module answered, so the DIDs before it are listed.
             Err(ReadError::Reply(ReplyError::Negative(refusal)))
-                if refusal.nrc == Nrc::RequestOutOfRange => {}
-            // A session refused on the way (re-entered after it lapsed): nothing more will read.
-            Err(e @ ReadError::SessionRefused(_)) => {
+                if refusal.nrc == Nrc::RequestOutOfRange =>
+            {
+                found.extend(unanswered(&mut quiet));
+            }
+            // A refusal of `22` itself, not of this DID: nothing more will read.
+            Err(e @ ReadError::Reply(ReplyError::Negative(refusal)))
+                if SERVICE_REFUSALS.contains(&refusal.nrc) =>
+            {
+                found.extend(unanswered(&mut quiet));
                 return Sweep {
                     found,
                     stop: Some(Stop {
@@ -227,14 +254,24 @@ fn read_each(
                     }),
                 };
             }
-            value => found.extend(
-                quiet
-                    .drain(..)
-                    .map(|did| (did, Err(ReadError::NoReply)))
-                    .chain([(*did, value)]),
-            ),
+            // A session refused on the way (re-entered after it lapsed): nothing more will read,
+            // and nothing since the last answer was.
+            Err(e @ ReadError::SessionRefused(_)) => {
+                return Sweep {
+                    found,
+                    stop: Some(Stop {
+                        at: resume,
+                        why: Why::Module(e),
+                    }),
+                };
+            }
+            value => {
+                found.extend(unanswered(&mut quiet));
+                found.push((*did, value));
+            }
         }
-        quiet.clear();
     }
+    // Fewer than QUIET_LIMIT unanswered at the end: listed, as there's nothing to resume.
+    found.extend(unanswered(&mut quiet));
     Sweep { found, stop: None }
 }

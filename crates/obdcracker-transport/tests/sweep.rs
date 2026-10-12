@@ -300,3 +300,103 @@ proptest! {
         prop_assert_eq!(car.sent, want);
     }
 }
+
+#[test]
+fn a_refusal_of_the_service_stops_the_sweep() {
+    // Refusing `22` itself, not one DID, means nothing more will read in this session.
+    for nrc in [0x11, 0x12, 0x13, 0x7F] {
+        let mut car = Car::new(move |_, request| match request {
+            [0x22, 0x06, 0x00] => reply(&[0x62, 0x06, 0x00, 0x12]),
+            [0x22, ..] => reply(&[0x7F, 0x22, nrc]),
+            _ => Vec::new(),
+        });
+        let got = sweep_dids(
+            &mut car,
+            &Policy::read_only(),
+            &engine(),
+            0x0600..=0x06FF,
+            TIMING,
+            &SweepOptions::default(),
+        )
+        .unwrap();
+        assert_eq!(got.found, [(0x0600, Ok(vec![0x12]))], "{nrc:02X}");
+        assert_eq!(
+            got.stop,
+            Some(Stop {
+                at: 0x0601,
+                why: Why::Module(ReadError::Reply(ReplyError::Negative(NegativeResponse {
+                    sid: 0x22,
+                    nrc: Nrc::from(nrc),
+                })))
+            }),
+            "{nrc:02X}"
+        );
+        assert_eq!(car.sent.len(), 2, "{nrc:02X}");
+    }
+}
+
+#[test]
+fn unanswered_dids_before_an_out_of_range_refusal_are_listed() {
+    // 0x0601 goes unanswered once, then 0x0602 is refused as out of range: the module is still
+    // there, so 0x0601 may be worth reading again.
+    let mut car = Car::new(|_, request| match request {
+        [0x22, 0x06, 0x01] => Vec::new(),
+        [0x22, ..] => reply(&[0x7F, 0x22, 0x31]),
+        _ => Vec::new(),
+    });
+    let got = sweep_dids(
+        &mut car,
+        &Policy::read_only(),
+        &engine(),
+        0x0600..=0x0603,
+        TIMING,
+        &SweepOptions::default(),
+    )
+    .unwrap();
+    assert_eq!(got.found, [(0x0601, Err(ReadError::NoReply))]);
+    assert_eq!(got.stop, None);
+}
+
+#[test]
+fn unanswered_dids_are_listed_or_resumed_never_lost() {
+    // 0x0601 goes unanswered, then the adapter fails at 0x0602: resuming must read 0x0601 again.
+    let mut car = Car::new(|_, request| match request {
+        [0x22, 0x06, 0x00] => reply(&[0x62, 0x06, 0x00, 0x12]),
+        _ => Vec::new(),
+    });
+    car.fail_at = Some(2);
+    let got = sweep_dids(
+        &mut car,
+        &Policy::read_only(),
+        &engine(),
+        0x0600..=0x0610,
+        TIMING,
+        &SweepOptions::default(),
+    )
+    .unwrap();
+    assert_eq!(got.found, [(0x0600, Ok(vec![0x12]))]);
+    assert_eq!(got.stop.map(|stop| stop.at), Some(0x0601));
+    // Unanswered DIDs at the end of the range, fewer than QUIET_LIMIT, are listed.
+    let mut car = Car::new(|_, request| match request {
+        [0x22, 0x06, 0x00] => reply(&[0x62, 0x06, 0x00, 0x12]),
+        _ => Vec::new(),
+    });
+    let got = sweep_dids(
+        &mut car,
+        &Policy::read_only(),
+        &engine(),
+        0x0600..=0x0602,
+        TIMING,
+        &SweepOptions::default(),
+    )
+    .unwrap();
+    assert_eq!(
+        got.found,
+        [
+            (0x0600, Ok(vec![0x12])),
+            (0x0601, Err(ReadError::NoReply)),
+            (0x0602, Err(ReadError::NoReply)),
+        ]
+    );
+    assert_eq!(got.stop, None);
+}
