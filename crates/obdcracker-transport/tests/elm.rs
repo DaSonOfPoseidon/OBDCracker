@@ -1441,6 +1441,13 @@ mod pacing {
             flow_commands(FakeLink::new(stn)),
             ["ATFCSM0", "ATFCSH714", "ATFCSD300000", "ATFCSM1"]
         );
+        // A clone that answers STI with something else isn't an STN.
+        let mut clone = long_replies();
+        clone.sti = Some("OK".into());
+        assert_eq!(
+            flow_commands(FakeLink::at_baud(clone, 115_200))[0],
+            "ATFCSD300003"
+        );
         // Untested any slower, so it's paced like any other adapter.
         let mut stn = long_replies();
         stn.sti = Some("STN2232 v5.12.4".into());

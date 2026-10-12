@@ -246,8 +246,9 @@ impl<L: Link> Elm<L> {
         for command in SETUP {
             elm.expect_ok(command)?;
         }
+        // Only an STN chip names itself so; a clone may answer anything.
         let stn = elm.command("STI")?.join(" ");
-        elm.stn = (stn != "?" && !stn.is_empty()).then_some(stn);
+        elm.stn = stn.starts_with("STN").then_some(stn);
         elm.st_min = st_min(elm.stn.is_some(), elm.link.byte_rate());
         Ok(elm)
     }
