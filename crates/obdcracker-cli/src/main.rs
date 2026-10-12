@@ -722,14 +722,15 @@ fn resume_command(
 // only has spaces too (POSIX shells, PowerShell and cmd all read those), else quoted for the
 // platform's shell. On Windows a backslash is an ordinary character (`\\.\COM10`), and cmd
 // groups words only with double quotes; but inside them PowerShell still expands `$` and `` ` ``
-// and cmd `%`, and they can't hold a `"` both read alike, so such a word gives None.
+// and cmd `%` (and `!` with delayed expansion), and they can't hold a `"` both read alike, so
+// such a word gives None.
 fn shell_word(word: &str, windows: bool) -> Option<String> {
     let plain =
         |c: char| c.is_ascii_alphanumeric() || "-_./=:,+@".contains(c) || (windows && c == '\\');
     Some(if !word.is_empty() && word.chars().all(plain) {
         word.to_owned()
     } else if windows {
-        if word.contains(['$', '`', '%', '"']) {
+        if word.contains(['$', '`', '%', '!', '"']) {
             return None;
         }
         format!("\"{word}\"")
@@ -1039,17 +1040,13 @@ mod tests {
             resume_command(ran.clone(), 1, 1, false).unwrap(),
             "obdcracker --tcp 'a$b' sweep --range 0001-0001"
         );
-        // Windows shells expand `$` (PowerShell) and `%` (cmd) even in double quotes.
+        // Windows shells expand `$` (PowerShell), `%` and, with delayed expansion, `!` (cmd)
+        // even in double quotes.
         assert_eq!(resume_command(ran, 1, 1, true), None);
-        let ran = args(&[
-            "obdcracker",
-            "--audit-log",
-            "%run%.jsonl",
-            "sweep",
-            "--range",
-            "0-1",
-        ]);
-        assert_eq!(resume_command(ran, 1, 1, true), None);
+        for word in ["%run%.jsonl", r"C:\logs\!CAR!\audit.jsonl"] {
+            let ran = args(&["obdcracker", "--audit-log", word, "sweep", "--range", "0-1"]);
+            assert_eq!(resume_command(ran, 1, 1, true), None, "{word}");
+        }
         // cmd.exe groups only with double quotes, and a backslash is part of a path there.
         let ran = args(&[
             r"C:\tools\obdcracker.exe",
