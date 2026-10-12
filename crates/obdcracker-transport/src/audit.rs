@@ -89,6 +89,12 @@ impl<T: Transport> Transport for Audited<T> {
         self.record("rx", response.source, &response.payload)?;
         Ok(response)
     }
+
+    fn patient(&mut self, on: bool) -> Result<(), Error> {
+        self.inner
+            .patient(on)
+            .map_err(|e| self.record_error("patient", None, e))
+    }
 }
 
 // Escapes `s` for the inside of a JSON string (RFC 8259, section 7): quotes, backslashes and

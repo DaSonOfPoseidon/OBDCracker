@@ -65,6 +65,18 @@ pub trait Transport {
     fn send(&mut self, request: &Approved) -> Result<(), Error>;
     /// Waits up to `timeout` for the next reply.
     fn recv(&mut self, timeout: Duration) -> Result<Response, Error>;
+    /// With `on`, waits as long as it can for each reply until called again without: an
+    /// adapter that learns shorter waits from how fast modules answer (the ELM327's adaptive
+    /// timing) stops doing so, so a module slow to answer isn't missed. Sends nothing on the bus.
+    /// The default does nothing, for a transport that waits for whatever timeout `recv` is given.
+    ///
+    /// # Errors
+    ///
+    /// The adapter refused the setting or failed.
+    fn patient(&mut self, on: bool) -> Result<(), Error> {
+        let _ = on;
+        Ok(())
+    }
 }
 
 /// Bytes as space-separated upper-case hex, the way CAN tools print them: `02 09 02`.
