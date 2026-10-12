@@ -28,9 +28,10 @@ pub struct SweepOptions {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Sweep {
     /// Each DID the module has, in order: its value, or why it refused it. A DID refused as out
-    /// of range (NRC 0x31) isn't there, so it isn't listed. A DID that went unanswered is
-    /// listed as [`ReadError::NoReply`], as it may be worth reading again, unless the sweep
-    /// stopped before an answer came after it: then [`Stop::at`] is at or before it.
+    /// of range (NRC 0x31) isn't there, so it isn't listed. A DID that got no final answer is
+    /// listed as [`ReadError::NoReply`] or [`ReadError::StillPending`], as it may be worth
+    /// reading again, unless the sweep stopped before an answer came after it: then
+    /// [`Stop::at`] is at or before it.
     pub found: Vec<(u16, Result<Vec<u8>, ReadError>)>,
     /// Where the sweep stopped early, if it did: sweep again from [`Stop::at`] to go on.
     pub stop: Option<Stop>,
@@ -38,12 +39,14 @@ pub struct Sweep {
 
 impl Sweep {
     /// How many DIDs in [`Sweep::found`] the module answered, with a value or a refusal: all
-    /// but those listed as [`ReadError::NoReply`].
+    /// but those listed as [`ReadError::NoReply`] or [`ReadError::StillPending`].
     #[must_use]
     pub fn answered(&self) -> usize {
         self.found
             .iter()
-            .filter(|(_, value)| *value != Err(ReadError::NoReply))
+            .filter(|(_, value)| {
+                !matches!(value, Err(ReadError::NoReply | ReadError::StillPending))
+            })
             .count()
     }
 }
@@ -61,7 +64,8 @@ pub struct Stop {
 /// Why a sweep stopped early.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Why {
-    /// The module stopped answering ([`ReadError::NoReply`] [`QUIET_LIMIT`] times in a row),
+    /// The module stopped answering ([`ReadError::NoReply`] or [`ReadError::StillPending`],
+    /// [`QUIET_LIMIT`] times in a row),
     /// refused `22` itself (service not supported, in this session or at all, or a bad format),
     /// or refused the extended session or didn't confirm it.
     Module(ReadError),
@@ -88,7 +92,8 @@ const SERVICE_REFUSALS: [Nrc; 4] = [
     Nrc::ServiceNotSupportedInActiveSession,
 ];
 
-/// How many DIDs in a row may go unanswered before a sweep takes the module to be gone.
+/// How many DIDs in a row may go without a final answer (no reply, or response-pending past
+/// [`Timing::max_pending`]) before a sweep takes the module to be gone or stuck.
 pub const QUIET_LIMIT: usize = 3;
 
 /// Reads each DID in `range` from `module`, in order, and returns those it has.
@@ -167,18 +172,31 @@ pub fn sweep_dids_reporting<T: Transport + ?Sized>(
             }
         };
         let sweep = read_each(&mut session, &requests, &mut progress);
-        // A module that doesn't confirm `10 01` leaves the session after S3.
+        // A module that doesn't confirm `10 01` leaves the session after S3. An adapter that
+        // fails then is in an unknown state, which matters more than why the sweep stopped.
         if let Err(e) = session.end()
             && let Err(FingerprintError::Transport(e)) = session_error(e)
-            && sweep.stop.is_none()
         {
-            return Ok(Sweep {
-                stop: Some(Stop {
-                    // Everything was read; sweeping again from the last DID repeats one read.
+            let stop = match sweep.stop {
+                Some(
+                    stop @ Stop {
+                        why: Why::Adapter(_),
+                        ..
+                    },
+                ) => stop,
+                Some(Stop { at, .. }) => Stop {
+                    at,
+                    why: Why::Adapter(e),
+                },
+                // Everything was read; sweeping again from the last DID repeats one read.
+                None => Stop {
                     at: *range.end(),
                     why: Why::Adapter(e),
-                }),
-                ..sweep
+                },
+            };
+            return Ok(Sweep {
+                found: sweep.found,
+                stop: Some(stop),
             });
         }
         return Ok(sweep);
@@ -207,21 +225,30 @@ fn read_each(
     progress: &mut impl FnMut(u16),
 ) -> Sweep {
     let mut found = Vec::new();
-    // DIDs that went unanswered since the last answer. Each ends up listed as `NoReply` or
-    // covered by `Stop::at`, never neither.
-    let mut quiet: Vec<u16> = Vec::new();
-    let unanswered = |quiet: &mut Vec<u16>| {
+    // DIDs that got no final answer (no reply, or response-pending past the limit) since the
+    // last answer. Each ends up listed with its error or covered by `Stop::at`, never neither.
+    let mut quiet: Vec<(u16, ReadError)> = Vec::new();
+    let unanswered = |quiet: &mut Vec<(u16, ReadError)>| {
         quiet
             .drain(..)
-            .map(|did| (did, Err(ReadError::NoReply)))
+            .map(|(did, e)| (did, Err(e)))
             .collect::<Vec<_>>()
     };
     for (did, request) in requests {
         // Where to resume after a stop that no answer came before: the first unanswered DID.
-        let resume = quiet.first().copied().unwrap_or(*did);
-        let value = match asker.ask(request, |payload| {
-            Ok(uds::decode_did(payload, *did)?.to_vec())
-        }) {
+        let resume = quiet.first().map_or(*did, |(did, _)| *did);
+        let mut ask = || {
+            asker.ask(request, |payload| {
+                Ok(uds::decode_did(payload, *did)?.to_vec())
+            })
+        };
+        let mut answer = ask();
+        // After an unanswered read, a refusal or a reply for another DID may be the late answer
+        // to that one: UDS refusals don't name the DID. Asking again settles it.
+        if !quiet.is_empty() && matches!(answer, Ok(Err(ReadError::Reply(_)))) {
+            answer = ask();
+        }
+        let value = match answer {
             Ok(value) => value,
             Err(e) => {
                 return Sweep {
@@ -235,14 +262,14 @@ fn read_each(
         };
         progress(*did);
         match value {
-            Err(ReadError::NoReply) => {
-                quiet.push(*did);
+            Err(e @ (ReadError::NoReply | ReadError::StillPending)) => {
+                quiet.push((*did, e));
                 if quiet.len() == QUIET_LIMIT {
                     return Sweep {
                         found,
                         stop: Some(Stop {
                             at: resume,
-                            why: Why::Module(ReadError::NoReply),
+                            why: Why::Module(e),
                         }),
                     };
                 }

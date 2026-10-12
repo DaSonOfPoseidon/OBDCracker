@@ -402,3 +402,95 @@ fn unanswered_dids_are_listed_or_resumed_never_lost() {
     // Only 0x0600 answered.
     assert_eq!(got.answered(), 1);
 }
+
+#[test]
+fn an_adapter_failure_leaving_the_session_outranks_a_module_stop() {
+    // The module refuses `22` in the extended session, then `10 01` fails at the adapter: its
+    // state is unknown, so that's the stop to report, at the same DID.
+    let mut car = Car::new(|_, request| match request {
+        [0x10, 0x03] => reply(&[0x50, 0x03, 0x00, 0x32, 0x01, 0xF4]),
+        [0x22, ..] => reply(&[0x7F, 0x22, 0x7F]),
+        _ => Vec::new(),
+    });
+    car.fail_at = Some(2);
+    let got = sweep_dids(
+        &mut car,
+        &Policy::read_only(),
+        &engine(),
+        0x0600..=0x06FF,
+        TIMING,
+        &extended(),
+    )
+    .unwrap();
+    assert_eq!(
+        got.stop,
+        Some(Stop {
+            at: 0x0600,
+            why: Why::Adapter(Error::Adapter("the adapter said BUFFER FULL".into()))
+        })
+    );
+}
+
+#[test]
+fn a_refusal_right_after_an_unanswered_read_is_asked_again() {
+    // 0x0600's late `7F 22 31` arrives as 0x0601's answer; asked again, 0x0601 answers.
+    let mut asked = 0;
+    let mut car = Car::new(move |_, request| match request {
+        [0x22, 0x06, 0x00] => Vec::new(),
+        [0x22, 0x06, 0x01] => {
+            asked += 1;
+            if asked == 1 {
+                reply(&[0x7F, 0x22, 0x31])
+            } else {
+                reply(&[0x62, 0x06, 0x01, 0x42])
+            }
+        }
+        _ => reply(&[0x7F, 0x22, 0x31]),
+    });
+    let got = sweep_dids(
+        &mut car,
+        &Policy::read_only(),
+        &engine(),
+        0x0600..=0x0602,
+        TIMING,
+        &SweepOptions::default(),
+    )
+    .unwrap();
+    assert_eq!(
+        got.found,
+        [(0x0600, Err(ReadError::NoReply)), (0x0601, Ok(vec![0x42])),]
+    );
+    assert_eq!(got.answered(), 1);
+}
+
+#[test]
+fn a_module_stuck_on_response_pending_stops_the_sweep() {
+    // Response-pending past the limit for every DID: as good as no answer.
+    let mut car = Car::new(|_, request| match request {
+        [0x22, ..] => std::iter::repeat_n(
+            reply(&[0x7F, 0x22, 0x78]),
+            usize::from(TIMING.max_pending) + 1,
+        )
+        .flatten()
+        .collect(),
+        _ => Vec::new(),
+    });
+    let got = sweep_dids(
+        &mut car,
+        &Policy::read_only(),
+        &engine(),
+        0x0600..=0x06FF,
+        TIMING,
+        &SweepOptions::default(),
+    )
+    .unwrap();
+    assert_eq!(
+        got.stop,
+        Some(Stop {
+            at: 0x0600,
+            why: Why::Module(ReadError::StillPending)
+        })
+    );
+    assert_eq!(got.answered(), 0);
+    assert_eq!(car.sent.len(), 3);
+}
