@@ -502,10 +502,18 @@ fn run_sweep<T: Transport>(
     match found.stop {
         None => ExitCode::SUCCESS,
         Some(stop) => {
-            eprintln!(
-                "stopped at {:04X}: {}; to go on, sweep --range {:04X}-{last:04X}",
-                stop.at, stop.why, stop.at
-            );
+            eprintln!("stopped at {:04X}: {}", stop.at, stop.why);
+            // A module that refused `22` or the session refuses it again; the rest may pass.
+            if matches!(
+                stop.why,
+                sweep::Why::Module(ReadError::NoReply) | sweep::Why::Adapter(_)
+            ) {
+                eprintln!(
+                    "to go on: sweep --module {name:?} --range {:04X}-{last:04X}{}",
+                    stop.at,
+                    if extended { " --extended" } else { "" }
+                );
+            }
             ExitCode::FAILURE
         }
     }
