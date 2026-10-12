@@ -125,6 +125,21 @@ pub struct DidDef {
     /// doesn't say where each value ends.
     #[serde(default)]
     pub length: Option<u16>,
+    /// The diagnostic session the module reads it in: the default one unless the profile says
+    /// `extended`.
+    #[serde(default)]
+    pub session: DidSession,
+}
+
+/// The diagnostic session a module reads a DID in.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum DidSession {
+    /// The session a module starts in.
+    #[default]
+    Default,
+    /// The extended diagnostic session (`10 03`).
+    Extended,
 }
 
 /// How to show a data identifier's value.

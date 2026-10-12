@@ -5,13 +5,13 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use obdcracker_core::obd::{self, Dtc, SupportedPids, Unit, Value};
 use obdcracker_core::response::{self, Error as ReplyError};
-use obdcracker_core::uds::{self, DtcCount, DtcRecord, did};
+use obdcracker_core::uds::{self, DiagnosticSession, DtcCount, DtcRecord, did};
 use obdcracker_safety::{Approved, Policy, Target};
 
 use crate::fingerprint::{
     DidValue, FingerprintError, ReadError, UdsModule, ask, broadcast, decode_did_value, from,
 };
-use crate::{Timing, Transport};
+use crate::{Error, ExtendedSession, S3, SessionError, Timing, Transport};
 
 /// The identification DIDs (ISO 14229-1 annex C) read from every module, in this order: spare
 /// part number (F187), software number (F188), software version (F189), system supplier
@@ -68,6 +68,21 @@ pub struct ExtraDid {
     /// are read up to three in one request (a single CAN frame), since a multi-DID reply
     /// doesn't say where each value ends.
     pub length: Option<u16>,
+    /// The diagnostic session the module reads it in. One that needs the extended session is
+    /// read only when [`ScanOptions::extended`] asks for it.
+    pub session: DiagnosticSession,
+}
+
+/// What [`scan_with`] does beyond [`scan`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct ScanOptions {
+    /// Read the DIDs that need the extended diagnostic session ([`ExtraDid::session`]): after
+    /// its other reads, each module that has any is put in the extended session, with these
+    /// S3 timings ([`ExtendedSession`]), and returned to the default session. `None`, the
+    /// default, changes no module's session, and those DIDs are
+    /// [`ReadError::NeedsExtendedSession`].
+    pub extended: Option<S3>,
 }
 
 /// How to show a DID's value.
@@ -158,7 +173,8 @@ pub struct ModuleScan {
 
 /// Scans a car, reading only: OBD-II from every emissions ECU (the supported PID bitmaps, then
 /// each supported mode 01 PID; mode 09 PIDs 00 and 0A; mode 03), then each module's DIDs and
-/// DTCs over UDS. It never changes a module's diagnostic session.
+/// DTCs over UDS. It never changes a module's diagnostic session, so DIDs that need the extended
+/// session are [`ReadError::NeedsExtendedSession`]; [`scan_with`] can read them.
 ///
 /// Every request it could send is approved by `policy` before the first is sent. A timeout or
 /// refusal only loses that value; an adapter error stops the scan.
@@ -167,6 +183,25 @@ pub fn scan<T: Transport + ?Sized>(
     policy: &Policy,
     modules: &[ScanModule],
     timing: Timing,
+) -> Result<Scan, ScanError> {
+    scan_with(transport, policy, modules, timing, &ScanOptions::default())
+}
+
+/// [`scan`], with `options`.
+///
+/// With [`ScanOptions::extended`], each module with DIDs that need the extended session is put
+/// in it after its other reads (`10 03`), kept there with `TesterPresent` if needed, and
+/// returned to the default session (`10 01`). Those requests are approved by `policy` before
+/// anything is sent too, and the policy must know each such module's reply ID (narrow it with
+/// the vehicle profile), or [`FingerprintError::Session`] is returned. A module that refuses
+/// the session or doesn't answer loses only those DIDs. One that doesn't confirm `10 01`
+/// returns to the default session on its own after S3.
+pub fn scan_with<T: Transport + ?Sized>(
+    transport: &mut T,
+    policy: &Policy,
+    modules: &[ScanModule],
+    timing: Timing,
+    options: &ScanOptions,
 ) -> Result<Scan, ScanError> {
     let approve = |target, payload: &[u8]| {
         policy
@@ -182,32 +217,7 @@ pub fn scan<T: Transport + ?Sized>(
     let dtc_request = approve(Target::ObdFunctional, &obd::stored_dtcs())?;
     let module_requests = modules
         .iter()
-        .map(|scanned| {
-            let target = Target::Physical(scanned.module.request_id);
-            let dids = dids_of(scanned);
-            let batches = batches_of(&dids)
-                .into_iter()
-                .map(|batch| {
-                    let mut payload = vec![uds::READ_DATA_BY_IDENTIFIER];
-                    for &index in &batch {
-                        payload.extend(dids[index].id.to_be_bytes());
-                    }
-                    Ok((batch, approve(target, &payload)?))
-                })
-                .collect::<Result<Vec<_>, _>>()?;
-            let dids = dids
-                .into_iter()
-                .map(|extra| Ok((extra, approve(target, &uds::read_did(extra.id))?)))
-                .collect::<Result<Vec<_>, _>>()?;
-            let count = approve(target, &uds::dtc_count_by_status_mask(FAULT_MASK))?;
-            let dtcs = approve(target, &uds::dtcs_by_status_mask(FAULT_MASK))?;
-            Ok(ModuleRequests {
-                dids,
-                batches,
-                count,
-                dtcs,
-            })
-        })
+        .map(|scanned| module_requests(policy, scanned, options))
         .collect::<Result<Vec<ModuleRequests>, ScanError>>()?;
 
     let supported = supported_pids(transport, &pid_requests, timing)?;
@@ -247,9 +257,11 @@ pub fn scan<T: Transport + ?Sized>(
     for (scanned_module, requests) in modules.iter().zip(module_requests) {
         scanned.push(scan_module(
             transport,
+            policy,
             &scanned_module.module,
             &requests,
             timing,
+            options,
         )?);
     }
     Ok(Scan {
@@ -258,13 +270,150 @@ pub fn scan<T: Transport + ?Sized>(
     })
 }
 
-// A module's requests, all approved: a read for each DID, the multi-DID reads (the indexes of
-// the DIDs each reads), the DTC count and the DTC list.
+// Approves every request scan may send a module: its DID reads, in batches and alone, the
+// extended session's own requests if it will be used, and the DTC reads.
+fn module_requests(
+    policy: &Policy,
+    scanned: &ScanModule,
+    options: &ScanOptions,
+) -> Result<ModuleRequests, ScanError> {
+    let approve = |target, payload: &[u8]| {
+        policy
+            .approve(target, payload)
+            .map_err(FingerprintError::Rejected)
+    };
+    let target = Target::Physical(scanned.module.request_id);
+    let did_requests = |dids: Vec<ExtraDid>| {
+        let batches = batches_of(&dids)
+            .into_iter()
+            .map(|batch| {
+                let mut payload = vec![uds::READ_DATA_BY_IDENTIFIER];
+                for &index in &batch {
+                    payload.extend(dids[index].id.to_be_bytes());
+                }
+                Ok((batch, approve(target, &payload)?))
+            })
+            .collect::<Result<Vec<_>, ScanError>>()?;
+        let dids = dids
+            .into_iter()
+            .map(|extra| Ok((extra, approve(target, &uds::read_did(extra.id))?)))
+            .collect::<Result<Vec<_>, ScanError>>()?;
+        Ok::<_, ScanError>(DidRequests { dids, batches })
+    };
+    let dids = dids_of(scanned);
+    let order = dids.iter().map(|did| did.id).collect();
+    let (extended, default): (Vec<_>, Vec<_>) = dids
+        .into_iter()
+        .partition(|did| did.session == DiagnosticSession::Extended);
+    let extended = did_requests(extended)?;
+    if options.extended.is_some() && !extended.dids.is_empty() {
+        // What `ExtendedSession` sends, checked now so nothing is sent if it can't be.
+        let enter = approve(target, &uds::session_control(DiagnosticSession::Extended))?;
+        approve(target, &uds::tester_present())?;
+        approve(target, &uds::session_control(DiagnosticSession::Default))?;
+        if enter.reply_id().is_none() {
+            return Err(FingerprintError::Session(SessionError::UnknownReplyId));
+        }
+    }
+    Ok(ModuleRequests {
+        order,
+        default: did_requests(default)?,
+        extended,
+        count: approve(target, &uds::dtc_count_by_status_mask(FAULT_MASK))?,
+        dtcs: approve(target, &uds::dtcs_by_status_mask(FAULT_MASK))?,
+    })
+}
+
+// A module's requests, all approved: its DID reads in the default session and in the extended
+// one, the DTC count and the DTC list. `order` is the order its DIDs' values are given in.
 struct ModuleRequests {
-    dids: Vec<(ExtraDid, Approved)>,
-    batches: Vec<(Vec<usize>, Approved)>,
+    order: Vec<u16>,
+    default: DidRequests,
+    extended: DidRequests,
     count: Approved,
     dtcs: Approved,
+}
+
+// A read for each DID, and the multi-DID reads (the indexes of the DIDs each reads).
+struct DidRequests {
+    dids: Vec<(ExtraDid, Approved)>,
+    batches: Vec<(Vec<usize>, Approved)>,
+}
+
+// Sends one read and decodes its answer: straight to the transport, or through an extended
+// session.
+trait Ask {
+    fn ask<V>(
+        &mut self,
+        request: &Approved,
+        decode: impl FnOnce(&[u8]) -> Result<V, ReplyError>,
+    ) -> Result<Result<V, ReadError>, ScanError>;
+}
+
+struct Direct<'a, T: ?Sized> {
+    transport: &'a mut T,
+    response_id: u32,
+    timing: Timing,
+}
+
+impl<T: Transport + ?Sized> Ask for Direct<'_, T> {
+    fn ask<V>(
+        &mut self,
+        request: &Approved,
+        decode: impl FnOnce(&[u8]) -> Result<V, ReplyError>,
+    ) -> Result<Result<V, ReadError>, ScanError> {
+        ask(
+            self.transport,
+            request,
+            self.response_id,
+            self.timing,
+            decode,
+        )
+    }
+}
+
+impl<T: Transport + ?Sized> Ask for ExtendedSession<'_, T> {
+    fn ask<V>(
+        &mut self,
+        request: &Approved,
+        decode: impl FnOnce(&[u8]) -> Result<V, ReplyError>,
+    ) -> Result<Result<V, ReadError>, ScanError> {
+        // `TesterPresent` if a slow module took long enough, so the session doesn't lapse.
+        if let Err(e) = self.keep_alive() {
+            return session_error(e).map(Err);
+        }
+        match self.exchange(request) {
+            Ok(reply) => Ok(decode(&reply.payload).map_err(ReadError::Reply)),
+            Err(e) => session_error(e).map(Err),
+        }
+    }
+}
+
+// What a session failure means for the values it was for: the module didn't answer or refused
+// the session, which loses only those; or the adapter failed, which stops the scan.
+fn session_error(e: SessionError) -> Result<ReadError, ScanError> {
+    match e {
+        SessionError::Transport(Error::Timeout) => Ok(ReadError::NoReply),
+        SessionError::Transport(Error::StillPending) => Ok(ReadError::StillPending),
+        SessionError::Transport(e) => Err(FingerprintError::Transport(e)),
+        // A refusal of `10 03` or `3E 00`, or a positive answer whose timing couldn't be decoded:
+        // decoded as an answer to the service it names.
+        SessionError::Refused(reply) => {
+            let sid = match *reply.as_slice() {
+                // A refusal: `7F <service ID> <code>`.
+                [0x7F, sid, ..] => sid,
+                // A positive answer's service ID is the request's plus 0x40.
+                [sid, ..] => sid.wrapping_sub(0x40),
+                [] => uds::DIAGNOSTIC_SESSION_CONTROL,
+            };
+            Ok(ReadError::SessionRefused(
+                response::positive(sid, &reply)
+                    .err()
+                    .unwrap_or(ReplyError::Malformed),
+            ))
+        }
+        e => Err(FingerprintError::Session(e)),
+    }
 }
 
 // A multi-DID request fits one CAN frame with up to three DIDs (7 bytes), which every adapter
@@ -411,28 +560,93 @@ fn pid_values<T: Transport + ?Sized>(
 
 fn scan_module<T: Transport + ?Sized>(
     transport: &mut T,
+    policy: &Policy,
     module: &UdsModule,
     requests: &ModuleRequests,
     timing: Timing,
+    options: &ScanOptions,
 ) -> Result<ModuleScan, ScanError> {
     let response_id = module.response_id;
+    let mut direct = Direct {
+        transport,
+        response_id,
+        timing,
+    };
+    let (mut dids, mut batch_answered) = read_dids(&mut direct, &requests.default)?;
+    let dtc_count = direct.ask(&requests.count, uds::decode_dtc_count)?;
+    let dtcs = direct.ask(&requests.dtcs, |payload| {
+        let (availability, records) = uds::decode_dtcs_by_status_mask(payload)?;
+        Ok(records
+            .filter(|record| record.status.0 & availability.0 & FAULT_MASK != 0)
+            .collect())
+    })?;
+    let replied =
+        |e: &ReadError| !matches!(e, ReadError::NoReply | ReadError::NeedsExtendedSession);
+    let answered = |dids: &[(u16, Result<DidValue, ReadError>)], batch_answered| {
+        batch_answered
+            || dids
+                .iter()
+                .any(|(_, value)| value.as_ref().err().is_none_or(replied))
+            || dtc_count.as_ref().err().is_none_or(replied)
+            || dtcs.as_ref().err().is_none_or(replied)
+    };
+    let extended = &requests.extended;
+    if !extended.dids.is_empty() {
+        let unread = |e: ReadError| extended.dids.iter().map(move |(did, _)| (did.id, Err(e)));
+        match options.extended {
+            None => dids.extend(unread(ReadError::NeedsExtendedSession)),
+            // A module that answered nothing isn't there: no session to enter.
+            Some(_) if !answered(&dids, batch_answered) => dids.extend(unread(ReadError::NoReply)),
+            Some(s3) => {
+                let target = Target::Physical(module.request_id);
+                match ExtendedSession::enter(transport, policy, target, timing, s3) {
+                    Ok(mut session) => {
+                        let (values, answered) = read_dids(&mut session, extended)?;
+                        dids.extend(values);
+                        batch_answered |= answered;
+                        // A module that doesn't confirm `10 01` leaves the session after S3.
+                        if let Err(e) = session.end() {
+                            session_error(e)?;
+                        }
+                    }
+                    // Dropping a session that may have been entered sent `10 01`.
+                    Err(e) => dids.extend(unread(session_error(e)?)),
+                }
+            }
+        }
+    }
+    let answered = answered(&dids, batch_answered);
+    // Each session's values were read apart: back to SCAN_DIDS, then the profile's.
+    dids.sort_by_key(|(id, _)| requests.order.iter().position(|did| did == id));
+    Ok(ModuleScan {
+        name: module.name.clone(),
+        response_id,
+        dids,
+        dtc_count,
+        dtcs,
+        answered,
+    })
+}
+
+// Reads each DID in `requests`, several at a time where it can, and whether any multi-DID read
+// got an answer, which the values may not show.
+#[allow(clippy::type_complexity)]
+fn read_dids(
+    asker: &mut impl Ask,
+    requests: &DidRequests,
+) -> Result<(Vec<(u16, Result<DidValue, ReadError>)>, bool), ScanError> {
     let did_requests = &requests.dids;
     let mut values: Vec<Option<Result<DidValue, ReadError>>> = vec![None; did_requests.len()];
-    // Whether any multi-DID read got an answer, which the values may not show.
     let mut batch_answered = false;
-    let read_alone = |transport: &mut T, index: usize| {
-        let (ExtraDid { id, format, .. }, request) = &did_requests[index];
-        ask(transport, request, response_id, timing, |payload| {
-            decode_scanned(payload, *id, *format)
-        })
-    };
     for index in 0..did_requests.len() {
         if values[index].is_some() {
             continue;
         }
         // A multi-DID read goes where its first DID comes.
         let Some((batch, request)) = requests.batches.iter().find(|(b, _)| b[0] == index) else {
-            values[index] = Some(read_alone(transport, index)?);
+            let (ExtraDid { id, format, .. }, request) = &did_requests[index];
+            values[index] =
+                Some(asker.ask(request, |payload| decode_scanned(payload, *id, *format))?);
             continue;
         };
         let layout: Vec<(u16, usize)> = batch
@@ -444,9 +658,7 @@ fn scan_module<T: Transport + ?Sized>(
             .collect();
         // A refusal, no reply, or a reply that doesn't fit the lengths: every DID in it is read
         // alone next.
-        let found = ask(transport, request, response_id, timing, |payload| {
-            split_batch(payload, &layout)
-        })?;
+        let found = asker.ask(request, |payload| split_batch(payload, &layout))?;
         batch_answered |= found.as_ref().err() != Some(&ReadError::NoReply);
         let found = found.unwrap_or_default();
         for (id, data) in found {
@@ -465,8 +677,13 @@ fn scan_module<T: Transport + ?Sized>(
         // (another ECU variant) is malformed until the profile is fixed.
         for &i in batch {
             if values[i].is_none() {
-                let (ExtraDid { id, format, length }, request) = &did_requests[i];
-                values[i] = Some(ask(transport, request, response_id, timing, |payload| {
+                let (
+                    ExtraDid {
+                        id, format, length, ..
+                    },
+                    request,
+                ) = &did_requests[i];
+                values[i] = Some(asker.ask(request, |payload| {
                     let data = uds::decode_did(payload, *id)?;
                     if length.is_some_and(|length| data.len() != usize::from(length)) {
                         return Err(ReplyError::Malformed);
@@ -476,39 +693,12 @@ fn scan_module<T: Transport + ?Sized>(
             }
         }
     }
-    let dids: Vec<_> = did_requests
+    let dids = did_requests
         .iter()
         .zip(values)
         .map(|((did, _), value)| (did.id, value.unwrap_or(Err(ReadError::NoReply))))
         .collect();
-    let dtc_count = ask(
-        transport,
-        &requests.count,
-        response_id,
-        timing,
-        uds::decode_dtc_count,
-    )?;
-    let dtcs = ask(transport, &requests.dtcs, response_id, timing, |payload| {
-        let (availability, records) = uds::decode_dtcs_by_status_mask(payload)?;
-        Ok(records
-            .filter(|record| record.status.0 & availability.0 & FAULT_MASK != 0)
-            .collect())
-    })?;
-    let replied = |e: &ReadError| *e != ReadError::NoReply;
-    let answered = batch_answered
-        || dids
-            .iter()
-            .any(|(_, value)| value.as_ref().err().is_none_or(replied))
-        || dtc_count.as_ref().err().is_none_or(replied)
-        || dtcs.as_ref().err().is_none_or(replied);
-    Ok(ModuleScan {
-        name: module.name.clone(),
-        response_id,
-        dids,
-        dtc_count,
-        dtcs,
-        answered,
-    })
+    Ok((dids, batch_answered))
 }
 
 // SCAN_DIDS, then the module's other extra DIDs, each once. A DID takes its first extra entry's
@@ -521,6 +711,7 @@ fn dids_of(scanned: &ScanModule) -> Vec<ExtraDid> {
             id,
             format: DidFormat::Text,
             length: None,
+            session: DiagnosticSession::Default,
         })
         .collect();
     let mut seen = BTreeSet::new();
@@ -531,6 +722,7 @@ fn dids_of(scanned: &ScanModule) -> Vec<ExtraDid> {
         match dids.iter_mut().find(|did| did.id == extra.id) {
             Some(did) => {
                 did.length = extra.length;
+                did.session = extra.session;
                 if !did::is_text(did.id) {
                     did.format = extra.format;
                 }

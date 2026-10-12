@@ -7,15 +7,18 @@ use std::time::Duration;
 use clap::builder::PossibleValuesParser;
 use clap::{Parser, Subcommand};
 use obdcracker_core::obd;
-use obdcracker_profile::{Decode, Profile, Protocol};
+use obdcracker_core::uds::DiagnosticSession;
+use obdcracker_profile::{Decode, DidSession, Profile, Protocol};
 use obdcracker_safety::{Policy, Target};
 use obdcracker_sim::SimBus;
 use obdcracker_transport::discover;
 use obdcracker_transport::elm::Elm;
 use obdcracker_transport::fingerprint::{self, DidValue, Fingerprint, ReadError, UdsModule};
 use obdcracker_transport::link::{Link, SerialLink, TcpLink};
-use obdcracker_transport::scan::{self, DidFormat, ExtraDid, PidValue, Scan, ScanModule};
-use obdcracker_transport::{Audited, DryRun, Expect, Timing, Transport, exchange, hex};
+use obdcracker_transport::scan::{
+    self, DidFormat, ExtraDid, PidValue, Scan, ScanModule, ScanOptions,
+};
+use obdcracker_transport::{Audited, DryRun, Expect, S3, Timing, Transport, exchange, hex};
 
 // OBDLink USB adapters' rate.
 const DEFAULT_BAUD: u32 = 115_200;
@@ -81,6 +84,11 @@ enum Command {
         /// then scan those that answer too
         #[arg(long)]
         discover: bool,
+        /// Also read the DIDs the profile says need the extended diagnostic session: each module
+        /// that has any is switched to it (UDS 0x10 03) after its other reads, kept there with
+        /// a tester-present request (0x3E 00), and switched back (0x10 01)
+        #[arg(long)]
+        extended: bool,
     },
     /// List this computer's serial ports
     Ports,
@@ -195,8 +203,8 @@ fn run<T: Transport>(cli: &Cli, transport: T, link: &str, timing: Timing) -> Exi
     if let Command::Fingerprint = cli.command {
         return run_fingerprint(cli, &mut transport, timing);
     }
-    if let Command::Scan { discover } = cli.command {
-        return run_scan(cli, &mut transport, timing, discover);
+    if let Command::Scan { discover, extended } = cli.command {
+        return run_scan(cli, &mut transport, timing, discover, extended);
     }
     let (target, payload, expect) = match cli.command {
         Command::Vin => (
@@ -392,6 +400,10 @@ fn scan_modules(cli: &Cli) -> Result<Vec<ScanModule>, String> {
                         Decode::Hex => DidFormat::Hex,
                     },
                     length: did.length,
+                    session: match did.session {
+                        DidSession::Default => DiagnosticSession::Default,
+                        DidSession::Extended => DiagnosticSession::Extended,
+                    },
                 })
                 .collect(),
         });
@@ -404,6 +416,7 @@ fn run_scan<T: Transport>(
     transport: &mut T,
     timing: Timing,
     discover: bool,
+    extended: bool,
 ) -> ExitCode {
     let (mut modules, mut policy) = match scan_modules(cli).and_then(|m| Ok((m, policy(cli)?))) {
         Ok(found) => found,
@@ -421,7 +434,15 @@ fn run_scan<T: Transport>(
             Err(code) => return code,
         }
     }
-    match scan::scan(transport, &policy, &modules, timing) {
+    let mut options = ScanOptions::default();
+    if extended {
+        eprintln!(
+            "note: --extended switches each module with extended-session DIDs to the extended \
+             diagnostic session (10 03) and back (10 01); it only reads"
+        );
+        options.extended = Some(S3::default());
+    }
+    match scan::scan_with(transport, &policy, &modules, timing, &options) {
         Ok(_) if cli.dry_run => {
             println!("dry run: nothing was sent");
             // Nothing answers a dry run, so the reads that depend on the answers aren't shown.
@@ -430,6 +451,14 @@ fn run_scan<T: Transport>(
                  the next bitmap is supported, then 01 <PID> for each PID an ECU says it supports \
                  (mode 01 reads only)"
             );
+            if extended {
+                // `10 03` gets no answer here, so the reads it would allow aren't shown.
+                println!(
+                    "with --extended, a live scan also reads each extended-session DID (22 <DID>) \
+                     between a module's 10 03 and 10 01, with 3E 00 before a read once 2 s have \
+                     passed since the module last accepted one"
+                );
+            }
             ExitCode::SUCCESS
         }
         Ok(found) => {

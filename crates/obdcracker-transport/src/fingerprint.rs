@@ -7,7 +7,7 @@ use obdcracker_core::response;
 use obdcracker_core::uds::{self, did};
 use obdcracker_safety::{Approved, Policy, Rejection, Target};
 
-use crate::{Error, Expect, Response, Timing, Transport, exchange, hex};
+use crate::{Error, Expect, Response, SessionError, Timing, Transport, exchange, hex};
 
 /// The identification DIDs read from each module, in this order: spare part number (F187),
 /// software number (F188), software version (F189), hardware number (F191) and ODX file (F19E).
@@ -135,6 +135,13 @@ pub enum ReadError {
     StillPending,
     /// The reply was a refusal or couldn't be decoded.
     Reply(response::Error),
+    /// Only the extended diagnostic session reads it, and the scan wasn't asked to enter it
+    /// ([`crate::scan::ScanOptions::extended`]). Nothing was sent for it.
+    NeedsExtendedSession,
+    /// The module refused to enter the extended diagnostic session (`10 03`) or to stay in it
+    /// (`3E 00`), or its answer couldn't be decoded, so this value, which needs the session,
+    /// wasn't read. The error names the refused service.
+    SessionRefused(response::Error),
     /// The CVNs don't pair with the calibration IDs: J1979 gives one CVN per calibration ID, so
     /// neither can be trusted to say which calibration a CVN checks. The raw replies are in the
     /// audit log.
@@ -152,6 +159,8 @@ impl fmt::Display for ReadError {
             Self::NoReply => f.write_str("no reply"),
             Self::StillPending => crate::Error::StillPending.fmt(f),
             Self::Reply(e) => e.fmt(f),
+            Self::NeedsExtendedSession => f.write_str("not read: needs the extended session"),
+            Self::SessionRefused(e) => write!(f, "not read: extended session: {e}"),
             Self::CountMismatch { calids, cvns } => {
                 write!(f, "{cvns} CVNs for {calids} calibration IDs")
             }
@@ -169,6 +178,10 @@ pub enum FingerprintError {
     Rejected(Rejection),
     /// The adapter failed. What was read before then is lost; the audit log has it.
     Transport(Error),
+    /// A module can't be put in the extended diagnostic session, such as one whose reply ID
+    /// the policy doesn't know ([`SessionError::UnknownReplyId`]). Checked before anything is
+    /// sent.
+    Session(SessionError),
 }
 
 impl fmt::Display for FingerprintError {
@@ -176,6 +189,7 @@ impl fmt::Display for FingerprintError {
         match self {
             Self::Rejected(rejection) => write!(f, "safety policy {rejection}"),
             Self::Transport(e) => e.fmt(f),
+            Self::Session(e) => write!(f, "extended session: {e}"),
         }
     }
 }

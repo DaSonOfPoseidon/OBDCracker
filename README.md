@@ -46,6 +46,10 @@ from developers being careful:
   (`19 01 AF`, `19 02 AF`). It lists only DTCs that are failed, pending, confirmed or failed since the last clear, not
   the module's untested codes. DIDs whose length the profile gives are read three to a request; any a reply leaves
   out or doesn't fit are read again one at a time, and must then be exactly that length.
+- `scan --extended` also reads the DIDs the profile marks `session = "extended"`. After a module's other reads it
+  enters the extended session (`10 03`), reads them (with `3E 00` before a read once 2 s have passed since the module
+  last accepted one), and returns it to the default session (`10 01`). A module with no such DIDs isn't switched, and
+  without `--extended` those DIDs show as not read. A module that refuses the session loses only those DIDs.
 - `scan --discover` first looks for modules the profile doesn't list. It reads the part number (`22 F1 87`) from each
   request ID in the profile's discovery range, one at a time and through the policy narrowed to those IDs, then scans
   whatever answered along with the profile's modules. On the A7 that's 0x700 to 0x769, replies at +0x6A: no ID it sends
@@ -95,6 +99,7 @@ obdcracker --serial <PORT> fingerprint
 obdcracker --dry-run --profile a7 scan # what scan would send; opens no adapter
 obdcracker --serial <PORT> --profile a7 scan
 obdcracker --serial <PORT> --profile a7 scan --discover  # also look for modules the profile doesn't list
+obdcracker --serial <PORT> --profile a7 scan --extended  # also read the profile's extended-session DIDs
 ```
 
 ## Using it as a library
@@ -132,7 +137,8 @@ raw-frame escape hatch, so no program built on these crates can send something t
 unlocked by cargo features plus a runtime unlock, and flashing stays banned until its design doc exists. If you need raw
 CAN for something else, use your own driver alongside this one.
 
-Reads that need the extended diagnostic session go through `transport::ExtendedSession`. It enters the session
+Reads that need the extended diagnostic session go through `transport::ExtendedSession`; `scan::scan_with` uses it
+for the DIDs a profile marks `session = "extended"`. It enters the session
 (`10 03`), and its `keep_alive` sends TesterPresent (`3E 00`) between requests so the module doesn't drop back after
 S3 (5 s). If the session has lapsed anyway, the guard enters it again before the next request. Dropping the guard
 returns the module to the default session (`10 01`).

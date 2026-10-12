@@ -5,13 +5,14 @@ use std::time::Duration;
 
 use obdcracker_core::obd::{Dtc, Unit};
 use obdcracker_core::response::{Error as ReplyError, NegativeResponse, Nrc};
-use obdcracker_core::uds::{DtcCount, DtcFormat, DtcRecord, DtcStatus, UdsDtc};
+use obdcracker_core::uds::{DiagnosticSession, DtcCount, DtcFormat, DtcRecord, DtcStatus, UdsDtc};
 use obdcracker_safety::{Approved, Policy};
 use obdcracker_transport::fingerprint::{DidValue, FingerprintError, ReadError, UdsModule};
 use obdcracker_transport::scan::{
-    DidFormat, ExtraDid, ObdEcu, PidValue, SCAN_DIDS, Scan, ScanModule, scan,
+    DidFormat, ExtraDid, ObdEcu, PidValue, SCAN_DIDS, Scan, ScanModule, ScanOptions, scan,
+    scan_with,
 };
-use obdcracker_transport::{Error, Response, Timing, Transport, hex};
+use obdcracker_transport::{Error, Response, S3, SessionError, Timing, Transport, hex};
 
 type Answer = Box<dyn FnMut(u32, &[u8]) -> Vec<Response>>;
 
@@ -75,6 +76,7 @@ fn engine(extra_dids: &[u16]) -> ScanModule {
                 id,
                 format: DidFormat::Text,
                 length: None,
+                session: DiagnosticSession::Default,
             })
             .collect(),
     }
@@ -87,6 +89,7 @@ fn engine_with_lengths() -> ScanModule {
         id,
         format,
         length: Some(length),
+        session: DiagnosticSession::Default,
     };
     ScanModule {
         module: UdsModule::obd_engine(),
@@ -183,6 +186,7 @@ fn a_batch_never_asks_for_a_reply_longer_than_iso_tp_carries() {
         id,
         format: DidFormat::Hex,
         length: Some(length),
+        session: DiagnosticSession::Default,
     };
     let module = ScanModule {
         module: UdsModule::obd_engine(),
@@ -641,12 +645,14 @@ fn a_hex_did_keeps_its_bytes_even_when_they_look_like_text() {
                 id: 0x0600,
                 format: DidFormat::Hex,
                 length: None,
+                session: DiagnosticSession::Default,
             },
             // A standard DID stays text, whatever a later entry says.
             ExtraDid {
                 id: 0xF187,
                 format: DidFormat::Hex,
                 length: None,
+                session: DiagnosticSession::Default,
             },
         ],
     };
@@ -684,6 +690,7 @@ fn a_profile_format_replaces_the_default_for_a_standard_did_with_no_fixed_format
         id,
         format: DidFormat::Hex,
         length: None,
+        session: DiagnosticSession::Default,
     };
     let module = ScanModule {
         module: UdsModule::obd_engine(),
@@ -695,6 +702,7 @@ fn a_profile_format_replaces_the_default_for_a_standard_did_with_no_fixed_format
                 id: 0xF18B,
                 format: DidFormat::Text,
                 length: None,
+                session: DiagnosticSession::Default,
             },
         ],
     };
@@ -951,5 +959,327 @@ fn a_module_that_stays_busy_loses_only_that_value() {
     assert_eq!(
         ReadError::StillPending.to_string(),
         "the module said it was busy (response-pending) but didn't answer in time"
+    );
+}
+
+// The engine with DIDs only the extended session reads: its coding (0600) and two values with
+// lengths, which can be read in one request.
+fn engine_with_extended() -> ScanModule {
+    let did = |id, length| ExtraDid {
+        id,
+        format: DidFormat::Hex,
+        length,
+        session: DiagnosticSession::Extended,
+    };
+    ScanModule {
+        module: UdsModule::obd_engine(),
+        extra_dids: vec![
+            did(0x0600, None),
+            did(0x0601, Some(1)),
+            did(0x0602, Some(2)),
+        ],
+    }
+}
+
+// An engine that reads 0600..=0602 only in the extended session, and refuses the identification
+// DIDs. `enter` is its answer to 10 03.
+fn session_car(enter: &'static [u8]) -> Car {
+    let mut extended = false;
+    Car::new(move |id, request| {
+        if id != 0x7E0 {
+            return Vec::new();
+        }
+        match request {
+            [0x10, 0x03] => {
+                extended = enter[0] == 0x50;
+                vec![reply(0x7E8, enter)]
+            }
+            [0x10, 0x01] => {
+                extended = false;
+                vec![reply(0x7E8, &[0x50, 0x01, 0x00, 0x32, 0x01, 0xF4])]
+            }
+            [0x3E, 0x00] => vec![reply(0x7E8, &[0x7E, 0x00])],
+            [0x22, 0x06, 0x00] if extended => dids_reply(&[&[0x06, 0x00, 0xAA, 0xBB]]),
+            [0x22, 0x06, 0x01, 0x06, 0x02] if extended => {
+                dids_reply(&[&[0x06, 0x01, 0x01], &[0x06, 0x02, 0x02, 0x03]])
+            }
+            [0x22, ..] => vec![reply(0x7E8, &[0x7F, 0x22, 0x31])],
+            [0x19, ..] => vec![reply(0x7E8, &[0x7F, 0x19, 0x12])],
+            _ => Vec::new(),
+        }
+    })
+}
+
+const ENTERED: &[u8] = &[0x50, 0x03, 0x00, 0x32, 0x01, 0xF4];
+
+fn extended() -> ScanOptions {
+    let mut options = ScanOptions::default();
+    options.extended = Some(S3::default());
+    options
+}
+
+fn value(scan: &Scan, did: u16) -> Result<DidValue, ReadError> {
+    scan.modules[0]
+        .dids
+        .iter()
+        .find(|(id, _)| *id == did)
+        .unwrap_or_else(|| panic!("{did:04X} wasn't read"))
+        .1
+        .clone()
+}
+
+#[test]
+fn extended_dids_are_only_read_when_asked() {
+    let mut car = session_car(ENTERED);
+    let got = scan(
+        &mut car,
+        &Policy::read_only(),
+        &[engine_with_extended()],
+        TIMING,
+    )
+    .unwrap();
+    for did in [0x0600, 0x0601, 0x0602] {
+        assert_eq!(value(&got, did), Err(ReadError::NeedsExtendedSession));
+    }
+    assert!(
+        !car.sent.iter().any(|sent| sent.starts_with("7E0 10")),
+        "{:?}",
+        car.sent
+    );
+    // Only the module's own answers count: refusals of the identification DIDs here.
+    assert!(got.modules[0].answered);
+}
+
+#[test]
+fn extended_dids_are_read_in_the_extended_session_after_everything_else() {
+    let mut car = session_car(ENTERED);
+    let got = scan_with(
+        &mut car,
+        &Policy::read_only(),
+        &[engine_with_extended()],
+        TIMING,
+        &extended(),
+    )
+    .unwrap();
+    assert_eq!(value(&got, 0x0600), Ok(DidValue::Bytes(vec![0xAA, 0xBB])));
+    assert_eq!(value(&got, 0x0601), Ok(DidValue::Bytes(vec![0x01])));
+    assert_eq!(value(&got, 0x0602), Ok(DidValue::Bytes(vec![0x02, 0x03])));
+    let engine: Vec<&str> = car
+        .sent
+        .iter()
+        .map(String::as_str)
+        .filter(|sent| sent.starts_with("7E0"))
+        .collect();
+    // The default session's reads and the DTCs first, then the session, then back.
+    let enter = engine.iter().position(|s| *s == "7E0 10 03").unwrap();
+    assert_eq!(
+        engine[enter..],
+        [
+            "7E0 10 03",
+            "7E0 22 06 00",
+            "7E0 22 06 01 06 02",
+            "7E0 10 01"
+        ]
+    );
+    assert!(engine[..enter].iter().any(|s| s.starts_with("7E0 19")));
+}
+
+#[test]
+fn a_module_that_refuses_the_extended_session_doesnt_stop_the_scan() {
+    let mut car = session_car(&[0x7F, 0x10, 0x22]);
+    let got = scan_with(
+        &mut car,
+        &Policy::read_only(),
+        &[engine_with_extended(), engine(&[])],
+        TIMING,
+        &extended(),
+    )
+    .unwrap();
+    for did in [0x0600, 0x0601, 0x0602] {
+        assert_eq!(
+            value(&got, did),
+            Err(ReadError::SessionRefused(ReplyError::Negative(
+                NegativeResponse {
+                    sid: 0x10,
+                    nrc: Nrc::ConditionsNotCorrect,
+                }
+            )))
+        );
+    }
+    // A plain refusal leaves the module in the default session: nothing to leave.
+    assert!(!car.sent.iter().any(|sent| sent == "7E0 10 01"));
+    assert_eq!(got.modules.len(), 2);
+}
+
+#[test]
+fn a_module_that_doesnt_answer_10_03_is_returned_to_the_default_session() {
+    // No answer doesn't mean the module didn't switch.
+    let mut car = session_car(ENTERED);
+    let mut answer = std::mem::replace(&mut car.answer, Box::new(|_, _| Vec::new()));
+    car.answer = Box::new(move |id, request| {
+        if request == [0x10, 0x03] {
+            Vec::new()
+        } else {
+            answer(id, request)
+        }
+    });
+    let got = scan_with(
+        &mut car,
+        &Policy::read_only(),
+        &[engine_with_extended()],
+        TIMING,
+        &extended(),
+    )
+    .unwrap();
+    assert_eq!(value(&got, 0x0600), Err(ReadError::NoReply));
+    assert_eq!(car.sent.last().map(String::as_str), Some("7E0 10 01"));
+}
+
+#[test]
+fn a_module_without_extended_dids_isnt_switched() {
+    let mut car = session_car(ENTERED);
+    scan_with(
+        &mut car,
+        &Policy::read_only(),
+        &[engine(&[0x0600])],
+        TIMING,
+        &extended(),
+    )
+    .unwrap();
+    assert!(!car.sent.iter().any(|sent| sent.starts_with("7E0 10")));
+}
+
+#[test]
+fn the_extended_session_needs_the_modules_reply_id_before_anything_is_sent() {
+    // Without a profile, the policy doesn't know which ID 0x714 answers on.
+    let mut module = engine_with_extended();
+    module.module = UdsModule {
+        name: "instruments".into(),
+        request_id: 0x714,
+        response_id: 0x77E,
+    };
+    let mut car = session_car(ENTERED);
+    let err = scan_with(
+        &mut car,
+        &Policy::read_only(),
+        &[module],
+        TIMING,
+        &extended(),
+    )
+    .unwrap_err();
+    assert_eq!(err, FingerprintError::Session(SessionError::UnknownReplyId));
+    assert!(car.sent.is_empty(), "{:?}", car.sent);
+}
+
+#[test]
+fn a_slow_module_is_kept_in_the_extended_session_with_tester_present() {
+    // A keepalive due at every read, as if each read took longer than S3client.
+    let mut options = ScanOptions::default();
+    options.extended = Some(S3 {
+        keepalive: Duration::ZERO,
+        timeout: Duration::from_secs(3600),
+    });
+    let mut car = session_car(ENTERED);
+    let got = scan_with(
+        &mut car,
+        &Policy::read_only(),
+        &[engine_with_extended()],
+        TIMING,
+        &options,
+    )
+    .unwrap();
+    assert_eq!(value(&got, 0x0600), Ok(DidValue::Bytes(vec![0xAA, 0xBB])));
+    let enter = car.sent.iter().position(|s| s == "7E0 10 03").unwrap();
+    assert_eq!(
+        car.sent[enter..],
+        [
+            "7E0 10 03",
+            "7E0 3E 00",
+            "7E0 22 06 00",
+            "7E0 3E 00",
+            "7E0 22 06 01 06 02",
+            "7E0 10 01"
+        ]
+    );
+}
+
+#[test]
+fn a_module_that_answered_nothing_isnt_switched() {
+    let mut car = Car::new(|_, _| Vec::new());
+    let got = scan_with(
+        &mut car,
+        &Policy::read_only(),
+        &[engine_with_extended()],
+        TIMING,
+        &extended(),
+    )
+    .unwrap();
+    assert_eq!(value(&got, 0x0600), Err(ReadError::NoReply));
+    assert!(!car.sent.iter().any(|sent| sent.starts_with("7E0 10")));
+    assert!(!got.modules[0].answered);
+}
+
+#[test]
+fn values_keep_their_order_whatever_session_reads_them() {
+    // An extended DID listed before a default one.
+    let mut module = engine_with_extended();
+    module.extra_dids.push(ExtraDid {
+        id: 0x0700,
+        format: DidFormat::Hex,
+        length: None,
+        session: DiagnosticSession::Default,
+    });
+    let expected: Vec<u16> = SCAN_DIDS
+        .iter()
+        .copied()
+        .chain([0x0600, 0x0601, 0x0602, 0x0700])
+        .collect();
+    for options in [ScanOptions::default(), extended()] {
+        let mut car = session_car(ENTERED);
+        let got = scan_with(
+            &mut car,
+            &Policy::read_only(),
+            std::slice::from_ref(&module),
+            TIMING,
+            &options,
+        )
+        .unwrap();
+        let order: Vec<u16> = got.modules[0].dids.iter().map(|(id, _)| *id).collect();
+        assert_eq!(order, expected, "{options:?}");
+    }
+}
+
+#[test]
+fn a_refused_tester_present_is_reported_as_its_own_refusal() {
+    let mut car = session_car(ENTERED);
+    let mut answer = std::mem::replace(&mut car.answer, Box::new(|_, _| Vec::new()));
+    car.answer = Box::new(move |id, request| {
+        if request == [0x3E, 0x00] {
+            vec![reply(0x7E8, &[0x7F, 0x3E, 0x22])]
+        } else {
+            answer(id, request)
+        }
+    });
+    let mut options = ScanOptions::default();
+    options.extended = Some(S3 {
+        keepalive: Duration::ZERO,
+        timeout: Duration::from_secs(3600),
+    });
+    let got = scan_with(
+        &mut car,
+        &Policy::read_only(),
+        &[engine_with_extended()],
+        TIMING,
+        &options,
+    )
+    .unwrap();
+    assert_eq!(
+        value(&got, 0x0600),
+        Err(ReadError::SessionRefused(ReplyError::Negative(
+            NegativeResponse {
+                sid: 0x3E,
+                nrc: Nrc::ConditionsNotCorrect,
+            }
+        )))
     );
 }
