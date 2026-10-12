@@ -203,24 +203,27 @@ pub struct Elm<L> {
     stn: Option<String>,
     // The link's byte rate, if replies are paced to it.
     pace: Option<u32>,
-    // Each module answering the request in progress, and the lines (with when they were read)
-    // of its reply so far, which are reported as unread if it never completes.
+    // Each module answering the request in progress.
     senders: Vec<Sender>,
+    // Lines of the request in progress that are in no reply yet, in the order they were read,
+    // with when, and the number each was given; reported as unread once the request is over.
+    heard: Vec<(u64, SystemTime, String)>,
+    next_heard: u64,
     // What it did besides requests and replies, until taken, and how many more were dropped.
     log: Vec<LinkEvent>,
     lost: usize,
 }
 
-// Where the adapter sends ISO-TP flow control frames.
 // A module answering the request in progress.
 #[derive(Debug)]
 struct Sender {
     id: u32,
     reassembler: Reassembler<Vec<u8>>,
-    // The lines of its reply so far, and when each was read.
-    lines: Vec<(SystemTime, String)>,
+    // The numbers of the `heard` lines of its reply so far.
+    lines: Vec<u64>,
 }
 
+// Where the adapter sends ISO-TP flow control frames.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Flow {
     // To the ID ISO 15765-4 gives, for the OBD-II IDs, with no gap between frames
@@ -287,6 +290,8 @@ impl<L: Link> Elm<L> {
             stn: None,
             pace: None,
             senders: Vec::new(),
+            heard: Vec::new(),
+            next_heard: 0,
             log: Vec::new(),
             lost: 0,
         };
@@ -755,6 +760,7 @@ impl<L: Link> Elm<L> {
     // Feeds one frame, printed as `line`, to its module's reassembler and returns the reply it
     // completes. Lines that end up in no reply are reported as unread.
     fn feed(&mut self, source: u32, data: &[u8], line: &str) -> Option<Response> {
+        let number = self.hear(line);
         let index = match self.senders.iter().position(|s| s.id == source) {
             Some(index) => index,
             None if self.senders.len() < MAX_SENDERS => {
@@ -766,19 +772,14 @@ impl<L: Link> Elm<L> {
                 });
                 self.senders.len() - 1
             }
-            None => {
-                self.note_unread(vec![(self.event_at, line.to_owned())]);
-                return None;
-            }
+            None => return None,
         };
+        let sender = &mut self.senders[index];
         // A single or first frame starts a new transfer, abandoning any unfinished one.
         if data.first().is_some_and(|pci| pci >> 4 <= 1) {
-            let abandoned = std::mem::take(&mut self.senders[index].lines);
-            self.note_unread(abandoned);
+            sender.lines.clear();
         }
-        let at = self.event_at;
-        let sender = &mut self.senders[index];
-        sender.lines.push((at, line.to_owned()));
+        sender.lines.push(number);
         // A frame that doesn't fit its module's transfer drops that transfer only; the
         // reassembler starts over at the module's next single or first frame.
         match sender.reassembler.feed(data) {
@@ -787,27 +788,35 @@ impl<L: Link> Elm<L> {
                     source,
                     payload: payload.to_vec(),
                 };
-                sender.lines.clear();
+                let used = std::mem::take(&mut sender.lines);
+                self.heard.retain(|(number, ..)| !used.contains(number));
                 Some(reply)
             }
             Ok(_) => None,
             Err(_) => {
-                let dropped = std::mem::take(&mut sender.lines);
-                self.note_unread(dropped);
+                sender.lines.clear();
                 None
             }
         }
     }
 
-    // Forgets every module's reply in progress, reporting the lines of those left unfinished.
-    fn drop_senders(&mut self) {
-        for sender in std::mem::take(&mut self.senders) {
-            self.note_unread(sender.lines);
+    // Keeps a line of the request in progress, read at `event_at`, until it's known whether
+    // it's part of a reply. Returns its number.
+    fn hear(&mut self, line: &str) -> u64 {
+        let number = self.next_heard;
+        self.next_heard += 1;
+        if self.heard.len() < MAX_EVENTS {
+            self.heard.push((number, self.event_at, line.to_owned()));
+        } else {
+            self.lost += 1;
         }
+        number
     }
 
-    fn note_unread(&mut self, lines: Vec<(SystemTime, String)>) {
-        for (at, line) in lines {
+    // Forgets every module's reply in progress, reporting the lines in no reply.
+    fn drop_senders(&mut self) {
+        self.senders.clear();
+        for (_, at, line) in std::mem::take(&mut self.heard) {
             self.note(LinkEvent::Unread { at, line });
         }
     }
@@ -939,6 +948,10 @@ impl<L: Link> Transport for Elm<L> {
 
     // The rest of the last request's output is read, and reported as unread.
     fn settle(&mut self) -> Result<(), Error> {
+        // Even if the adapter broke and nothing more can be read.
+        if self.broken.is_some() {
+            self.drop_senders();
+        }
         if self.busy { self.ready() } else { Ok(()) }
     }
 
@@ -984,7 +997,9 @@ impl<L: Link> Transport for Elm<L> {
                         return Err(Error::Adapter(format!("the adapter said {status}")));
                     }
                     // Such as NO DATA: heard, but no reply.
-                    Some(_) => self.note_unread(vec![(self.event_at, text)]),
+                    Some(_) => {
+                        self.hear(&text);
+                    }
                     None => {}
                 },
             }

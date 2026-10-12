@@ -1752,6 +1752,80 @@ mod events {
         assert_eq!(unread, expected);
     }
 
+    fn unread_in(events: Vec<LinkEvent>) -> Vec<String> {
+        events
+            .into_iter()
+            .filter_map(|e| match e {
+                LinkEvent::Unread { line, .. } => Some(line),
+                _ => None,
+            })
+            .collect()
+    }
+
+    // Three ECUs answer a broadcast with a 20-byte reply, each in three frames.
+    fn three_ecus() -> FakeElm {
+        FakeElm::new(Box::new(|header, request| {
+            if header == 0x7DF && request == [0x09, 0x02] {
+                [0x7E8, 0x7E9, 0x7EA]
+                    .into_iter()
+                    .map(|source| (source, VIN.to_vec()))
+                    .collect()
+            } else {
+                Vec::new()
+            }
+        }))
+    }
+
+    #[test]
+    fn unfinished_replies_are_reported_in_the_order_they_arrived() {
+        // Paced, the ECUs' frames interleave: the first's reply completes on its third frame,
+        // by when the other two have sent two frames each, and their last frames follow.
+        let mut elm = Elm::connect(FakeLink::at_baud(three_ecus(), 115_200)).unwrap();
+        elm.send(&approve(Target::ObdFunctional, &[0x09, 0x02]))
+            .unwrap();
+        assert_eq!(elm.recv(Duration::from_secs(1)).unwrap().source, 0x7E8);
+        elm.take_events();
+        elm.settle().unwrap();
+        let frames = frames(VIN);
+        let expected: Vec<String> = frames
+            .iter()
+            .flat_map(|frame| ["7E9", "7EA"].map(|source| format!("{source} {}", hex(frame))))
+            .collect();
+        assert_eq!(unread_in(elm.take_events()), expected);
+    }
+
+    #[test]
+    fn a_broken_adapter_still_reports_what_it_had_heard() {
+        // The second ECU's reply is longer, so it's still unfinished when the first's completes.
+        let mut elm = Elm::connect(FakeLink::at_baud(
+            FakeElm::new(Box::new(|header, _| {
+                if header == 0x7DF {
+                    vec![(0x7E8, VIN.to_vec()), (0x7E9, [VIN, VIN].concat())]
+                } else {
+                    Vec::new()
+                }
+            })),
+            115_200,
+        ))
+        .unwrap();
+        elm.send(&approve(Target::ObdFunctional, &[0x09, 0x02]))
+            .unwrap();
+        assert_eq!(elm.recv(Duration::from_secs(1)).unwrap().source, 0x7E8);
+        elm.take_events();
+        elm.link_mut().closed = true;
+        assert!(matches!(
+            elm.recv(Duration::from_secs(1)),
+            Err(Error::Adapter(_))
+        ));
+        assert!(elm.settle().is_err());
+        let unread = unread_in(elm.take_events());
+        let sent: Vec<String> = frames(&[VIN, VIN].concat())
+            .iter()
+            .map(|frame| format!("7E9 {}", hex(frame)))
+            .collect();
+        assert!(unread.len() >= 2 && sent.starts_with(&unread), "{unread:?}");
+    }
+
     #[test]
     fn a_status_line_that_isnt_a_failure_is_reported() {
         let mut elm = connect(car());
