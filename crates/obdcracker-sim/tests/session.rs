@@ -255,7 +255,14 @@ fn guard_reports_a_module_that_does_not_answer() {
         GUARD,
     )
     .unwrap_err();
-    assert_eq!(error, SessionError::Transport(Error::Timeout));
+    // Neither `10 03` nor `10 01` was confirmed, so it may be in the extended session.
+    assert_eq!(
+        error,
+        SessionError::Unconfirmed {
+            entry: Box::new(SessionError::Transport(Error::Timeout)),
+            leave: Box::new(SessionError::Transport(Error::Timeout)),
+        }
+    );
 }
 
 #[test]
@@ -306,7 +313,14 @@ fn guard_leaves_a_session_whose_entry_went_unanswered() {
         GUARD,
     )
     .unwrap_err();
-    assert_eq!(error, SessionError::Transport(Error::Timeout));
+    // Neither `10 03` nor `10 01` was confirmed, so it may be in the extended session.
+    assert_eq!(
+        error,
+        SessionError::Unconfirmed {
+            entry: Box::new(SessionError::Transport(Error::Timeout)),
+            leave: Box::new(SessionError::Transport(Error::Timeout)),
+        }
+    );
     assert_eq!(sent(&bus), [vec![0x10, 0x03], vec![0x10, 0x01]]);
     assert_eq!(session(&bus), Session::Default);
 }
@@ -395,4 +409,31 @@ fn scan_reads_extended_dids_and_leaves_the_module_in_the_default_session() {
     let mut options = ScanOptions::default();
     options.extended = Some(GUARD);
     assert_eq!(coding(&options), Ok(DidValue::Bytes((1..=10).collect())));
+}
+
+// A sweep finds the coding only in the extended session, and leaves the engine in the default one.
+#[test]
+fn sweep_finds_extended_dids_only_in_the_extended_session() {
+    use obdcracker_transport::fingerprint::UdsModule;
+    use obdcracker_transport::sweep::{SweepOptions, sweep_dids};
+
+    let found = |options: &SweepOptions| {
+        let mut bus = car();
+        let got = sweep_dids(
+            &mut bus,
+            &Policy::read_only(),
+            &UdsModule::obd_engine(),
+            0x05FE..=0x0602,
+            Timing::default(),
+            options,
+        )
+        .unwrap();
+        assert_eq!(got.stop, None);
+        assert_eq!(session(&bus), Session::Default);
+        got.found
+    };
+    assert_eq!(found(&SweepOptions::default()), []);
+    let mut options = SweepOptions::default();
+    options.extended = Some(GUARD);
+    assert_eq!(found(&options), [(CODING, Ok((1..=10).collect()))]);
 }

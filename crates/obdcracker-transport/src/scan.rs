@@ -342,7 +342,7 @@ struct DidRequests {
 
 // Sends one read and decodes its answer: straight to the transport, or through an extended
 // session.
-trait Ask {
+pub(crate) trait Ask {
     fn ask<V>(
         &mut self,
         request: &Approved,
@@ -350,10 +350,10 @@ trait Ask {
     ) -> Result<Result<V, ReadError>, ScanError>;
 }
 
-struct Direct<'a, T: ?Sized> {
-    transport: &'a mut T,
-    response_id: u32,
-    timing: Timing,
+pub(crate) struct Direct<'a, T: ?Sized> {
+    pub(crate) transport: &'a mut T,
+    pub(crate) response_id: u32,
+    pub(crate) timing: Timing,
 }
 
 impl<T: Transport + ?Sized> Ask for Direct<'_, T> {
@@ -391,11 +391,14 @@ impl<T: Transport + ?Sized> Ask for ExtendedSession<'_, T> {
 
 // What a session failure means for the values it was for: the module didn't answer or refused
 // the session, which loses only those; or the adapter failed, which stops the scan.
-fn session_error(e: SessionError) -> Result<ReadError, ScanError> {
+pub(crate) fn session_error(e: SessionError) -> Result<ReadError, ScanError> {
     match e {
         SessionError::Transport(Error::Timeout) => Ok(ReadError::NoReply),
         SessionError::Transport(Error::StillPending) => Ok(ReadError::StillPending),
         SessionError::Transport(e) => Err(FingerprintError::Transport(e)),
+        // What matters for the values is that the session wasn't entered. The module leaves it
+        // by itself after S3 if it did.
+        SessionError::Unconfirmed { entry, .. } => session_error(*entry),
         // A refusal of `10 03` or `3E 00`, or a positive answer whose timing couldn't be decoded:
         // decoded as an answer to the service it names.
         SessionError::Refused(reply) => {

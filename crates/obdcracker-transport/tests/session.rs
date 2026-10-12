@@ -29,6 +29,18 @@ fn mock(replies: &[&[u8]]) -> Mock {
     mock
 }
 
+fn timeout() -> SessionError {
+    SessionError::Transport(obdcracker_transport::Error::Timeout)
+}
+
+// `entry`, then no answer to `10 01`.
+fn unconfirmed(entry: SessionError) -> SessionError {
+    SessionError::Unconfirmed {
+        entry: Box::new(entry),
+        leave: Box::new(timeout()),
+    }
+}
+
 fn sent(mock: &Mock) -> Vec<Vec<u8>> {
     mock.sent().iter().map(|r| r.payload().to_vec()).collect()
 }
@@ -61,10 +73,8 @@ fn a_session_change_to_another_session_is_refused() {
     let mut adapter = mock(&[&[0x50, 0x01, 0x00, 0x32, 0x01, 0xF4]]);
     let error = ExtendedSession::enter(&mut adapter, &Policy::read_only(), ENGINE, FAST, GUARD)
         .unwrap_err();
-    assert_eq!(
-        error,
-        SessionError::Transport(obdcracker_transport::Error::Timeout)
-    );
+    // Nor does anything answer `10 01`, so the module may be in the extended session.
+    assert_eq!(error, unconfirmed(timeout()));
 }
 
 #[test]
@@ -117,10 +127,8 @@ fn a_malformed_refusal_counts_as_no_answer_and_is_left() {
     let mut adapter = mock(&[&[0x7F, 0x10, 0x22, 0x00]]);
     let error = ExtendedSession::enter(&mut adapter, &Policy::read_only(), ENGINE, FAST, GUARD)
         .unwrap_err();
-    assert_eq!(
-        error,
-        SessionError::Transport(obdcracker_transport::Error::Timeout)
-    );
+    // Nor does anything answer `10 01`, so the module may be in the extended session.
+    assert_eq!(error, unconfirmed(timeout()));
     assert_eq!(sent(&adapter), [vec![0x10, 0x03], vec![0x10, 0x01]]);
 }
 
@@ -257,7 +265,51 @@ fn a_malformed_positive_entry_is_refused_and_left() {
         .unwrap_err();
     assert_eq!(
         error,
-        SessionError::Refused(vec![0x50, 0x03, 0x00, 0x32, 0x01, 0xF4, 0x00])
+        unconfirmed(SessionError::Refused(vec![
+            0x50, 0x03, 0x00, 0x32, 0x01, 0xF4, 0x00
+        ]))
     );
     assert_eq!(sent(&adapter), [vec![0x10, 0x03], vec![0x10, 0x01]]);
+}
+
+// Answers nothing, and fails as an adapter does from the second request on.
+#[derive(Debug, Default)]
+struct FailsAfterOne {
+    sent: usize,
+}
+
+impl obdcracker_transport::Transport for FailsAfterOne {
+    fn send(
+        &mut self,
+        _request: &obdcracker_safety::Approved,
+    ) -> Result<(), obdcracker_transport::Error> {
+        self.sent += 1;
+        if self.sent > 1 {
+            return Err(obdcracker_transport::Error::Adapter(
+                "the adapter said BUFFER FULL".to_owned(),
+            ));
+        }
+        Ok(())
+    }
+
+    fn recv(&mut self, _timeout: Duration) -> Result<Response, obdcracker_transport::Error> {
+        Err(obdcracker_transport::Error::Timeout)
+    }
+}
+
+#[test]
+fn an_adapter_failure_leaving_after_an_unanswered_entry_is_reported() {
+    // `10 03` goes unanswered, so the module may have switched; `10 01` then fails in the
+    // adapter, whose state is now unknown. That matters more than the missing answer.
+    let mut adapter = FailsAfterOne::default();
+    let error = ExtendedSession::enter(&mut adapter, &Policy::read_only(), ENGINE, FAST, GUARD)
+        .unwrap_err();
+    assert!(
+        matches!(
+            error,
+            SessionError::Transport(obdcracker_transport::Error::Adapter(_))
+        ),
+        "{error:?}"
+    );
+    assert_eq!(adapter.sent, 2);
 }

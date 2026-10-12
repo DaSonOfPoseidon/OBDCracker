@@ -66,6 +66,10 @@ Each entry names the class, what to check, and where it bit us.
 - **Escape what you write, too.** A format built by hand (JSON Lines, TOML) must escape every string it
   interpolates, or one quote or backslash breaks the file for every reader. The audit log wrote the link name raw, so
   a Windows port such as `\\.\COM10` made invalid JSON. Test by parsing the output back with a real parser (#2).
+- **Quote for a shell with an allowlist, not a denylist.** The sweep's resume command refused Windows words with
+  `$ % ! "` and double-quoted the rest, but PowerShell also reads typographic quotes (`“`, `’`) as quotes, so a
+  crafted path could still end the quoting. Write a word only if every character is known plain; otherwise print
+  no command at all (PR #76).
 - **Don't over-restrict.** Know the protocol before rejecting something: Toyota body modules legitimately share
   CAN ID 0x750 with different extended-address bytes.
 
@@ -99,6 +103,17 @@ Each entry names the class, what to check, and where it bit us.
   service from the reply, or keep the request with it.
 - **Splitting a list to process it in groups reorders it.** `scan` read extended-session DIDs after the others and
   appended them, so values left their documented order. Put them back in the original order after the last group.
+- **Cleanup that runs on drop can't report a failure.** A guard's `Drop` sends `10 01`, but nothing sees what
+  happened, so an adapter that failed there went unnoticed and a module that refused to leave the session looked
+  fine. Where the outcome matters, clean up explicitly and pass the result on alongside the original failure (both
+  can matter: `SessionError::Unconfirmed`); leave `Drop` as the last resort.
+- **"Busy, repeat request" (NRC 0x21) isn't an answer.** Recording it as the DID's value and moving on misses the
+  DID and keeps a busy module busy. Stop or wait, then ask again.
+- **A refusal doesn't say which request it refuses.** UDS `7F 22 31` names the service, not the DID, so after a read
+  times out its late refusal can arrive as the next read's answer. Asking again doesn't fix it: the retry takes the
+  first answer, and the duplicate's answer is left queued for the read after. Once replies may be out of step, they
+  stay so for the rest of the connection, even past answers that plainly match: stop at the next one that can't be
+  matched, and resume on a fresh connection from there.
 - **Match a reply to its request by what it echoes**, not only the service ID: the PID (mode 09), a requested PID
   (mode 01), a requested DID (0x22) or the subfunction. A late reply to an earlier request has the same SID
   (`response::answers`).

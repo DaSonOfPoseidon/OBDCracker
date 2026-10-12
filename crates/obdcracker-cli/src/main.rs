@@ -7,6 +7,7 @@ use std::time::Duration;
 use clap::builder::PossibleValuesParser;
 use clap::{Parser, Subcommand};
 use obdcracker_core::obd;
+use obdcracker_core::response::{Error as ReplyError, Nrc};
 use obdcracker_core::uds::DiagnosticSession;
 use obdcracker_profile::{Decode, DidSession, Profile, Protocol};
 use obdcracker_safety::{ModuleIds, Policy, Target};
@@ -18,6 +19,7 @@ use obdcracker_transport::link::{Link, SerialLink, TcpLink};
 use obdcracker_transport::scan::{
     self, DidFormat, ExtraDid, PidValue, Scan, ScanModule, ScanOptions,
 };
+use obdcracker_transport::sweep::{self, SweepOptions};
 use obdcracker_transport::{Audited, DryRun, Expect, S3, Timing, Transport, exchange, hex};
 
 // OBDLink USB adapters' rate.
@@ -94,6 +96,21 @@ enum Command {
         /// These are the first range's reply IDs, so a module that stayed silent there may own one
         #[arg(long, requires = "discover")]
         wide: bool,
+    },
+    /// Look for the DIDs a module has: read each DID in a range (UDS 0x22), one request each, and
+    /// list those it answers. Reads only. Needs a profile (--profile or --sim) that lists the
+    /// module
+    Sweep {
+        /// The module's name in the profile, such as "head-up display"
+        #[arg(long)]
+        module: String,
+        /// The DIDs to read, as hex: FIRST-LAST, such as 0600-06FF. A whole range is 65536 reads
+        #[arg(long, value_parser = parse_did_range)]
+        range: (u16, u16),
+        /// Read in the extended diagnostic session: switch the module to it first (UDS 0x10 03),
+        /// keep it there with a tester-present request (0x3E 00), and switch it back (0x10 01)
+        #[arg(long)]
+        extended: bool,
     },
     /// List this computer's serial ports
     Ports,
@@ -216,6 +233,14 @@ fn run<T: Transport>(cli: &Cli, transport: T, link: &str, timing: Timing) -> Exi
     {
         return run_scan(cli, &mut transport, timing, discover, wide, extended);
     }
+    if let Command::Sweep {
+        module,
+        range,
+        extended,
+    } = &cli.command
+    {
+        return run_sweep(cli, &mut transport, timing, module, *range, *extended);
+    }
     let (target, payload, expect) = match cli.command {
         Command::Vin => (
             Target::ObdFunctional,
@@ -223,7 +248,11 @@ fn run<T: Transport>(cli: &Cli, transport: T, link: &str, timing: Timing) -> Exi
             Expect::ObdEcus,
         ),
         // Handled before any transport is opened, or above.
-        Command::Ports | Command::Adapter | Command::Fingerprint | Command::Scan { .. } => {
+        Command::Ports
+        | Command::Adapter
+        | Command::Fingerprint
+        | Command::Scan { .. }
+        | Command::Sweep { .. } => {
             unreachable!()
         }
     };
@@ -359,6 +388,174 @@ fn print_fingerprint(found: &Fingerprint) {
     }
 }
 
+// `FIRST-LAST`, each up to four hex digits, FIRST no later than LAST.
+fn parse_did_range(text: &str) -> Result<(u16, u16), String> {
+    let did = |part: &str| {
+        // Only hex digits: from_str_radix also takes a leading `+`.
+        if (1..=4).contains(&part.len()) && part.bytes().all(|b| b.is_ascii_hexdigit()) {
+            u16::from_str_radix(part, 16).map_err(|e| e.to_string())
+        } else {
+            Err(format!("{part:?} isn't a DID: up to four hex digits"))
+        }
+    };
+    let (first, last) = text
+        .split_once('-')
+        .ok_or_else(|| format!("{text:?} isn't a range: give FIRST-LAST, such as 0600-06FF"))?;
+    let (first, last) = (did(first)?, did(last)?);
+    if first > last {
+        return Err(format!(
+            "the range starts at {first:04X}, after its end {last:04X}"
+        ));
+    }
+    Ok((first, last))
+}
+
+// Reads each DID in the range from one profile module and lists those it has.
+fn run_sweep<T: Transport>(
+    cli: &Cli,
+    transport: &mut T,
+    timing: Timing,
+    name: &str,
+    (first, last): (u16, u16),
+    extended: bool,
+) -> ExitCode {
+    let usage = |e: String| {
+        eprintln!("{e}");
+        ExitCode::from(2)
+    };
+    let Some(profile_name) = cli.profile.as_ref().or(cli.sim.as_ref()) else {
+        return usage("sweep needs a profile that lists the module (--profile or --sim)".into());
+    };
+    let profile = match Profile::builtin(profile_name) {
+        Ok(profile) => profile,
+        Err(e) => return usage(format!("profile {profile_name}: {e}")),
+    };
+    let Some(module) = profile.module(name) else {
+        return usage(format!(
+            "profile {profile_name} has no module named {name:?}"
+        ));
+    };
+    if module.protocol != Protocol::Uds || module.extended_address.is_some() {
+        return usage(format!("{name} isn't plain UDS, which sweep needs"));
+    }
+    let module = UdsModule {
+        name: module.name.clone(),
+        request_id: module.request_id,
+        response_id: module.response_id,
+    };
+    let policy = match policy(cli) {
+        Ok(policy) => policy,
+        Err(e) => return usage(e),
+    };
+    let count = u32::from(last) - u32::from(first) + 1;
+    // About what an ELM adapter takes per refused read.
+    eprintln!(
+        "sweep: {count} reads of {} ({:03X}), about {} min",
+        module.name,
+        module.request_id,
+        (count * 50).div_ceil(60_000)
+    );
+    let mut options = SweepOptions::default();
+    if extended {
+        options.extended = Some(S3::default());
+    }
+    let progress = |did: u16| {
+        if did & 0xFF == 0xFF && did != last {
+            eprintln!("sweep: read up to {did:04X}");
+        }
+    };
+    let found = match sweep::sweep_dids_reporting(
+        transport,
+        &policy,
+        &module,
+        first..=last,
+        timing,
+        &options,
+        progress,
+    ) {
+        Ok(found) => found,
+        Err(e) => {
+            eprintln!("{e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    if cli.dry_run {
+        println!("dry run: nothing was sent");
+        // Nothing answers a dry run, so the sweep stopped after a few reads.
+        println!(
+            "a live sweep reads every DID from 22 {first:04X} to 22 {last:04X}, one request each, \
+             and stops early if the module stops answering"
+        );
+        return ExitCode::SUCCESS;
+    }
+    print_sweep(&module, &found, last)
+}
+
+// Lists what a sweep found, and how to resume one that stopped.
+fn print_sweep(module: &UdsModule, found: &sweep::Sweep, last: u16) -> ExitCode {
+    for (did, value) in &found.found {
+        match value {
+            Ok(data) => println!(
+                "{:03X} {} {did:04X} [{}]",
+                module.response_id,
+                module.name,
+                hex(data)
+            ),
+            Err(e) => println!("{:03X} {} {did:04X} ({e})", module.response_id, module.name),
+        }
+    }
+    let unanswered = found.found.len() - found.answered();
+    println!(
+        "sweep: {} DIDs answered{}",
+        found.answered(),
+        if unanswered > 0 {
+            format!(", {unanswered} unanswered (worth reading again)")
+        } else {
+            String::new()
+        }
+    );
+    if let Some(e) = &found.still_extended {
+        eprintln!(
+            "warning: {} may still be in the extended session ({e}); it returns to the default \
+             session by itself within about 5 s",
+            module.name
+        );
+    }
+    match &found.stop {
+        None => ExitCode::SUCCESS,
+        Some(stop) => {
+            eprintln!("stopped at {:04X}: {}", stop.at, stop.why);
+            // A module that refused `22` or the session refuses it again; the rest may pass.
+            let busy = matches!(
+                &stop.why,
+                sweep::Why::Module(ReadError::Reply(ReplyError::Negative(refusal)))
+                    if [Nrc::BusyRepeatRequest, Nrc::GeneralReject].contains(&refusal.nrc)
+            );
+            if busy
+                || matches!(
+                    stop.why,
+                    sweep::Why::Module(ReadError::NoReply | ReadError::StillPending)
+                        | sweep::Why::Unmatched(_)
+                        | sweep::Why::Adapter(_)
+                )
+            {
+                // An argument that isn't UTF-8 can't be printed as it was given.
+                let ran: Option<Vec<String>> = std::env::args_os()
+                    .map(|arg| arg.into_string().ok())
+                    .collect();
+                match ran.and_then(|ran| resume_command(ran, stop.at, last, cfg!(windows))) {
+                    Some(command) => eprintln!("to go on: {command}"),
+                    None => eprintln!(
+                        "to go on: run the same command with --range {:04X}-{last:04X}",
+                        stop.at
+                    ),
+                }
+            }
+            ExitCode::FAILURE
+        }
+    }
+}
+
 fn print_dids(id: u32, name: &str, dids: &[(u16, Result<DidValue, ReadError>)]) {
     for (did, value) in dids {
         match value {
@@ -486,6 +683,63 @@ fn run_scan<T: Transport>(
             ExitCode::FAILURE
         }
     }
+}
+
+// The command that ran, with its `--range` starting at `from`, for a shell to run again: a
+// Windows one if `windows`. None if a word can't be written so every such shell reads it as is.
+fn resume_command(
+    ran: impl IntoIterator<Item = String>,
+    from: u16,
+    last: u16,
+    windows: bool,
+) -> Option<String> {
+    let range = format!("{from:04X}-{last:04X}");
+    let mut ran = ran.into_iter();
+    // The program as installed, not however this run reached it.
+    ran.next();
+    let mut words = vec!["obdcracker".to_owned()];
+    let mut range_next = false;
+    for word in ran {
+        words.push(if range_next {
+            range.clone()
+        } else if word.starts_with("--range=") {
+            format!("--range={range}")
+        } else {
+            word.clone()
+        });
+        range_next = word == "--range";
+    }
+    Some(
+        words
+            .iter()
+            .map(|word| shell_word(word, windows))
+            .collect::<Option<Vec<_>>>()?
+            .join(" "),
+    )
+}
+
+// `word` as one shell word: as is if no shell treats any of it specially, in double quotes if it
+// only has spaces too (POSIX shells, PowerShell and cmd all read those), else quoted for the
+// platform's shell. On Windows a backslash is an ordinary character (`\\.\COM10`), and cmd
+// groups words only with double quotes; but inside them PowerShell still expands `$` and `` ` ``
+// (and reads typographic quotes as quotes), cmd `%` (and `!` with delayed expansion), so any
+// other word gives None rather than trusting a list of what's special.
+fn shell_word(word: &str, windows: bool) -> Option<String> {
+    // PowerShell reads a leading `@` as splatting or an array.
+    if windows && word.starts_with('@') {
+        return None;
+    }
+    let plain =
+        |c: char| c.is_ascii_alphanumeric() || "-_./=:,+@".contains(c) || (windows && c == '\\');
+    Some(if !word.is_empty() && word.chars().all(plain) {
+        word.to_owned()
+    } else if word.chars().all(|c| plain(c) || c == ' ') {
+        format!("\"{word}\"")
+    } else if windows {
+        return None;
+    } else {
+        format!("'{}'", word.replace('\'', r"'\''"))
+    })
 }
 
 // Looks for modules in the profile's discovery range, and with `wide` its wide range too, and
@@ -735,5 +989,93 @@ fn print_scan(found: &Scan) {
             }
             Err(e) => println!("{id:03X} {name} DTCs ({e})"),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::resume_command;
+
+    fn args(words: &[&str]) -> Vec<String> {
+        words.iter().map(|&w| w.to_owned()).collect()
+    }
+
+    #[test]
+    fn the_resume_command_is_the_one_that_ran_from_where_it_stopped() {
+        let ran = args(&[
+            "/usr/local/bin/obdcracker",
+            "--serial",
+            "/dev/ttyUSB0",
+            "--profile",
+            "a7",
+            "--audit-log",
+            "car4-hud.jsonl",
+            "sweep",
+            "--module",
+            "head-up display",
+            "--range",
+            "0000-0FFF",
+            "--extended",
+        ]);
+        assert_eq!(
+            resume_command(ran, 0x0123, 0x0FFF, false).unwrap(),
+            "obdcracker --serial /dev/ttyUSB0 --profile a7 --audit-log car4-hud.jsonl sweep \
+             --module \"head-up display\" --range 0123-0FFF --extended"
+        );
+        let ran = args(&[
+            "obdcracker",
+            "--sim",
+            "a7",
+            "sweep",
+            "--range=0-ff",
+            "--module",
+            "x",
+        ]);
+        assert_eq!(
+            resume_command(ran, 0x0080, 0x00FF, false).unwrap(),
+            "obdcracker --sim a7 sweep --range=0080-00FF --module x"
+        );
+        // A word a shell would expand is quoted so it isn't.
+        let ran = args(&["obdcracker", "--tcp", "a$b", "sweep", "--range", "0-1"]);
+        assert_eq!(
+            resume_command(ran.clone(), 1, 1, false).unwrap(),
+            "obdcracker --tcp 'a$b' sweep --range 0001-0001"
+        );
+        // Windows shells expand `$` (PowerShell), `%` and, with delayed expansion, `!` (cmd)
+        // even in double quotes.
+        assert_eq!(resume_command(ran, 1, 1, true), None);
+        // PowerShell also reads typographic quotes as quotes, so only known-plain words are
+        // written, whatever else a shell might treat specially.
+        for word in [
+            "%run%.jsonl",
+            r"C:\logs\!CAR!\audit.jsonl",
+            "car\u{201C} 4.jsonl",
+            "car\u{2019}s log.jsonl",
+            "a^b c",
+            "(car).jsonl",
+            // PowerShell reads a leading `@` as splatting or an array.
+            "@args",
+            "caf\u{E9}.jsonl",
+        ] {
+            let ran = args(&["obdcracker", "--audit-log", word, "sweep", "--range", "0-1"]);
+            assert_eq!(resume_command(ran, 1, 1, true), None, "{word}");
+        }
+        // cmd.exe groups only with double quotes, and a backslash is part of a path there.
+        let ran = args(&[
+            r"C:\tools\obdcracker.exe",
+            "--serial",
+            r"\\.\COM10",
+            "--audit-log",
+            r"C:\car 4\hud.jsonl",
+            "sweep",
+            "--module",
+            "head-up display",
+            "--range",
+            "0000-0FFF",
+        ]);
+        assert_eq!(
+            resume_command(ran, 0x0123, 0x0FFF, true).unwrap(),
+            r#"obdcracker --serial \\.\COM10 --audit-log "C:\car 4\hud.jsonl" sweep --module "head-up display" --range 0123-0FFF"#
+        );
     }
 }
