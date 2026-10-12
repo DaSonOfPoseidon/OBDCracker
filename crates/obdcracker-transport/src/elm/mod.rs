@@ -122,9 +122,11 @@ const STN_UNPACED_RATE: u32 = 115_200 / 10;
 /// [`Elm::connect`] fails.
 ///
 /// Replies still arriving when the next request is sent are dropped: checked for signs of a
-/// reset, but not returned, so an [`crate::Audited`] wrapper doesn't log them. Call
-/// [`Transport::recv`] until it times out to get them all. Returning them later would let a
-/// late reply to a repeated request pass for a fresh one.
+/// reset, but not returned, as that would let a late reply to a repeated request pass for a
+/// fresh one. Their lines are reported as [`LinkEvent::Unread`] instead, which an
+/// [`crate::Audited`] wrapper logs, along with every command sent to the adapter
+/// ([`Transport::take_events`]); dropping the wrapper reads what's left of the last request
+/// first ([`Transport::settle`]).
 ///
 /// Requests must fit one CAN frame: up to 7 bytes. That covers the OBD-II reads and UDS 0x22
 /// with up to 3 DIDs, but not every request the policy allows (0x22 with 4 DIDs is 9 bytes).
@@ -216,6 +218,15 @@ enum Flow {
     To(u32, u8),
 }
 
+/// Why [`Elm::connect_reporting`] failed, and what the adapter was sent and answered first.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConnectFailed {
+    /// Why it failed.
+    pub error: Error,
+    /// The commands sent and the lines read, oldest first.
+    pub events: Vec<LinkEvent>,
+}
+
 /// What an adapter says about itself. Reading it puts nothing on the bus.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AdapterInfo {
@@ -233,8 +244,20 @@ impl<L: Link> Elm<L> {
     /// Resets the adapter and sets it up for CAN. Nothing is put on the bus.
     ///
     /// Fails if no ELM327 answers, or if the adapter refuses any setup command (some clones
-    /// don't implement everything they claim).
+    /// don't implement everything they claim). [`Elm::connect_reporting`] also returns the
+    /// commands sent before the failure.
     pub fn connect(link: L) -> Result<Self, Error> {
+        Self::connect_reporting(link).map_err(|failed| failed.error)
+    }
+
+    /// [`Elm::connect`], returning with a failure what the adapter was sent and answered up to
+    /// it ([`LinkEvent`]s), as nothing else can take them: for the audit log
+    /// ([`crate::log_failure`]).
+    ///
+    /// # Errors
+    ///
+    /// As [`Elm::connect`].
+    pub fn connect_reporting(link: L) -> Result<Self, ConnectFailed> {
         let mut elm = Self {
             link,
             splitter: LineSplitter::default(),
@@ -256,6 +279,17 @@ impl<L: Link> Elm<L> {
             log: Vec::new(),
             lost: 0,
         };
+        match elm.set_up() {
+            Ok(()) => Ok(elm),
+            Err(error) => Err(ConnectFailed {
+                error,
+                events: elm.take_events(),
+            }),
+        }
+    }
+
+    fn set_up(&mut self) -> Result<(), Error> {
+        let elm = self;
         elm.drain_stale()?;
         elm.reset()?;
         elm.check_defaults()?;
@@ -274,7 +308,7 @@ impl<L: Link> Elm<L> {
         if elm.pace.is_some() {
             elm.expect_ok("ATAT0")?;
         }
-        Ok(elm)
+        Ok(())
     }
 
     /// Timing for [`crate::exchange`] through this adapter. The adapter decides when a request

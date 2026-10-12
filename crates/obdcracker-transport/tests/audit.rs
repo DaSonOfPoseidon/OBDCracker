@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use obdcracker_safety::Approved;
 use obdcracker_safety::{Policy, Target};
-use obdcracker_transport::{Audited, Error, LinkEvent, Mock, Response, Transport};
+use obdcracker_transport::{Audited, Error, LinkEvent, Mock, Response, Transport, log_failure};
 
 fn temp_log(name: &str) -> PathBuf {
     let path = std::env::temp_dir().join(format!(
@@ -245,4 +245,55 @@ fn logs_adapter_commands_and_unread_reply_lines() {
         }
         assert_eq!(lines.len(), if fail { 5 } else { 4 }, "{audit}");
     }
+}
+
+#[test]
+fn a_transport_that_failed_before_it_could_be_wrapped_is_logged() {
+    let log = temp_log("failure");
+    let events = vec![LinkEvent::Command {
+        at: std::time::UNIX_EPOCH,
+        command: "ATSP6".to_owned(),
+        answer: vec!["?".to_owned()],
+    }];
+    let error = Error::Adapter("the adapter doesn't support ATSP6".to_owned());
+    log_failure(&log, "usb-serial", events, "connect", &error).unwrap();
+    let audit = std::fs::read_to_string(&log).unwrap();
+    let lines: Vec<_> = audit.lines().collect();
+    assert_eq!(lines.len(), 2, "{audit}");
+    assert!(
+        lines[0].contains(r#""dir":"cmd","cmd":"ATSP6","answer":"?","link":"usb-serial""#),
+        "{audit}"
+    );
+    assert!(
+        lines[1].contains(r#""dir":"err","op":"connect","error":"adapter error: the adapter doesn't support ATSP6""#),
+        "{audit}"
+    );
+}
+
+// Fails while finishing its last request.
+struct FailsToSettle;
+
+impl Transport for FailsToSettle {
+    fn send(&mut self, _: &Approved) -> Result<(), Error> {
+        Ok(())
+    }
+
+    fn recv(&mut self, _: Duration) -> Result<Response, Error> {
+        Err(Error::Timeout)
+    }
+
+    fn settle(&mut self) -> Result<(), Error> {
+        Err(Error::Adapter("the link closed".to_owned()))
+    }
+}
+
+#[test]
+fn a_failure_finishing_the_last_request_is_logged() {
+    let log = temp_log("settle-fails");
+    drop(Audited::open(&log, FailsToSettle, "mock").unwrap());
+    let audit = std::fs::read_to_string(&log).unwrap();
+    assert!(
+        audit.contains(r#""dir":"err","op":"settle","error":"adapter error: the link closed""#),
+        "{audit}"
+    );
 }

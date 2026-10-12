@@ -157,8 +157,51 @@ impl<T: Transport> Drop for Audited<T> {
     // What's left of the last request is logged before the session ends. Nothing can report a
     // failure from here.
     fn drop(&mut self) {
-        let _ = self.inner.settle();
+        let settled = self.inner.settle();
         let _ = self.record_events();
+        if let Err(e) = settled {
+            self.record_error("settle", None, e);
+        }
+    }
+}
+
+/// Appends `events`, then `error` from the `op` call, to the audit log at `path`, as
+/// [`Audited`] would have: for a transport that failed before it could be wrapped, such as an
+/// adapter whose setup failed ([`crate::elm::Elm::connect_reporting`]).
+///
+/// # Errors
+///
+/// The log can't be opened or written.
+pub fn log_failure(
+    path: &Path,
+    link: impl Into<String>,
+    events: Vec<LinkEvent>,
+    op: &str,
+    error: &Error,
+) -> io::Result<()> {
+    let mut audited = Audited::open(path, Replay(events), link)?;
+    let fields = format!(
+        r#""dir":"err","op":"{}","error":"{}""#,
+        json_escape(op),
+        json_escape(&error.to_string())
+    );
+    audited.write(&fields).map_err(io::Error::other)
+}
+
+// Hands out the events it was given, and carries nothing.
+struct Replay(Vec<LinkEvent>);
+
+impl Transport for Replay {
+    fn send(&mut self, _: &Approved) -> Result<(), Error> {
+        Err(Error::Adapter("nothing to send through".to_owned()))
+    }
+
+    fn recv(&mut self, _: Duration) -> Result<Response, Error> {
+        Err(Error::Timeout)
+    }
+
+    fn take_events(&mut self) -> Vec<LinkEvent> {
+        std::mem::take(&mut self.0)
     }
 }
 

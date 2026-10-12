@@ -18,7 +18,7 @@ pub mod scan;
 mod session;
 pub mod sweep;
 
-pub use audit::Audited;
+pub use audit::{Audited, log_failure};
 pub use dry_run::DryRun;
 pub use exchange::{Expect, Timing, exchange};
 pub use mock::Mock;

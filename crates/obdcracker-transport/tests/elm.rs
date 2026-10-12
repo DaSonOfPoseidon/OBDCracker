@@ -1781,6 +1781,34 @@ mod events {
     }
 
     #[test]
+    fn a_failed_setup_still_reports_the_commands_it_sent() {
+        // The adapter refuses `AT SP 6` mid-setup: the commands up to it, and its answer, come
+        // back with the error, as nothing else can take them.
+        let mut adapter = FakeElm::silent();
+        adapter.unsupported.push("ATSP6".into());
+        let Err(failed) = Elm::connect_reporting(FakeLink::new(adapter)) else {
+            panic!("connected");
+        };
+        assert!(
+            failed.error.to_string().contains("ATSP6"),
+            "{}",
+            failed.error
+        );
+        assert_eq!(
+            commands_in(&failed.events),
+            ["ATZ", "ATPPS", "ATL0", "ATS1", "ATH1", "ATSP6"]
+        );
+        assert!(
+            matches!(
+                failed.events.last(),
+                Some(LinkEvent::Command { answer, .. }) if answer == &["?".to_owned()]
+            ),
+            "{:?}",
+            failed.events.last()
+        );
+    }
+
+    #[test]
     fn an_untaken_report_is_bounded() {
         // Nobody takes the events: they stop growing, and say how many were lost.
         let mut elm = connect(car());
