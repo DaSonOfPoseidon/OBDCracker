@@ -124,10 +124,20 @@ fn a_malformed_refusal_counts_as_no_answer_and_is_left() {
     assert_eq!(sent(&adapter), [vec![0x10, 0x03], vec![0x10, 0x01]]);
 }
 
-// A module whose every reply takes `delay` to arrive.
+// A module whose replies each take their own delay to arrive.
 struct Slow {
     inner: Mock,
-    delay: Duration,
+    delays: std::collections::VecDeque<Duration>,
+}
+
+fn slow(replies: &[(u64, &[u8])]) -> Slow {
+    Slow {
+        inner: mock(&replies.iter().map(|&(_, r)| r).collect::<Vec<_>>()),
+        delays: replies
+            .iter()
+            .map(|&(ms, _)| Duration::from_millis(ms))
+            .collect(),
+    }
 }
 
 impl obdcracker_transport::Transport for Slow {
@@ -139,56 +149,93 @@ impl obdcracker_transport::Transport for Slow {
     }
 
     fn recv(&mut self, timeout: Duration) -> Result<Response, obdcracker_transport::Error> {
-        sleep(self.delay);
+        sleep(self.delays.pop_front().unwrap_or_default());
         self.inner.recv(timeout)
     }
 }
 
+const PATIENT: Timing = Timing {
+    p2: Duration::from_millis(500),
+    p2_star: Duration::from_millis(500),
+    max_pending: 3,
+};
+
 #[test]
-fn a_long_response_pending_wait_does_not_lapse_the_session() {
-    // Response-pending replies keep the module's session alive (ISO 14229-2), so a read that
-    // takes longer than S3 to answer needs no new `10 03` afterwards.
+fn a_wait_longer_than_the_margin_is_followed_by_a_new_10_03() {
+    // The module restarted S3 somewhere between the request and the answer reaching us: an ELM
+    // can spend seconds printing a long answer. Only the request's time is safe, so after a
+    // slow answer the guard enters the session again before the next request.
     let short = S3 {
         keepalive: Duration::from_millis(40),
         timeout: Duration::from_millis(120),
     };
-    let patient = Timing {
-        p2: Duration::from_millis(500),
-        p2_star: Duration::from_millis(500),
-        max_pending: 3,
-    };
-    let mut adapter = Slow {
-        inner: mock(&[
-            &[0x50, 0x03, 0x00, 0x32, 0x01, 0xF4],
-            &[0x7F, 0x22, 0x78],
-            &[0x7F, 0x22, 0x78],
-            &[0x62, 0xF1, 0x87, 0x41],
-            &[0x62, 0xF1, 0x87, 0x41],
-        ]),
-        delay: Duration::from_millis(60),
-    };
+    let positive_entry: &[u8] = &[0x50, 0x03, 0x00, 0x32, 0x01, 0xF4];
+    let mut adapter = slow(&[
+        (0, positive_entry),
+        (60, &[0x7F, 0x22, 0x78]),
+        (60, &[0x7F, 0x22, 0x78]),
+        (60, &[0x62, 0xF1, 0x87, 0x41]),
+        (0, positive_entry),
+        (0, &[0x62, 0xF1, 0x87, 0x41]),
+    ]);
     let read = Policy::read_only()
         .approve(ENGINE, &[0x22, 0xF1, 0x87])
         .unwrap();
     let mut guard =
-        ExtendedSession::enter(&mut adapter, &Policy::read_only(), ENGINE, patient, short).unwrap();
+        ExtendedSession::enter(&mut adapter, &Policy::read_only(), ENGINE, PATIENT, short).unwrap();
     // About 180 ms from the request to the answer, longer than S3.
     guard.exchange(&read).unwrap();
     guard.exchange(&read).unwrap();
     drop(guard);
-    let sent: Vec<Vec<u8>> = adapter
-        .inner
-        .sent()
-        .iter()
-        .map(|r| r.payload().to_vec())
-        .collect();
     assert_eq!(
-        sent,
+        sent(&adapter.inner),
         [
             vec![0x10, 0x03],
             vec![0x22, 0xF1, 0x87],
+            vec![0x10, 0x03],
             vec![0x22, 0xF1, 0x87],
             vec![0x10, 0x01]
         ]
+    );
+}
+
+#[test]
+fn the_timing_the_module_gives_is_used() {
+    // The module says P2 is 200 ms in the extended session; the caller's P2 assumed 50 ms.
+    let base = Timing {
+        p2: Duration::from_millis(50),
+        p2_star: Duration::from_millis(500),
+        max_pending: 3,
+    };
+    let mut adapter = slow(&[
+        (0, &[0x50, 0x03, 0x00, 0xC8, 0x01, 0xF4]),
+        (120, &[0x62, 0xF1, 0x87, 0x41]),
+    ]);
+    let read = Policy::read_only()
+        .approve(ENGINE, &[0x22, 0xF1, 0x87])
+        .unwrap();
+    let mut guard =
+        ExtendedSession::enter(&mut adapter, &Policy::read_only(), ENGINE, base, GUARD).unwrap();
+    assert_eq!(
+        guard.exchange(&read).unwrap().payload,
+        [0x62, 0xF1, 0x87, 0x41]
+    );
+}
+
+#[test]
+fn an_unanswered_end_is_retried_on_drop() {
+    // `end` consumes the guard, so the caller can't retry; dropping it tries `10 01` once more.
+    let mut adapter = mock(&[&[0x50, 0x03, 0x00, 0x32, 0x01, 0xF4]]);
+    let guard =
+        ExtendedSession::enter(&mut adapter, &Policy::read_only(), ENGINE, FAST, GUARD).unwrap();
+    assert_eq!(
+        guard.end(),
+        Err(SessionError::Transport(
+            obdcracker_transport::Error::Timeout
+        ))
+    );
+    assert_eq!(
+        sent(&adapter),
+        [vec![0x10, 0x03], vec![0x10, 0x01], vec![0x10, 0x01]]
     );
 }

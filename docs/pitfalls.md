@@ -94,11 +94,19 @@ Each entry names the class, what to check, and where it bit us.
 - **Match a reply to its request by what it echoes**, not only the service ID: the PID (mode 09), a requested PID
   (mode 01), a requested DID (0x22) or the subfunction. A late reply to an earlier request has the same SID
   (`response::answers`).
-- **A deadline on the far side of the bus needs a margin for the trip.** The guard checked S3 against its own
-  clock, so a `3E 00` sent just in time could reach the module after its session lapsed. The module answered it
-  in the default session anyway, so nothing showed. And timing from the request rather than the answer counted a
-  long response-pending wait as idle time, which forced a needless `10 03`. Time from when the other side last
-  acted (its answer), and stop trusting the deadline early enough for a message to get there (#68, Codex).
+- **A deadline on the far side of the bus needs a margin for the trip, and the earliest safe time.** The guard
+  checked S3 against its own clock, so a `3E 00` sent just in time could reach the module after its session
+  lapsed. The module answered it in the default session anyway, so nothing showed. The next fix timed S3 from
+  the answer's arrival, but an ELM can take 18 s to print a long answer the module sent at once. When you can't
+  see when the other side acted, take the earliest moment it could have (the request), and stop trusting the
+  deadline early enough for the next message to get there. Pick the failure that costs least: a needless `10 03`,
+  not a read sent into the default session (#68, three Codex rounds).
+- **Use the limits the other side declares.** A module's `50 03` gives its own P2 and P2*; ignoring them timed
+  out a module that said it needs 100 ms. Extend the caller's timing by the excess over the standard defaults,
+  so an adapter's allowance stays on top (#68, Codex).
+- **Keep cleanup armed until it has worked.** `end()` marked the guard finished before sending `10 01`, so a
+  failed send left nothing to retry it, and `end` had consumed the guard. Disarm only after a definite answer
+  (#68, Codex).
 - **The suppress-positive-response bit (bit 7) is not echoed.** It applies to every UDS service with a subfunction,
   0x19 included. A request with the bit set gets no positive reply, so only a refusal answers it; masking the bit
   off instead lets a late positive reply to an earlier, unsuppressed request through. A refusal is still sent when

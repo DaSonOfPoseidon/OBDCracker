@@ -10,10 +10,9 @@ use crate::{Error, Expect, Response, Timing, Transport, exchange};
 /// How long a module keeps a non-default session without a request, and how often to remind it.
 ///
 /// The session is trusted only until halfway between `keepalive` and `timeout` (3.5 s by
-/// default). A request takes time to reach the module, and its answer to come back, so one sent
-/// any later could arrive after the module left the session. A module in the default session
-/// answers `TesterPresent` too, so that wouldn't show. From then on, the session is entered again
-/// instead.
+/// default). A request takes time to reach the module, so one sent any later could arrive after
+/// the module left the session. A module in the default session answers `TesterPresent` too, so
+/// that wouldn't show. From then on, the session is entered again instead.
 ///
 /// Any values are safe, they only change what's sent: with `keepalive` at or above `timeout`,
 /// [`ExtendedSession::keep_alive`] never sends `TesterPresent` and enters the session again
@@ -21,8 +20,8 @@ use crate::{Error, Expect, Response, Timing, Transport, exchange};
 /// a zero `timeout` enters the session again before every request.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct S3 {
-    /// How long after the module's last answer to send `TesterPresent`: 2 s by default
-    /// (S3client, ISO 14229-2).
+    /// How long after the last request the module accepted to send `TesterPresent`: 2 s by
+    /// default (S3client, ISO 14229-2).
     pub keepalive: Duration,
     /// How long the module stays in the session without a request: 5 s by default (S3server,
     /// ISO 14229-2).
@@ -30,8 +29,8 @@ pub struct S3 {
 }
 
 impl S3 {
-    // How long after the module's last answer its session is trusted: halfway from `keepalive`
-    // to `timeout`, leaving the rest for messages on their way.
+    // How long after the last accepted request the session is trusted: halfway from `keepalive`
+    // to `timeout`, leaving the rest for the next request on its way.
     fn trusted(self) -> Duration {
         self.timeout
             .saturating_sub(self.timeout.saturating_sub(self.keepalive) / 2)
@@ -102,10 +101,16 @@ impl From<Error> for SessionError {
 /// it again first. (Anything tied to the session, such as security access, would be lost then;
 /// reads aren't.)
 ///
-/// Time is measured from when each positive answer arrives: the module restarts S3 once it has
-/// sent its answer, and response-pending replies keep the session alive during a long wait
-/// (ISO 14229-2), so a slow answer needs no keepalive. A refused or unanswered request doesn't
-/// count, so the session is never taken for alive after the module has left it.
+/// Time is measured from just before each request the module accepted was sent. The module
+/// restarts S3 when it has sent its answer, which is somewhere between then and when the answer
+/// arrives; an ELM adapter can take seconds to print a long one. So an answer that took longer
+/// than the margin is followed by a new `10 03` before the next request, even though
+/// response-pending replies kept the session alive meanwhile. That costs session state, never a
+/// read sent into the default session. A refused or unanswered request doesn't count at all.
+///
+/// The module's positive answer to `10 03` gives its P2 and P2* for the session. Where they're
+/// longer than ISO 14229-2's defaults (50 ms, 5 s), the session adds the difference to the
+/// caller's [`Timing`], which keeps any allowance the caller made for its adapter.
 ///
 /// `TesterPresent` is sent as `3E 00`, not with the suppress-positive-response bit (`3E 80`):
 /// a suppressed request that succeeds gets no reply, so an ELM adapter would wait out its whole
@@ -140,9 +145,11 @@ pub struct ExtendedSession<'a, T: Transport + ?Sized> {
     present: Approved,
     leave: Approved,
     reply: u32,
+    // The caller's timing, and that timing extended by what the module gave for the session.
+    base: Timing,
     timing: Timing,
     s3: S3,
-    // When the module's last positive answer arrived.
+    // Just before the last request the module accepted was sent.
     last: Instant,
     ended: bool,
 }
@@ -178,6 +185,7 @@ impl<'a, T: Transport + ?Sized> ExtendedSession<'a, T> {
             present,
             leave,
             reply,
+            base: timing,
             timing,
             s3,
             last: Instant::now(),
@@ -243,11 +251,11 @@ impl<'a, T: Transport + ?Sized> ExtendedSession<'a, T> {
         if self.lapsed() {
             self.request(&self.enter.clone())?;
         }
-        let (answered, reply) = self.send(request)?;
+        let (started, reply) = self.send(request)?;
         // Only a positive answer counts, so the session is never taken for alive when it isn't;
         // at worst, the next request enters it again needlessly.
         if response::positive(request.payload()[0], &reply.payload).is_ok() {
-            self.last = answered;
+            self.last = started;
         }
         Ok(reply)
     }
@@ -257,21 +265,31 @@ impl<'a, T: Transport + ?Sized> ExtendedSession<'a, T> {
     ///
     /// # Errors
     ///
-    /// The module refuses `10 01` or doesn't answer, or the adapter fails.
+    /// The module refuses `10 01` or doesn't answer, or the adapter fails. Unless the module
+    /// answered, dropping the session then tries `10 01` once more.
     pub fn end(mut self) -> Result<(), SessionError> {
-        self.ended = true;
-        self.request(&self.leave.clone())
+        let result = self.request(&self.leave.clone());
+        if !matches!(result, Err(SessionError::Transport(_))) {
+            self.ended = true;
+        }
+        result
     }
 
     // Sends one of the session's own requests and checks that the module accepted it. Only an
     // accepted one restarts the clock: after a refused `10 03`, the module is still in the
     // default session, and a `3E 00` would keep it there.
     fn request(&mut self, request: &Approved) -> Result<(), SessionError> {
-        let (answered, reply) = self.send(request)?;
+        let (started, reply) = self.send(request)?;
         let sid = request.payload()[0];
         match response::positive(sid, &reply.payload) {
             Ok(_) => {
-                self.last = answered;
+                self.last = started;
+                // Only a positive answer to `10 03` decodes; it carries the session's timing.
+                if let Ok(given) =
+                    uds::decode_session_timing(&reply.payload, DiagnosticSession::Extended)
+                {
+                    self.timing = extended(self.base, given);
+                }
                 Ok(())
             }
             Err(_) => Err(SessionError::Refused(reply.payload)),
@@ -283,15 +301,29 @@ impl<'a, T: Transport + ?Sized> ExtendedSession<'a, T> {
         self.last.elapsed() >= self.s3.trusted()
     }
 
-    // Sends `request` and returns when its answer arrived, with the answer.
+    // Sends `request` and returns when it was sent, with the module's answer.
     fn send(&mut self, request: &Approved) -> Result<(Instant, Response), SessionError> {
+        let started = Instant::now();
         let mut replies = exchange(
             self.transport,
             request,
             Expect::Module(self.reply),
             self.timing,
         )?;
-        Ok((Instant::now(), replies.remove(0)))
+        Ok((started, replies.remove(0)))
+    }
+}
+
+// The caller's timing, plus however much longer than ISO 14229-2's defaults the module's own P2
+// and P2* are.
+fn extended(base: Timing, given: uds::SessionTiming) -> Timing {
+    let standard = Timing::default();
+    Timing {
+        p2: base.p2.saturating_add(given.p2.saturating_sub(standard.p2)),
+        p2_star: base
+            .p2_star
+            .saturating_add(given.p2_star.saturating_sub(standard.p2_star)),
+        ..base
     }
 }
 
