@@ -590,3 +590,46 @@ fn an_unconfirmed_entry_and_leave_say_the_module_may_still_be_extended() {
         got.still_extended
     );
 }
+
+#[test]
+fn a_general_reject_is_listed_and_stops_the_sweep_after_it() {
+    // `7F 22 10` gives no reason, so it may be every DID's answer: listing each would fill the
+    // sweep with false finds. The DID is listed, and the sweep stops at the next one.
+    let mut car = Car::new(|_, request| match request {
+        [0x22, ..] => reply(&[0x7F, 0x22, 0x10]),
+        _ => Vec::new(),
+    });
+    let got = sweep_dids(
+        &mut car,
+        &Policy::read_only(),
+        &engine(),
+        0x0600..=0x0603,
+        TIMING,
+        &SweepOptions::default(),
+    )
+    .unwrap();
+    let reject = ReadError::Reply(ReplyError::Negative(NegativeResponse {
+        sid: 0x22,
+        nrc: Nrc::GeneralReject,
+    }));
+    assert_eq!(got.found, [(0x0600, Err(reject))]);
+    assert_eq!(
+        got.stop,
+        Some(Stop {
+            at: 0x0601,
+            why: Why::Module(reject)
+        })
+    );
+    // At the end of the range there's nothing left to stop before.
+    let got = sweep_dids(
+        &mut car,
+        &Policy::read_only(),
+        &engine(),
+        0x0603..=0x0603,
+        TIMING,
+        &SweepOptions::default(),
+    )
+    .unwrap();
+    assert_eq!(got.found, [(0x0603, Err(reject))]);
+    assert_eq!(got.stop, None);
+}

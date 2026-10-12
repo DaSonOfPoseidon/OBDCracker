@@ -529,7 +529,7 @@ fn print_sweep(module: &UdsModule, found: &sweep::Sweep, last: u16) -> ExitCode 
             let busy = matches!(
                 &stop.why,
                 sweep::Why::Module(ReadError::Reply(ReplyError::Negative(refusal)))
-                    if refusal.nrc == Nrc::BusyRepeatRequest
+                    if [Nrc::BusyRepeatRequest, Nrc::GeneralReject].contains(&refusal.nrc)
             );
             if busy
                 || matches!(
@@ -540,7 +540,10 @@ fn print_sweep(module: &UdsModule, found: &sweep::Sweep, last: u16) -> ExitCode 
                 )
             {
                 let ran = std::env::args_os().map(|arg| arg.to_string_lossy().into_owned());
-                eprintln!("to go on: {}", resume_command(ran, stop.at, last));
+                eprintln!(
+                    "to go on: {}",
+                    resume_command(ran, stop.at, last, cfg!(windows))
+                );
             }
             ExitCode::FAILURE
         }
@@ -676,8 +679,14 @@ fn run_scan<T: Transport>(
     }
 }
 
-// The command that ran, with its `--range` starting at `from`, for a shell to run again.
-fn resume_command(ran: impl IntoIterator<Item = String>, from: u16, last: u16) -> String {
+// The command that ran, with its `--range` starting at `from`, for a shell to run again: a
+// Windows one if `windows`.
+fn resume_command(
+    ran: impl IntoIterator<Item = String>,
+    from: u16,
+    last: u16,
+    windows: bool,
+) -> String {
     let range = format!("{from:04X}-{last:04X}");
     let mut ran = ran.into_iter();
     // The program as installed, not however this run reached it.
@@ -696,19 +705,22 @@ fn resume_command(ran: impl IntoIterator<Item = String>, from: u16, last: u16) -
     }
     words
         .iter()
-        .map(|word| shell_word(word))
+        .map(|word| shell_word(word, windows))
         .collect::<Vec<_>>()
         .join(" ")
 }
 
 // `word` as one shell word: as is if no shell treats any of it specially, in double quotes if it
-// only has spaces too (POSIX shells, PowerShell and cmd all read those), else in POSIX quotes.
-fn shell_word(word: &str) -> String {
-    let plain = |c: char| c.is_ascii_alphanumeric() || "-_./=:,+@".contains(c);
+// only has spaces too (POSIX shells, PowerShell and cmd all read those), else quoted for the
+// platform's shell. On Windows a backslash is an ordinary character (`\\.\COM10`), and cmd
+// groups words only with double quotes, so those are used, any inside doubled.
+fn shell_word(word: &str, windows: bool) -> String {
+    let plain =
+        |c: char| c.is_ascii_alphanumeric() || "-_./=:,+@".contains(c) || (windows && c == '\\');
     if !word.is_empty() && word.chars().all(plain) {
         word.to_owned()
-    } else if word.chars().all(|c| plain(c) || c == ' ') {
-        format!("\"{word}\"")
+    } else if windows || word.chars().all(|c| plain(c) || c == ' ') {
+        format!("\"{}\"", word.replace('"', "\"\""))
     } else {
         format!("'{}'", word.replace('\'', r"'\''"))
     }
@@ -990,7 +1002,7 @@ mod tests {
             "--extended",
         ]);
         assert_eq!(
-            resume_command(ran, 0x0123, 0x0FFF),
+            resume_command(ran, 0x0123, 0x0FFF, false),
             "obdcracker --serial /dev/ttyUSB0 --profile a7 --audit-log car4-hud.jsonl sweep \
              --module \"head-up display\" --range 0123-0FFF --extended"
         );
@@ -1004,14 +1016,31 @@ mod tests {
             "x",
         ]);
         assert_eq!(
-            resume_command(ran, 0x0080, 0x00FF),
+            resume_command(ran, 0x0080, 0x00FF, false),
             "obdcracker --sim a7 sweep --range=0080-00FF --module x"
         );
         // A word a shell would expand is quoted so it isn't.
         let ran = args(&["obdcracker", "--tcp", "a$b", "sweep", "--range", "0-1"]);
         assert_eq!(
-            resume_command(ran, 1, 1),
+            resume_command(ran.clone(), 1, 1, false),
             "obdcracker --tcp 'a$b' sweep --range 0001-0001"
+        );
+        // cmd.exe groups only with double quotes, and a backslash is part of a path there.
+        let ran = args(&[
+            r"C:\tools\obdcracker.exe",
+            "--serial",
+            r"\\.\COM10",
+            "--audit-log",
+            r"C:\car 4\hud.jsonl",
+            "sweep",
+            "--module",
+            "head-up display",
+            "--range",
+            "0000-0FFF",
+        ]);
+        assert_eq!(
+            resume_command(ran, 0x0123, 0x0FFF, true),
+            r#"obdcracker --serial \\.\COM10 --audit-log "C:\car 4\hud.jsonl" sweep --module "head-up display" --range 0123-0FFF"#
         );
     }
 }

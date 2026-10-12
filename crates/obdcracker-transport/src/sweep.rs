@@ -71,7 +71,9 @@ pub enum Why {
     /// The module stopped answering ([`ReadError::NoReply`] or [`ReadError::StillPending`],
     /// [`QUIET_LIMIT`] times in a row),
     /// refused `22` itself (service not supported, in this session or at all, or a bad format),
-    /// said it was busy (NRC 0x21: sweep again from [`Stop::at`] a little later), or refused the
+    /// said it was busy (NRC 0x21: sweep again from [`Stop::at`] a little later), rejected a DID
+    /// with no reason given (NRC 0x10, which may be its answer to every DID: that DID is listed,
+    /// and [`Stop::at`] is the next one), or refused the
     /// extended session or didn't confirm it.
     Module(ReadError),
     /// Right after a DID went unanswered, the next read got a refusal or another DID's value,
@@ -246,6 +248,15 @@ fn stopped(failure: Result<ReadError, FingerprintError>) -> Why {
     }
 }
 
+// A sweep that stopped at `at`.
+fn halt(found: Vec<(u16, Result<Vec<u8>, ReadError>)>, at: u16, why: Why) -> Sweep {
+    Sweep {
+        found,
+        stop: Some(Stop { at, why }),
+        still_extended: None,
+    }
+}
+
 fn read_each(
     asker: &mut impl Ask,
     requests: &[(u16, obdcracker_safety::Approved)],
@@ -270,14 +281,7 @@ fn read_each(
         let value = match answer {
             Ok(value) => value,
             Err(e) => {
-                return Sweep {
-                    still_extended: None,
-                    found,
-                    stop: Some(Stop {
-                        at: resume,
-                        why: stopped(Err(e)),
-                    }),
-                };
+                return halt(found, resume, stopped(Err(e)));
             }
         };
         // After an unanswered read, a refusal or another DID's value may be the late answer to
@@ -286,28 +290,14 @@ fn read_each(
             && let Err(e @ ReadError::Reply(_)) = value
         {
             found.extend(unanswered(&mut quiet));
-            return Sweep {
-                still_extended: None,
-                found,
-                stop: Some(Stop {
-                    at: *did,
-                    why: Why::Unmatched(e),
-                }),
-            };
+            return halt(found, *did, Why::Unmatched(e));
         }
         progress(*did);
         match value {
             Err(e @ (ReadError::NoReply | ReadError::StillPending)) => {
                 quiet.push((*did, e));
                 if quiet.len() == QUIET_LIMIT {
-                    return Sweep {
-                        still_extended: None,
-                        found,
-                        stop: Some(Stop {
-                            at: resume,
-                            why: Why::Module(e),
-                        }),
-                    };
+                    return halt(found, resume, Why::Module(e));
                 }
             }
             // Not there, but the module answered, so the DIDs before it are listed.
@@ -316,31 +306,39 @@ fn read_each(
             {
                 found.extend(unanswered(&mut quiet));
             }
+            // No reason given, so it may be every DID's answer: listed, and the sweep stops
+            // before the next DID, so going on always gets further.
+            Err(e @ ReadError::Reply(ReplyError::Negative(refusal)))
+                if refusal.nrc == Nrc::GeneralReject =>
+            {
+                found.extend(unanswered(&mut quiet));
+                found.push((*did, Err(e)));
+                let next = requests
+                    .iter()
+                    .map(|(next, _)| *next)
+                    .find(|next| next > did);
+                if let Some(at) = next {
+                    return Sweep {
+                        found,
+                        stop: Some(Stop {
+                            at,
+                            why: Why::Module(e),
+                        }),
+                        still_extended: None,
+                    };
+                }
+            }
             // A refusal of `22` itself, not of this DID: nothing more will read now.
             Err(e @ ReadError::Reply(ReplyError::Negative(refusal)))
                 if SERVICE_REFUSALS.contains(&refusal.nrc) =>
             {
                 found.extend(unanswered(&mut quiet));
-                return Sweep {
-                    still_extended: None,
-                    found,
-                    stop: Some(Stop {
-                        at: *did,
-                        why: Why::Module(e),
-                    }),
-                };
+                return halt(found, *did, Why::Module(e));
             }
             // A session refused on the way (re-entered after it lapsed): nothing more will read,
             // and nothing since the last answer was.
             Err(e @ ReadError::SessionRefused(_)) => {
-                return Sweep {
-                    still_extended: None,
-                    found,
-                    stop: Some(Stop {
-                        at: resume,
-                        why: Why::Module(e),
-                    }),
-                };
+                return halt(found, resume, Why::Module(e));
             }
             value => {
                 found.extend(unanswered(&mut quiet));
