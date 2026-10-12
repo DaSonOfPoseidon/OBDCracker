@@ -198,12 +198,7 @@ impl<'a, T: Transport + ?Sized> ExtendedSession<'a, T> {
                 Ok(session)
             }
             // Only a well-formed refusal of `10 03` says the module stayed in the default session.
-            Err(SessionError::Refused(reply))
-                if matches!(
-                    response::positive(uds::DIAGNOSTIC_SESSION_CONTROL, &reply),
-                    Err(response::Error::Negative(_))
-                ) =>
-            {
+            Err(SessionError::Refused(reply)) if plainly_refused(&reply) => {
                 Err(SessionError::Refused(reply))
             }
             Err(e) => {
@@ -266,10 +261,14 @@ impl<'a, T: Transport + ?Sized> ExtendedSession<'a, T> {
     /// # Errors
     ///
     /// The module refuses `10 01` or doesn't answer, or the adapter fails. Unless the module
-    /// answered, dropping the session then tries `10 01` once more.
+    /// accepted or plainly refused it, dropping the session then tries `10 01` once more.
     pub fn end(mut self) -> Result<(), SessionError> {
         let result = self.request(&self.leave.clone());
-        if !matches!(result, Err(SessionError::Transport(_))) {
+        if match &result {
+            Ok(()) => true,
+            Err(SessionError::Refused(reply)) => plainly_refused(reply),
+            Err(_) => false,
+        } {
             self.ended = true;
         }
         result
@@ -283,13 +282,16 @@ impl<'a, T: Transport + ?Sized> ExtendedSession<'a, T> {
         let sid = request.payload()[0];
         match response::positive(sid, &reply.payload) {
             Ok(_) => {
-                self.last = started;
-                // Only a positive answer to `10 03` decodes; it carries the session's timing.
-                if let Ok(given) =
-                    uds::decode_session_timing(&reply.payload, DiagnosticSession::Extended)
-                {
-                    self.timing = extended(self.base, given);
+                // A positive answer to `10 03` carries the session's timing; older servers send
+                // a bare `50 03`. Anything else isn't a confirmed entry.
+                if request.payload() == self.enter.payload() {
+                    match uds::decode_session_timing(&reply.payload, DiagnosticSession::Extended) {
+                        Ok(given) => self.timing = extended(self.base, given),
+                        Err(_) if reply.payload == [0x50, 0x03] => self.timing = self.base,
+                        Err(_) => return Err(SessionError::Refused(reply.payload)),
+                    }
                 }
+                self.last = started;
                 Ok(())
             }
             Err(_) => Err(SessionError::Refused(reply.payload)),
@@ -312,6 +314,15 @@ impl<'a, T: Transport + ?Sized> ExtendedSession<'a, T> {
         )?;
         Ok((started, replies.remove(0)))
     }
+}
+
+// Whether `reply` is a well-formed refusal of a session request (`7F 10 <NRC>`): a definite
+// answer that the module stayed in the session it was in.
+fn plainly_refused(reply: &[u8]) -> bool {
+    matches!(
+        response::positive(uds::DIAGNOSTIC_SESSION_CONTROL, reply),
+        Err(response::Error::Negative(_))
+    )
 }
 
 // The caller's timing, plus however much longer than ISO 14229-2's defaults the module's own P2

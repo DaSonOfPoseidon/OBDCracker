@@ -239,3 +239,25 @@ fn an_unanswered_end_is_retried_on_drop() {
         [vec![0x10, 0x03], vec![0x10, 0x01], vec![0x10, 0x01]]
     );
 }
+
+#[test]
+fn a_bare_positive_entry_is_accepted() {
+    // Older servers answer `50 03` without the timing; the caller's timing is kept.
+    let mut adapter = mock(&[&[0x50, 0x03]]);
+    let guard =
+        ExtendedSession::enter(&mut adapter, &Policy::read_only(), ENGINE, FAST, GUARD).unwrap();
+    drop(guard);
+    assert_eq!(sent(&adapter), [vec![0x10, 0x03], vec![0x10, 0x01]]);
+}
+
+#[test]
+fn a_malformed_positive_entry_is_refused_and_left() {
+    let mut adapter = mock(&[&[0x50, 0x03, 0x00, 0x32, 0x01, 0xF4, 0x00]]);
+    let error = ExtendedSession::enter(&mut adapter, &Policy::read_only(), ENGINE, FAST, GUARD)
+        .unwrap_err();
+    assert_eq!(
+        error,
+        SessionError::Refused(vec![0x50, 0x03, 0x00, 0x32, 0x01, 0xF4, 0x00])
+    );
+    assert_eq!(sent(&adapter), [vec![0x10, 0x03], vec![0x10, 0x01]]);
+}
