@@ -201,6 +201,10 @@ Each entry names the class, what to check, and where it bit us.
 - **Pin external test tools exactly, and check the pin installs from scratch.** PyPI's ELM327-emulator 4.0.0 sdist
   reports `4.0.0.post57`, which uv refuses; it only worked locally from a cached build. CI installs a pinned git
   commit (M3 branch).
+- **A shared buffer fills at the sum of its sources' rates.** Pacing each module's frames to the link's speed kept
+  one reply from overflowing the ELM327's buffer, but a broadcast can get long replies from 8 ECUs at once, with
+  the same gap each (PR #70, Codex). Size a rate limit for every source that can send at once, and make the fake
+  interleave concurrent senders, not print each in turn.
 - **Trust what an adapter does, not what it says it is.** Clones claim `v1.5` (never released) or `v2.1` and refuse
   v2.0 commands, and any answer to `STI` that wasn't `?` counted as an STN chip, which would have exempted a clone
   from pacing (#23, #44). Decide on behaviour you've checked, match identification answers exactly (`STN…`), and
