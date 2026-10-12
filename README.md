@@ -66,7 +66,7 @@ from developers being careful:
   such as the head-up display's adaptation values. It reads each DID in the range (`22 xxxx`), one request each, and
   lists those the module answers, skipping refusals as out of range (NRC 0x31). It asks for an explicit range and
   prints how many reads that is first. It stops early, keeping what it found and saying where to resume, if the
-  module goes quiet (3 unanswered reads in a row), refuses `22` itself (such as "service not supported in active
+  module goes quiet (3 reads in a row with no final answer), refuses `22` itself (such as "service not supported in active
   session"), or the adapter fails. `--extended` sweeps in the extended session, entered and left as
   `scan --extended` does.
 - Every frame sent or received in a real session is appended to an audit log, along with any adapter error (such as an

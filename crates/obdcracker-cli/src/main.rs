@@ -526,7 +526,8 @@ fn print_sweep(
             // A module that refused `22` or the session refuses it again; the rest may pass.
             if matches!(
                 stop.why,
-                sweep::Why::Module(ReadError::NoReply) | sweep::Why::Adapter(_)
+                sweep::Why::Module(ReadError::NoReply | ReadError::StillPending)
+                    | sweep::Why::Adapter(_)
             ) {
                 eprintln!(
                     "to go on: sweep --module {name:?} --range {:04X}-{last:04X}{}",
