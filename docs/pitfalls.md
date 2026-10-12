@@ -66,6 +66,10 @@ Each entry names the class, what to check, and where it bit us.
 - **Escape what you write, too.** A format built by hand (JSON Lines, TOML) must escape every string it
   interpolates, or one quote or backslash breaks the file for every reader. The audit log wrote the link name raw, so
   a Windows port such as `\\.\COM10` made invalid JSON. Test by parsing the output back with a real parser (#2).
+- **Quote for a shell with an allowlist, not a denylist.** The sweep's resume command refused Windows words with
+  `$ % ! "` and double-quoted the rest, but PowerShell also reads typographic quotes (`“`, `’`) as quotes, so a
+  crafted path could still end the quoting. Write a word only if every character is known plain; otherwise print
+  no command at all (PR #76).
 - **Don't over-restrict.** Know the protocol before rejecting something: Toyota body modules legitimately share
   CAN ID 0x750 with different extended-address bytes.
 

@@ -722,20 +722,17 @@ fn resume_command(
 // only has spaces too (POSIX shells, PowerShell and cmd all read those), else quoted for the
 // platform's shell. On Windows a backslash is an ordinary character (`\\.\COM10`), and cmd
 // groups words only with double quotes; but inside them PowerShell still expands `$` and `` ` ``
-// and cmd `%` (and `!` with delayed expansion), and they can't hold a `"` both read alike, so
-// such a word gives None.
+// (and reads typographic quotes as quotes), cmd `%` (and `!` with delayed expansion), so any
+// other word gives None rather than trusting a list of what's special.
 fn shell_word(word: &str, windows: bool) -> Option<String> {
     let plain =
         |c: char| c.is_ascii_alphanumeric() || "-_./=:,+@".contains(c) || (windows && c == '\\');
     Some(if !word.is_empty() && word.chars().all(plain) {
         word.to_owned()
-    } else if windows {
-        if word.contains(['$', '`', '%', '!', '"']) {
-            return None;
-        }
-        format!("\"{word}\"")
     } else if word.chars().all(|c| plain(c) || c == ' ') {
         format!("\"{word}\"")
+    } else if windows {
+        return None;
     } else {
         format!("'{}'", word.replace('\'', r"'\''"))
     })
@@ -1043,7 +1040,17 @@ mod tests {
         // Windows shells expand `$` (PowerShell), `%` and, with delayed expansion, `!` (cmd)
         // even in double quotes.
         assert_eq!(resume_command(ran, 1, 1, true), None);
-        for word in ["%run%.jsonl", r"C:\logs\!CAR!\audit.jsonl"] {
+        // PowerShell also reads typographic quotes as quotes, so only known-plain words are
+        // written, whatever else a shell might treat specially.
+        for word in [
+            "%run%.jsonl",
+            r"C:\logs\!CAR!\audit.jsonl",
+            "car\u{201C} 4.jsonl",
+            "car\u{2019}s log.jsonl",
+            "a^b c",
+            "(car).jsonl",
+            "caf\u{E9}.jsonl",
+        ] {
             let ran = args(&["obdcracker", "--audit-log", word, "sweep", "--range", "0-1"]);
             assert_eq!(resume_command(ran, 1, 1, true), None, "{word}");
         }
