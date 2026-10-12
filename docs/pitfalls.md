@@ -201,6 +201,10 @@ Each entry names the class, what to check, and where it bit us.
 - **Pin external test tools exactly, and check the pin installs from scratch.** PyPI's ELM327-emulator 4.0.0 sdist
   reports `4.0.0.post57`, which uv refuses; it only worked locally from a cached build. CI installs a pinned git
   commit (M3 branch).
+- **Trust what an adapter does, not what it says it is.** Clones claim `v1.5` (never released) or `v2.1` and refuse
+  v2.0 commands, and any answer to `STI` that wasn't `?` counted as an STN chip, which would have exempted a clone
+  from pacing (#23, #44). Decide on behaviour you've checked, match identification answers exactly (`STN…`), and
+  name the claimed version in the error when a command it should support is refused.
 - **Emulators have quirks too.** ELM327-emulator prints `SEARCHING...` on the first `01 00` even with a fixed
   protocol, which a real adapter doesn't; the test reads PID 20 instead. Note each workaround where it's made
   (M3 branch).
