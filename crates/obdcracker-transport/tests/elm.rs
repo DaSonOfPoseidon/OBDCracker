@@ -8,8 +8,8 @@ use std::time::{Duration, Instant};
 use obdcracker_safety::{Approved, ModuleIds, Policy, Target};
 use obdcracker_transport::elm::Elm;
 use obdcracker_transport::link::{Driver, Link, LinkKind};
-use obdcracker_transport::{Audited, Error, Expect, Response, Transport, exchange};
-use support::fake_elm::{BANNER, FakeElm, FakeLink};
+use obdcracker_transport::{Audited, Error, Expect, Response, Transport, exchange, hex};
+use support::fake_elm::{BANNER, FakeElm, FakeLink, frames};
 
 const VIN: &[u8] = b"\x49\x02\x01WAUZZZ4G1EN000000";
 
@@ -1722,6 +1722,51 @@ mod events {
             unread.iter().all(|line| line.starts_with(other)),
             "{unread:?}"
         );
+    }
+
+    #[test]
+    fn frames_of_a_reply_left_incomplete_are_reported() {
+        // Paced, the two ECUs' frames interleave, so the second's first frames are read (and
+        // fed to its reassembler) before the first's reply completes. Abandoning that reply
+        // must still report every one of its lines.
+        let mut elm = Elm::connect(FakeLink::at_baud(car(), 115_200)).unwrap();
+        elm.send(&approve(Target::ObdFunctional, &[0x09, 0x02]))
+            .unwrap();
+        let first = elm.recv(Duration::from_secs(1)).unwrap();
+        elm.take_events();
+        elm.send(&approve(Target::ObdFunctional, &[0x09, 0x02]))
+            .unwrap();
+        let other = if first.source == 0x7E8 { "7E9" } else { "7E8" };
+        let unread: Vec<String> = elm
+            .take_events()
+            .into_iter()
+            .filter_map(|e| match e {
+                LinkEvent::Unread { line, .. } => Some(line),
+                _ => None,
+            })
+            .collect();
+        let expected: Vec<String> = frames(VIN)
+            .iter()
+            .map(|frame| format!("{other} {}", hex(frame)))
+            .collect();
+        assert_eq!(unread, expected);
+    }
+
+    #[test]
+    fn a_status_line_that_isnt_a_failure_is_reported() {
+        let mut elm = connect(car());
+        elm.send(&approve(Target::Physical(0x7E0), &[0x01, 0x00]))
+            .unwrap();
+        assert_eq!(elm.recv(Duration::from_secs(1)), Err(Error::Timeout));
+        let unread: Vec<String> = elm
+            .take_events()
+            .into_iter()
+            .filter_map(|e| match e {
+                LinkEvent::Unread { line, .. } => Some(line),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(unread, ["NO DATA"]);
     }
 
     #[test]

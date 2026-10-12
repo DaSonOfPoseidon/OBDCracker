@@ -203,13 +203,24 @@ pub struct Elm<L> {
     stn: Option<String>,
     // The link's byte rate, if replies are paced to it.
     pace: Option<u32>,
-    senders: Vec<(u32, Reassembler<Vec<u8>>)>,
+    // Each module answering the request in progress, and the lines (with when they were read)
+    // of its reply so far, which are reported as unread if it never completes.
+    senders: Vec<Sender>,
     // What it did besides requests and replies, until taken, and how many more were dropped.
     log: Vec<LinkEvent>,
     lost: usize,
 }
 
 // Where the adapter sends ISO-TP flow control frames.
+// A module answering the request in progress.
+#[derive(Debug)]
+struct Sender {
+    id: u32,
+    reassembler: Reassembler<Vec<u8>>,
+    // The lines of its reply so far, and when each was read.
+    lines: Vec<(SystemTime, String)>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Flow {
     // To the ID ISO 15765-4 gives, for the OBD-II IDs, with no gap between frames
@@ -597,7 +608,8 @@ impl<L: Link> Elm<L> {
             return self.check_idle();
         }
         // The rest of the last request's replies are dropped, but a reset among them still
-        // counts.
+        // counts. Unfinished replies' lines were read first, so they're reported first.
+        self.drop_senders();
         let deadline = Instant::now() + LONGEST_REQUEST;
         loop {
             match self.next_request_event(deadline)? {
@@ -625,7 +637,6 @@ impl<L: Link> Elm<L> {
             }
         }
         self.busy = false;
-        self.senders.clear();
         self.check_idle()
     }
 
@@ -741,26 +752,63 @@ impl<L: Link> Elm<L> {
         }
     }
 
-    // Feeds one frame to its module's reassembler and returns the reply it completes.
-    fn feed(&mut self, source: u32, data: &[u8]) -> Option<Response> {
-        let index = match self.senders.iter().position(|(id, _)| *id == source) {
+    // Feeds one frame, printed as `line`, to its module's reassembler and returns the reply it
+    // completes. Lines that end up in no reply are reported as unread.
+    fn feed(&mut self, source: u32, data: &[u8], line: &str) -> Option<Response> {
+        let index = match self.senders.iter().position(|s| s.id == source) {
             Some(index) => index,
             None if self.senders.len() < MAX_SENDERS => {
                 let buf = vec![0; MAX_SHORT_PAYLOAD];
-                self.senders
-                    .push((source, Reassembler::new(buf, Addressing::Normal)));
+                self.senders.push(Sender {
+                    id: source,
+                    reassembler: Reassembler::new(buf, Addressing::Normal),
+                    lines: Vec::new(),
+                });
                 self.senders.len() - 1
             }
-            None => return None,
+            None => {
+                self.note_unread(vec![(self.event_at, line.to_owned())]);
+                return None;
+            }
         };
+        // A single or first frame starts a new transfer, abandoning any unfinished one.
+        if data.first().is_some_and(|pci| pci >> 4 <= 1) {
+            let abandoned = std::mem::take(&mut self.senders[index].lines);
+            self.note_unread(abandoned);
+        }
+        let at = self.event_at;
+        let sender = &mut self.senders[index];
+        sender.lines.push((at, line.to_owned()));
         // A frame that doesn't fit its module's transfer drops that transfer only; the
         // reassembler starts over at the module's next single or first frame.
-        match self.senders[index].1.feed(data) {
-            Ok(Progress::Complete(payload)) => Some(Response {
-                source,
-                payload: payload.to_vec(),
-            }),
-            _ => None,
+        match sender.reassembler.feed(data) {
+            Ok(Progress::Complete(payload)) => {
+                let reply = Response {
+                    source,
+                    payload: payload.to_vec(),
+                };
+                sender.lines.clear();
+                Some(reply)
+            }
+            Ok(_) => None,
+            Err(_) => {
+                let dropped = std::mem::take(&mut sender.lines);
+                self.note_unread(dropped);
+                None
+            }
+        }
+    }
+
+    // Forgets every module's reply in progress, reporting the lines of those left unfinished.
+    fn drop_senders(&mut self) {
+        for sender in std::mem::take(&mut self.senders) {
+            self.note_unread(sender.lines);
+        }
+    }
+
+    fn note_unread(&mut self, lines: Vec<(SystemTime, String)>) {
+        for (at, line) in lines {
+            self.note(LinkEvent::Unread { at, line });
         }
     }
 
@@ -876,7 +924,7 @@ impl<L: Link> Transport for Elm<L> {
         self.quiet = Duration::ZERO;
         self.echo = Some(line);
         self.busy = true;
-        self.senders.clear();
+        self.drop_senders();
         Ok(())
     }
 
@@ -911,6 +959,7 @@ impl<L: Link> Transport for Elm<L> {
                 Some(Event::Prompt) => {
                     self.prompt_after_request()?;
                     self.busy = false;
+                    self.drop_senders();
                     return Err(Error::Timeout);
                 }
                 // It can't be read, so it could hide a reset.
@@ -920,7 +969,7 @@ impl<L: Link> Transport for Elm<L> {
                 // `None` is the echo.
                 Some(Event::Line(text)) => match self.reply_line(&text)? {
                     Some(Line::Frame(frame)) => {
-                        if let Some(reply) = self.feed(frame.id(), frame.data()) {
+                        if let Some(reply) = self.feed(frame.id(), frame.data(), &text) {
                             return Ok(reply);
                         }
                     }
@@ -934,7 +983,9 @@ impl<L: Link> Transport for Elm<L> {
                     Some(Line::Status(status)) if status.is_failure() => {
                         return Err(Error::Adapter(format!("the adapter said {status}")));
                     }
-                    _ => {}
+                    // Such as NO DATA: heard, but no reply.
+                    Some(_) => self.note_unread(vec![(self.event_at, text)]),
+                    None => {}
                 },
             }
         }

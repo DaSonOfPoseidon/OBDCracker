@@ -224,6 +224,10 @@ Each entry names the class, what to check, and where it bit us.
   When bytes arrive, restart from the last byte, not from the end of the wait it came in: a wait that heard one
   stray NUL still ended in silence, and discarding it let bytes just under twice the limit apart run forever (M3
   branch, Codex).
+- **A log of what was heard must cover what was half-used.** The audit log reported lines left unread at the next
+  request, but frames already fed to a reassembler for a reply that never completed (another module's interleaved
+  frames, a transfer dropped mid-way, a sixteenth-plus sender) and status lines such as `NO DATA` vanished. Keep each
+  input's raw form until it's part of something logged, and report it when it's dropped (PR #78).
 - **Don't hand back stale data to make a log complete.** Replies drained before the next request aren't returned:
   queueing them would let a late reply to a repeated request pass for a fresh one. Document what the audit log
   records instead (M3 branch, Codex).
