@@ -3,8 +3,9 @@
 # Fails if an open issue blocks it: one tagged with an area this branch touches whose milestone is
 # the PR's, an earlier one, or none. Issues tagged with the PR's milestone block it in any area.
 # Issues for later milestones wait for their own milestone, and `milestone:later` issues (planned,
-# not yet scheduled) wait until they get one. Issues this branch's commits fix
-# (`fixes #N`) don't count; they close when the PR merges.
+# not yet scheduled) wait until they get one. So do `status:blocked` issues, which wait on something
+# else; only `status:ready` issues (or ones not yet given a status) block. Issues this branch's
+# commits fix (`fixes #N`) don't count; they close when the PR merges.
 set -e
 cd "$(dirname "$0")/.."
 repo=DaSonOfPoseidon/OBDCracker
@@ -69,12 +70,13 @@ open=$(gh api --paginate "repos/$repo/issues?state=open&per_page=100" --jq "
 	| ([.labels[].name] ) as \$names
 	| ([\$names[] | select(startswith(\"milestone:M\")) | ltrimstr(\"milestone:M\") | tonumber] | min) as \$due
 	| select(\$due != null or (\"milestone:later\" | IN(\$names[]) | not))
+	| select(\"status:blocked\" | IN(\$names[]) | not)
 	| select(
 		(\$m > 0 and \$due == \$m)
 		or (([\$names[] | select(IN(\$areas[]))] | length > 0)
 			and (\$due == null or (\$m > 0 and \$due <= \$m)))
 	)
-	| \"#\\(.number) [\\(\$names | map(select(startswith(\"area:\") or startswith(\"milestone:\"))) | join(\", \"))] \\(.title)\"
+	| \"#\\(.number) [\\(\$names | map(select(startswith(\"area:\") or startswith(\"milestone:\") or startswith(\"status:\"))) | join(\", \"))] \\(.title)\"
 ")
 if [ -n "$open" ]; then
 	echo "Open issues block this PR:"
