@@ -32,7 +32,7 @@ Label it `bug`, `documentation` or `enhancement`, and tag what it impacts:
 - **Every area it affects:** `area:core`, `area:safety`, `area:transport`, `area:sim`, `area:profile`, `area:cli`, `area:facade`
   (the `obdcracker` crate), `area:docs` (any `*.md` or `docs/`), `area:ci` (workflows, `scripts/`, Cargo and tool
   config).
-- **The milestone it blocks,** if any: `milestone:M1` to `milestone:M9`. A planned feature that isn't scheduled yet gets
+- **The milestone it blocks,** if any: `milestone:M1` to `milestone:M13`. A planned feature that isn't scheduled yet gets
   `milestone:later` instead: it blocks nothing until it's given a milestone. An issue with no milestone label at all
   blocks every PR in its areas.
 
