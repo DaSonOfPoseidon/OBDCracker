@@ -2,7 +2,8 @@
 
 Plug the adapter into the car and turn the ignition on. `vin`, `fingerprint`, `scan` and `sweep` send requests only
 through the [safety policy](safety.md), and with a real adapter they append to an audit log. `ports` and `adapter`
-send nothing to the car and write no audit log.
+send nothing to the car. `ports` writes no audit log; `adapter` writes one only if connecting to the adapter fails,
+recording what it sent the adapter and heard back.
 
 ## Connecting
 
