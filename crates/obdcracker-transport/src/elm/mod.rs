@@ -965,12 +965,23 @@ impl<L: Link> Transport for Elm<L> {
         if self.pace.is_none() {
             self.expect_ok("ATAT0")?;
         }
-        // Whole milliseconds, as `STPTO` takes them.
+        if self.stn.is_none() {
+            return Ok(Some(ADAPTER_TIMEOUT));
+        }
+        // Whole milliseconds, as `STPTO` takes them, and never shorter than usual.
         let ms = wait.min(STN_LONGEST_TIMEOUT).as_millis();
-        let wait = Duration::from_millis(u64::try_from(ms).unwrap_or(u64::MAX));
-        if self.stn.is_some() && wait > ADAPTER_TIMEOUT {
-            self.expect_ok(&format!("STPTO{ms}"))?;
+        let wait =
+            Duration::from_millis(u64::try_from(ms).unwrap_or(u64::MAX)).max(ADAPTER_TIMEOUT);
+        if wait != self.timeout {
+            let command = if wait == ADAPTER_TIMEOUT {
+                "ATSTFF".to_owned()
+            } else {
+                format!("STPTO{ms}")
+            };
+            // Recorded first: a command that fails may still have taken effect. (A failed
+            // command leaves the adapter unusable until it's connected, and reset, again.)
             self.timeout = wait;
+            self.expect_ok(&command)?;
         }
         Ok(Some(self.timeout))
     }

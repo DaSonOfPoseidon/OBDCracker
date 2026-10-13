@@ -1562,6 +1562,48 @@ mod pacing {
     }
 
     #[test]
+    fn patience_sets_the_wait_each_call_asks_for() {
+        // A second call sets its own wait, shorter or longer, rather than keeping the first.
+        let mut stn = car();
+        stn.sti = Some("STN2232 v5.12.4".into());
+        let mut elm = connect(stn);
+        elm.patient(Some(Duration::from_secs(5))).unwrap();
+        assert_eq!(
+            elm.patient(Some(Duration::from_secs(2))).unwrap(),
+            Some(Duration::from_secs(2))
+        );
+        assert_eq!(commands(&elm).last().map(String::as_str), Some("STPTO2000"));
+        assert_eq!(
+            elm.patient(Some(Duration::from_millis(500))).unwrap(),
+            Some(ADAPTER_TIMEOUT)
+        );
+        assert_eq!(commands(&elm).last().map(String::as_str), Some("ATSTFF"));
+        // Already the usual timeout: nothing more to restore.
+        let before = commands(&elm).len();
+        elm.patient(None).unwrap();
+        assert_eq!(commands(&elm)[before..], ["ATAT1"]);
+    }
+
+    #[test]
+    fn a_failed_stpto_leaves_the_adapter_unusable() {
+        // An answer that isn't OK doesn't prove the adapter didn't apply it, so its timeout is
+        // unknown: nothing more is sent until it's connected (and reset) again.
+        let mut stn = car();
+        stn.sti = Some("STN2232 v5.12.4".into());
+        stn.unsupported = vec!["STPTO5000".into()];
+        let mut elm = connect(stn);
+        assert!(elm.patient(Some(Duration::from_secs(5))).is_err());
+        let before = commands(&elm).len();
+        let err = elm.patient(None).unwrap_err();
+        assert!(err.to_string().contains("connect again"), "{err}");
+        assert!(
+            elm.send(&approve(Target::Physical(0x7E0), &[0x09, 0x02]))
+                .is_err()
+        );
+        assert_eq!(commands(&elm).len(), before);
+    }
+
+    #[test]
     fn a_plain_elm327_waits_no_longer_than_at_st_ff() {
         // `AT ST FF` is the most an ELM327 waits, so patience says that's how long the wait
         // really is. A plain ELM327 is paced, so adaptive timing is already off and nothing is
