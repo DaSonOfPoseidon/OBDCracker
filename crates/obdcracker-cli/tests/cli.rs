@@ -687,9 +687,9 @@ fn scan_discover_needs_a_profile_with_a_discovery_range() {
 }
 
 #[test]
-fn scan_extended_says_what_it_does_and_switches_no_module_without_extended_dids() {
-    // The A7 profile has no DID that needs the extended session yet, so --extended reads the
-    // same as a plain scan and never sends 10 03.
+fn scan_extended_switches_only_the_modules_with_extended_dids() {
+    // In the A7 profile only the head-up display has DIDs that need the extended session (0100
+    // and 0102, #86), so --extended sends 10 03 to it alone, and a plain scan says it didn't read them.
     let log = temp_log("scan-extended");
     let out = obdcracker(&[
         "--sim",
@@ -709,8 +709,30 @@ fn scan_extended_says_what_it_does_and_switches_no_module_without_extended_dids(
         stderr.contains("extended diagnostic session (10 03)"),
         "{stderr}"
     );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    for line in [
+        "785 head-up display 0100 [00]",
+        "785 head-up display 0102 [00]",
+    ] {
+        assert!(stdout.lines().any(|l| l == line), "{line}: {stdout}");
+    }
     let audit = std::fs::read_to_string(&log).unwrap();
-    assert!(!audit.contains(r#""payload":"10 03""#), "{audit}");
+    let switches: Vec<&str> = audit
+        .lines()
+        .filter(|l| l.contains(r#""payload":"10 03""#))
+        .collect();
+    assert_eq!(switches.len(), 1, "{audit}");
+    assert!(switches[0].contains(r#""id":"71B""#), "{audit}");
+
+    let out = obdcracker(&["--sim", "a7", "scan"]);
+    assert!(out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout
+            .lines()
+            .any(|l| l == "785 head-up display 0100 (not read: needs the extended session)"),
+        "{stdout}"
+    );
 }
 
 #[test]

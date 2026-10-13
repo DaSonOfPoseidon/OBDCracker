@@ -11,7 +11,10 @@
 # not every A7; `tests/data/a7-did-replies.txt` keeps those replies, and a test checks each length
 # against them. A DID the module refused has no length. F18B (manufacture date) is listed to show it
 # as bytes: it's BCD, such as 13 11 19, and all zeros when unset. 0x0600 (VW coding) is listed on
-# every module, so a scan reads it; the rest are VAG extras.
+# every module that answered it in #86, so a scan reads it; the sensor cluster, tire pressure and
+# parking brake refused it as out of range, and the transmission wasn't asked. The rest are VAG
+# extras. The head-up display's DIDs below 0x1000 are what the #86 sweeps found; their meanings
+# aren't known yet.
 
 name = "2014 Audi A7 3.0 TDI (C7)"
 bitrate = 500000
@@ -310,6 +313,7 @@ length = 20
 id = 0x0600
 name = "VW coding value"
 decode = "hex"
+length = 3
 
 [[module]]
 name = "steering"
@@ -363,6 +367,7 @@ length = 25
 id = 0x0600
 name = "VW coding value"
 decode = "hex"
+length = 6
 
 [[module]]
 name = "brakes"
@@ -416,6 +421,7 @@ length = 17
 id = 0x0600
 name = "VW coding value"
 decode = "hex"
+length = 10
 
 [[module]]
 name = "airbag"
@@ -475,6 +481,7 @@ length = 21
 id = 0x0600
 name = "VW coding value"
 decode = "hex"
+length = 18
 
 [[module]]
 name = "rear climate"
@@ -528,6 +535,7 @@ length = 25
 id = 0x0600
 name = "VW coding value"
 decode = "hex"
+length = 1
 
 [[module]]
 name = "head-up display"
@@ -579,9 +587,83 @@ decode = "text"
 length = 14
 
 [[module.did]]
+id = 0x0100
+name = "unknown (#86 sweep)"
+decode = "hex"
+length = 1
+session = "extended"
+
+[[module.did]]
+id = 0x0102
+name = "unknown (#86 sweep)"
+decode = "hex"
+length = 1
+session = "extended"
+
+[[module.did]]
+id = 0x0103
+name = "unknown (#86 sweep)"
+decode = "hex"
+length = 1
+
+[[module.did]]
+id = 0x0286
+name = "unknown (#86 sweep)"
+decode = "hex"
+length = 1
+
+[[module.did]]
+id = 0x028D
+name = "unknown, needs security access (#86 sweep)"
+decode = "hex"
+
+[[module.did]]
+id = 0x0405
+name = "unknown (#86 sweep)"
+decode = "hex"
+length = 1
+
+[[module.did]]
+id = 0x0407
+name = "unknown (#86 sweep)"
+decode = "hex"
+length = 20
+
+[[module.did]]
+id = 0x0408
+name = "unknown (#86 sweep)"
+decode = "hex"
+length = 20
+
+[[module.did]]
+id = 0x040F
+name = "unknown (#86 sweep)"
+decode = "hex"
+length = 20
+
+[[module.did]]
+id = 0x0501
+name = "unknown (#86 sweep)"
+decode = "hex"
+length = 40
+
+[[module.did]]
+id = 0x0502
+name = "unknown (#86 sweep)"
+decode = "hex"
+length = 11
+
+[[module.did]]
 id = 0x0600
 name = "VW coding value"
 decode = "hex"
+length = 3
+
+[[module.did]]
+id = 0x0902
+name = "unknown (#86 sweep)"
+decode = "hex"
+length = 1
 
 [[module]]
 name = "sensor cluster"
@@ -666,11 +748,6 @@ id = 0xF19E
 name = "ODX file"
 decode = "text"
 length = 9
-
-[[module.did]]
-id = 0x0600
-name = "VW coding value"
-decode = "hex"
 
 [[module]]
 name = "rear lid"
@@ -760,6 +837,7 @@ length = 24
 id = 0x0600
 name = "VW coding value"
 decode = "hex"
+length = 5
 
 [[module]]
 name = "camera"
@@ -813,6 +891,7 @@ length = 19
 id = 0x0600
 name = "VW coding value"
 decode = "hex"
+length = 4
 
 [[module]]
 name = "night vision"
@@ -872,6 +951,7 @@ length = 18
 id = 0x0600
 name = "VW coding value"
 decode = "hex"
+length = 2
 
 [[module]]
 name = "tire pressure"
@@ -933,11 +1013,6 @@ name = "ODX file"
 decode = "text"
 length = 14
 
-[[module.did]]
-id = 0x0600
-name = "VW coding value"
-decode = "hex"
-
 [[module]]
 name = "climate"
 request_id = 0x746
@@ -990,6 +1065,7 @@ length = 20
 id = 0x0600
 name = "VW coding value"
 decode = "hex"
+length = 5
 
 [[module]]
 name = "parking brake"
@@ -1039,11 +1115,6 @@ name = "ODX file"
 decode = "text"
 length = 14
 
-[[module.did]]
-id = 0x0600
-name = "VW coding value"
-decode = "hex"
-
 [[module]]
 name = "headlight range"
 request_id = 0x754
@@ -1090,6 +1161,7 @@ length = 19
 id = 0x0600
 name = "VW coding value"
 decode = "hex"
+length = 8
 
 [[module]]
 name = "acc 2"
@@ -1137,6 +1209,7 @@ length = 25
 id = 0x0600
 name = "VW coding value"
 decode = "hex"
+length = 5
 
 [[module]]
 name = "acc"
@@ -1184,6 +1257,7 @@ length = 25
 id = 0x0600
 name = "VW coding value"
 decode = "hex"
+length = 5
 
 [[module]]
 name = "image processing"
@@ -1231,6 +1305,7 @@ length = 7
 id = 0x0600
 name = "VW coding value"
 decode = "hex"
+length = 6
 
 [[module]]
 name = "belt tensioner left"
@@ -1290,6 +1365,7 @@ length = 9
 id = 0x0600
 name = "VW coding value"
 decode = "hex"
+length = 18
 
 [[module]]
 name = "belt tensioner right"
@@ -1349,6 +1425,7 @@ length = 9
 id = 0x0600
 name = "VW coding value"
 decode = "hex"
+length = 18
 
 [[module]]
 name = "top view"
@@ -1402,6 +1479,7 @@ length = 25
 id = 0x0600
 name = "VW coding value"
 decode = "hex"
+length = 14
 
 # `scan --discover` tries each request ID here with `22 F187`, expecting replies at the request ID
 # + 0x6A. 0x700..=0x769 is as far as that goes safely: the replies (0x76A..=0x7D3) are never a

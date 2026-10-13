@@ -300,16 +300,51 @@ fn coding_did_needs_the_extended_session() {
 
 #[test]
 fn a7_coding_reads_in_the_default_session() {
-    // Every A7 module answered 0600 without a session change (#49). The instruments send
-    // response-pending first, so the answer is the last reply.
+    // Every A7 module that has a coding answered 0600 without a session change (#49, #86). The
+    // instruments send response-pending first, so the answer is the last reply.
+    let profile = Profile::builtin("a7").unwrap();
     let mut bus = a7();
-    for target in [ENGINE, GATEWAY, INSTRUMENTS] {
+    let mut read = 0;
+    for module in &profile.modules {
+        let target = Target::Physical(module.request_id);
         let reply = ask(&mut bus, target, &uds::read_did(0x0600))
             .pop()
             .unwrap()
             .payload;
-        assert!(uds::decode_did(&reply, 0x0600).is_ok(), "{target:?}");
+        if module.dids.iter().any(|did| did.id == 0x0600) {
+            assert!(uds::decode_did(&reply, 0x0600).is_ok(), "{}", module.name);
+            read += 1;
+        } else {
+            // The transmission, and the three modules that refused it in #86.
+            assert_eq!(nrc(&reply, 0x22), Nrc::RequestOutOfRange, "{}", module.name);
+        }
     }
+    assert_eq!(read, 20);
+}
+
+#[test]
+fn a7_hud_answers_as_its_sweeps_did() {
+    // #86: 0100 answered only in the extended session, refused as out of range in the default one;
+    // 028D was refused for want of security access in both.
+    let hud = Target::Physical(0x71B);
+    let mut bus = a7();
+    let reply = ask_one(&mut bus, hud, &uds::read_did(0x0100));
+    assert_eq!(nrc(&reply, 0x22), Nrc::RequestOutOfRange);
+    let reply = ask_one(&mut bus, hud, &uds::read_did(0x028D));
+    assert_eq!(nrc(&reply, 0x22), Nrc::SecurityAccessDenied);
+    assert_eq!(
+        ask_one(&mut bus, hud, &uds::read_did(0x0502)),
+        [
+            0x62, 0x05, 0x02, 0x1E, 0x82, 0x14, 0x02, 0x02, 0x32, 0x32, 0x40, 0x00, 0x3B, 0x00
+        ]
+    );
+    ask_one(&mut bus, hud, &[0x10, 0x03]);
+    assert_eq!(
+        ask_one(&mut bus, hud, &uds::read_did(0x0100)),
+        [0x62, 0x01, 0x00, 0x00]
+    );
+    let reply = ask_one(&mut bus, hud, &uds::read_did(0x028D));
+    assert_eq!(nrc(&reply, 0x22), Nrc::SecurityAccessDenied);
 }
 
 #[test]
