@@ -7,7 +7,7 @@
 #   scripts/import-opendbc.sh volkswagen 229dc7062d8986b4f954c7c97875b4ffd0044d12 \
 #       crates/obdcracker-sim/fixtures/opendbc-vag.toml AUDI_Q5_MK1 AUDI_A3_MK3 PORSCHE_MACAN_MK1
 #
-# Only engine and transmission entries are imported. Add the commit to THIRD_PARTY.md.
+# Only engine and transmission entries are imported. Add the commit to docs/third-party.md.
 set -e
 [ $# -ge 4 ] || { sed -n 2,10p "$0" >&2; exit 2; }
 make=$1 commit=$2 out=$3

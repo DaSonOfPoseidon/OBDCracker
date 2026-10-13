@@ -1,5 +1,5 @@
 //! Test vectors ported from independent implementations, so a misreading of the standards that
-//! our own golden frames share gets caught. Sources (MIT, see `THIRD_PARTY.md`):
+//! our own golden frames share gets caught. Sources (MIT, see `docs/third-party.md`):
 //!
 //! - python-can-isotp, `test/test_helper_classes.py` and `test/test_transport_layer_logic.py`
 //! - python-udsoncan, `test/client/test_read_data_by_identifier.py`,
