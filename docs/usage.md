@@ -1,7 +1,8 @@
 # Using the CLI
 
-Plug the adapter into the car and turn the ignition on. Every command goes through the [safety policy](safety.md),
-and a real session appends to an audit log.
+Plug the adapter into the car and turn the ignition on. `vin`, `fingerprint`, `scan` and `sweep` send requests only
+through the [safety policy](safety.md), and with a real adapter they append to an audit log. `ports` and `adapter`
+send nothing to the car and write no audit log.
 
 ## Connecting
 
@@ -16,7 +17,7 @@ On macOS use the `/dev/cu.*` port. Leaving a wireless adapter plugged in drains 
 connect, so the CLI warns about it, and the audit log records which link a session used. See
 [adapters](adapters.md) for what's supported.
 
-Two options work with any command:
+Two options work with `vin`, `fingerprint`, `scan` and `sweep` (not `ports` or `adapter`):
 
 - `--dry-run` prints the frames the command would send and opens no adapter.
 - `--sim a7` runs it against a simulated A7.

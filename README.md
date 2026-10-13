@@ -20,10 +20,10 @@ manufacturer diagnostics are added as vehicle profiles. The development testbed 
 - **Safe by construction:** every request passes a tiered safety policy, and transports accept nothing else
 - **Any adapter, any OS:** ELM327/STN over USB serial or Wi-Fi today; more backends planned
 - **`fingerprint`:** calibration IDs, CVNs and part numbers of the engine and transmission, to see what a tune changed
-- **`scan`:** live data, DTCs and identification from every module, with discovery of modules the profile doesn't list
+- **`scan`:** live data, DTCs and identification from the profile's modules, plus any that `--discover` finds
 - **`sweep`:** find the DIDs a module answers that no profile lists yet
 - **`--dry-run` and `--sim`:** see the exact frames before sending, or run against a simulated car
-- **Audit log** of every frame and adapter command in a real session
+- **Audit log** of every frame and adapter command in a real diagnostic session
 - **A library first:** the CLI is one consumer of the importable `obdcracker` crate
 
 ## Quick start
@@ -58,7 +58,7 @@ module.
 
 | Tier | Allows | Status |
 |---|---|---|
-| T0 Read | OBD-II modes 01/03/09, UDS 0x22, 0x19, 0x3E, 0x10 | allowed |
+| T0 Read | OBD-II modes 01/03/09, UDS 0x22, 0x19, 0x3E, 0x10 (default/extended session) | allowed |
 | T1 Clear DTCs | UDS 0x14, OBD-II mode 04 | planned |
 | T2 Coding | UDS 0x2E, 0x27 | planned |
 | T3 Flash | programming session, 0x31, 0x34/0x36/0x37, 0x11 | **hard-banned** |
