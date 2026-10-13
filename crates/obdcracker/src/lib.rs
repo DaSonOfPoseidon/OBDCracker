@@ -63,7 +63,11 @@ pub use obdcracker_safety as safety;
 pub use obdcracker_sim as sim;
 pub use obdcracker_transport as transport;
 
-// Compiles the README's Rust examples as doctests, so they can't drift from the API.
+// Compiles the README's and the library guide's Rust examples as doctests, so they can't drift from the API.
 #[cfg(doctest)]
 #[doc = include_str!("../../../README.md")]
 struct ReadmeDoctests;
+
+#[cfg(doctest)]
+#[doc = include_str!("../../../docs/library.md")]
+struct LibraryDocDoctests;

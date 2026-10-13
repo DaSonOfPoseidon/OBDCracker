@@ -57,7 +57,7 @@ closes when the PR merges.
 
 Codex reviews every push to a pull request, and each review costs time and usage. So review your
 own change just as hard before pushing, and push fixes in batches rather than one at a time. Read
-[`docs/pitfalls.md`](docs/pitfalls.md) before making a change: it lists the classes of bug reviews have
+[`docs/pitfalls.md`](pitfalls.md) before making a change: it lists the classes of bug reviews have
 caught here. Add a new entry when a review finds a new class. Check each change against:
 
 - **Untrusted input:** every length, count and echoed ID is checked exactly. Reject trailing bytes,
@@ -114,4 +114,4 @@ cargo build -p obdcracker-core --target thumbv7em-none-eabihf  # obdcracker-core
 docker run --rm -v "$PWD:/repo" -w /repo rhysd/actionlint:1.7.7  # when workflows change
 ```
 
-New capabilities are written test-first. See the safety model in `README.md` before adding anything that sends a request.
+New capabilities are written test-first. See the [safety model](safety.md) before adding anything that sends a request.

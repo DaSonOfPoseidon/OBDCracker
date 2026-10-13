@@ -1,258 +1,108 @@
 # OBDCracker
 
-A laptop tool that talks to a car's diagnostic bus through the OBD2 port using an off-the-shelf adapter.
-It works with any adapter, any OS (macOS, Windows, Linux) and any manufacturer. OBD-II is the baseline every car shares,
-and manufacturer diagnostics are added as vehicle profiles. The development testbed is a 2014 Audi A7 3.0 TDI (C7).
+[![CI](https://github.com/DaSonOfPoseidon/OBDCracker/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/DaSonOfPoseidon/OBDCracker/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![Rust 1.99](https://img.shields.io/badge/rust-1.99-orange.svg)](rust-toolchain.toml)
 
-> **Status:** early. The ELM327/STN driver works over USB serial and Wi-Fi (TCP), and has run three read-only sessions
+**Adapter-agnostic OBD2/UDS diagnostics in Rust, safe by construction.**
+
+OBDCracker talks to a car's diagnostic bus through the OBD2 port using an off-the-shelf adapter. It works with any
+adapter, any OS (macOS, Windows, Linux) and any manufacturer. OBD-II is the baseline every car shares, and
+manufacturer diagnostics are added as vehicle profiles. The development testbed is a 2014 Audi A7 3.0 TDI (C7).
+
+> [!NOTE]
+> **Status: early.** The ELM327/STN driver works over USB serial and Wi-Fi (TCP), and has run three read-only sessions
 > on the 2014 A7 over USB (OBDLink EX): fingerprinting, and a scan of the modules behind its gateway. Only read-only
 > requests are allowed.
 
-## Safety model
+## Features
 
-The main rule: **nothing this tool sends may brick or damage a car.** That rule comes from how the code is built, not
-from developers being careful:
+- **Safe by construction:** every request passes a tiered safety policy, and transports accept nothing else
+- **Any adapter, any OS:** ELM327/STN over USB serial or Wi-Fi today; more backends planned
+- **`fingerprint`:** calibration IDs, CVNs and part numbers of the engine and transmission, to see what a tune changed
+- **`scan`:** live data, DTCs and identification from the profile's modules, plus any that `--discover` finds
+- **`sweep`:** find the DIDs a module answers that no profile lists yet
+- **`--dry-run` and `--sim`:** see the exact frames before sending, or run against a simulated car
+- **Audit log** of every frame and adapter command in a real diagnostic session
+- **A library first:** the CLI is one consumer of the importable `obdcracker` crate
 
-- Every request goes through `obdcracker-safety`. Its `Policy` gives every OBD-II and UDS service a tier and returns an
-  `Approved` request. That type can only be created inside `obdcracker-safety`, and every transport's `send` requires it.
-- Anything not on the allowlist is rejected, unknown services included.
-- The policy classifies each request by **protocol**, because service IDs mean different things in different protocols.
-  In UDS `0x85` is ControlDTCSetting, but in KWP2000 `10 85` starts the programming (flashing) session. Every protocol
-  has its own allowlist and banned list.
-- A vehicle profile can only narrow what the policy allows, never widen it.
-- Each tier above read-only needs a cargo feature, an explicit runtime unlock, and passing preconditions:
+## Quick start
 
-| Tier | Allows | Status |
-|---|---|---|
-| T0 Read | OBD-II modes 01/03/09, UDS 0x22, 0x19, 0x3E, 0x10 (default/extended session) | allowed |
-| T1 Clear DTCs | UDS 0x14, OBD-II mode 04 | planned |
-| T2 Coding | UDS 0x2E, 0x27 | planned; needs a backup of the current value |
-| T3 Flash | programming session, 0x31, 0x34/0x36/0x37, 0x11 | **hard-banned** until a separate design doc exists; will need a full backup of the current image |
-
-- **Back up before every change.** A write (T1 and up) can't be approved without a `Backup` of what is on the module
-  right now: read from the same module, saved to disk and read back from disk. Every change is reversible from that
-  backup, and each restore path is tested end to end against the simulator (back up → write → restore → read back
-  equals the original) before it touches a car.
-- `--dry-run` prints the exact frames a command would send without opening a device. Frames that depend on the
-  car's answers (`scan`'s later PID bitmaps and PID reads) can't be known in advance; the dry run lists what they
-  can be instead.
-- `--sim a7` runs a command against a simulated A7 instead of a car, through the same policy and audit log.
-- `fingerprint` identifies the engine and transmission software: calibration IDs and CVNs (OBD-II mode 09), then
-  part numbers and versions (UDS `22 F187`, `F188`, `F189`, `F191`, `F19E`), one read at a time. A tune changes the
-  CVNs, so a saved fingerprint shows later what changed. Module addresses come from `--profile`, or the OBD-II
-  engine and transmission IDs without one.
-- `scan` reads everything the default diagnostic session allows, without changing any module's session. From each
-  emissions ECU it reads every supported mode 01 PID, mode 09 PIDs 00 and 0A, and mode 03 stored DTCs. From each
-  plain-UDS module in the profile it reads the standard identification DIDs plus the profile's own DIDs, and its DTCs
-  (`19 01 AF`, `19 02 AF`). It lists only DTCs that are failed, pending, confirmed or failed since the last clear, not
-  the module's untested codes. DIDs whose length the profile gives are read three to a request; any a reply leaves
-  out or doesn't fit are read again one at a time, and must then be exactly that length.
-- `scan --extended` also reads the DIDs the profile marks `session = "extended"`. After a module's other reads it
-  enters the extended session (`10 03`), reads them (with `3E 00` before a read once 2 s have passed since the module
-  last accepted one), and returns it to the default session (`10 01`). A module with no such DIDs isn't switched, and
-  without `--extended` those DIDs show as not read. A module that refuses the session loses only those DIDs.
-- `scan --discover` first looks for modules the profile doesn't list. It reads the part number (`22 F1 87`) from each
-  request ID in the profile's discovery range, one at a time and through the policy narrowed to those IDs, then scans
-  whatever answered along with the profile's modules. On the A7 that's 0x700 to 0x769, replies at +0x6A: no ID it sends
-  on is ever a reply ID. A module whose request ID is past 0x769 isn't found by that pass.
-- `scan --discover --wide` then looks further, at 0x76A to 0x795 on the A7 (replies up to 0x7FF), where VW's MQB
-  cars put the MMI (0x773). Those request IDs are the first pass's reply IDs. It skips those a module it knows of
-  (listed in the profile, or just found) answers on, and any whose reply would be an OBD-II ID. A module that stayed
-  silent in the first pass could still own one, so before the wide pass it asks each of those first-pass IDs again,
-  waiting up to 5 s for each, to find a module that was only slow. The wide pass waits as long, for modules such as
-  the MMI whose replies the gateway may route slowly. An OBDLink (STN chip) can wait that long; a plain ELM327 waits
-  about 1 s at most, and the output says so. One that
-  doesn't answer `22 F1 87` at all could still own one, so `--wide` is opt-in and may send a read on that module's
-  reply ID: a frame no module receives, since modules only send on theirs. A module that speaks only KWP2000/TP2.0,
-  as some older MMIs may, doesn't answer any pass.
-- `sweep --module <NAME> --range FIRST-LAST` looks for the DIDs one profile module has that no profile lists yet,
-  such as the head-up display's adaptation values. It reads each DID in the range (`22 xxxx`), one request each, and
-  lists those the module answers, skipping refusals as out of range (NRC 0x31). It asks for an explicit range and
-  prints how many reads that is first. It stops early, keeping what it found, if the module goes quiet (3 reads in a
-  row with no final answer), refuses `22` itself (such as "service not supported in active session"), says it's
-  busy, or the adapter fails, and prints the command to go on with when that can help. `--extended` sweeps in the
-  extended session, entered and left as `scan --extended` does, and warns if the module may not have left it.
-- Every frame sent or received in a real session is appended to an audit log, along with any adapter error (such as an
-  adapter mishearing a request it may already have sent), every command to the adapter (`"dir":"cmd"`, such as
-  `AT SH 7E0`, with its answer), and every reply line the adapter printed after nothing read it any more
-  (`"dir":"unread"`, such as a late reply). It holds only what the adapter hears through its receive filter, not the
-  whole bus.
-- **One gap: ELM327/STN adapters that echo whole lines.** Their serial line has no checksum. On an adapter that echoes
-  each character as it reads it (the OBDLink EX does), the driver checks a request's echo before sending its carriage
-  return, so a misheard request never reaches the bus (#34). One that echoes only whole lines sends a request before
-  the driver can check it, so a single bit error can turn an approved read into another request, a locked or banned
-  one included (a reset, clearing DTCs, one write). It can't complete a flash sequence, and the driver stops at the
-  first mismatched echo. It's a rare, accepted risk, reasoned in [`docs/elm327.md`](docs/elm327.md). Prefer a USB or
-  Wi-Fi adapter over a direct serial cable.
-
-New capabilities are developed test-first: golden-frame unit tests, then property tests and fuzzing of response parsers,
-then a simulated ECU (`obdcracker-sim`), then a dry run on the car, and only then a live session.
-
-## Install
-
-One command builds the `obdcracker` CLI from source. It installs whatever is missing (a C linker and rustup), and
-doesn't need Git. Run it again to update.
+```sh
+# macOS and Linux
+curl -fsSL https://raw.githubusercontent.com/DaSonOfPoseidon/OBDCracker/main/scripts/install.sh | sh
+```
 
 ```powershell
 # Windows (PowerShell)
 irm https://raw.githubusercontent.com/DaSonOfPoseidon/OBDCracker/main/scripts/install.ps1 | iex
 ```
 
-```sh
-# macOS and Linux (or `wget -qO- <url> | sh` without curl)
-curl -fsSL https://raw.githubusercontent.com/DaSonOfPoseidon/OBDCracker/main/scripts/install.sh | sh
-```
-
-- **Windows:** the first run installs the Visual C++ Build Tools, which is a few GB and asks for admin rights. If
-  `obdcracker ports` doesn't list the adapter, install the [FTDI VCP driver](https://ftdichip.com/drivers/vcp-drivers/).
-- **macOS:** if the Xcode Command Line Tools are missing, the script opens their installer; run it again once that's
-  done. Use the `/dev/cu.*` port.
-- **Linux:** the script adds you to the serial ports' group (`dialout` or `uucp`); log out and back in once.
-- To build a branch: `-Ref <branch>` on Windows (`& ([scriptblock]::Create((irm <url>))) -Ref <branch>`), or
-  `| sh -s -- --ref <branch>` elsewhere. To build a checkout: `scripts/install.ps1 -Source .` or `scripts/install.sh --source .`.
-
 Then, with the adapter plugged into the car and the ignition on:
 
 ```sh
-obdcracker ports                       # find the adapter's port
-obdcracker --serial <PORT> adapter     # check the adapter; sends nothing to the car
+obdcracker ports                              # find the adapter's port
+obdcracker --serial <PORT> adapter            # check the adapter; sends nothing to the car
 obdcracker --serial <PORT> fingerprint
-obdcracker --dry-run --profile a7 scan # what scan would send; opens no adapter
 obdcracker --serial <PORT> --profile a7 scan
-obdcracker --serial <PORT> --profile a7 scan --discover  # also look for modules the profile doesn't list
-obdcracker --serial <PORT> --profile a7 scan --extended  # also read the profile's extended-session DIDs
-obdcracker --serial <PORT> --profile a7 scan --discover --wide  # and past the discovery range
-obdcracker --serial <PORT> --profile a7 sweep --module "head-up display" --range 0600-06FF  # DIDs it answers
 ```
 
-## Using it as a library
+See [Install](docs/install.md) for notes for each OS, and [Using the CLI](docs/usage.md) for every command.
 
-OBDCracker is meant to be imported. Add the `obdcracker` crate, which re-exports the others:
+## Safety
+
+**Nothing this tool sends may brick or damage a car.** Every request goes through `obdcracker-safety`, which returns an
+`Approved` request that can't be created anywhere else; anything not on the allowlist is rejected. Each tier above
+read-only needs a cargo feature, an explicit runtime unlock, passing preconditions, and a backup of what's on the
+module.
+
+| Tier | Allows | Status |
+|---|---|---|
+| T0 Read | OBD-II modes 01/03/09, UDS 0x22, 0x19, 0x3E, 0x10 (default/extended session) | allowed |
+| T1 Clear DTCs | UDS 0x14, OBD-II mode 04 | planned |
+| T2 Coding | UDS 0x2E, 0x27 | planned |
+| T3 Flash | programming session, 0x31, 0x34/0x36/0x37, 0x11 | **hard-banned** |
+
+Read the full [safety model](docs/safety.md), including its one known gap.
+
+## Use as a library
 
 ```toml
 [dependencies]
 obdcracker = { git = "https://github.com/DaSonOfPoseidon/OBDCracker" }
-# obdcracker = { git = "...", features = ["sim"] }  # simulated ECUs for your own tests
 ```
 
 ```rust,no_run
-use std::error::Error;
-use std::time::Duration;
-
 use obdcracker::core::obd;
 use obdcracker::safety::{Policy, Target};
-use obdcracker::transport::{Audited, DryRun, Transport};
+use obdcracker::transport::{DryRun, Transport};
 
-fn main() -> Result<(), Box<dyn Error>> {
+fn main() -> Result<(), Box<dyn std::error::Error>> {
     let vin = Policy::read_only().approve(Target::ObdFunctional, &obd::vehicle_info(0x02))?;
-    let adapter = DryRun::new(std::io::stdout());
-    let mut adapter = Audited::open("session.audit.jsonl".as_ref(), adapter, "dry-run")?;
-    adapter.send(&vin)?; // prints "7DF 02 09 02"
-    if let Ok(reply) = adapter.recv(Duration::from_secs(1)) {
-        println!("VIN {}", obd::decode_vin(&reply.payload)?);
-    }
+    DryRun::new(std::io::stdout()).send(&vin)?; // prints "7DF 02 09 02"
     Ok(())
 }
 ```
 
-The safety policy applies to importers too. Every transport takes only `Approved` requests, and there is no
-raw-frame escape hatch, so no program built on these crates can send something the policy refuses. Higher tiers will be
-unlocked by cargo features plus a runtime unlock, and flashing stays banned until its design doc exists. If you need raw
-CAN for something else, use your own driver alongside this one.
+The same policy applies to importers: there is no raw-frame escape hatch. See [Using it as a library](docs/library.md).
 
-Reads that need the extended diagnostic session go through `transport::ExtendedSession`; `scan::scan_with` uses it
-for the DIDs a profile marks `session = "extended"`, and `sweep::sweep_dids` with `SweepOptions::extended`. It
-enters the session (`10 03`), and its `keep_alive` sends TesterPresent (`3E 00`) between requests so the module
-doesn't drop back after S3 (5 s). If the session has lapsed anyway, the guard enters it again before the next
-request. Dropping the guard returns the module to the default session (`10 01`).
+## Documentation
 
-The crates will be published to crates.io once the M1 codec API settles. Until then, depend on the git repo.
-
-## Layout
-
-| Crate | Role |
+| | |
 |---|---|
-| `obdcracker` | Facade for importers: re-exports the crates below (`sim` behind a feature) |
-| `obdcracker-core` | Pure `no_std` codecs: CAN, ISO-TP, VW TP2.0, OBD-II, UDS, KWP2000 |
-| `obdcracker-safety` | Tiered policy and `Approved` |
-| `obdcracker-transport` | `Transport` trait and adapter backends |
-| `obdcracker-profile` | Vehicle profiles: module addresses, addressing, protocol and DIDs, as TOML data |
-| `obdcracker-sim` | Simulated ECUs for tests: a profile plus a fixture of what each module answers (built in: `a7`) |
-| `obdcracker-cli` | The `obdcracker` command-line tool |
+| [Install](docs/install.md) | One-command install on Windows, macOS and Linux |
+| [Using the CLI](docs/usage.md) | `adapter`, `fingerprint`, `scan`, `sweep` and their options |
+| [Library](docs/library.md) | Importing the `obdcracker` crate |
+| [Safety model](docs/safety.md) | The policy, tiers, backups, dry runs and the audit log |
+| [Adapters](docs/adapters.md) | Supported adapter drivers and links |
+| [Protocols](docs/protocols.md) | Physical, transport and diagnostic protocol status |
+| [Vehicle profiles](docs/profiles.md) | What a profile holds, and the profiles so far |
+| [Development](docs/development.md) | Crate layout and checks |
 
-## Adapters
+## Contributing
 
-An adapter backend has two parts: the **link** that carries bytes to the adapter, and the **driver** that speaks the
-adapter's command set. The ELM driver takes any two-way byte stream, so serial, TCP and BLE share one tested driver.
-
-| Driver | Hardware | Links | OS | Status |
-|---|---|---|---|---|
-| `mock` | none (tests) | — | all | done |
-| `sim` | none: a simulated car from a vehicle profile and a fixture (`--sim a7`) | — | all | done |
-| `elm` | ELM327 v2.0+ / STN (e.g. OBDLink EX, MX+, CX) | USB serial, Wi-Fi (TCP); Bluetooth LE and Classic planned | all | done for USB serial and TCP; three read-only sessions on the A7 over USB (OBDLink EX). Clones that refuse `AT CRA` with `X` digits are refused at connect ([clone policy](docs/elm327.md#clones)) |
-| `gsusb` | CANable / candleLight (USB-C) and an OBD2-to-DB9 cable | USB | all | planned, with listen-only mode |
-| `socketcan` | any SocketCAN interface | kernel | Linux | planned |
-| `j2534` | J2534 pass-thru (Tactrix OpenPort, Toyota Mini VCI, VAS 5054A clones) | vendor DLL | Windows | later |
-| `dpdu` | ISO 22900 D-PDU API (what ODIS uses) | vendor DLL | Windows | maybe |
-
-Leaving a wireless adapter plugged in drains the battery and lets anyone in range connect, so the CLI warns about it, and
-the audit log records which link a session used.
-
-```sh
-obdcracker ports                                   # list serial ports
-obdcracker --serial /dev/ttyUSB0 adapter           # what the adapter is, and the battery voltage; sends nothing on the bus
-obdcracker --serial /dev/ttyUSB0 vin               # 115200 baud by default; --baud 38400 for many clones
-obdcracker --tcp 192.168.0.10:35000 vin            # a Wi-Fi adapter
-```
-
-The ELM driver only sends single-frame requests (up to 7 bytes: the OBD-II reads, and UDS 0x22 with up to 3 DIDs), never
-lets the adapter search for a protocol, and stops if the adapter stops answering. On a plain ELM327 it paces a physical
-request's long reply to the link's speed, so its 512-byte buffer doesn't overflow (down to about 2300 baud). Broadcasts
-can't be paced: several ECUs' multi-frame replies at once on a slow link can still overflow it, which the driver
-reports as `BUFFER FULL` (#71). [`docs/elm327.md`](docs/elm327.md)
-lists the adapter behaviour it relies on, with datasheet pages. It's tested against a fake adapter written from the
-datasheet, against the simulated A7, and against [ELM327-emulator](https://github.com/Ircama/ELM327-emulator), an
-independent implementation. That last test is opt-in (`#[ignore]`) and runs in a CI job that doesn't block merging yet.
-
-## Protocols
-
-| Layer | Protocol | Used by | Status |
-|---|---|---|---|
-| Physical | CAN 500 kbit/s (OBD pins 6/14), 11- and 29-bit IDs | every US car since 2008 | 11-bit done through the ELM driver; 29-bit planned |
-| Physical | K-line (pin 7): ISO 9141-2, ISO 14230, VW KW1281 | pre-CAN cars, a few older modules | if a profile needs it |
-| Physical | DoIP (ISO 13400, Ethernet on pins 3/11/12/13) | newer cars (around 2020+) | not yet; the transport trait leaves room |
-| Physical | CAN FD | newer cars | not yet |
-| Transport | ISO-TP (ISO 15765-2), normal and extended addressing | almost everyone; Toyota uses extended addressing | done (classic CAN, both addressing modes) |
-| Transport | VW TP2.0 | older VAG module designs | after the A7 module scan |
-| Diagnostic | OBD-II (SAE J1979) | every car | decoding done for mode 01 (supported PIDs, load, coolant, RPM, speed, intake temp, MAF, throttle and pedal positions, run time, distances, warm-ups, barometric pressure, catalyst, ambient and oil temperatures, injection timing, fuel rate, torque, module voltage), mode 03 DTCs, mode 09 VIN, CALID, CVN and ECU name |
-| Diagnostic | UDS (ISO 14229) | most modules from about 2010 | decoding done for 0x22 (single and multi-DID), 0x19 (0x01, 0x02, 0x0A) and negative response codes; the extended session (0x10 03, kept with 0x3E 00, left with 0x10 01) for reads that need it |
-| Diagnostic | KWP2000 (ISO 14230-3) over CAN | VAG TP2.0 modules, Toyota enhanced diagnostics before about 2018 | planned, with its own allowlist |
-
-The OBD port only reaches what the car's gateway passes on, which is the diagnostic bus. Internal buses (body CAN, FlexRay,
-MOST, LIN) need a direct tap. If that is ever supported, it will run in listen-only mode, where the adapter can't transmit
-or acknowledge frames.
-
-## Vehicle profiles
-
-A profile is data, not code: module addresses, addressing mode, protocol per module, the identifiers to read and how to
-decode them. Without a profile the tool falls back to generic OBD-II. Profiles are TOML files in
-`crates/obdcracker-profile/profiles/`; a profile has no field that names a service, so it can't widen the safety policy.
-
-| Profile | Expected setup (confirmed by a read-only module scan before use) |
-|---|---|
-| 2014 Audi A7 3.0 TDI (C7) | CAN 500k behind the J533 gateway; UDS on ISO-TP with 11-bit IDs: all 24 modules found so far answer UDS (#54), engine 0x7E0/0x7E8, head-up display 0x71B/0x785. A TP2.0/KWP2000-only module wouldn't show up in discovery, which only sends UDS |
-| 2014 Toyota Camry (XV50) | CAN 500k; OBD-II on 0x7DF/0x7E0+; enhanced diagnostics are KWP2000-style (e.g. 0x21 read by local ID) on ISO-TP; body modules sit behind 0x750 with an extended-address byte |
-
-## Development
-
-```sh
-cargo fmt --check && cargo clippy --all-targets --all-features -- -D warnings && cargo test --all-features
-cargo build -p obdcracker-core --target thumbv7em-none-eabihf  # obdcracker-core must stay no_std
-```
-
-You need either a local `rustup` (the version is pinned in `rust-toolchain.toml`) or Docker: `scripts/cargo.sh <args>` runs
-cargo in a container.
+Issues and pull requests are welcome. Read [CONTRIBUTING](docs/CONTRIBUTING.md) and [pitfalls](docs/pitfalls.md) first.
 
 ## License
 
-MIT
+[MIT](LICENSE). Third-party test data is listed in [docs/third-party.md](docs/third-party.md).
