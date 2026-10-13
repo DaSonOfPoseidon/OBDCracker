@@ -6,7 +6,7 @@ use std::io;
 use std::time::{Duration, Instant};
 
 use obdcracker_safety::{Approved, ModuleIds, Policy, Target};
-use obdcracker_transport::elm::Elm;
+use obdcracker_transport::elm::{ADAPTER_TIMEOUT, Elm};
 use obdcracker_transport::link::{Driver, Link, LinkKind};
 use obdcracker_transport::{Audited, Error, Expect, Response, Transport, exchange, hex};
 use support::fake_elm::{BANNER, FakeElm, FakeLink, frames};
@@ -114,8 +114,8 @@ mod setup {
         )
         .unwrap();
         while elm.recv(Duration::from_secs(1)).is_ok() {}
-        elm.patient(true).unwrap();
-        elm.patient(false).unwrap();
+        elm.patient(Some(Duration::from_secs(5))).unwrap();
+        elm.patient(None).unwrap();
         commands(&elm)
             .iter()
             .filter(|c| !c.bytes().all(|b| b.is_ascii_hexdigit()))
@@ -1522,22 +1522,89 @@ mod pacing {
     }
 
     #[test]
-    fn patience_turns_adaptive_timing_off_and_back_on_unless_pacing() {
-        // An adaptive timeout learned from fast modules can end a slow one's wait early, so
-        // a patient read waits the whole `AT ST FF`.
+    fn patience_raises_an_stns_timeout_and_restores_it() {
+        // An STN always waits its whole timeout for a first reply (STN1100 FRPM), so turning
+        // adaptive timing off alone never made a silent ID's wait longer: every discovery pass in
+        // #86 waited about 1.09 s (#87). `STPTO` sets the timeout in milliseconds, up to 65535.
         let mut stn = car();
         stn.sti = Some("STN2232 v5.12.4".into());
         let mut elm = connect(stn);
-        elm.patient(true).unwrap();
-        assert_eq!(commands(&elm).last().map(String::as_str), Some("ATAT0"));
-        elm.patient(false).unwrap();
-        assert_eq!(commands(&elm).last().map(String::as_str), Some("ATAT1"));
-        // Paced, adaptive timing is always off: nothing to change.
-        let mut elm = Elm::connect(FakeLink::at_baud(long_replies(), 9600)).unwrap();
+        let new_commands = |elm: &Elm<FakeLink>, before: usize| commands(elm)[before..].to_vec();
         let before = commands(&elm).len();
-        elm.patient(true).unwrap();
-        elm.patient(false).unwrap();
-        assert_eq!(commands(&elm).len(), before);
+        assert_eq!(
+            elm.patient(Some(Duration::from_secs(5))).unwrap(),
+            Some(Duration::from_secs(5))
+        );
+        assert_eq!(new_commands(&elm, before), ["ATAT0", "STPTO5000"]);
+        let before = commands(&elm).len();
+        assert_eq!(elm.patient(None).unwrap(), None);
+        assert_eq!(new_commands(&elm, before), ["ATSTFF", "ATAT1"]);
+        // Capped at the most STPTO takes.
+        assert_eq!(
+            elm.patient(Some(Duration::from_secs(100))).unwrap(),
+            Some(Duration::from_millis(65_535))
+        );
+        assert_eq!(
+            commands(&elm).last().map(String::as_str),
+            Some("STPTO65535")
+        );
+        elm.patient(None).unwrap();
+        // A wait no longer than its usual timeout leaves the timeout alone.
+        let before = commands(&elm).len();
+        assert_eq!(
+            elm.patient(Some(Duration::from_millis(500))).unwrap(),
+            Some(ADAPTER_TIMEOUT)
+        );
+        assert_eq!(new_commands(&elm, before), ["ATAT0"]);
+        let before = commands(&elm).len();
+        elm.patient(None).unwrap();
+        assert_eq!(new_commands(&elm, before), ["ATAT1"]);
+    }
+
+    #[test]
+    fn a_plain_elm327_waits_no_longer_than_at_st_ff() {
+        // `AT ST FF` is the most an ELM327 waits, so patience says that's how long the wait
+        // really is. A plain ELM327 is paced, so adaptive timing is already off and nothing is
+        // sent: a learned timeout shorter than the gap would end a paced reply early (PR #70).
+        for elm in [car(), long_replies()] {
+            let mut elm = Elm::connect(FakeLink::new(elm)).unwrap();
+            let before = commands(&elm).len();
+            assert_eq!(
+                elm.patient(Some(Duration::from_secs(5))).unwrap(),
+                Some(ADAPTER_TIMEOUT)
+            );
+            assert_eq!(elm.patient(None).unwrap(), None);
+            assert_eq!(commands(&elm).len(), before);
+        }
+    }
+
+    #[test]
+    fn a_patient_stn_may_stay_quiet_for_its_whole_timeout() {
+        // With a 9 s timeout, 8 s without a byte is the adapter waiting, not a hang.
+        let mut stn = car();
+        stn.sti = Some("STN2232 v5.12.4".into());
+        let mut elm = connect(stn);
+        elm.patient(Some(Duration::from_secs(9))).unwrap();
+        elm.link_mut().elm.hang_after_request = true;
+        elm.send(&approve(Target::Physical(0x7E5), &[0x09, 0x02]))
+            .unwrap();
+        let start = Instant::now();
+        elm.link_mut().scheduled = [(start + Duration::from_secs(8), b"\r>".to_vec())].into();
+        assert_eq!(elm.recv(Duration::from_secs(60)), Err(Error::Timeout));
+        assert!(start.elapsed() >= Duration::from_secs(8));
+        // Once patience ends, the usual limit is back.
+        elm.patient(None).unwrap();
+        elm.send(&approve(Target::Physical(0x7E5), &[0x09, 0x02]))
+            .unwrap();
+        let start = Instant::now();
+        let err = loop {
+            match elm.recv(Duration::from_secs(60)) {
+                Ok(_) | Err(Error::Timeout) => {}
+                Err(err) => break err,
+            }
+            assert!(start.elapsed() < Duration::from_secs(15), "never tripped");
+        };
+        assert!(err.to_string().contains("quiet"), "{err}");
     }
 
     #[test]

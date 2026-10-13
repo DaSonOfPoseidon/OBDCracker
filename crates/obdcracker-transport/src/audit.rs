@@ -133,11 +133,12 @@ impl<T: Transport> Transport for Audited<T> {
         Ok(response)
     }
 
-    fn patient(&mut self, on: bool) -> Result<(), Error> {
-        let result = self.inner.patient(on);
+    fn patient(&mut self, wait: Option<Duration>) -> Result<Option<Duration>, Error> {
+        let result = self.inner.patient(wait);
         let logged = self.record_events();
-        result.map_err(|e| self.record_error("patient", None, e))?;
-        logged
+        let waits = result.map_err(|e| self.record_error("patient", None, e))?;
+        logged?;
+        Ok(waits)
     }
 
     fn take_events(&mut self) -> Vec<LinkEvent> {

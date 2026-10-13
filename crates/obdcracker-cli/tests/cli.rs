@@ -593,16 +593,18 @@ fn sim_scan_discover_wide_looks_past_the_discovery_range_without_sending_on_a_re
         stdout.contains("discovery: 22 of 106 request IDs answered"),
         "{stdout}"
     );
-    // The silent first-pass IDs whose reply IDs the wide pass sends on are asked again first.
+    // The silent first-pass IDs whose reply IDs the wide pass sends on are asked again first,
+    // waiting as long as the transport allows: the sim waits whatever it's asked to (#87).
     assert!(
-        stdout.contains("recheck, waiting longer: 0 of 21 request IDs answered"),
+        stdout.contains("recheck, waiting up to 5.0 s each: 0 of 21 request IDs answered"),
         "{stdout}"
     );
-    // The simulated A7 has nothing past 0x769.
+    // The simulated A7 has nothing past 0x769. The wide pass is as patient, for a module such
+    // as the MMI that may answer slowly through the gateway.
     assert!(
         stdout
             .lines()
-            .any(|l| l.starts_with("wide discovery: 0 of ")),
+            .any(|l| l.starts_with("wide discovery, waiting up to 5.0 s each: 0 of ")),
         "{stdout}"
     );
     assert!(

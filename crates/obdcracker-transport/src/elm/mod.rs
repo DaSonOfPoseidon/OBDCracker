@@ -59,8 +59,14 @@ const OBD_FILTER: &str = "7EX";
 /// ([`Transport::take_events`]); it counts any more as lost.
 pub const MAX_EVENTS: usize = 4096;
 
-/// The longest the adapter waits for a reply, or for more replies after one: `AT ST FF`.
+/// How long the adapter waits for a reply, or for more replies after one: `AT ST FF`, unless an STN
+/// is made to wait longer ([`Transport::patient`]).
 pub const ADAPTER_TIMEOUT: Duration = Duration::from_millis(0xFF * 4);
+
+/// The longest an STN chip can be made to wait for a reply while [`Transport::patient`]:
+/// `STPTO`'s largest value, 65535 ms (STN1100 FRPM). A plain ELM327 can't wait longer than
+/// [`ADAPTER_TIMEOUT`].
+pub const STN_LONGEST_TIMEOUT: Duration = Duration::from_millis(65_535);
 
 // How long to wait for the adapter to go quiet before the reset, and the most time to spend.
 const QUIET: Duration = Duration::from_millis(100);
@@ -87,16 +93,15 @@ const _: () = assert!(MAX_SENDERS == 16, "update LONGEST_PRINT_ALL");
 // The longest a request may run: the adapter's timeout for the first reply, the time to print
 // the longest reply from every module (about 5 minutes at 9600 baud), and time for the link.
 // Only an adapter that keeps printing gets near it: a working one ends each request with its
-// prompt, and one that goes quiet is caught by `SILENCE_LIMIT`.
-const LONGEST_REQUEST: Duration = ADAPTER_TIMEOUT
+// prompt, and one that goes quiet is caught by the silence limit (its timeout plus
+// `SILENCE_MARGIN`).
+const LONGEST_REQUEST: Duration = STN_LONGEST_TIMEOUT
     .saturating_add(LONGEST_PRINT_ALL)
     .saturating_add(Duration::from_secs(1));
-// The longest the adapter stays quiet during a request: its own timeout, plus the default P2*
-// (5 s) that v2.1 and STN chips wait after a response-pending reply (ELM327DS v2.1, p. 90),
+// How much longer than its own timeout the adapter may stay quiet during a request: the default
+// P2* (5 s) that v2.1 and STN chips wait after a response-pending reply (ELM327DS v2.1, p. 90),
 // plus time for the link. Any longer and it has hung.
-const SILENCE_LIMIT: Duration = ADAPTER_TIMEOUT
-    .saturating_add(Duration::from_secs(5))
-    .saturating_add(Duration::from_secs(1));
+const SILENCE_MARGIN: Duration = Duration::from_secs(6);
 // The longest any single receive waits, so a huge timeout can't overflow the clock.
 const LONGEST_WAIT: Duration = Duration::from_secs(3600);
 // How long a request's digits may take to echo before its carriage return. The STN in an
@@ -203,6 +208,8 @@ pub struct Elm<L> {
     stn: Option<String>,
     // The link's byte rate, if replies are paced to it.
     pace: Option<u32>,
+    // How long the adapter waits for a reply: `ADAPTER_TIMEOUT`, or longer on a patient STN.
+    timeout: Duration,
     // Each module answering the request in progress.
     senders: Vec<Sender>,
     // Lines of the request in progress that are in no reply yet, in the order they were read,
@@ -289,6 +296,7 @@ impl<L: Link> Elm<L> {
             banner: String::new(),
             stn: None,
             pace: None,
+            timeout: ADAPTER_TIMEOUT,
             senders: Vec::new(),
             heard: Vec::new(),
             next_heard: 0,
@@ -329,7 +337,7 @@ impl<L: Link> Elm<L> {
 
     /// Timing for [`crate::exchange`] through this adapter. The adapter decides when a request
     /// is over: it prints its prompt, which ends the exchange at once. So P2 is only an outer
-    /// bound: [`ADAPTER_TIMEOUT`] plus the time to print the longest reply (4095 bytes) from
+    /// bound: [`STN_LONGEST_TIMEOUT`] plus the time to print the longest reply (4095 bytes) from
     /// each of up to 16 modules at 9600 baud, about 5 minutes. P2* gets the same print
     /// allowance on top of the default. An adapter that goes quiet in a request without
     /// finishing it fails within seconds instead (see [`Elm`]).
@@ -727,12 +735,14 @@ impl<L: Link> Elm<L> {
     }
 
     // The next thing the adapter printed during a request, or None once the deadline passes.
-    // An adapter quiet for longer than `SILENCE_LIMIT` in a request has hung. Silence is the
-    // time the driver spent waiting, added up across calls, so neither a caller that reads late
-    // nor one that polls with short timeouts skews it.
+    // An adapter quiet for longer than its timeout plus `SILENCE_MARGIN` in a request has hung.
+    // Silence is the time the driver spent waiting, added up across calls, so neither a caller
+    // that reads late nor one that polls with short timeouts skews it.
     fn next_request_event(&mut self, deadline: Instant) -> Result<Option<Event>, Error> {
         loop {
-            let Some(left) = SILENCE_LIMIT
+            let Some(left) = self
+                .timeout
+                .saturating_add(SILENCE_MARGIN)
                 .checked_sub(self.quiet)
                 .filter(|left| !left.is_zero())
             else {
@@ -937,13 +947,32 @@ impl<L: Link> Transport for Elm<L> {
         Ok(())
     }
 
-    // Adaptive timing off waits the whole `AT ST FF` (about 1 s) for each reply. When pacing,
-    // it's always off (see `connect`).
-    fn patient(&mut self, on: bool) -> Result<(), Error> {
-        if self.pace.is_some() {
-            return Ok(());
+    // Adaptive timing off, so a timeout learned from fast modules can't cut a slow one short;
+    // when pacing it's always off (see `connect`). An STN always waits its whole timeout for a
+    // first reply, so only a longer timeout (`STPTO`, in ms) lets a slow module answer (#87).
+    // A plain ELM327 can't wait longer than `AT ST FF`.
+    fn patient(&mut self, wait: Option<Duration>) -> Result<Option<Duration>, Error> {
+        let Some(wait) = wait else {
+            if self.timeout != ADAPTER_TIMEOUT {
+                self.expect_ok("ATSTFF")?;
+                self.timeout = ADAPTER_TIMEOUT;
+            }
+            if self.pace.is_none() {
+                self.expect_ok("ATAT1")?;
+            }
+            return Ok(None);
+        };
+        if self.pace.is_none() {
+            self.expect_ok("ATAT0")?;
         }
-        self.expect_ok(if on { "ATAT0" } else { "ATAT1" })
+        // Whole milliseconds, as `STPTO` takes them.
+        let ms = wait.min(STN_LONGEST_TIMEOUT).as_millis();
+        let wait = Duration::from_millis(u64::try_from(ms).unwrap_or(u64::MAX));
+        if self.stn.is_some() && wait > ADAPTER_TIMEOUT {
+            self.expect_ok(&format!("STPTO{ms}"))?;
+            self.timeout = wait;
+        }
+        Ok(Some(self.timeout))
     }
 
     // The rest of the last request's output is read, and reported as unread.

@@ -794,11 +794,12 @@ fn discover_modules<T: Transport>(
         timing,
         &profile,
         "discovery",
-        false,
+        None,
     )?;
     if wide {
         // Before sending on a first-pass reply ID, look again, more patiently, for a module
-        // that may own it but was slow to answer.
+        // that may own it but was slow to answer. The first pass waited the adapter's usual
+        // timeout; only a longer one can catch it (#87).
         let known: Vec<ModuleIds> = found.iter().map(module_ids).collect();
         let recheck = profile.recheck_candidates(&known);
         if !recheck.is_empty() {
@@ -808,8 +809,8 @@ fn discover_modules<T: Transport>(
                 &recheck,
                 timing,
                 &profile,
-                "recheck, waiting longer",
-                true,
+                "recheck",
+                Some(discover::PATIENT_WAIT),
             )?;
             found.extend(again);
         }
@@ -830,6 +831,7 @@ fn discover_modules<T: Transport>(
             })
     };
     let wide_policy = narrow(&[known.as_slice(), &wide_candidates].concat())?;
+    // Patient too: modules out here, such as the MMI, may answer slowly through the gateway.
     let more = discover_pass(
         transport,
         &wide_policy,
@@ -837,7 +839,7 @@ fn discover_modules<T: Transport>(
         timing,
         &profile,
         "wide discovery",
-        false,
+        Some(discover::PATIENT_WAIT),
     )?;
     known.extend(more.iter().map(module_ids));
     found.extend(more);
@@ -852,7 +854,7 @@ fn module_ids(found: &discover::Found) -> ModuleIds {
 }
 
 // One discovery pass over `candidates`, printing each module that answers. A `patient` pass
-// waits longer for each reply.
+// asks the adapter to wait up to that long for each reply, and says how long it really waited.
 fn discover_pass<T: Transport>(
     transport: &mut T,
     policy: &Policy,
@@ -860,17 +862,33 @@ fn discover_pass<T: Transport>(
     timing: Timing,
     profile: &Profile,
     pass: &str,
-    patient: bool,
+    patient: Option<Duration>,
 ) -> Result<Vec<discover::Found>, ExitCode> {
-    let discover = if patient {
-        discover::discover_patiently
-    } else {
-        discover::discover
-    };
-    let found = discover(transport, policy, candidates, timing).map_err(|e| {
+    let failed = |e: fingerprint::FingerprintError| {
         eprintln!("{e}");
         ExitCode::FAILURE
-    })?;
+    };
+    let (found, pass) = match patient {
+        Some(wait) => {
+            let (found, waited) =
+                discover::discover_patiently(transport, policy, candidates, timing, wait)
+                    .map_err(failed)?;
+            let most = if waited < wait {
+                ", the most this adapter can"
+            } else {
+                ""
+            };
+            let secs = waited.as_secs_f64();
+            (
+                found,
+                format!("{pass}, waiting up to {secs:.1} s each{most}"),
+            )
+        }
+        None => (
+            discover::discover(transport, policy, candidates, timing).map_err(failed)?,
+            pass.to_owned(),
+        ),
+    };
     for module in &found {
         let listed = profile
             .modules

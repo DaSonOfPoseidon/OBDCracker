@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use obdcracker_core::response::{Error as ReplyError, NegativeResponse, Nrc};
 use obdcracker_safety::{Approved, ModuleIds, Policy, Rejection};
-use obdcracker_transport::discover::{Found, PATIENT_P2, discover, discover_patiently};
+use obdcracker_transport::discover::{Found, discover, discover_patiently};
 use obdcracker_transport::fingerprint::{DidValue, FingerprintError, ReadError};
 use obdcracker_transport::{Error, Response, Timing, Transport, hex};
 
@@ -19,6 +19,8 @@ struct Car {
     fail_after: Option<usize>,
     // The shortest timeout each receive was given.
     shortest_wait: Option<Duration>,
+    // Fail when asked to be patient, as an adapter refusing a setting part-way would.
+    refuse_patience: bool,
 }
 
 impl Car {
@@ -29,6 +31,7 @@ impl Car {
             sent: Vec::new(),
             fail_after: None,
             shortest_wait: None,
+            refuse_patience: false,
         }
     }
 }
@@ -50,9 +53,13 @@ impl Transport for Car {
         self.replies.pop_front().ok_or(Error::Timeout)
     }
 
-    fn patient(&mut self, on: bool) -> Result<(), Error> {
-        self.sent.push(format!("patient {on}"));
-        Ok(())
+    // Waits as long as it's asked to, but no more than 2 s, like an adapter with a ceiling.
+    fn patient(&mut self, wait: Option<Duration>) -> Result<Option<Duration>, Error> {
+        self.sent.push(format!("patient {wait:?}"));
+        if self.refuse_patience && wait.is_some() {
+            return Err(Error::Adapter("STPTO refused".to_owned()));
+        }
+        Ok(wait.map(|wait| wait.min(Duration::from_secs(2))))
     }
 }
 
@@ -202,31 +209,44 @@ fn a_patient_pass_waits_longer_and_always_ends_patience() {
         0x70A => vec![reply(0x774, &[0x62, 0xF1, 0x87, b'X'])],
         _ => Vec::new(),
     });
-    let found = discover_patiently(&mut car, &policy, &candidates, TIMING).unwrap();
+    let wait = Duration::from_secs(5);
+    let (found, waited) = discover_patiently(&mut car, &policy, &candidates, TIMING, wait).unwrap();
     assert_eq!(found.len(), 1);
     assert_eq!(found[0].request_id, 0x70A);
+    // The transport's own ceiling, not what was asked for.
+    assert_eq!(waited, Duration::from_secs(2));
     assert_eq!(
         car.sent,
         [
-            "patient true",
+            "patient Some(5s)",
             "709 22 F1 87",
             "70A 22 F1 87",
-            "patient false"
+            "patient None"
         ]
     );
-    // Each receive gets what's left of P2.
+    // Each receive gets what's left of a P2 as long as the transport waits.
     assert!(
-        car.shortest_wait > PATIENT_P2.checked_sub(Duration::from_millis(100)),
+        car.shortest_wait > waited.checked_sub(Duration::from_millis(100)),
         "{:?}",
         car.shortest_wait
     );
     // An adapter failure still ends patience, and is what's reported.
     let mut car = Car::new(|_, _| Vec::new());
     car.fail_after = Some(2);
-    let error = discover_patiently(&mut car, &policy, &candidates, TIMING).unwrap_err();
+    let error = discover_patiently(&mut car, &policy, &candidates, TIMING, wait).unwrap_err();
     assert!(
         matches!(error, FingerprintError::Transport(Error::Adapter(_))),
         "{error:?}"
     );
-    assert_eq!(car.sent.last().map(String::as_str), Some("patient false"));
+    assert_eq!(car.sent.last().map(String::as_str), Some("patient None"));
+    // So does a failure to become patient, which may have changed part of the adapter's
+    // timing already (adaptive timing off, then STPTO refused). Nothing is sent on the bus.
+    let mut car = Car::new(|_, _| Vec::new());
+    car.refuse_patience = true;
+    let error = discover_patiently(&mut car, &policy, &candidates, TIMING, wait).unwrap_err();
+    assert!(
+        matches!(&error, FingerprintError::Transport(Error::Adapter(e)) if e == "STPTO refused"),
+        "{error:?}"
+    );
+    assert_eq!(car.sent, ["patient Some(5s)", "patient None"]);
 }
