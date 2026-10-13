@@ -291,6 +291,17 @@ impl FakeElm {
             let reply = self.sti.clone().unwrap_or_else(|| "?".into());
             self.print(&reply);
             self.prompt();
+        } else if let Some(ms) = line.strip_prefix("STPTO") {
+            // An STN's request timeout in decimal ms, 1 to 65535 (STN1100 FRPM); a plain ELM327
+            // doesn't know the command.
+            let valid =
+                ms.bytes().all(|b| b.is_ascii_digit()) && ms.parse::<u16>().is_ok_and(|ms| ms > 0);
+            self.print(if self.sti.is_some() && valid {
+                "OK"
+            } else {
+                "?"
+            });
+            self.prompt();
         } else {
             self.request(&line);
         }

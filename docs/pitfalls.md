@@ -203,6 +203,11 @@ Each entry names the class, what to check, and where it bit us.
 - **An adapter's learned timeout can hide a slow module.** The ELM327's adaptive timing (`AT AT1`) shortens its wait
   to fit the modules that answered fast, so a module that wakes slowly reads as absent. Before acting on "nothing is
   there", as discovery's wide pass does, look again with the adapter's longest wait.
+- **Check that a fix changes what the logs show.** Discovery's "waiting longer" recheck turned adaptive timing off,
+  but an STN always waits its whole timeout for a first reply, so in #86 the recheck waited the same 1.09 s per
+  silent ID as the first pass (#87). Read the datasheet for what a setting changes, and compare the real audit log's
+  timings before and after. A longer wait needs a longer timeout (`STPTO` on an STN), and a silence watchdog sized
+  for the old timeout must grow with it.
 - **Every read and write on a link needs a bound, not just the bus waits.** A peer that stops reading blocks a write
   forever once buffers fill (set a write timeout), and some calls ignore that timeout altogether: serial2's `flush`
   waits for the OS queue to drain with no limit. Check each I/O call's docs for what its timeout covers (M3 branch,

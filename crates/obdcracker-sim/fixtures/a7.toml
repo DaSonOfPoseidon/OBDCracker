@@ -4,8 +4,10 @@
 # instruments are from the first two read-only sessions, ignition on and engine off: mode 09 VIN,
 # CALIDs and CVNs from #46 (2026-10-10), and everything else from #49 (2026-10-10). The other
 # modules are the ones `scan --discover` found in the third session (#54, 2026-10-11), with the
-# engine idling. A DID that isn't listed was refused with NRC 0x31 (request out of range), as the
-# car refused it.
+# engine idling. The coding (0600) of those modules, and the head-up display's DIDs below 0x1000,
+# are from the fourth session (#86, 2026-10-12, engine idling). A DID that isn't listed was
+# refused with NRC 0x31 (request out of range), as the car refused it: the sensor cluster, tire
+# pressure and parking brake refused 0600 too.
 #
 # Quirks the car showed, which the sim reproduces:
 # - The transmission sent one response-pending (7F 19 78) before its DTC list, and so did the
@@ -21,7 +23,8 @@
 # - Whether a module answers ReadDTCInformation 0x0A (supported DTCs) is untested; only 0x02 is
 #   listed, plus 0x01 for the one module that answered it (the sensor cluster). The others refused
 #   0x01 (NRC 0x12).
-# - #54 didn't read the coding (0600) of the modules it found, so the sim refuses it for them.
+# - The head-up display answers `10 03` with P2* 2000 ms (`50 03 00 32 00 C8`, #86); the sim
+#   answers every module with the standard 5000 ms (`00 32 01 F4`).
 #
 # The first four modules' UDS DTCs are each one's full table as `19 02 FF` returned it. Every status
 # is "test not completed" (0x10, 0x40 or 0x50): none is failed, pending or confirmed. The modules
@@ -647,6 +650,11 @@ id = 0xF19E
 # "EV_EPHVA18AU57X0000" and 0x00
 hex = "45 56 5F 45 50 48 56 41 31 38 41 55 35 37 58 30 30 30 30 00"
 
+# Coding (#86): read in the default session.
+[[ecu.did]]
+id = 0x0600
+hex = "A8 EB 04"
+
 [[ecu]]
 module = "steering"
 dtc_reports = [0x02]
@@ -680,6 +688,11 @@ text = "RCEPS        "
 id = 0xF19E
 # "EV_RCEPS" and 17 bytes of 0x00
 hex = "45 56 5F 52 43 45 50 53 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00"
+
+# Coding (#86): read in the default session.
+[[ecu.did]]
+id = 0x0600
+hex = "10 10 01 01 00 00"
 
 [[ecu]]
 module = "brakes"
@@ -715,6 +728,11 @@ text = "ESP PREMIUM  "
 id = 0xF19E
 # "EV_ESPPremiAU57X" and 0x00
 hex = "45 56 5F 45 53 50 50 72 65 6D 69 41 55 35 37 58 00"
+
+# Coding (#86): read in the default session.
+[[ecu.did]]
+id = 0x0600
+hex = "27 A7 97 03 E4 E5 E9 C0 4B 00"
 
 [[ecu]]
 module = "airbag"
@@ -761,6 +779,11 @@ request = "19 01 AF"
 reply = "59 01 00 00"
 pending = 1
 
+# Coding (#86): read in the default session.
+[[ecu.did]]
+id = 0x0600
+hex = "30 31 45 31 31 31 30 30 31 32 4A 55 30 4C 34 47 38 53"
+
 [[ecu]]
 module = "rear climate"
 dtc_reports = [0x02]
@@ -795,6 +818,11 @@ id = 0xF19E
 # "EV_ClimaContrUnitRearUDS" and 0x00
 hex = "45 56 5F 43 6C 69 6D 61 43 6F 6E 74 72 55 6E 69 74 52 65 61 72 55 44 53 00"
 
+# Coding (#86): read in the default session.
+[[ecu.did]]
+id = 0x0600
+hex = "20"
+
 [[ecu]]
 module = "head-up display"
 dtc_reports = [0x02]
@@ -828,6 +856,63 @@ text = "HeadUpDisplay"
 id = 0xF19E
 # "EV_HUDContiC7" and 0x00
 hex = "45 56 5F 48 55 44 43 6F 6E 74 69 43 37 00"
+
+# Found by the #86 sweeps of 0000..=0FFF. 0100 and 0102 answered only in the extended session;
+# 028D was refused for want of security access in both.
+[[ecu.did]]
+id = 0x0100
+hex = "00"
+session = "extended"
+
+[[ecu.did]]
+id = 0x0102
+hex = "00"
+session = "extended"
+
+[[ecu.did]]
+id = 0x0103
+hex = "00"
+
+[[ecu.did]]
+id = 0x0286
+hex = "8C"
+
+[[ecu.did]]
+id = 0x028D
+nrc = 0x33
+
+[[ecu.did]]
+id = 0x0405
+hex = "00"
+
+[[ecu.did]]
+id = 0x0407
+hex = "00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00"
+
+[[ecu.did]]
+id = 0x0408
+hex = "00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00"
+
+[[ecu.did]]
+id = 0x040F
+hex = "FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF"
+
+[[ecu.did]]
+id = 0x0501
+hex = "00 00 00 00 01 00 01 A4 28 00 26 59 60 00 36 C9 FF 00 FF FF 00 00 08 C4 01 00 41 BE 28 00 5D 22 60 00 93 EC FF 00 FF FF"
+
+[[ecu.did]]
+id = 0x0502
+hex = "1E 82 14 02 02 32 32 40 00 3B 00"
+
+[[ecu.did]]
+id = 0x0902
+hex = "00"
+
+# Coding (#86): read in the default session.
+[[ecu.did]]
+id = 0x0600
+hex = "D6 00 00"
 
 [[ecu]]
 module = "sensor cluster"
@@ -946,6 +1031,11 @@ id = 0xF19E
 # "EV_HDSGAu573" and 12 bytes of 0x00
 hex = "45 56 5F 48 44 53 47 41 75 35 37 33 00 00 00 00 00 00 00 00 00 00 00 00"
 
+# Coding (#86): read in the default session.
+[[ecu.did]]
+id = 0x0600
+hex = "0A 33 05 C1 02"
+
 [[ecu]]
 module = "camera"
 dtc_reports = [0x02]
@@ -979,6 +1069,11 @@ text = "DPC-SG       "
 id = 0xF19E
 # "EV_OnBoardCamerDPC" and 0x00
 hex = "45 56 5F 4F 6E 42 6F 61 72 64 43 61 6D 65 72 44 50 43 00"
+
+# Coding (#86): read in the default session.
+[[ecu.did]]
+id = 0x0600
+hex = "6A 06 00 00"
 
 [[ecu]]
 module = "night vision"
@@ -1024,6 +1119,11 @@ text = "NV-ECU-Gen1  "
 id = 0xF19E
 # "EV_NightVisioGen1" and 0x00
 hex = "45 56 5F 4E 69 67 68 74 56 69 73 69 6F 47 65 6E 31 00"
+
+# Coding (#86): read in the default session.
+[[ecu.did]]
+id = 0x0600
+hex = "14 11"
 
 [[ecu]]
 module = "tire pressure"
@@ -1101,6 +1201,11 @@ id = 0xF19E
 # "EV_AirCondiComfoUDS" and 0x00
 hex = "45 56 5F 41 69 72 43 6F 6E 64 69 43 6F 6D 66 6F 55 44 53 00"
 
+# Coding (#86): read in the default session.
+[[ecu.did]]
+id = 0x0600
+hex = "36 03 20 7A 5D"
+
 [[ecu]]
 module = "parking brake"
 dtc_reports = [0x02]
@@ -1167,6 +1272,11 @@ id = 0xF19E
 # "EV_HeadlRegulBasic" and 0x00
 hex = "45 56 5F 48 65 61 64 6C 52 65 67 75 6C 42 61 73 69 63 00"
 
+# Coding (#86): read in the default session.
+[[ecu.did]]
+id = 0x0600
+hex = "12 23 A6 60 10 02 A5 00"
+
 [[ecu]]
 module = "acc 2"
 dtc_reports = [0x02]
@@ -1199,6 +1309,11 @@ text = "ACC3         "
 id = 0xF19E
 # "EV_AdaptCruisContr2AU57X" and 0x00
 hex = "45 56 5F 41 64 61 70 74 43 72 75 69 73 43 6F 6E 74 72 32 41 55 35 37 58 00"
+
+# Coding (#86): read in the default session.
+[[ecu.did]]
+id = 0x0600
+hex = "7E 01 01 02 01"
 
 [[ecu]]
 module = "acc"
@@ -1235,6 +1350,11 @@ id = 0xF19E
 # "EV_AdaptCruisContrAU57X" and 2 bytes of 0x00
 hex = "45 56 5F 41 64 61 70 74 43 72 75 69 73 43 6F 6E 74 72 41 55 35 37 58 00 00"
 
+# Coding (#86): read in the default session.
+[[ecu.did]]
+id = 0x0600
+hex = "7E 01 01 02 01"
+
 [[ecu]]
 module = "image processing"
 dtc_reports = [0x02]
@@ -1264,6 +1384,11 @@ text = "BV-SG        "
 id = 0xF19E
 # "EV_BC7" and 0x00
 hex = "45 56 5F 42 43 37 00"
+
+# Coding (#86): read in the default session.
+[[ecu.did]]
+id = 0x0600
+hex = "03 C1 98 18 01 11"
 
 [[ecu]]
 module = "belt tensioner left"
@@ -1303,6 +1428,11 @@ id = 0xF19E
 # "EV_RGS_L" and 0x00
 hex = "45 56 5F 52 47 53 5F 4C 00"
 
+# Coding (#86): read in the default session.
+[[ecu.did]]
+id = 0x0600
+hex = "00 66 E6 08 03 1F 03 76 07 03 08 01 42 40 C2 01 00 00"
+
 [[ecu]]
 module = "belt tensioner right"
 dtc_reports = [0x02]
@@ -1341,6 +1471,11 @@ id = 0xF19E
 # "EV_RGS_R" and 0x00
 hex = "45 56 5F 52 47 53 5F 52 00"
 
+# Coding (#86): read in the default session.
+[[ecu.did]]
+id = 0x0600
+hex = "00 66 E6 08 03 1F 03 76 07 03 08 01 42 40 C2 01 00 00"
+
 [[ecu]]
 module = "top view"
 dtc_reports = [0x02]
@@ -1374,3 +1509,8 @@ text = "TopView      "
 id = 0xF19E
 # "EV_CamerSysteTopViewAUDI" and 0x00
 hex = "45 56 5F 43 61 6D 65 72 53 79 73 74 65 54 6F 70 56 69 65 77 41 55 44 49 00"
+
+# Coding (#86): read in the default session.
+[[ecu.did]]
+id = 0x0600
+hex = "02 05 00 00 01 01 01 00 00 01 02 00 00 00"

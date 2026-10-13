@@ -66,17 +66,21 @@ pub trait Transport {
     fn send(&mut self, request: &Approved) -> Result<(), Error>;
     /// Waits up to `timeout` for the next reply.
     fn recv(&mut self, timeout: Duration) -> Result<Response, Error>;
-    /// With `on`, waits as long as it can for each reply until called again without: an
-    /// adapter that learns shorter waits from how fast modules answer (the ELM327's adaptive
-    /// timing) stops doing so, so a module slow to answer isn't missed. Sends nothing on the bus.
-    /// The default does nothing, for a transport that waits for whatever timeout `recv` is given.
+    /// With `Some(wait)`, waits up to `wait` for each reply, or as near to it as the adapter
+    /// can, until called again with `None`, which restores the usual wait. An adapter that
+    /// learns shorter waits from how fast modules answer (the ELM327's adaptive timing) stops
+    /// doing so, so a module slow to answer isn't missed. Sends nothing on the bus.
+    ///
+    /// Returns how long the adapter now waits for a reply (`None` after `None`), which can be
+    /// less than `wait` (an ELM327 waits at most about 1 s) or more (it never waits less than
+    /// usual). The default does nothing and returns `wait`, for a transport that waits for
+    /// whatever timeout `recv` is given.
     ///
     /// # Errors
     ///
     /// The adapter refused the setting or failed.
-    fn patient(&mut self, on: bool) -> Result<(), Error> {
-        let _ = on;
-        Ok(())
+    fn patient(&mut self, wait: Option<Duration>) -> Result<Option<Duration>, Error> {
+        Ok(wait)
     }
     /// What the adapter did besides carrying requests and replies since this was last called,
     /// oldest first, for the audit log ([`Audited`] takes them after every call). The default

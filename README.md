@@ -59,7 +59,9 @@ from developers being careful:
   cars put the MMI (0x773). Those request IDs are the first pass's reply IDs. It skips those a module it knows of
   (listed in the profile, or just found) answers on, and any whose reply would be an OBD-II ID. A module that stayed
   silent in the first pass could still own one, so before the wide pass it asks each of those first-pass IDs again,
-  waiting about 1 s for each (with the ELM's adaptive timing off), to find a module that was only slow. One that
+  waiting up to 5 s for each, to find a module that was only slow. The wide pass waits as long, for modules such as
+  the MMI whose replies the gateway may route slowly. An OBDLink (STN chip) can wait that long; a plain ELM327 waits
+  about 1 s at most, and the output says so. One that
   doesn't answer `22 F1 87` at all could still own one, so `--wide` is opt-in and may send a read on that module's
   reply ID: a frame no module receives, since modules only send on theirs. A module that speaks only KWP2000/TP2.0,
   as some older MMIs may, doesn't answer any pass.

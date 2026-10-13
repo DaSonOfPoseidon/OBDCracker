@@ -20,13 +20,15 @@ pub struct Found {
     pub part_number: Result<DidValue, ReadError>,
 }
 
-/// The least P2 [`discover_patiently`] waits for each reply: a module just woken, or slow to
-/// answer, still has time.
-pub const PATIENT_P2: Duration = Duration::from_secs(1);
+/// How long [`discover_patiently`] asks the transport to wait for each reply, for a caller with
+/// no better figure: long enough for a module just woken, or one whose replies a gateway routes
+/// slowly (an STN chip can wait this long; a plain ELM327 waits about 1 s at most).
+pub const PATIENT_WAIT: Duration = Duration::from_secs(5);
 
-/// [`discover`], waiting longer for each reply: at least [`PATIENT_P2`], with the transport made
-/// [`Transport::patient`] for the pass. For candidates a quicker pass may have missed. Patience
-/// ends afterwards whatever happens; a discovery error is reported over a failure to end it.
+/// [`discover`], waiting up to `wait` for each reply, or as near to it as the transport can
+/// ([`Transport::patient`]). For candidates a quicker pass may have missed. Returns what answered,
+/// and how long the transport waited for each reply. Patience ends afterwards whatever happens,
+/// even if the transport failed to become patient; the first error is the one reported.
 ///
 /// # Errors
 ///
@@ -36,21 +38,25 @@ pub fn discover_patiently<T: Transport + ?Sized>(
     policy: &Policy,
     candidates: &[ModuleIds],
     timing: Timing,
-) -> Result<Vec<Found>, FingerprintError> {
+    wait: Duration,
+) -> Result<(Vec<Found>, Duration), FingerprintError> {
+    let waits = match transport.patient(Some(wait)) {
+        Ok(waits) => waits.unwrap_or(wait),
+        Err(error) => {
+            // It may have changed part of the adapter's timing before failing: undo what it can.
+            let _ = transport.patient(None);
+            return Err(FingerprintError::Transport(error));
+        }
+    };
     let timing = Timing {
-        p2: timing.p2.max(PATIENT_P2),
+        p2: timing.p2.max(waits),
         ..timing
     };
-    transport
-        .patient(true)
-        .map_err(FingerprintError::Transport)?;
     let found = discover(transport, policy, candidates, timing);
-    let ended = transport
-        .patient(false)
-        .map_err(FingerprintError::Transport);
+    let ended = transport.patient(None).map_err(FingerprintError::Transport);
     let found = found?;
     ended?;
-    Ok(found)
+    Ok((found, waits))
 }
 
 /// Reads the spare part number from each candidate, in order, and returns those that answered.

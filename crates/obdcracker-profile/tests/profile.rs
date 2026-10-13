@@ -206,14 +206,55 @@ fn a7_profile_has_the_expected_uds_modules() {
     // The 22 modules discovery found in #54, plus the engine and transmission on the OBD-II IDs,
     // which its range doesn't reach.
     assert_eq!(a7.modules.len(), 24);
-    // Each reads its coding.
+    // Each reads its coding, except the transmission and the three modules that refused 0600 as
+    // out of range in #86.
+    let no_coding = [
+        "transmission",
+        "sensor cluster",
+        "tire pressure",
+        "parking brake",
+    ];
     for module in &a7.modules {
-        assert!(
-            module.dids.iter().any(|did| did.id == 0x0600) || module.name == "transmission",
+        assert_eq!(
+            module.dids.iter().any(|did| did.id == 0x0600),
+            !no_coding.contains(&module.name.as_str()),
             "{}",
             module.name
         );
     }
+}
+
+// The head-up display's DIDs that the #86 sweeps of 0000..=0FFF found: 0100 and 0102 answered only
+// in the extended session, and 028D was refused for want of security access (`7F 22 33`).
+#[test]
+fn a7_hud_lists_the_dids_its_sweeps_found() {
+    let a7 = Profile::builtin("a7").unwrap();
+    let hud = a7.module("head-up display").unwrap();
+    let found: Vec<(u16, DidSession)> = hud
+        .dids
+        .iter()
+        .filter(|did| did.id < 0x1000)
+        .map(|did| (did.id, did.session))
+        .collect();
+    let extended = [0x0100, 0x0102];
+    let expected: Vec<(u16, DidSession)> = [
+        0x0100, 0x0102, 0x0103, 0x0286, 0x028D, 0x0405, 0x0407, 0x0408, 0x040F, 0x0501, 0x0502,
+        0x0600, 0x0902,
+    ]
+    .into_iter()
+    .map(|id| {
+        let session = if extended.contains(&id) {
+            DidSession::Extended
+        } else {
+            DidSession::Default
+        };
+        (id, session)
+    })
+    .collect();
+    assert_eq!(found, expected);
+    // The refused one has no length: no reply gave it one.
+    let refused = hud.dids.iter().find(|did| did.id == 0x028D).unwrap();
+    assert_eq!(refused.length, None);
 }
 
 // A profile only names where requests go; what may be sent is still the policy's decision.
