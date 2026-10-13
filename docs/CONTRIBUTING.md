@@ -35,6 +35,9 @@ Label it `bug`, `documentation` or `enhancement`, and tag what it impacts:
 - **The milestone it blocks,** if any: `milestone:M1` to `milestone:M9`. A planned feature that isn't scheduled yet gets
   `milestone:later` instead: it blocks nothing until it's given a milestone. An issue with no milestone label at all
   blocks every PR in its areas.
+- **Its status:** `status:ready` if it can be picked up now, or `status:blocked` if it waits on something else
+  (another issue, a car session, hardware or a decision). When you mark it blocked, comment saying what blocks it, with
+  issue numbers. When you close an issue, move the issues it blocked to `status:ready` if nothing else blocks them.
 
 Only fix it in the same change if it blocks your task, and then reference it in the commit (`fixes #N`).
 
@@ -45,7 +48,8 @@ No open issue may block it. An issue blocks a PR when either:
 - it's tagged with an area the PR touches, and its milestone is the PR's milestone, an earlier one, or none; or
 - it's tagged with the PR's milestone, whatever its area.
 
-Issues for later milestones, and `milestone:later` issues, wait until then. Run:
+Only ready issues count: `status:blocked` issues wait for their blocker, and an issue with no status label counts as
+ready. Issues for later milestones, and `milestone:later` issues, wait until then. Run:
 
 ```sh
 scripts/pr-gate.sh M2   # the PR's milestone; leave it out if none
