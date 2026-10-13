@@ -32,7 +32,9 @@ Label it `bug`, `documentation` or `enhancement`, and tag what it impacts:
 - **Every area it affects:** `area:core`, `area:safety`, `area:transport`, `area:sim`, `area:profile`, `area:cli`, `area:facade`
   (the `obdcracker` crate), `area:docs` (any `*.md` or `docs/`), `area:ci` (workflows, `scripts/`, Cargo and tool
   config).
-- **The milestone it blocks,** if any: `milestone:M1` to `milestone:M7`.
+- **The milestone it blocks,** if any: `milestone:M1` to `milestone:M9`. A planned feature that isn't scheduled yet gets
+  `milestone:later` instead: it blocks nothing until it's given a milestone. An issue with no milestone label at all
+  blocks every PR in its areas.
 
 Only fix it in the same change if it blocks your task, and then reference it in the commit (`fixes #N`).
 
@@ -43,7 +45,7 @@ No open issue may block it. An issue blocks a PR when either:
 - it's tagged with an area the PR touches, and its milestone is the PR's milestone, an earlier one, or none; or
 - it's tagged with the PR's milestone, whatever its area.
 
-Issues for later milestones wait until then. Run:
+Issues for later milestones, and `milestone:later` issues, wait until then. Run:
 
 ```sh
 scripts/pr-gate.sh M2   # the PR's milestone; leave it out if none

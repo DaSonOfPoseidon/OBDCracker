@@ -2,7 +2,8 @@
 # Run before opening a PR, with the PR's milestone if it has one: `scripts/pr-gate.sh M2`.
 # Fails if an open issue blocks it: one tagged with an area this branch touches whose milestone is
 # the PR's, an earlier one, or none. Issues tagged with the PR's milestone block it in any area.
-# Issues for later milestones wait for their own milestone. Issues this branch's commits fix
+# Issues for later milestones wait for their own milestone, and `milestone:later` issues (planned,
+# not yet scheduled) wait until they get one. Issues this branch's commits fix
 # (`fixes #N`) don't count; they close when the PR merges.
 set -e
 cd "$(dirname "$0")/.."
@@ -67,6 +68,7 @@ open=$(gh api --paginate "repos/$repo/issues?state=open&per_page=100" --jq "
 	| select(.number | IN(\$fixed[]) | not)
 	| ([.labels[].name] ) as \$names
 	| ([\$names[] | select(startswith(\"milestone:M\")) | ltrimstr(\"milestone:M\") | tonumber] | min) as \$due
+	| select(\$due != null or (\"milestone:later\" | IN(\$names[]) | not))
 	| select(
 		(\$m > 0 and \$due == \$m)
 		or (([\$names[] | select(IN(\$areas[]))] | length > 0)
