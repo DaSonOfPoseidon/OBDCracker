@@ -39,6 +39,10 @@ pub struct Sweep {
     /// afterwards, as it refused `10 01` or didn't answer it. It returns to the default session by
     /// itself once S3 runs out without a `TesterPresent` (5 s by default).
     pub still_extended: Option<ReadError>,
+    /// Whether a read went without a final answer: its answer may still arrive, and be taken
+    /// for the answer to a later read on this connection, as UDS refusals don't name the DID.
+    /// Connect again before reading from this module again.
+    pub out_of_step: bool,
 }
 
 impl Sweep {
@@ -167,6 +171,7 @@ pub fn sweep_dids_reporting<T: Transport + ?Sized>(
             still_extended: None,
             found: Vec::new(),
             stop: None,
+            out_of_step: false,
         });
     };
     if let Some(s3) = options.extended {
@@ -195,6 +200,8 @@ pub fn sweep_dids_reporting<T: Transport + ?Sized>(
                         at: first,
                         why: stopped(session_error(entry)),
                     }),
+                    // A session request's late answer isn't a read's.
+                    out_of_step: false,
                 });
             }
         };
@@ -252,11 +259,17 @@ fn stopped(failure: Result<ReadError, FingerprintError>) -> Why {
 }
 
 // A sweep that stopped at `at`.
-fn halt(found: Vec<(u16, Result<Vec<u8>, ReadError>)>, at: u16, why: Why) -> Sweep {
+fn halt(
+    found: Vec<(u16, Result<Vec<u8>, ReadError>)>,
+    at: u16,
+    why: Why,
+    out_of_step: bool,
+) -> Sweep {
     Sweep {
         found,
         stop: Some(Stop { at, why }),
         still_extended: None,
+        out_of_step,
     }
 }
 
@@ -294,7 +307,7 @@ fn read_each(
                 value
             }
             Err(e) => {
-                return halt(found, resume, stopped(Err(e)));
+                return halt(found, resume, stopped(Err(e)), out_of_step);
             }
         };
         // After an unanswered read, a refusal or another DID's value may be the late answer to
@@ -302,14 +315,14 @@ fn read_each(
         // could leave this DID's own answer queued for the next.
         if out_of_step && let Err(e @ ReadError::Reply(_)) = value {
             found.extend(unanswered(&mut quiet));
-            return halt(found, *did, Why::Unmatched(e));
+            return halt(found, *did, Why::Unmatched(e), true);
         }
         match value {
             Err(e @ (ReadError::NoReply | ReadError::StillPending)) => {
                 quiet.push((*did, e));
                 out_of_step = true;
                 if quiet.len() == QUIET_LIMIT {
-                    return halt(found, resume, Why::Module(e));
+                    return halt(found, resume, Why::Module(e), true);
                 }
             }
             // Not there, but the module answered, so the DIDs before it are listed.
@@ -330,14 +343,7 @@ fn read_each(
                     .map(|(next, _)| *next)
                     .find(|next| next > did);
                 if let Some(at) = next {
-                    return Sweep {
-                        found,
-                        stop: Some(Stop {
-                            at,
-                            why: Why::Module(e),
-                        }),
-                        still_extended: None,
-                    };
+                    return halt(found, at, Why::Module(e), out_of_step);
                 }
             }
             // A refusal of `22` itself, not of this DID: nothing more will read now.
@@ -345,12 +351,12 @@ fn read_each(
                 if SERVICE_REFUSALS.contains(&refusal.nrc) =>
             {
                 found.extend(unanswered(&mut quiet));
-                return halt(found, *did, Why::Module(e));
+                return halt(found, *did, Why::Module(e), out_of_step);
             }
             // A session refused on the way (re-entered after it lapsed): nothing more will read,
             // and nothing since the last answer was.
             Err(e @ ReadError::SessionRefused(_)) => {
-                return halt(found, resume, Why::Module(e));
+                return halt(found, resume, Why::Module(e), out_of_step);
             }
             value => {
                 found.extend(unanswered(&mut quiet));
@@ -364,5 +370,6 @@ fn read_each(
         found,
         stop: None,
         still_extended: None,
+        out_of_step,
     }
 }
