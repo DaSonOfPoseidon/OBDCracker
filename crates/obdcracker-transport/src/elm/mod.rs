@@ -219,6 +219,9 @@ pub struct Elm<L> {
     // or, for a status line, as a status.
     heard: Vec<(u64, SystemTime, String)>,
     next_heard: u64,
+    // How many lines of the request in progress didn't fit in `heard`: lost unless a reply
+    // turns out to use them.
+    overflowed: usize,
     // What it did besides requests and replies, until taken, and how many more were dropped.
     log: Vec<LinkEvent>,
     lost: usize,
@@ -305,6 +308,7 @@ impl<L: Link> Elm<L> {
             next_heard: 0,
             log: Vec::new(),
             lost: 0,
+            overflowed: 0,
         };
         match elm.set_up() {
             Ok(()) => Ok(elm),
@@ -801,7 +805,11 @@ impl<L: Link> Elm<L> {
                     payload: payload.to_vec(),
                 };
                 let used = std::mem::take(&mut sender.lines);
+                let kept = self.heard.len();
                 self.heard.retain(|(number, ..)| !used.contains(number));
+                // The reply's other lines didn't fit in `heard`, and aren't lost after all.
+                let found = kept - self.heard.len();
+                self.overflowed = self.overflowed.saturating_sub(used.len() - found);
                 Some(reply)
             }
             Ok(_) => None,
@@ -820,7 +828,7 @@ impl<L: Link> Elm<L> {
         if self.heard.len() < MAX_EVENTS {
             self.heard.push((number, self.event_at, line.to_owned()));
         } else {
-            self.lost += 1;
+            self.overflowed += 1;
         }
         number
     }
@@ -828,6 +836,7 @@ impl<L: Link> Elm<L> {
     // Forgets every module's reply in progress, reporting the lines in no reply.
     fn drop_senders(&mut self) {
         self.senders.clear();
+        self.lost += std::mem::take(&mut self.overflowed);
         for (_, at, line) in std::mem::take(&mut self.heard) {
             self.note(left_over(at, line));
         }

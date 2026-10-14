@@ -131,7 +131,8 @@ pub enum LinkEvent {
         /// The line as the adapter printed it.
         line: String,
     },
-    /// How many events were dropped because nothing took them in time.
+    /// How many events, or lines the adapter printed, were dropped because there was no room to
+    /// keep them until something took them.
     Lost(usize),
 }
 
