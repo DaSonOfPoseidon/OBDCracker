@@ -108,14 +108,20 @@ Each entry names the class, what to check, and where it bit us.
   fine. Where the outcome matters, clean up explicitly and pass the result on alongside the original failure (both
   can matter: `SessionError::Unconfirmed`); leave `Drop` as the last resort. And a last resort shouldn't repeat
   cleanup the caller already did: `Audited`'s drop settled again after an explicit `settle()`, so a broken adapter's
-  failure was logged twice (#83). Track whether anything happened since.
+  failure was logged twice (#83). Track whether anything happened since. Nor should explicit cleanup hand its own
+  retry to `Drop`: `ExtendedSession::end` left the guard armed after an unanswered `10 01`, so the retry's adapter
+  failure was lost (#80). Retry inside the explicit call and disarm the guard.
+- **Report progress only for work that happened.** A sweep called `progress(did)` even when the session's keepalive
+  failed before the read was sent, so a caller checkpointing on it would skip a DID that never reached the bus (#81).
 - **"Busy, repeat request" (NRC 0x21) isn't an answer.** Recording it as the DID's value and moving on misses the
   DID and keeps a busy module busy. Stop or wait, then ask again.
 - **A refusal doesn't say which request it refuses.** UDS `7F 22 31` names the service, not the DID, so after a read
   times out its late refusal can arrive as the next read's answer. Asking again doesn't fix it: the retry takes the
   first answer, and the duplicate's answer is left queued for the read after. Once replies may be out of step, they
   stay so for the rest of the connection, even past answers that plainly match: stop at the next one that can't be
-  matched, and resume on a fresh connection from there.
+  matched, and resume on a fresh connection from there. A run that *ends* out of step must say so too
+  (`Sweep::out_of_step`, #82), or the caller's next read on the same connection can take the late refusal as its
+  answer.
 - **Match a reply to its request by what it echoes**, not only the service ID: the PID (mode 09), a requested PID
   (mode 01), a requested DID (0x22) or the subfunction. A late reply to an earlier request has the same SID
   (`response::answers`).
