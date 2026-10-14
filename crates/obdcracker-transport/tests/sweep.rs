@@ -694,3 +694,68 @@ fn an_adapter_failure_retrying_the_leave_stops_the_sweep() {
     );
     assert_eq!(car.sent, ["7E0 10 03", "7E0 22 06 00", "7E0 10 01"]);
 }
+
+// An engine whose second `3E 00` gets `second` instead of `7E 00`, in a session that sends
+// `3E 00` before every read: 0600 to 0602 all have a value.
+fn keepalive_fails(second: &'static [u8]) -> (Car, SweepOptions) {
+    let mut presents = 0;
+    let car = Car::new(move |_, request| match request {
+        [0x10, 0x03] => reply(&[0x50, 0x03, 0x00, 0x32, 0x01, 0xF4]),
+        [0x10, 0x01] => reply(&[0x50, 0x01, 0x00, 0x32, 0x01, 0xF4]),
+        [0x3E, 0x00] => {
+            presents += 1;
+            if presents == 2 {
+                reply(second)
+            } else {
+                reply(&[0x7E, 0x00])
+            }
+        }
+        [0x22, hi, lo] => reply(&[0x62, *hi, *lo, 0x12]),
+        _ => Vec::new(),
+    });
+    let mut options = SweepOptions::default();
+    options.extended = Some(S3 {
+        keepalive: Duration::ZERO,
+        ..S3::default()
+    });
+    (car, options)
+}
+
+#[test]
+fn a_did_whose_keepalive_was_refused_is_not_reported_as_read() {
+    // The refused `3E 00` stops the sweep before `22 06 01` is sent, so a caller checkpointing on
+    // progress must not skip 0601.
+    let (mut car, options) = keepalive_fails(&[0x7F, 0x3E, 0x12]);
+    let mut seen = Vec::new();
+    let got = sweep_dids_reporting(
+        &mut car,
+        &Policy::read_only(),
+        &engine(),
+        0x0600..=0x0602,
+        TIMING,
+        &options,
+        |did| seen.push(did),
+    )
+    .unwrap();
+    assert!(!car.sent.contains(&"7E0 22 06 01".to_owned()), "{:?}", car.sent);
+    assert_eq!(got.stop.map(|stop| stop.at), Some(0x0601));
+    assert_eq!(seen, [0x0600]);
+}
+
+#[test]
+fn a_did_whose_keepalive_went_unanswered_is_not_reported_as_read() {
+    let (mut car, options) = keepalive_fails(&[]);
+    let mut seen = Vec::new();
+    sweep_dids_reporting(
+        &mut car,
+        &Policy::read_only(),
+        &engine(),
+        0x0600..=0x0602,
+        TIMING,
+        &options,
+        |did| seen.push(did),
+    )
+    .unwrap();
+    assert!(!car.sent.contains(&"7E0 22 06 01".to_owned()), "{:?}", car.sent);
+    assert_eq!(seen, [0x0600, 0x0602]);
+}
