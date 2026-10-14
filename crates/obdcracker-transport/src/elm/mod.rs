@@ -77,7 +77,7 @@ const RESET_TRIES: usize = 2;
 // How long to look for output the adapter shouldn't have printed before writing to it.
 const IDLE_CHECK: Duration = Duration::from_millis(1);
 // The most lines an answer to a command may have: `AT PPS` prints 12. A reset, whose noise
-// can be long, keeps that many for the report and counts the rest as lost.
+// can be long, keeps that many for the report and reports how many more it dropped.
 const MAX_ANSWER_LINES: usize = 32;
 // How long an AT command may take.
 const COMMAND_WAIT: Duration = Duration::from_secs(2);
@@ -418,6 +418,7 @@ impl<L: Link> Elm<L> {
             let mut banner = None;
             // What it printed, for the report; a flood isn't kept, only counted as lost.
             let mut answer = Vec::new();
+            let mut skipped = 0;
             let reset = loop {
                 let event = match self.next_event(deadline) {
                     Ok(Some(event)) => event,
@@ -428,7 +429,7 @@ impl<L: Link> Elm<L> {
                     if answer.len() < MAX_ANSWER_LINES {
                         answer.push(line.clone());
                     } else {
-                        self.lost += 1;
+                        skipped += 1;
                     }
                 }
                 match event {
@@ -447,6 +448,10 @@ impl<L: Link> Elm<L> {
                 command: "ATZ".to_owned(),
                 answer,
             });
+            // Next to the reset, in order, not at the end with what nothing took in time.
+            if skipped > 0 {
+                self.note(LinkEvent::Lost(skipped));
+            }
             if reset? {
                 return Ok(());
             }
@@ -520,6 +525,9 @@ impl<L: Link> Elm<L> {
     fn note(&mut self, event: LinkEvent) {
         if self.log.len() < MAX_EVENTS {
             self.log.push(event);
+        } else if let LinkEvent::Lost(count) = event {
+            // What it counted is lost too.
+            self.lost += count;
         } else {
             self.lost += 1;
         }
@@ -836,9 +844,13 @@ impl<L: Link> Elm<L> {
     // Forgets every module's reply in progress, reporting the lines in no reply.
     fn drop_senders(&mut self) {
         self.senders.clear();
-        self.lost += std::mem::take(&mut self.overflowed);
         for (_, at, line) in std::mem::take(&mut self.heard) {
             self.note(left_over(at, line));
+        }
+        // After the request's lines, in order.
+        let overflowed = std::mem::take(&mut self.overflowed);
+        if overflowed > 0 {
+            self.note(LinkEvent::Lost(overflowed));
         }
     }
 

@@ -1992,7 +1992,17 @@ mod events {
         assert_eq!(answer.len(), 32);
         assert_eq!(answer[0], "ATZ");
         assert!(answer[1..].iter().all(|line| line == "NOISE"), "{answer:?}");
-        assert_eq!(events.last(), Some(&LinkEvent::Lost(10)), "{events:?}");
+        // Right after the reset, not after the setup that followed it.
+        let reset = events
+            .iter()
+            .position(|e| matches!(e, LinkEvent::Command { command, .. } if command == "ATZ"))
+            .unwrap();
+        assert_eq!(
+            events.get(reset + 1),
+            Some(&LinkEvent::Lost(10)),
+            "{events:?}"
+        );
+        assert_eq!(lost_in(&events), 10);
     }
 
     // Eight ECUs answer a broadcast at once with the longest single transfer, 586 frames each,
@@ -2053,8 +2063,16 @@ mod events {
         elm.recv(Duration::from_secs(5)).unwrap();
         elm.take_events();
         elm.settle().unwrap();
+        // The next request's setup comes after the count, which is where the lines went.
+        elm.send(&approve(Target::Physical(0x7E0), &[0x09, 0x02]))
+            .unwrap();
         let events = elm.take_events();
         let lost = lost_in(&events);
+        let at = events.iter().position(|e| matches!(e, LinkEvent::Lost(_)));
+        let first_command = events
+            .iter()
+            .position(|e| matches!(e, LinkEvent::Command { .. }));
+        assert!(at < first_command, "{at:?} {first_command:?}");
         let unread = unread_in(events).len();
         assert!(lost > 0, "{unread} unread");
         assert_eq!(unread + lost, 7 * per_ecu);
