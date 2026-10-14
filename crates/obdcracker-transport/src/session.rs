@@ -296,9 +296,9 @@ impl<'a, T: Transport + ?Sized> ExtendedSession<'a, T> {
     /// # Errors
     ///
     /// The module refuses `10 01` or doesn't answer, or the adapter fails. Unless the module
-    /// accepted or plainly refused it, `10 01` is tried once more first, and that try's failure
-    /// is returned, or the first's if only that one was the adapter's: an adapter in an unknown
-    /// state matters more than the module's answer.
+    /// accepted or plainly refused it, `10 01` is tried once more first. An adapter failure on
+    /// the first try is returned however the retry goes, as the adapter's state is unknown;
+    /// otherwise the retry's result is.
     pub fn end(mut self) -> Result<(), SessionError> {
         // Whatever happens, nothing is left for dropping the session to send unobserved.
         self.ended = true;
@@ -308,12 +308,12 @@ impl<'a, T: Transport + ?Sized> ExtendedSession<'a, T> {
             Err(SessionError::Refused(reply)) if plainly_refused(&reply) => {
                 Err(SessionError::Refused(reply))
             }
-            Err(first) => match self.request(&self.leave.clone()) {
-                Ok(()) => Ok(()),
-                Err(retry @ SessionError::Transport(Error::Adapter(_))) => Err(retry),
-                Err(_) if matches!(first, SessionError::Transport(Error::Adapter(_))) => Err(first),
-                Err(retry) => Err(retry),
-            },
+            // An adapter failure stands however the retry goes: the adapter's state is unknown.
+            Err(first @ SessionError::Transport(Error::Adapter(_))) => {
+                let _ = self.request(&self.leave.clone());
+                Err(first)
+            }
+            Err(_) => self.request(&self.leave.clone()),
         }
     }
 
