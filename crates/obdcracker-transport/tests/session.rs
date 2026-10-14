@@ -231,8 +231,8 @@ fn the_timing_the_module_gives_is_used() {
 }
 
 #[test]
-fn an_unanswered_end_is_retried_on_drop() {
-    // `end` consumes the guard, so the caller can't retry; dropping it tries `10 01` once more.
+fn an_unanswered_end_is_tried_once_more() {
+    // `end` consumes the guard, so the caller can't retry; `end` tries `10 01` once more itself.
     let mut adapter = mock(&[&[0x50, 0x03, 0x00, 0x32, 0x01, 0xF4]]);
     let guard =
         ExtendedSession::enter(&mut adapter, &Policy::read_only(), ENGINE, FAST, GUARD).unwrap();
@@ -312,4 +312,54 @@ fn an_adapter_failure_leaving_after_an_unanswered_entry_is_reported() {
         "{error:?}"
     );
     assert_eq!(adapter.sent, 2);
+}
+
+// Confirms `10 03`, answers nothing else, and fails as an adapter does from the third request on.
+#[derive(Debug, Default)]
+struct FailsOnRetry {
+    sent: Vec<Vec<u8>>,
+    replies: Vec<Response>,
+}
+
+impl obdcracker_transport::Transport for FailsOnRetry {
+    fn send(
+        &mut self,
+        request: &obdcracker_safety::Approved,
+    ) -> Result<(), obdcracker_transport::Error> {
+        if self.sent.len() == 2 {
+            return Err(obdcracker_transport::Error::Adapter(
+                "the adapter said BUFFER FULL".to_owned(),
+            ));
+        }
+        self.sent.push(request.payload().to_vec());
+        if request.payload() == [0x10, 0x03] {
+            self.replies.push(Response {
+                source: 0x7E8,
+                payload: vec![0x50, 0x03, 0x00, 0x32, 0x01, 0xF4],
+            });
+        }
+        Ok(())
+    }
+
+    fn recv(&mut self, _timeout: Duration) -> Result<Response, obdcracker_transport::Error> {
+        self.replies.pop().ok_or(obdcracker_transport::Error::Timeout)
+    }
+}
+
+#[test]
+fn an_adapter_failure_retrying_the_end_is_reported() {
+    // `10 01` goes unanswered, and trying it again fails in the adapter, whose state is now
+    // unknown: `end` reports that, and nothing is left for dropping the guard to send.
+    let mut adapter = FailsOnRetry::default();
+    let guard =
+        ExtendedSession::enter(&mut adapter, &Policy::read_only(), ENGINE, FAST, GUARD).unwrap();
+    let error = guard.end().unwrap_err();
+    assert!(
+        matches!(
+            error,
+            SessionError::Transport(obdcracker_transport::Error::Adapter(_))
+        ),
+        "{error:?}"
+    );
+    assert_eq!(adapter.sent, [vec![0x10, 0x03], vec![0x10, 0x01]]);
 }

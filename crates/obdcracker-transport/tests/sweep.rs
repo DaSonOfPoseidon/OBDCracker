@@ -664,3 +664,33 @@ fn replies_stay_suspect_after_an_unanswered_read_even_past_a_value() {
     assert_eq!(stop.at, 0x0602);
     assert!(matches!(stop.why, Why::Unmatched(_)), "{:?}", stop.why);
 }
+
+#[test]
+fn an_adapter_failure_retrying_the_leave_stops_the_sweep() {
+    // `10 01` goes unanswered and trying it again fails at the adapter: its state is unknown,
+    // which matters more than the module perhaps still being in the extended session.
+    let mut car = Car::new(|_, request| match request {
+        [0x10, 0x03] => reply(&[0x50, 0x03, 0x00, 0x32, 0x01, 0xF4]),
+        [0x22, 0x06, 0x00] => reply(&[0x62, 0x06, 0x00, 0x12]),
+        _ => Vec::new(),
+    });
+    car.fail_at = Some(3);
+    let got = sweep_dids(
+        &mut car,
+        &Policy::read_only(),
+        &engine(),
+        0x0600..=0x0600,
+        TIMING,
+        &extended(),
+    )
+    .unwrap();
+    assert_eq!(got.found, [(0x0600, Ok(vec![0x12]))]);
+    assert_eq!(
+        got.stop,
+        Some(Stop {
+            at: 0x0600,
+            why: Why::Adapter(Error::Adapter("the adapter said BUFFER FULL".into()))
+        })
+    );
+    assert_eq!(car.sent, ["7E0 10 03", "7E0 22 06 00", "7E0 10 01"]);
+}
