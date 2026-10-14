@@ -140,8 +140,9 @@ pub fn sweep_dids<T: Transport + ?Sized>(
 }
 
 /// [`sweep_dids`], calling `progress` with each DID once its read was sent and answered or
-/// timed out. A DID whose read never went out, as the extended session's keepalive or re-entry
-/// failed first, isn't reported. Resume from [`Stop::at`], not the last DID reported.
+/// timed out. If the extended session's keepalive or re-entry fails before a read goes out, that
+/// DID isn't reported and the sweep stops there. Resume from [`Stop::at`], not the last DID
+/// reported.
 ///
 /// # Errors
 ///
@@ -298,13 +299,16 @@ fn read_each(
             Ok(uds::decode_did(payload, *did)?.to_vec())
         });
         let value = match answer {
-            Ok((sent, value)) => {
-                // A session's keepalive or re-entry can fail before the read is sent; a caller
-                // checkpointing on progress mustn't skip that DID.
-                if sent {
-                    progress(*did);
-                }
+            Ok((true, value)) => {
+                progress(*did);
                 value
+            }
+            // The session's keepalive or re-entry failed before the read was sent. Going on
+            // would report later DIDs past this one, and a caller checkpointing on progress
+            // would skip it, so the sweep stops here.
+            Ok((false, value)) => {
+                let e = value.err().unwrap_or(ReadError::NoReply);
+                return halt(found, resume, Why::Module(e), out_of_step);
             }
             Err(e) => {
                 return halt(found, resume, stopped(Err(e)), out_of_step);
@@ -352,11 +356,6 @@ fn read_each(
             {
                 found.extend(unanswered(&mut quiet));
                 return halt(found, *did, Why::Module(e), out_of_step);
-            }
-            // A session refused on the way (re-entered after it lapsed): nothing more will read,
-            // and nothing since the last answer was.
-            Err(e @ ReadError::SessionRefused(_)) => {
-                return halt(found, resume, Why::Module(e), out_of_step);
             }
             value => {
                 found.extend(unanswered(&mut quiet));
