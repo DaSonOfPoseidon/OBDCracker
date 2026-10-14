@@ -365,3 +365,57 @@ fn an_adapter_failure_retrying_the_end_is_reported() {
     );
     assert_eq!(adapter.sent, [vec![0x10, 0x03], vec![0x10, 0x01]]);
 }
+
+// Confirms every session request, but fails as an adapter does on the second one sent.
+#[derive(Debug, Default)]
+struct FailsOnce {
+    sent: Vec<Vec<u8>>,
+    replies: Vec<Response>,
+}
+
+impl obdcracker_transport::Transport for FailsOnce {
+    fn send(
+        &mut self,
+        request: &obdcracker_safety::Approved,
+    ) -> Result<(), obdcracker_transport::Error> {
+        self.sent.push(request.payload().to_vec());
+        if self.sent.len() == 2 {
+            return Err(obdcracker_transport::Error::Adapter(
+                "the adapter said BUFFER FULL".to_owned(),
+            ));
+        }
+        let mut payload = vec![0x50, request.payload()[1]];
+        payload.extend([0x00, 0x32, 0x01, 0xF4]);
+        self.replies.push(Response {
+            source: 0x7E8,
+            payload,
+        });
+        Ok(())
+    }
+
+    fn recv(&mut self, _timeout: Duration) -> Result<Response, obdcracker_transport::Error> {
+        self.replies
+            .pop()
+            .ok_or(obdcracker_transport::Error::Timeout)
+    }
+}
+
+#[test]
+fn an_adapter_failure_leaving_is_reported_even_if_the_retry_works() {
+    // The adapter failed, so its state is unknown, however the retry went.
+    let mut adapter = FailsOnce::default();
+    let guard =
+        ExtendedSession::enter(&mut adapter, &Policy::read_only(), ENGINE, FAST, GUARD).unwrap();
+    let error = guard.end().unwrap_err();
+    assert!(
+        matches!(
+            error,
+            SessionError::Transport(obdcracker_transport::Error::Adapter(_))
+        ),
+        "{error:?}"
+    );
+    assert_eq!(
+        adapter.sent,
+        [vec![0x10, 0x03], vec![0x10, 0x01], vec![0x10, 0x01]]
+    );
+}
