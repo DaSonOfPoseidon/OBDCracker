@@ -135,7 +135,9 @@ pub fn sweep_dids<T: Transport + ?Sized>(
     sweep_dids_reporting(transport, policy, module, range, timing, options, |_| {})
 }
 
-/// [`sweep_dids`], calling `progress` with each DID once it's been read.
+/// [`sweep_dids`], calling `progress` with each DID once its read was sent and answered or
+/// timed out. A DID whose read never went out, as the extended session's keepalive or re-entry
+/// failed first, isn't reported. Resume from [`Stop::at`], not the last DID reported.
 ///
 /// # Errors
 ///
@@ -279,16 +281,22 @@ fn read_each(
     for (did, request) in requests {
         // Where to resume after a stop that no answer came before: the first unanswered DID.
         let resume = quiet.first().map_or(*did, |(did, _)| *did);
-        let answer = asker.ask(request, |payload| {
+        let answer = asker.ask_sent(request, |payload| {
             Ok(uds::decode_did(payload, *did)?.to_vec())
         });
         let value = match answer {
-            Ok(value) => value,
+            Ok((sent, value)) => {
+                // A session's keepalive or re-entry can fail before the read is sent; a caller
+                // checkpointing on progress mustn't skip that DID.
+                if sent {
+                    progress(*did);
+                }
+                value
+            }
             Err(e) => {
                 return halt(found, resume, stopped(Err(e)));
             }
         };
-        progress(*did);
         // After an unanswered read, a refusal or another DID's value may be the late answer to
         // that one, even past answers that were plainly this connection's own. Asking again
         // could leave this DID's own answer queued for the next.

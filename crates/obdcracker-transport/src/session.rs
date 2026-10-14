@@ -257,6 +257,13 @@ impl<'a, T: Transport + ?Sized> ExtendedSession<'a, T> {
     /// [`SessionError::SessionChange`] for a `DiagnosticSessionControl` request, the module
     /// refuses to enter the session again, or doesn't answer, or the adapter fails.
     pub fn exchange(&mut self, request: &Approved) -> Result<Response, SessionError> {
+        self.prepare(request)?;
+        self.exchange_prepared(request)
+    }
+
+    // What `exchange` does before sending `request`: its checks, and entering the session again
+    // if it has lapsed. A failure here means `request` wasn't sent.
+    pub(crate) fn prepare(&mut self, request: &Approved) -> Result<(), SessionError> {
         if request.target() != self.enter.target() {
             return Err(SessionError::WrongTarget);
         }
@@ -266,6 +273,11 @@ impl<'a, T: Transport + ?Sized> ExtendedSession<'a, T> {
         if self.lapsed() {
             self.request(&self.enter.clone())?;
         }
+        Ok(())
+    }
+
+    // The rest of `exchange`, once `prepare` has passed: sends `request` and returns its answer.
+    pub(crate) fn exchange_prepared(&mut self, request: &Approved) -> Result<Response, SessionError> {
         let (started, reply) = self.send(request)?;
         // Only a positive answer counts, so the session is never taken for alive when it isn't;
         // at worst, the next request enters it again needlessly.
