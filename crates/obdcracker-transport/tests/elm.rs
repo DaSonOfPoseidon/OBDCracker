@@ -1935,21 +1935,147 @@ mod events {
         assert!(unread.len() >= 2 && sent.starts_with(&unread), "{unread:?}");
     }
 
+    fn statuses_in(events: &[LinkEvent]) -> Vec<&str> {
+        events
+            .iter()
+            .filter_map(|e| match e {
+                LinkEvent::Status { line, .. } => Some(line.as_str()),
+                _ => None,
+            })
+            .collect()
+    }
+
     #[test]
-    fn a_status_line_that_isnt_a_failure_is_reported() {
+    fn a_status_line_that_ends_a_request_is_reported_as_a_status() {
+        // NO DATA was read: it's the adapter's answer that ended the request (#88).
         let mut elm = connect(car());
         elm.send(&approve(Target::Physical(0x7E0), &[0x01, 0x00]))
             .unwrap();
         assert_eq!(elm.recv(Duration::from_secs(1)), Err(Error::Timeout));
-        let unread: Vec<String> = elm
-            .take_events()
-            .into_iter()
-            .filter_map(|e| match e {
-                LinkEvent::Unread { line, .. } => Some(line),
+        let events = elm.take_events();
+        assert_eq!(statuses_in(&events), ["NO DATA"]);
+        assert_eq!(unread_in(events), Vec::<String>::new());
+    }
+
+    #[test]
+    fn a_status_line_nobody_waited_for_is_still_a_status() {
+        // The caller never asks for the reply; the next request drains the NO DATA.
+        let mut elm = connect(car());
+        elm.send(&approve(Target::Physical(0x7E0), &[0x01, 0x00]))
+            .unwrap();
+        elm.take_events();
+        elm.send(&approve(Target::Physical(0x7E0), &[0x01, 0x00]))
+            .unwrap();
+        let events = elm.take_events();
+        assert_eq!(statuses_in(&events), ["NO DATA"]);
+        assert_eq!(unread_in(events), Vec::<String>::new());
+    }
+
+    #[test]
+    fn reset_output_past_the_answer_cap_is_counted_as_lost() {
+        // A noisy clone prints 40 lines before its banner (#85). The answer keeps the first 32
+        // lines (the echo and 31 of them); the other 9 and the banner are counted, not dropped
+        // silently.
+        let mut fake = car();
+        fake.reset_noise = b"NOISE\r".repeat(40);
+        let mut elm = connect(fake);
+        let events = elm.take_events();
+        let answer = events
+            .iter()
+            .find_map(|e| match e {
+                LinkEvent::Command {
+                    command, answer, ..
+                } if command == "ATZ" => Some(answer),
                 _ => None,
             })
+            .unwrap();
+        assert_eq!(answer.len(), 32);
+        assert_eq!(answer[0], "ATZ");
+        assert!(answer[1..].iter().all(|line| line == "NOISE"), "{answer:?}");
+        // Right after the reset, not after the setup that followed it.
+        let reset = events
+            .iter()
+            .position(|e| matches!(e, LinkEvent::Command { command, .. } if command == "ATZ"))
+            .unwrap();
+        assert_eq!(
+            events.get(reset + 1),
+            Some(&LinkEvent::Lost(10)),
+            "{events:?}"
+        );
+        assert_eq!(lost_in(&events), 10);
+    }
+
+    // Eight ECUs answer a broadcast at once with the longest single transfer, 586 frames each,
+    // interleaved: more frame lines are in flight than the driver keeps (`MAX_EVENTS`, 4096)
+    // before the first reply completes.
+    fn eight_long_replies() -> (Elm<FakeLink>, usize) {
+        let payload: Vec<u8> = [0x49, 0x02]
+            .into_iter()
+            .chain((0..=250u8).cycle().take(4093))
             .collect();
-        assert_eq!(unread, ["NO DATA"]);
+        let per_ecu = frames(&payload).len();
+        let mut fake = FakeElm::new(Box::new(move |header, request| {
+            if header == 0x7DF && request == [0x09, 0x02] {
+                (0x7E8..=0x7EF).map(|id| (id, payload.clone())).collect()
+            } else {
+                Vec::new()
+            }
+        }));
+        // Interleaved, but never overflowing the adapter's buffer.
+        fake.drain_rate = Some(u32::MAX);
+        let mut elm = connect(fake);
+        elm.send(&approve(Target::ObdFunctional, &[0x09, 0x02]))
+            .unwrap();
+        (elm, per_ecu)
+    }
+
+    fn lost_in(events: &[LinkEvent]) -> usize {
+        events
+            .iter()
+            .map(|e| match e {
+                LinkEvent::Lost(n) => *n,
+                _ => 0,
+            })
+            .sum()
+    }
+
+    #[test]
+    fn lines_past_the_cap_that_end_up_in_replies_are_not_lost() {
+        // #84: every reply completes, so nothing was lost.
+        let (mut elm, _) = eight_long_replies();
+        for _ in 0..8 {
+            assert_eq!(
+                elm.recv(Duration::from_secs(5)).unwrap().payload.len(),
+                4095
+            );
+        }
+        elm.settle().unwrap();
+        let events = elm.take_events();
+        assert_eq!(lost_in(&events), 0, "{:?}", events.last());
+        assert_eq!(unread_in(events), Vec::<String>::new());
+    }
+
+    #[test]
+    fn lines_past_the_cap_in_abandoned_replies_are_each_counted_once() {
+        // Only the first reply is read: every line of the other seven is reported as unread or
+        // counted as lost, and nothing else is.
+        let (mut elm, per_ecu) = eight_long_replies();
+        elm.recv(Duration::from_secs(5)).unwrap();
+        elm.take_events();
+        elm.settle().unwrap();
+        // The next request's setup comes after the count, which is where the lines went.
+        elm.send(&approve(Target::Physical(0x7E0), &[0x09, 0x02]))
+            .unwrap();
+        let events = elm.take_events();
+        let lost = lost_in(&events);
+        let at = events.iter().position(|e| matches!(e, LinkEvent::Lost(_)));
+        let first_command = events
+            .iter()
+            .position(|e| matches!(e, LinkEvent::Command { .. }));
+        assert!(at < first_command, "{at:?} {first_command:?}");
+        let unread = unread_in(events).len();
+        assert!(lost > 0, "{unread} unread");
+        assert_eq!(unread + lost, 7 * per_ecu);
     }
 
     #[test]

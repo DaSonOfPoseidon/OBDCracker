@@ -12,10 +12,11 @@ use crate::{Error, LinkEvent, Response, Transport, hex};
 /// Lines file. Requests are logged before they are sent, so a send that crashes the program is
 /// still on record. After every call it also logs the transport's [`LinkEvent`]s: commands to
 /// the adapter (`"dir":"cmd"`), reply lines nobody read before the next request
-/// (`"dir":"unread"`), and how many events were lost (`"dir":"lost"`). Each line's `ts_ms` is
+/// (`"dir":"unread"`), status lines that ended a request, such as `NO DATA` (`"dir":"status"`),
+/// and how many events were lost (`"dir":"lost"`). Each line's `ts_ms` is
 /// when it happened (for a reply line, when the driver read it from the link), so an event can
 /// be logged after a later request. When dropped, it has the transport read what's left of the
-/// last request ([`Transport::settle`]) and logs that too.
+/// last request ([`Transport::settle`]) and logs that too, unless it was settled since.
 ///
 /// Errors from `send` and `recv` are logged too (`"dir":"err"`, with `"op"` naming the call), so
 /// the log shows when an adapter misheard a request it may already have sent. A
@@ -28,6 +29,8 @@ pub struct Audited<T: Transport> {
     // Already escaped for a JSON string, so every line stays valid JSON whatever the link is
     // called (Windows ports such as `\\.\COM10` contain backslashes).
     link: String,
+    // `settle` was called, and nothing since, so dropping has nothing to settle.
+    settled: bool,
 }
 
 impl<T: Transport> Audited<T> {
@@ -40,6 +43,7 @@ impl<T: Transport> Audited<T> {
             inner,
             log,
             link: json_escape(&link.into()),
+            settled: false,
         };
         audited.record_events().map_err(io::Error::other)?;
         Ok(audited)
@@ -85,6 +89,10 @@ impl<T: Transport> Audited<T> {
                     at,
                     &format!(r#""dir":"unread","line":"{}""#, json_escape(&line)),
                 )?,
+                LinkEvent::Status { at, line } => self.write_at(
+                    at,
+                    &format!(r#""dir":"status","line":"{}""#, json_escape(&line)),
+                )?,
                 LinkEvent::Lost(count) => {
                     self.write(&format!(r#""dir":"lost","count":{count}"#))?;
                 }
@@ -110,6 +118,7 @@ impl<T: Transport> Audited<T> {
 
 impl<T: Transport> Transport for Audited<T> {
     fn send(&mut self, request: &Approved) -> Result<(), Error> {
+        self.settled = false;
         let id = request.target().can_id();
         self.record("tx", id, request.payload())?;
         let sent = self.inner.send(request);
@@ -121,6 +130,7 @@ impl<T: Transport> Transport for Audited<T> {
     }
 
     fn recv(&mut self, timeout: Duration) -> Result<Response, Error> {
+        self.settled = false;
         let received = self.inner.recv(timeout);
         let logged = self.record_events();
         let response = match received {
@@ -134,6 +144,7 @@ impl<T: Transport> Transport for Audited<T> {
     }
 
     fn patient(&mut self, wait: Option<Duration>) -> Result<Option<Duration>, Error> {
+        self.settled = false;
         let result = self.inner.patient(wait);
         let logged = self.record_events();
         let waits = result.map_err(|e| self.record_error("patient", None, e))?;
@@ -147,6 +158,7 @@ impl<T: Transport> Transport for Audited<T> {
     }
 
     fn settle(&mut self) -> Result<(), Error> {
+        self.settled = true;
         let settled = self.inner.settle();
         let logged = self.record_events();
         settled.map_err(|e| self.record_error("settle", None, e))?;
@@ -158,6 +170,9 @@ impl<T: Transport> Drop for Audited<T> {
     // What's left of the last request is logged before the session ends. Nothing can report a
     // failure from here.
     fn drop(&mut self) {
+        if self.settled {
+            return;
+        }
         let settled = self.inner.settle();
         let _ = self.record_events();
         if let Err(e) = settled {

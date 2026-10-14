@@ -106,7 +106,9 @@ Each entry names the class, what to check, and where it bit us.
 - **Cleanup that runs on drop can't report a failure.** A guard's `Drop` sends `10 01`, but nothing sees what
   happened, so an adapter that failed there went unnoticed and a module that refused to leave the session looked
   fine. Where the outcome matters, clean up explicitly and pass the result on alongside the original failure (both
-  can matter: `SessionError::Unconfirmed`); leave `Drop` as the last resort.
+  can matter: `SessionError::Unconfirmed`); leave `Drop` as the last resort. And a last resort shouldn't repeat
+  cleanup the caller already did: `Audited`'s drop settled again after an explicit `settle()`, so a broken adapter's
+  failure was logged twice (#83). Track whether anything happened since.
 - **"Busy, repeat request" (NRC 0x21) isn't an answer.** Recording it as the DID's value and moving on misses the
   DID and keeps a busy module busy. Stop or wait, then ask again.
 - **A refusal doesn't say which request it refuses.** UDS `7F 22 31` names the service, not the DID, so after a read
@@ -232,7 +234,9 @@ Each entry names the class, what to check, and where it bit us.
 - **A log of what was heard must cover what was half-used.** The audit log reported lines left unread at the next
   request, but frames already fed to a reassembler for a reply that never completed (another module's interleaved
   frames, a transfer dropped mid-way, a sixteenth-plus sender) and status lines such as `NO DATA` vanished. Keep each
-  input's raw form until it's part of something logged, and report it when it's dropped (PR #78).
+  input's raw form until it's part of something logged, and report it when it's dropped (PR #78). But log each line
+  as what it was: `NO DATA` *is* the answer that ended a request, and logging it as unread buried the few real unread
+  lines among 126 of them in car session 4 (#88).
 - **Don't hand back stale data to make a log complete.** Replies drained before the next request aren't returned:
   queueing them would let a late reply to a repeated request pass for a fresh one. Document what the audit log
   records instead (M3 branch, Codex).
