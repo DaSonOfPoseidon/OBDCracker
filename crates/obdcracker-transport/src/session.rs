@@ -277,7 +277,10 @@ impl<'a, T: Transport + ?Sized> ExtendedSession<'a, T> {
     }
 
     // The rest of `exchange`, once `prepare` has passed: sends `request` and returns its answer.
-    pub(crate) fn exchange_prepared(&mut self, request: &Approved) -> Result<Response, SessionError> {
+    pub(crate) fn exchange_prepared(
+        &mut self,
+        request: &Approved,
+    ) -> Result<Response, SessionError> {
         let (started, reply) = self.send(request)?;
         // Only a positive answer counts, so the session is never taken for alive when it isn't;
         // at worst, the next request enters it again needlessly.
@@ -308,9 +311,7 @@ impl<'a, T: Transport + ?Sized> ExtendedSession<'a, T> {
             Err(first) => match self.request(&self.leave.clone()) {
                 Ok(()) => Ok(()),
                 Err(retry @ SessionError::Transport(Error::Adapter(_))) => Err(retry),
-                Err(_) if matches!(first, SessionError::Transport(Error::Adapter(_))) => {
-                    Err(first)
-                }
+                Err(_) if matches!(first, SessionError::Transport(Error::Adapter(_))) => Err(first),
                 Err(retry) => Err(retry),
             },
         }

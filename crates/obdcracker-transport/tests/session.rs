@@ -342,7 +342,9 @@ impl obdcracker_transport::Transport for FailsOnRetry {
     }
 
     fn recv(&mut self, _timeout: Duration) -> Result<Response, obdcracker_transport::Error> {
-        self.replies.pop().ok_or(obdcracker_transport::Error::Timeout)
+        self.replies
+            .pop()
+            .ok_or(obdcracker_transport::Error::Timeout)
     }
 }
 

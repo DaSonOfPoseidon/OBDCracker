@@ -737,7 +737,11 @@ fn a_did_whose_keepalive_was_refused_is_not_reported_as_read() {
         |did| seen.push(did),
     )
     .unwrap();
-    assert!(!car.sent.contains(&"7E0 22 06 01".to_owned()), "{:?}", car.sent);
+    assert!(
+        !car.sent.contains(&"7E0 22 06 01".to_owned()),
+        "{:?}",
+        car.sent
+    );
     assert_eq!(got.stop.map(|stop| stop.at), Some(0x0601));
     assert_eq!(seen, [0x0600]);
 }
@@ -756,7 +760,11 @@ fn a_did_whose_keepalive_went_unanswered_is_not_reported_as_read() {
         |did| seen.push(did),
     )
     .unwrap();
-    assert!(!car.sent.contains(&"7E0 22 06 01".to_owned()), "{:?}", car.sent);
+    assert!(
+        !car.sent.contains(&"7E0 22 06 01".to_owned()),
+        "{:?}",
+        car.sent
+    );
     assert_eq!(seen, [0x0600, 0x0602]);
 }
 
