@@ -534,7 +534,16 @@ fn print_sweep(module: &UdsModule, found: &sweep::Sweep, last: u16) -> ExitCode 
         );
     }
     match &found.stop {
-        None => ExitCode::SUCCESS,
+        None => {
+            if found.out_of_step {
+                eprintln!(
+                    "note: some reads went unanswered, so a late answer may still arrive; connect \
+                     again before reading from {} again",
+                    module.name
+                );
+            }
+            ExitCode::SUCCESS
+        }
         Some(stop) => {
             eprintln!("stopped at {:04X}: {}", stop.at, stop.why);
             // A module that refused `22` or the session refuses it again; the rest may pass.

@@ -257,6 +257,13 @@ impl<'a, T: Transport + ?Sized> ExtendedSession<'a, T> {
     /// [`SessionError::SessionChange`] for a `DiagnosticSessionControl` request, the module
     /// refuses to enter the session again, or doesn't answer, or the adapter fails.
     pub fn exchange(&mut self, request: &Approved) -> Result<Response, SessionError> {
+        self.prepare(request)?;
+        self.exchange_prepared(request)
+    }
+
+    // What `exchange` does before sending `request`: its checks, and entering the session again
+    // if it has lapsed. A failure here means `request` wasn't sent.
+    pub(crate) fn prepare(&mut self, request: &Approved) -> Result<(), SessionError> {
         if request.target() != self.enter.target() {
             return Err(SessionError::WrongTarget);
         }
@@ -266,6 +273,14 @@ impl<'a, T: Transport + ?Sized> ExtendedSession<'a, T> {
         if self.lapsed() {
             self.request(&self.enter.clone())?;
         }
+        Ok(())
+    }
+
+    // The rest of `exchange`, once `prepare` has passed: sends `request` and returns its answer.
+    pub(crate) fn exchange_prepared(
+        &mut self,
+        request: &Approved,
+    ) -> Result<Response, SessionError> {
         let (started, reply) = self.send(request)?;
         // Only a positive answer counts, so the session is never taken for alive when it isn't;
         // at worst, the next request enters it again needlessly.
@@ -275,23 +290,31 @@ impl<'a, T: Transport + ?Sized> ExtendedSession<'a, T> {
         Ok(reply)
     }
 
-    /// Returns the module to the default session. Dropping the session does the same, but
-    /// can't report a failure.
+    /// Returns the module to the default session. Dropping the session does the same (one try),
+    /// but can't report a failure.
     ///
     /// # Errors
     ///
     /// The module refuses `10 01` or doesn't answer, or the adapter fails. Unless the module
-    /// accepted or plainly refused it, dropping the session then tries `10 01` once more.
+    /// accepted or plainly refused it, `10 01` is tried once more first. An adapter failure on
+    /// the first try is returned however the retry goes, as the adapter's state is unknown;
+    /// otherwise the retry's result is.
     pub fn end(mut self) -> Result<(), SessionError> {
-        let result = self.request(&self.leave.clone());
-        if match &result {
-            Ok(()) => true,
-            Err(SessionError::Refused(reply)) => plainly_refused(reply),
-            Err(_) => false,
-        } {
-            self.ended = true;
+        // Whatever happens, nothing is left for dropping the session to send unobserved.
+        self.ended = true;
+        let first = self.request(&self.leave.clone());
+        match first {
+            Ok(()) => Ok(()),
+            Err(SessionError::Refused(reply)) if plainly_refused(&reply) => {
+                Err(SessionError::Refused(reply))
+            }
+            // An adapter failure stands however the retry goes: the adapter's state is unknown.
+            Err(first @ SessionError::Transport(Error::Adapter(_))) => {
+                let _ = self.request(&self.leave.clone());
+                Err(first)
+            }
+            Err(_) => self.request(&self.leave.clone()),
         }
-        result
     }
 
     // Sends one of the session's own requests and checks that the module accepted it. Only an

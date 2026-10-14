@@ -347,7 +347,17 @@ pub(crate) trait Ask {
         &mut self,
         request: &Approved,
         decode: impl FnOnce(&[u8]) -> Result<V, ReplyError>,
-    ) -> Result<Result<V, ReadError>, ScanError>;
+    ) -> Result<Result<V, ReadError>, ScanError> {
+        self.ask_sent(request, decode).map(|(_, value)| value)
+    }
+
+    // `ask`, also saying whether `request` was sent: a session's keepalive or re-entry can fail
+    // before it is.
+    fn ask_sent<V>(
+        &mut self,
+        request: &Approved,
+        decode: impl FnOnce(&[u8]) -> Result<V, ReplyError>,
+    ) -> Result<(bool, Result<V, ReadError>), ScanError>;
 }
 
 pub(crate) struct Direct<'a, T: ?Sized> {
@@ -357,11 +367,12 @@ pub(crate) struct Direct<'a, T: ?Sized> {
 }
 
 impl<T: Transport + ?Sized> Ask for Direct<'_, T> {
-    fn ask<V>(
+    fn ask_sent<V>(
         &mut self,
         request: &Approved,
         decode: impl FnOnce(&[u8]) -> Result<V, ReplyError>,
-    ) -> Result<Result<V, ReadError>, ScanError> {
+    ) -> Result<(bool, Result<V, ReadError>), ScanError> {
+        // Nothing comes before the request, and failing to send it is an adapter failure.
         ask(
             self.transport,
             request,
@@ -369,22 +380,23 @@ impl<T: Transport + ?Sized> Ask for Direct<'_, T> {
             self.timing,
             decode,
         )
+        .map(|value| (true, value))
     }
 }
 
 impl<T: Transport + ?Sized> Ask for ExtendedSession<'_, T> {
-    fn ask<V>(
+    fn ask_sent<V>(
         &mut self,
         request: &Approved,
         decode: impl FnOnce(&[u8]) -> Result<V, ReplyError>,
-    ) -> Result<Result<V, ReadError>, ScanError> {
+    ) -> Result<(bool, Result<V, ReadError>), ScanError> {
         // `TesterPresent` if a slow module took long enough, so the session doesn't lapse.
-        if let Err(e) = self.keep_alive() {
-            return session_error(e).map(Err);
+        if let Err(e) = self.keep_alive().and_then(|()| self.prepare(request)) {
+            return session_error(e).map(|e| (false, Err(e)));
         }
-        match self.exchange(request) {
-            Ok(reply) => Ok(decode(&reply.payload).map_err(ReadError::Reply)),
-            Err(e) => session_error(e).map(Err),
+        match self.exchange_prepared(request) {
+            Ok(reply) => Ok((true, decode(&reply.payload).map_err(ReadError::Reply))),
+            Err(e) => session_error(e).map(|e| (true, Err(e))),
         }
     }
 }

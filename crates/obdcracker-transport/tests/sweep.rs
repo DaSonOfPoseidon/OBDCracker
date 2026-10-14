@@ -664,3 +664,152 @@ fn replies_stay_suspect_after_an_unanswered_read_even_past_a_value() {
     assert_eq!(stop.at, 0x0602);
     assert!(matches!(stop.why, Why::Unmatched(_)), "{:?}", stop.why);
 }
+
+#[test]
+fn an_adapter_failure_retrying_the_leave_stops_the_sweep() {
+    // `10 01` goes unanswered and trying it again fails at the adapter: its state is unknown,
+    // which matters more than the module perhaps still being in the extended session.
+    let mut car = Car::new(|_, request| match request {
+        [0x10, 0x03] => reply(&[0x50, 0x03, 0x00, 0x32, 0x01, 0xF4]),
+        [0x22, 0x06, 0x00] => reply(&[0x62, 0x06, 0x00, 0x12]),
+        _ => Vec::new(),
+    });
+    car.fail_at = Some(3);
+    let got = sweep_dids(
+        &mut car,
+        &Policy::read_only(),
+        &engine(),
+        0x0600..=0x0600,
+        TIMING,
+        &extended(),
+    )
+    .unwrap();
+    assert_eq!(got.found, [(0x0600, Ok(vec![0x12]))]);
+    assert_eq!(
+        got.stop,
+        Some(Stop {
+            at: 0x0600,
+            why: Why::Adapter(Error::Adapter("the adapter said BUFFER FULL".into()))
+        })
+    );
+    assert_eq!(car.sent, ["7E0 10 03", "7E0 22 06 00", "7E0 10 01"]);
+}
+
+// An engine whose second `3E 00` gets `second` instead of `7E 00`, in a session that sends
+// `3E 00` before every read: 0600 to 0602 all have a value.
+fn keepalive_fails(second: &'static [u8]) -> (Car, SweepOptions) {
+    let mut presents = 0;
+    let car = Car::new(move |_, request| match request {
+        [0x10, 0x03] => reply(&[0x50, 0x03, 0x00, 0x32, 0x01, 0xF4]),
+        [0x10, 0x01] => reply(&[0x50, 0x01, 0x00, 0x32, 0x01, 0xF4]),
+        [0x3E, 0x00] => {
+            presents += 1;
+            if presents == 2 {
+                reply(second)
+            } else {
+                reply(&[0x7E, 0x00])
+            }
+        }
+        [0x22, hi, lo] => reply(&[0x62, *hi, *lo, 0x12]),
+        _ => Vec::new(),
+    });
+    let mut options = SweepOptions::default();
+    options.extended = Some(S3 {
+        keepalive: Duration::ZERO,
+        ..S3::default()
+    });
+    (car, options)
+}
+
+#[test]
+fn a_did_whose_keepalive_was_refused_is_not_reported_as_read() {
+    // The refused `3E 00` stops the sweep before `22 06 01` is sent, so a caller checkpointing on
+    // progress must not skip 0601.
+    let (mut car, options) = keepalive_fails(&[0x7F, 0x3E, 0x12]);
+    let mut seen = Vec::new();
+    let got = sweep_dids_reporting(
+        &mut car,
+        &Policy::read_only(),
+        &engine(),
+        0x0600..=0x0602,
+        TIMING,
+        &options,
+        |did| seen.push(did),
+    )
+    .unwrap();
+    assert!(
+        !car.sent.contains(&"7E0 22 06 01".to_owned()),
+        "{:?}",
+        car.sent
+    );
+    assert_eq!(got.stop.map(|stop| stop.at), Some(0x0601));
+    assert_eq!(seen, [0x0600]);
+}
+
+#[test]
+fn a_did_whose_keepalive_went_unanswered_stops_the_sweep_there() {
+    // Going on would report 0602 as read past 0601, which was never sent: a caller checkpointing
+    // on the last DID reported would skip it.
+    let (mut car, options) = keepalive_fails(&[]);
+    let mut seen = Vec::new();
+    let got = sweep_dids_reporting(
+        &mut car,
+        &Policy::read_only(),
+        &engine(),
+        0x0600..=0x0602,
+        TIMING,
+        &options,
+        |did| seen.push(did),
+    )
+    .unwrap();
+    assert!(
+        !car.sent
+            .iter()
+            .any(|sent| sent.starts_with("7E0 22 06 01") || sent.starts_with("7E0 22 06 02")),
+        "{:?}",
+        car.sent
+    );
+    assert_eq!(
+        got.stop,
+        Some(Stop {
+            at: 0x0601,
+            why: Why::Module(ReadError::NoReply)
+        })
+    );
+    assert_eq!(seen, [0x0600]);
+}
+
+#[test]
+fn a_sweep_ending_in_an_unanswered_read_says_replies_may_be_out_of_step() {
+    // 0601's late refusal may still arrive, as the answer to the caller's next read.
+    let mut car = Car::new(|_, request| match request {
+        [0x22, 0x06, 0x00] => reply(&[0x62, 0x06, 0x00, 0x12]),
+        _ => Vec::new(),
+    });
+    let got = sweep_dids(
+        &mut car,
+        &Policy::read_only(),
+        &engine(),
+        0x0600..=0x0601,
+        TIMING,
+        &SweepOptions::default(),
+    )
+    .unwrap();
+    assert_eq!(got.stop, None);
+    assert_eq!(got.found[1], (0x0601, Err(ReadError::NoReply)));
+    assert!(got.out_of_step);
+}
+
+#[test]
+fn a_sweep_with_every_read_answered_is_in_step() {
+    let got = sweep_dids(
+        &mut car(),
+        &Policy::read_only(),
+        &engine(),
+        0x0600..=0x0603,
+        TIMING,
+        &extended(),
+    )
+    .unwrap();
+    assert!(!got.out_of_step);
+}

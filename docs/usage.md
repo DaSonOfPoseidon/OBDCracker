@@ -98,4 +98,5 @@ out of range (NRC 0x31). It asks for an explicit range and prints how many reads
 what it found, if the module goes quiet (3 reads in a row with no final answer), refuses `22` itself (such as "service
 not supported in active session"), says it's busy, or the adapter fails, and prints the command to go on with when
 that can help. `--extended` sweeps in the extended session, entered and left as `scan --extended` does, and warns if
-the module may not have left it.
+the module may not have left it. A sweep that finishes with reads still unanswered notes that a late answer may yet
+arrive, so connect again before reading from that module again.
