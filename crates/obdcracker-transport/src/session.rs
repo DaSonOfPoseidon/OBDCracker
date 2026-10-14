@@ -275,23 +275,33 @@ impl<'a, T: Transport + ?Sized> ExtendedSession<'a, T> {
         Ok(reply)
     }
 
-    /// Returns the module to the default session. Dropping the session does the same, but
-    /// can't report a failure.
+    /// Returns the module to the default session. Dropping the session does the same (one try),
+    /// but can't report a failure.
     ///
     /// # Errors
     ///
     /// The module refuses `10 01` or doesn't answer, or the adapter fails. Unless the module
-    /// accepted or plainly refused it, dropping the session then tries `10 01` once more.
+    /// accepted or plainly refused it, `10 01` is tried once more first, and that try's failure
+    /// is returned, or the first's if only that one was the adapter's: an adapter in an unknown
+    /// state matters more than the module's answer.
     pub fn end(mut self) -> Result<(), SessionError> {
-        let result = self.request(&self.leave.clone());
-        if match &result {
-            Ok(()) => true,
-            Err(SessionError::Refused(reply)) => plainly_refused(reply),
-            Err(_) => false,
-        } {
-            self.ended = true;
+        // Whatever happens, nothing is left for dropping the session to send unobserved.
+        self.ended = true;
+        let first = self.request(&self.leave.clone());
+        match first {
+            Ok(()) => Ok(()),
+            Err(SessionError::Refused(reply)) if plainly_refused(&reply) => {
+                Err(SessionError::Refused(reply))
+            }
+            Err(first) => match self.request(&self.leave.clone()) {
+                Ok(()) => Ok(()),
+                Err(retry @ SessionError::Transport(Error::Adapter(_))) => Err(retry),
+                Err(_) if matches!(first, SessionError::Transport(Error::Adapter(_))) => {
+                    Err(first)
+                }
+                Err(retry) => Err(retry),
+            },
         }
-        result
     }
 
     // Sends one of the session's own requests and checks that the module accepted it. Only an
