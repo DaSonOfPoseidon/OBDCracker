@@ -1972,6 +1972,30 @@ mod events {
     }
 
     #[test]
+    fn reset_output_past_the_answer_cap_is_counted_as_lost() {
+        // A noisy clone prints 40 lines before its banner (#85). The answer keeps the first 32
+        // lines (the echo and 31 of them); the other 9 and the banner are counted, not dropped
+        // silently.
+        let mut fake = car();
+        fake.reset_noise = b"NOISE\r".repeat(40);
+        let mut elm = connect(fake);
+        let events = elm.take_events();
+        let answer = events
+            .iter()
+            .find_map(|e| match e {
+                LinkEvent::Command {
+                    command, answer, ..
+                } if command == "ATZ" => Some(answer),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(answer.len(), 32);
+        assert_eq!(answer[0], "ATZ");
+        assert!(answer[1..].iter().all(|line| line == "NOISE"), "{answer:?}");
+        assert_eq!(events.last(), Some(&LinkEvent::Lost(10)), "{events:?}");
+    }
+
+    #[test]
     fn unread_lines_keep_the_time_they_arrived() {
         // The second ECU's reply starts arriving with the first: its first line is read and
         // queued but unused while the caller waits, then dropped by the next request. Its time

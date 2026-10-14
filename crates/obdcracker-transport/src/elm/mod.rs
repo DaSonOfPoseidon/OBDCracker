@@ -76,7 +76,8 @@ const RESET_WAIT: Duration = Duration::from_secs(3);
 const RESET_TRIES: usize = 2;
 // How long to look for output the adapter shouldn't have printed before writing to it.
 const IDLE_CHECK: Duration = Duration::from_millis(1);
-// The most lines an answer to a command may have: `AT PPS` prints 12.
+// The most lines an answer to a command may have: `AT PPS` prints 12. A reset, whose noise
+// can be long, keeps that many for the report and counts the rest as lost.
 const MAX_ANSWER_LINES: usize = 32;
 // How long an AT command may take.
 const COMMAND_WAIT: Duration = Duration::from_secs(2);
@@ -411,7 +412,7 @@ impl<L: Link> Elm<L> {
             }
             let deadline = Instant::now() + RESET_WAIT;
             let mut banner = None;
-            // What it printed, for the report; a flood isn't kept.
+            // What it printed, for the report; a flood isn't kept, only counted as lost.
             let mut answer = Vec::new();
             let reset = loop {
                 let event = match self.next_event(deadline) {
@@ -419,10 +420,12 @@ impl<L: Link> Elm<L> {
                     Ok(None) => break Ok(false),
                     Err(e) => break Err(e),
                 };
-                if let Event::Line(line) = &event
-                    && answer.len() < MAX_ANSWER_LINES
-                {
-                    answer.push(line.clone());
+                if let Event::Line(line) = &event {
+                    if answer.len() < MAX_ANSWER_LINES {
+                        answer.push(line.clone());
+                    } else {
+                        self.lost += 1;
+                    }
                 }
                 match event {
                     Event::Line(line) if line.starts_with("ELM327") => banner = Some(line),
