@@ -315,3 +315,25 @@ fn a_status_line_is_logged_as_a_status() {
         "{audit}"
     );
 }
+
+#[test]
+fn a_session_settled_already_is_not_settled_again_when_dropped() {
+    // #83: the explicit settle's failure is logged once, not again by the drop.
+    let settle_errors = |audit: &str| audit.matches(r#""op":"settle""#).count();
+    let log = temp_log("settle-once");
+    let mut audited = Audited::open(&log, FailsToSettle, "mock").unwrap();
+    assert!(audited.settle().is_err());
+    drop(audited);
+    assert_eq!(settle_errors(&std::fs::read_to_string(&log).unwrap()), 1);
+
+    // A request after the settle leaves something to settle again.
+    let log = temp_log("settle-again");
+    let mut audited = Audited::open(&log, FailsToSettle, "mock").unwrap();
+    assert!(audited.settle().is_err());
+    let rpm = Policy::read_only()
+        .approve(Target::Physical(0x7E0), &[0x01, 0x0C])
+        .unwrap();
+    audited.send(&rpm).unwrap();
+    drop(audited);
+    assert_eq!(settle_errors(&std::fs::read_to_string(&log).unwrap()), 2);
+}
