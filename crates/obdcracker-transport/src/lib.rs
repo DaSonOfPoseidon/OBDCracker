@@ -122,6 +122,15 @@ pub enum LinkEvent {
         /// The line as the adapter printed it.
         line: String,
     },
+    /// A status line the adapter printed for a request instead of a reply, such as an ELM327's
+    /// `NO DATA` when nothing answered. One that fails a request the caller is waiting on, such
+    /// as `CAN ERROR`, is returned as an error instead.
+    Status {
+        /// When the driver read it from the link.
+        at: SystemTime,
+        /// The line as the adapter printed it.
+        line: String,
+    },
     /// How many events were dropped because nothing took them in time.
     Lost(usize),
 }

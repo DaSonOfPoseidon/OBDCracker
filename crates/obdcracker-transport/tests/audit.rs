@@ -297,3 +297,21 @@ fn a_failure_finishing_the_last_request_is_logged() {
         "{audit}"
     );
 }
+
+#[test]
+fn a_status_line_is_logged_as_a_status() {
+    let log = temp_log("status");
+    let events = vec![LinkEvent::Status {
+        at: std::time::UNIX_EPOCH + Duration::from_secs(1_700_000_000),
+        line: "NO DATA".to_owned(),
+    }];
+    let error = Error::Adapter("the link closed".to_owned());
+    log_failure(&log, "mock", events, "recv", &error).unwrap();
+    let audit = std::fs::read_to_string(&log).unwrap();
+    assert!(
+        audit.starts_with(
+            r#"{"ts_ms":1700000000000,"dir":"status","line":"NO DATA","link":"mock"}"#
+        ),
+        "{audit}"
+    );
+}

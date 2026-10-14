@@ -128,7 +128,8 @@ const STN_UNPACED_RATE: u32 = 115_200 / 10;
 ///
 /// Replies still arriving when the next request is sent are dropped: checked for signs of a
 /// reset, but not returned, as that would let a late reply to a repeated request pass for a
-/// fresh one. Their lines are reported as [`LinkEvent::Unread`] instead, which an
+/// fresh one. Their lines are reported as [`LinkEvent::Unread`] instead (status lines such as
+/// `NO DATA` as [`LinkEvent::Status`], read or not), which an
 /// [`crate::Audited`] wrapper logs, along with every command sent to the adapter
 /// ([`Transport::take_events`]); dropping the wrapper reads what's left of the last request
 /// first ([`Transport::settle`]).
@@ -213,7 +214,8 @@ pub struct Elm<L> {
     // Each module answering the request in progress.
     senders: Vec<Sender>,
     // Lines of the request in progress that are in no reply yet, in the order they were read,
-    // with when, and the number each was given; reported as unread once the request is over.
+    // with when, and the number each was given; reported once the request is over, as unread
+    // or, for a status line, as a status.
     heard: Vec<(u64, SystemTime, String)>,
     next_heard: u64,
     // What it did besides requests and replies, until taken, and how many more were dropped.
@@ -636,10 +638,7 @@ impl<L: Link> Elm<L> {
                 Some(Event::Line(text)) => {
                     // Not the request's echo, which `reply_line` checks.
                     if self.echo.is_none() {
-                        self.note(LinkEvent::Unread {
-                            at: self.event_at,
-                            line: text.clone(),
-                        });
+                        self.note(left_over(self.event_at, text.clone()));
                     }
                     self.reply_line(&text)?;
                 }
@@ -827,7 +826,7 @@ impl<L: Link> Elm<L> {
     fn drop_senders(&mut self) {
         self.senders.clear();
         for (_, at, line) in std::mem::take(&mut self.heard) {
-            self.note(LinkEvent::Unread { at, line });
+            self.note(left_over(at, line));
         }
     }
 
@@ -900,6 +899,16 @@ fn filter_shows(pattern: &str, id: u32) -> bool {
             .bytes()
             .zip(id.bytes())
             .all(|(want, got)| want == b'X' || want == got)
+}
+
+// A line of a request that's in no reply, read at `at`: a status line such as `NO DATA` was the
+// adapter's answer (#88); anything else is a reply line nobody read.
+fn left_over(at: SystemTime, line: String) -> LinkEvent {
+    if matches!(parse_line(&line), Line::Status(_)) {
+        LinkEvent::Status { at, line }
+    } else {
+        LinkEvent::Unread { at, line }
+    }
 }
 
 // Whether a status means the adapter's settings, or what it reads next, can't be trusted: it
@@ -1036,7 +1045,7 @@ impl<L: Link> Transport for Elm<L> {
                     Some(Line::Status(status)) if status.is_failure() => {
                         return Err(Error::Adapter(format!("the adapter said {status}")));
                     }
-                    // Such as NO DATA: heard, but no reply.
+                    // Such as NO DATA: heard, but no reply; reported as a status, in turn.
                     Some(_) => {
                         self.hear(&text);
                     }

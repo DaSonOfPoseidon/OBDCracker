@@ -232,7 +232,9 @@ Each entry names the class, what to check, and where it bit us.
 - **A log of what was heard must cover what was half-used.** The audit log reported lines left unread at the next
   request, but frames already fed to a reassembler for a reply that never completed (another module's interleaved
   frames, a transfer dropped mid-way, a sixteenth-plus sender) and status lines such as `NO DATA` vanished. Keep each
-  input's raw form until it's part of something logged, and report it when it's dropped (PR #78).
+  input's raw form until it's part of something logged, and report it when it's dropped (PR #78). But log each line
+  as what it was: `NO DATA` *is* the answer that ended a request, and logging it as unread buried the few real unread
+  lines among 126 of them in car session 4 (#88).
 - **Don't hand back stale data to make a log complete.** Replies drained before the next request aren't returned:
   queueing them would let a late reply to a repeated request pass for a fresh one. Document what the audit log
   records instead (M3 branch, Codex).

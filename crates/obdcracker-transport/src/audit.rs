@@ -12,7 +12,8 @@ use crate::{Error, LinkEvent, Response, Transport, hex};
 /// Lines file. Requests are logged before they are sent, so a send that crashes the program is
 /// still on record. After every call it also logs the transport's [`LinkEvent`]s: commands to
 /// the adapter (`"dir":"cmd"`), reply lines nobody read before the next request
-/// (`"dir":"unread"`), and how many events were lost (`"dir":"lost"`). Each line's `ts_ms` is
+/// (`"dir":"unread"`), status lines that ended a request, such as `NO DATA` (`"dir":"status"`),
+/// and how many events were lost (`"dir":"lost"`). Each line's `ts_ms` is
 /// when it happened (for a reply line, when the driver read it from the link), so an event can
 /// be logged after a later request. When dropped, it has the transport read what's left of the
 /// last request ([`Transport::settle`]) and logs that too.
@@ -84,6 +85,10 @@ impl<T: Transport> Audited<T> {
                 LinkEvent::Unread { at, line } => self.write_at(
                     at,
                     &format!(r#""dir":"unread","line":"{}""#, json_escape(&line)),
+                )?,
+                LinkEvent::Status { at, line } => self.write_at(
+                    at,
+                    &format!(r#""dir":"status","line":"{}""#, json_escape(&line)),
                 )?,
                 LinkEvent::Lost(count) => {
                     self.write(&format!(r#""dir":"lost","count":{count}"#))?;

@@ -1935,21 +1935,40 @@ mod events {
         assert!(unread.len() >= 2 && sent.starts_with(&unread), "{unread:?}");
     }
 
+    fn statuses_in(events: &[LinkEvent]) -> Vec<&str> {
+        events
+            .iter()
+            .filter_map(|e| match e {
+                LinkEvent::Status { line, .. } => Some(line.as_str()),
+                _ => None,
+            })
+            .collect()
+    }
+
     #[test]
-    fn a_status_line_that_isnt_a_failure_is_reported() {
+    fn a_status_line_that_ends_a_request_is_reported_as_a_status() {
+        // NO DATA was read: it's the adapter's answer that ended the request (#88).
         let mut elm = connect(car());
         elm.send(&approve(Target::Physical(0x7E0), &[0x01, 0x00]))
             .unwrap();
         assert_eq!(elm.recv(Duration::from_secs(1)), Err(Error::Timeout));
-        let unread: Vec<String> = elm
-            .take_events()
-            .into_iter()
-            .filter_map(|e| match e {
-                LinkEvent::Unread { line, .. } => Some(line),
-                _ => None,
-            })
-            .collect();
-        assert_eq!(unread, ["NO DATA"]);
+        let events = elm.take_events();
+        assert_eq!(statuses_in(&events), ["NO DATA"]);
+        assert_eq!(unread_in(events), Vec::<String>::new());
+    }
+
+    #[test]
+    fn a_status_line_nobody_waited_for_is_still_a_status() {
+        // The caller never asks for the reply; the next request drains the NO DATA.
+        let mut elm = connect(car());
+        elm.send(&approve(Target::Physical(0x7E0), &[0x01, 0x00]))
+            .unwrap();
+        elm.take_events();
+        elm.send(&approve(Target::Physical(0x7E0), &[0x01, 0x00]))
+            .unwrap();
+        let events = elm.take_events();
+        assert_eq!(statuses_in(&events), ["NO DATA"]);
+        assert_eq!(unread_in(events), Vec::<String>::new());
     }
 
     #[test]
