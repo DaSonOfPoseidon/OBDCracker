@@ -747,10 +747,12 @@ fn a_did_whose_keepalive_was_refused_is_not_reported_as_read() {
 }
 
 #[test]
-fn a_did_whose_keepalive_went_unanswered_is_not_reported_as_read() {
+fn a_did_whose_keepalive_went_unanswered_stops_the_sweep_there() {
+    // Going on would report 0602 as read past 0601, which was never sent: a caller checkpointing
+    // on the last DID reported would skip it.
     let (mut car, options) = keepalive_fails(&[]);
     let mut seen = Vec::new();
-    sweep_dids_reporting(
+    let got = sweep_dids_reporting(
         &mut car,
         &Policy::read_only(),
         &engine(),
@@ -761,11 +763,20 @@ fn a_did_whose_keepalive_went_unanswered_is_not_reported_as_read() {
     )
     .unwrap();
     assert!(
-        !car.sent.contains(&"7E0 22 06 01".to_owned()),
+        !car.sent
+            .iter()
+            .any(|sent| sent.starts_with("7E0 22 06 01") || sent.starts_with("7E0 22 06 02")),
         "{:?}",
         car.sent
     );
-    assert_eq!(seen, [0x0600, 0x0602]);
+    assert_eq!(
+        got.stop,
+        Some(Stop {
+            at: 0x0601,
+            why: Why::Module(ReadError::NoReply)
+        })
+    );
+    assert_eq!(seen, [0x0600]);
 }
 
 #[test]
