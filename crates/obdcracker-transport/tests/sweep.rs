@@ -759,3 +759,38 @@ fn a_did_whose_keepalive_went_unanswered_is_not_reported_as_read() {
     assert!(!car.sent.contains(&"7E0 22 06 01".to_owned()), "{:?}", car.sent);
     assert_eq!(seen, [0x0600, 0x0602]);
 }
+
+#[test]
+fn a_sweep_ending_in_an_unanswered_read_says_replies_may_be_out_of_step() {
+    // 0601's late refusal may still arrive, as the answer to the caller's next read.
+    let mut car = Car::new(|_, request| match request {
+        [0x22, 0x06, 0x00] => reply(&[0x62, 0x06, 0x00, 0x12]),
+        _ => Vec::new(),
+    });
+    let got = sweep_dids(
+        &mut car,
+        &Policy::read_only(),
+        &engine(),
+        0x0600..=0x0601,
+        TIMING,
+        &SweepOptions::default(),
+    )
+    .unwrap();
+    assert_eq!(got.stop, None);
+    assert_eq!(got.found[1], (0x0601, Err(ReadError::NoReply)));
+    assert!(got.out_of_step);
+}
+
+#[test]
+fn a_sweep_with_every_read_answered_is_in_step() {
+    let got = sweep_dids(
+        &mut car(),
+        &Policy::read_only(),
+        &engine(),
+        0x0600..=0x0603,
+        TIMING,
+        &extended(),
+    )
+    .unwrap();
+    assert!(!got.out_of_step);
+}
