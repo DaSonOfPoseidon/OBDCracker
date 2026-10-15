@@ -5,7 +5,8 @@
 # CALIDs and CVNs from #46 (2026-10-10), and everything else from #49 (2026-10-10). The other
 # modules are the ones `scan --discover` found in the third session (#54, 2026-10-11), with the
 # engine idling. The coding (0600) of those modules, and the head-up display's DIDs below 0x1000,
-# are from the fourth session (#86, 2026-10-12, engine idling). A DID that isn't listed was
+# are from the fourth session (#86, 2026-10-12, engine idling), and the gateway's battery-monitor
+# DIDs from the fifth (#92, 2026-10-15, engine idling). A DID that isn't listed was
 # refused with NRC 0x31 (request out of range), as the car refused it: the sensor cluster, tire
 # pressure and parking brake refused 0600 too.
 #
@@ -330,6 +331,10 @@ hex = "45 56 5F 54 43 4D 41 4C 35 35 31 32 31 31 00"
 id = 0xF1A3
 text = "H16"
 
+[[ecu.did]]
+id = 0xF1AA
+text = "J217 "
+
 # The gateway refuses F190.
 [[ecu]]
 module = "gateway"
@@ -543,6 +548,31 @@ hex = "45 56 5F 47 61 74 65 77 50 6B 6F 55 44 53 00"
 [[ecu.did]]
 id = 0x0600
 hex = "00 CD 07 7D 00"
+
+# Its LIN sub-system, the battery monitor J367 (#92, 2026-10-15, engine idling).
+[[ecu.did]]
+id = 0x0664
+text = "8T0915181  "
+
+[[ecu.did]]
+id = 0x0694
+text = "8041"
+
+[[ecu.did]]
+id = 0x06C4
+text = "8T0915181  "
+
+[[ecu.did]]
+id = 0x06F4
+text = "H03"
+
+[[ecu.did]]
+id = 0x0724
+text = "1271971803          "
+
+[[ecu.did]]
+id = 0x0754
+text = "J367-BDMHella"
 
 # The instruments refuse F190, and send one response-pending before most answers.
 [[ecu]]

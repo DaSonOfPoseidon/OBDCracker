@@ -6,7 +6,7 @@ use std::time::Duration;
 use obdcracker_core::obd::{self, Unit, Value};
 use obdcracker_core::response::{Error as ReplyError, Nrc};
 use obdcracker_core::uds::{self, DtcFormat, DtcStatus};
-use obdcracker_profile::{Profile, ProfileError};
+use obdcracker_profile::{DidSession, Profile, ProfileError};
 use obdcracker_safety::{Approved, Policy, Target};
 use obdcracker_sim::{Fault, FixtureError, Session, SimBus};
 use obdcracker_transport::{Error, Expect, Response, Timing, Transport, exchange};
@@ -320,6 +320,41 @@ fn a7_coding_reads_in_the_default_session() {
         }
     }
     assert_eq!(read, 20);
+}
+
+#[test]
+fn a7_answers_every_profile_did_with_its_length() {
+    // A DID the profile gives a length for is one the car answered, so the sim must answer it too,
+    // or `--sim a7 scan` shows a refusal the car never sent (PR #127, Codex).
+    let profile = Profile::builtin("a7").unwrap();
+    let mut bus = a7();
+    for module in &profile.modules {
+        for did in &module.dids {
+            let (Some(length), DidSession::Default) = (did.length, did.session) else {
+                continue;
+            };
+            let target = Target::Physical(module.request_id);
+            let reply = ask(&mut bus, target, &uds::read_did(did.id))
+                .pop()
+                .unwrap()
+                .payload;
+            let [high, low] = did.id.to_be_bytes();
+            assert_eq!(
+                reply[..3],
+                [0x62, high, low],
+                "{} {:04X}",
+                module.name,
+                did.id
+            );
+            assert_eq!(
+                reply.len() - 3,
+                usize::from(length),
+                "{} {:04X}",
+                module.name,
+                did.id
+            );
+        }
+    }
 }
 
 #[test]
