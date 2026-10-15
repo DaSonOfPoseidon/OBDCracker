@@ -274,6 +274,9 @@ Each entry names the class, what to check, and where it bit us.
 
 - **A test that never ends gets the container OOM-killed** (1 GB cap) rather than failing cleanly. Run termination
   tests under `timeout`, and treat `SIGKILL` as "it hangs".
+- **A build that runs out of memory looks like a slow one.** Under the host's 1 GB default container cap, a
+  parallel rustc build on 24 cores was SIGKILLed crate by crate and ran for over 5 minutes before failing (#126).
+  `scripts/cargo.sh` sets its own limit; look for `signal: 9` in the output before calling a run hung.
 - **`timeout` around `scripts/cargo.sh` stops only the Docker client.** The container goes on running the hung test.
   Kill it with `docker kill` (find it with `docker ps --filter ancestor=rust:1-slim`).
 - **Termination needs an adversarial transport**: one that repeats forever, sends pending forever, or sleeps through
