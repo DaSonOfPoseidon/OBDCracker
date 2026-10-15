@@ -14,7 +14,10 @@
 # every module that answered it in #86, so a scan reads it; the sensor cluster, tire pressure and
 # parking brake refused it as out of range, and the transmission wasn't asked. The rest are VAG
 # extras. The head-up display's DIDs below 0x1000 are what the #86 sweeps found; their meanings
-# aren't known yet.
+# aren't known yet. The gateway's 0x0664..=0x0754 are what the #92 sweep found for its one LIN
+# sub-system, the battery monitor J367: one DID per field, 0x30 apart (part number, software
+# version, hardware number, hardware version, serial number, system name), going by their values.
+# The same sweep found counters, flags and timestamped logs (0x0420..=0x049F); they aren't listed.
 
 name = "2014 Audi A7 3.0 TDI (C7)"
 bitrate = 500000
@@ -199,6 +202,42 @@ id = 0x0600
 name = "VW coding value"
 decode = "hex"
 length = 5
+
+[[module.did]]
+id = 0x0664
+name = "battery monitor (J367) spare part number"
+decode = "text"
+length = 11
+
+[[module.did]]
+id = 0x0694
+name = "battery monitor (J367) software version"
+decode = "text"
+length = 4
+
+[[module.did]]
+id = 0x06C4
+name = "battery monitor (J367) hardware number"
+decode = "text"
+length = 11
+
+[[module.did]]
+id = 0x06F4
+name = "battery monitor (J367) hardware version"
+decode = "text"
+length = 3
+
+[[module.did]]
+id = 0x0724
+name = "battery monitor (J367) serial number"
+decode = "text"
+length = 20
+
+[[module.did]]
+id = 0x0754
+name = "battery monitor (J367) system name"
+decode = "text"
+length = 13
 
 [[module]]
 name = "instruments"

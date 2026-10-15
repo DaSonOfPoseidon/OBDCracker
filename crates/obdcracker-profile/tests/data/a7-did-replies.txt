@@ -1,5 +1,6 @@
 # Every single-DID ReadDataByIdentifier reply the A7 sent in the read-only sessions #49, #54 and #86
-# (2026-10-10 to 2026-10-12): the reply CAN ID, then the reply. Each profile DID length must match these.
+# (2026-10-10 to 2026-10-12), plus the gateway's battery-monitor DIDs from #92 (2026-10-15): the reply
+# CAN ID, then the reply. Each profile DID length must match these.
 774 62 06 00 A8 EB 04
 774 62 F1 87 34 48 30 39 31 39 34 37 35 41 41
 774 62 F1 89 30 30 38 33
@@ -9,6 +10,12 @@
 774 62 F1 97 50 41 52 4B 48 49 4C 46 45 20 41 43 43
 774 62 F1 9E 45 56 5F 45 50 48 56 41 31 38 41 55 35 37 58 30 30 30 30 00
 77A 62 06 00 00 CD 07 7D 00
+77A 62 06 64 38 54 30 39 31 35 31 38 31 20 20
+77A 62 06 94 38 30 34 31
+77A 62 06 C4 38 54 30 39 31 35 31 38 31 20 20
+77A 62 06 F4 48 30 33
+77A 62 07 24 31 32 37 31 39 37 31 38 30 33 20 20 20 20 20 20 20 20 20 20
+77A 62 07 54 4A 33 36 37 2D 42 44 4D 48 65 6C 6C 61
 77A 62 F1 87 34 47 30 39 30 37 34 36 38 41 44
 77A 62 F1 89 30 30 35 30
 77A 62 F1 8B 00 00 00
