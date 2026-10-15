@@ -45,8 +45,10 @@ Each entry names the class, what to check, and where it bit us.
   apply the same check as the others. Scan forced F18B to text and read F190 with the plain text decoder, so a
   printable date showed as a string and `62 F1 90 61 62 63` as the VIN `abc` (#50, #51). Keep the list in one place
   (`uds::did::is_text`, `obd::check_vin`).
-- **Cross-check related sources.** Fixture vs profile: every DID is standard or in the profile, values match the
-  profile's `decode`, and OBD-II data only sits on OBD-II ID pairs (0x7E0..=0x7E7 → +8).
+- **Cross-check related sources, both ways.** Fixture vs profile: every DID is standard or in the profile, values
+  match the profile's `decode`, and OBD-II data only sits on OBD-II ID pairs (0x7E0..=0x7E7 → +8). And profile vs
+  fixture: every DID the car answered (it has a length) is in the fixture, or the sim refuses what the car didn't.
+  Checking one direction only let the transmission's F1AA and six new gateway DIDs go missing (PR #127, Codex).
 - **Check data against the real replies, not against another hand-made file.** The instruments' F19E got the
   reply's length (24, with `62 F1 9E`) instead of the data's (21), in both the profile and the fixture. The cross-check
   between them passed, because both were wrong the same way, and the car's correct reply then read as malformed
