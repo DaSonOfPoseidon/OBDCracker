@@ -26,7 +26,7 @@ or anything CI already checks (rustfmt, clippy, tests, cargo-deny).
   `Approved`, which can't be built anywhere else. Transports take only `&Approved`. No send path may skip
   it, and there is no raw-frame escape hatch.
 - A new service goes into `classify` in `crates/obdcracker-safety/src/lib.rs` and into the independent
-  `READ_SERVICES`/`FLASH_SERVICES` lists in `tests/policy.rs`. Only T0 Read is unlocked; T3 Flash is banned.
+  `READ_SERVICES`/`FLASH_SERVICES` lists in `crates/obdcracker-safety/tests/policy.rs`. Only T0 Read is unlocked; T3 Flash is banned.
 - Vehicle profiles can only narrow the policy, never widen it.
 - `obdcracker-core` stays `no_std` and IO-free.
 - All public items have docs (`missing_docs`); the facade doctest must keep working.
