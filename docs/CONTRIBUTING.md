@@ -61,8 +61,11 @@ closes when the PR merges.
 
 ## Reviews
 
-Codex reviews every push to a pull request, and each review costs time and usage. So review your
-own change just as hard before pushing, and push fixes in batches rather than one at a time. Read
+Codex reviews a pull request when asked with an `@codex review` comment, at most three times per pull
+request, and each review costs time and usage. Both Codex and the maintainer's pre-push review follow
+the rules and P0–P3 scale in [`AGENTS.md`](../AGENTS.md). So review your own change just as hard before
+asking, and push fixes in batches rather than one at a time. Minor (P3) findings become follow-up issues
+rather than more review rounds. Read
 [`docs/pitfalls.md`](pitfalls.md) before making a change: it lists the classes of bug reviews have
 caught here. Add a new entry when a review finds a new class. Check each change against:
 
@@ -79,9 +82,10 @@ caught here. Add a new entry when a review finds a new class. Check each change 
 Before a PR can be approved:
 
 - Answer every finding. Either fix it (with a test first, in its own commit) and reply on the thread with the commit,
-  or reply explaining why it doesn't apply. A real problem outside the PR's scope becomes a tagged issue instead.
-- Push, then wait for Codex to review the new head commit. Repeat until a review of the head commit has no new
-  findings.
+  or reply explaining why it doesn't apply. A real problem outside the PR's scope, and any P3, becomes a tagged
+  issue instead (linked on the thread).
+- Push all the fixes at once, then ask for a new review with `@codex review`. At most three reviews per PR: in
+  the third, P2 findings also become issues, and a P0 or P1 goes to the maintainer to decide.
 - CI must be green on the head commit, and `scripts/pr-gate.sh` must still pass.
 
 Branch protection enforces the Codex part with the `codex-review` status
