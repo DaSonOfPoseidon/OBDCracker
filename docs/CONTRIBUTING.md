@@ -82,8 +82,9 @@ caught here. Add a new entry when a review finds a new class. Check each change 
 Before a PR can be approved:
 
 - Answer every finding. Either fix it (with a test first, in its own commit) and reply on the thread with the commit,
-  or reply explaining why it doesn't apply. A real problem outside the PR's scope, and any P3, becomes a tagged
-  issue instead (linked on the thread).
+  or reply explaining why it doesn't apply. A real problem outside the PR's scope becomes a tagged issue instead
+  (linked on the thread). A finding deferred by the review rules below (any P3, and a P2 in the third review)
+  becomes an issue tagged `milestone:later`, so it doesn't make `scripts/pr-gate.sh` block this or later PRs.
 - Push all the fixes at once, then ask for a new review with `@codex review`. At most three reviews per PR: in
   the third, P2 findings also become issues, and a P0 or P1 goes to the maintainer to decide.
 - CI must be green on the head commit, and `scripts/pr-gate.sh` must still pass.
