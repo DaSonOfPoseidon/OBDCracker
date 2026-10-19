@@ -87,7 +87,8 @@ Before a PR can be approved:
   becomes an issue tagged `milestone:later`, so it doesn't make `scripts/pr-gate.sh` block this or later PRs.
 - Push all the fixes at once, then ask for a new review with `@codex review`. At most three reviews per PR, except as below: in
   the third, P2 findings also become issues, and a P0 or P1 goes to the maintainer to decide. If the maintainer
-  has it fixed in this PR, the fix gets one more review, since `codex-review` needs a review of the new head.
+  has it fixed in this PR, each such fix gets another review (`codex-review` needs a review of the new head),
+  and the maintainer decides each review past the third until none finds a P0 or P1.
 - CI must be green on the head commit, and `scripts/pr-gate.sh` must still pass.
 
 Branch protection enforces the Codex part with the `codex-review` status
