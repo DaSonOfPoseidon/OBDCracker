@@ -61,8 +61,11 @@ closes when the PR merges.
 
 ## Reviews
 
-Codex reviews every push to a pull request, and each review costs time and usage. So review your
-own change just as hard before pushing, and push fixes in batches rather than one at a time. Read
+Codex reviews a pull request only when asked, with an `@codex review` comment, and each review costs time
+and usage. Both Codex and the maintainer's pre-push review use the rules and P0–P3 scale in
+[`AGENTS.md`](../AGENTS.md); how each finding is handled is under
+[Handling review findings](#handling-review-findings). So review your own change just as hard before asking,
+and push fixes in batches rather than one at a time. Read
 [`docs/pitfalls.md`](pitfalls.md) before making a change: it lists the classes of bug reviews have
 caught here. Add a new entry when a review finds a new class. Check each change against:
 
@@ -76,21 +79,35 @@ caught here. Add a new entry when a review finds a new class. Check each change 
   Lint workflow changes with actionlint (see Checks); GitHub silently refuses an invalid workflow.
 - **Your own fixes:** re-read the new code for the same problems; it's where new findings hide.
 
-Before a PR can be approved:
+### Handling review findings
 
-- Answer every finding. Either fix it (with a test first, in its own commit) and reply on the thread with the commit,
-  or reply explaining why it doesn't apply. A real problem outside the PR's scope becomes a tagged issue instead.
-- Push, then wait for Codex to review the new head commit. Repeat until a review of the head commit has no new
-  findings.
-- CI must be green on the head commit, and `scripts/pr-gate.sh` must still pass.
+Every finding gets one outcome, and its thread is resolved once it has one:
 
-Branch protection enforces the Codex part with the `codex-review` status
-(`scripts/codex-status.sh`, run by `.github/workflows/codex-review.yml`). It passes only once Codex
-has completed a review of the head commit, finishing after that commit was pushed, and every Codex
-thread is resolved. So resolve each
-thread once its finding is fixed, or answered with why it doesn't apply. Resolving doesn't
-trigger workflows, so then re-run the check with `gh workflow run codex-review.yml -f pr=<pr>`.
-Check it locally with `DRY_RUN=1 scripts/codex-status.sh <pr>`.
+- **Fix:** with a test first, in its own commit. Reply on the thread with the commit.
+- **Doesn't apply:** reply explaining why, with evidence.
+- **Defer:** file an issue tagged `milestone:later`, so `scripts/pr-gate.sh` doesn't block this or later PRs
+  on it. Reply with the link.
+- **Out of scope:** a real problem outside the PR becomes a tagged issue, as in
+  [Found a problem?](#found-a-problem-file-an-issue-and-keep-going). Reply with the link.
+
+Which outcome a valid finding in the PR's scope gets depends on its priority and on which review found it:
+
+| Finding | Reviews 1–2 | Review 3, and any later review |
+|---|---|---|
+| P0 or P1 | Fix | The maintainer picks fix or defer (a P0 is always fixed) |
+| P2 | Fix | Defer |
+| P3 | Defer | Defer |
+
+Push all the fixes at once, then ask for the next review with `@codex review`. There's no review after the
+third unless the maintainer asks for one, which they do when they have a P0 or P1 fixed in the PR, since
+`codex-review` needs a review of the new head.
+
+A PR is ready for approval when Codex has reviewed its head commit, every Codex thread is resolved, CI is green on
+the head commit, and `scripts/pr-gate.sh` passes. Branch protection enforces the Codex part with the
+`codex-review` status (`scripts/codex-status.sh`, run by `.github/workflows/codex-review.yml`): it passes only
+once Codex has completed a review of the head commit, finishing after that commit was pushed, and no Codex
+thread is unresolved. Resolving a thread doesn't trigger workflows, so after resolving, re-run the check with
+`gh workflow run codex-review.yml -f pr=<pr>`. Check it locally with `DRY_RUN=1 scripts/codex-status.sh <pr>`.
 
 ## Commits
 
