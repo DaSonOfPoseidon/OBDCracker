@@ -362,20 +362,18 @@ fn classify_kwp2000(payload: &[u8]) -> Option<Tier> {
             0x87 => Tier::Coding,
             _ => return None,
         },
-        // ClearDiagnosticInformation: a 2-byte DTC group
-        0x14 if data.len() == 2 => Tier::ClearDtc,
+        // ClearDiagnosticInformation: its DTC group is optional, and its width the
+        // manufacturer's (ISO 14230-3)
+        0x14 => Tier::ClearDtc,
         // ReadStatusOfDiagnosticTroubleCodes and ReadDiagnosticTroubleCodesByStatus: the status
         // and DTC group parameters' widths are up to the manufacturer (ISO 14230-3)
         0x17 | 0x18 if !data.is_empty() => Tier::Read,
         // ReadEcuIdentification (one identification option) and ReadDataByLocalIdentifier (one
-        // local ID)
+        // local ID; a transmission mode after it would ask for periodic replies, not one read)
         0x1A | 0x21 if data.len() == 1 => Tier::Read,
-        // SecurityAccess unlocks coding
-        0x27 if !data.is_empty() => Tier::Coding,
-        // WriteDataByCommonIdentifier (a 2-byte ID) and WriteDataByLocalIdentifier (a 1-byte ID),
-        // each with at least one byte of data
-        0x2E if data.len() >= 3 => Tier::Coding,
-        0x3B if data.len() >= 2 => Tier::Coding,
+        // SecurityAccess unlocks coding; WriteDataByCommonIdentifier and
+        // WriteDataByLocalIdentifier, whatever their record's length, change it
+        0x27 | 0x2E | 0x3B if !data.is_empty() => Tier::Coding,
         // TesterPresent, with or without responseRequired (01 yes, 02 no)
         0x3E if matches!(data, [] | [0x01 | 0x02]) => Tier::Read,
         // ECUReset (0x80..=0xFF are manufacturers' resets), the routines by local ID and by

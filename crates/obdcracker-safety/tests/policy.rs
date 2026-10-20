@@ -114,6 +114,11 @@ fn locks_clear_dtc_and_coding_in_read_only() {
     // SecurityAccess and the writes by common and by local ID change coding.
     for (payload, tier) in [
         (&[0x14, 0xFF, 0x00][..], Tier::ClearDtc),
+        // The group is optional, and its width the manufacturer's.
+        (&[0x14], Tier::ClearDtc),
+        (&[0x14, 0xFF], Tier::ClearDtc),
+        (&[0x2E, 0xF1], Tier::Coding),
+        (&[0x3B, 0x01], Tier::Coding),
         (&[0x10, 0x87], Tier::Coding),
         (&[0x27, 0x01], Tier::Coding),
         (&[0x2E, 0xF1, 0x98, 0x00], Tier::Coding),
@@ -224,7 +229,6 @@ fn rejects_malformed_kwp2000_reads() {
         &[0x3E, 0x01, 0x00],
         &[0x10], // no session
         &[0x10, 0x87, 0x00],
-        &[0x14, 0xFF], // clear: half a group
     ] {
         assert!(approve_kwp2000(ENGINE, payload).is_err(), "{payload:02X?}");
     }

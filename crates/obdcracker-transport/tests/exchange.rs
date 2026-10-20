@@ -573,18 +573,19 @@ fn a_kwp2000_request_is_matched_by_kwp2000_rules() {
     )
     .unwrap();
     assert_eq!(got, [reply(0x7E8, &[0x7E])]);
-    // A late answer to another identification option is dropped, and the right one taken.
-    let identification = kwp2000(&[0x1A, 0x9B]);
+    // A late answer to another local ID is dropped, and the right one taken after
+    // response-pending.
+    let local = kwp2000(&[0x21, 0x01]);
     let got = exchange(
         &mut mock(&[
-            reply(0x7E8, &[0x5A, 0x9A, 0x01]),
-            reply(0x7E8, &[0x7F, 0x1A, 0x78]),
-            reply(0x7E8, &[0x5A, 0x9B, 0x02]),
+            reply(0x7E8, &[0x61, 0x02, 0x01]),
+            reply(0x7E8, &[0x7F, 0x21, 0x78]),
+            reply(0x7E8, &[0x61, 0x01, 0x02]),
         ]),
-        &identification,
+        &local,
         Expect::Module(0x7E8),
         FAST,
     )
     .unwrap();
-    assert_eq!(got, [reply(0x7E8, &[0x5A, 0x9B, 0x02])]);
+    assert_eq!(got, [reply(0x7E8, &[0x61, 0x01, 0x02])]);
 }

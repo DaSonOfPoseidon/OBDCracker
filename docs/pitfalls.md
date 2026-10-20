@@ -205,8 +205,10 @@ Each entry names the class, what to check, and where it bit us.
 - **A value a standard leaves to the manufacturer isn't a standard value.** The first KWP2000 allowlist made `10 81`
   a read as "the standard session", but ISO 14230-3 leaves the diagnostic modes 0x80..=0xFF to each manufacturer, so on
   some make it could mean anything; and it fixed widths for `17`/`18` parameters the standard also leaves to them,
-  refusing valid reads (#137, Codex). Before allowing a parameter, find its row in the standard's table; if it's the
-  manufacturer's, it needs a profile-specific rule.
+  refusing valid reads, and a 2-byte clear-DTC group the standard makes optional (#137, Codex). The same goes for
+  replies: what follows `5A` is the manufacturer's record, so matching it on an echoed option would drop valid answers.
+  Before relying on a parameter, find its row in the standard's table; if it's the manufacturer's, it needs a
+  profile-specific rule.
 - **A new protocol reaches past the allowlist.** Approving KWP2000 requests wasn't enough: `exchange` still matched
   their replies as UDS, so KWP2000's bare `7E` answer to `3E 01` was dropped as not answering it (#137, Codex). Follow
   a request through everything that reads its reply: matching, response-pending, decoding.
