@@ -99,6 +99,12 @@ enum Command {
         /// These are the first range's reply IDs, so a module that stayed silent there may own one
         #[arg(long, requires = "discover")]
         wide: bool,
+        /// Also look on 29-bit CAN IDs: read the part number (UDS 0x22 F187) from each request ID
+        /// in the profile's 29-bit discovery range (on the A7, VAG's 0x17FC0000 to 0x17FC00FF,
+        /// answered on 0x17FE00xx), then scan those that answer too. The adapter switches to
+        /// 29-bit CAN for them and back
+        #[arg(long)]
+        discover_29bit: bool,
     },
     /// Look for the DIDs a module has: read each DID in a range (UDS 0x22), one request each, and
     /// list those it answers. Reads only. Needs a profile (--profile or --sim) that lists the
@@ -253,9 +259,15 @@ fn run<T: Transport>(cli: &Cli, transport: T, link: &str, timing: Timing) -> Exi
         discover,
         wide,
         extended,
+        discover_29bit,
     } = cli.command
     {
-        return run_scan(cli, &mut transport, timing, discover, wide, extended);
+        let passes = Discovery {
+            discover,
+            wide,
+            discover_29bit,
+        };
+        return run_scan(cli, &mut transport, timing, passes, extended);
     }
     if let Command::Sweep {
         module,
@@ -752,12 +764,20 @@ fn scan_modules(cli: &Cli) -> Result<Vec<ScanModule>, String> {
     Ok(modules)
 }
 
+// Which discovery passes `scan` runs before scanning.
+#[allow(clippy::struct_excessive_bools)]
+#[derive(Debug, Clone, Copy)]
+struct Discovery {
+    discover: bool,
+    wide: bool,
+    discover_29bit: bool,
+}
+
 fn run_scan<T: Transport>(
     cli: &Cli,
     transport: &mut T,
     timing: Timing,
-    discover: bool,
-    wide: bool,
+    passes: Discovery,
     extended: bool,
 ) -> ExitCode {
     let (mut modules, mut policy) = match scan_modules(cli).and_then(|m| Ok((m, policy(cli)?))) {
@@ -767,8 +787,17 @@ fn run_scan<T: Transport>(
             return ExitCode::from(2);
         }
     };
-    if discover {
-        match discover_modules(cli, transport, timing, wide) {
+    if passes.discover {
+        match discover_modules(cli, transport, timing, passes.wide) {
+            Ok((found, discovery_policy)) => {
+                modules.extend(found);
+                policy = discovery_policy;
+            }
+            Err(code) => return code,
+        }
+    }
+    if passes.discover_29bit {
+        match discover_29_bit_modules(cli, transport, timing, &modules) {
             Ok((found, discovery_policy)) => {
                 modules.extend(found);
                 policy = discovery_policy;
@@ -966,6 +995,59 @@ fn discover_modules<T: Transport>(
     known.extend(more.iter().map(module_ids));
     found.extend(more);
     Ok((unlisted(&profile, &found), narrow(&known)?))
+}
+
+// The 29-bit discovery pass, then the policy narrowed to `known` (the modules to scan so far)
+// and the modules it found.
+fn discover_29_bit_modules<T: Transport>(
+    cli: &Cli,
+    transport: &mut T,
+    timing: Timing,
+    known: &[ScanModule],
+) -> Result<(Vec<ScanModule>, Policy), ExitCode> {
+    let usage = |e: String| {
+        eprintln!("{e}");
+        ExitCode::from(2)
+    };
+    let Some(name) = cli.profile.as_ref().or(cli.sim.as_ref()) else {
+        return Err(usage(
+            "--discover-29bit needs a profile with a 29-bit discovery range (--profile or --sim)"
+                .to_owned(),
+        ));
+    };
+    let profile = Profile::builtin(name).map_err(|e| usage(format!("profile {name}: {e}")))?;
+    let candidates = profile.candidates_29bit();
+    if candidates.is_empty() {
+        return Err(usage(format!(
+            "--discover-29bit needs a profile with a 29-bit discovery range, and {name} has none"
+        )));
+    }
+    let narrow = |extra: &[ModuleIds]| {
+        profile
+            .narrow_with(Policy::read_only(), extra)
+            .map_err(|e| {
+                eprintln!("profile {name}: {e}");
+                ExitCode::FAILURE
+            })
+    };
+    let found = discover_pass(
+        transport,
+        &narrow(&candidates)?,
+        &candidates,
+        timing,
+        &profile,
+        "29-bit discovery",
+        None,
+    )?;
+    let mut ids: Vec<ModuleIds> = known
+        .iter()
+        .map(|scanned| ModuleIds {
+            request: scanned.module.request_id,
+            reply: scanned.module.response_id,
+        })
+        .collect();
+    ids.extend(found.iter().map(module_ids));
+    Ok((unlisted(&profile, &found), narrow(&ids)?))
 }
 
 fn module_ids(found: &discover::Found) -> ModuleIds {

@@ -78,7 +78,7 @@ pub fn discover<T: Transport + ?Sized>(
             let request = policy
                 .approve(
                     Protocol::Uds,
-                    Target::Physical(candidate.request),
+                    Target::physical(candidate.request),
                     &uds::read_did(did::SPARE_PART_NUMBER),
                 )
                 .map_err(FingerprintError::Rejected)?;

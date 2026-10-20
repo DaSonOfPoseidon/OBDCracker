@@ -37,6 +37,28 @@ pub struct Profile {
     pub modules: Vec<Module>,
     /// Where to look for modules the profile doesn't list, if anywhere.
     pub discovery: Option<Discovery>,
+    /// Where to look on 29-bit IDs for modules the profile doesn't list, if anywhere.
+    pub discovery_29bit: Option<Discovery29>,
+}
+
+/// A range of 29-bit request IDs to try for modules a profile doesn't list, each answering on its
+/// request ID plus a fixed offset: on VAG cars, requests on 0x17FC00xx and replies on 0x17FE00xx
+/// (offset 0x20000). Every candidate must be a 29-bit pair the safety policy accepts, and the
+/// range at most [`Discovery29::MAX_IDS`] long.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Discovery29 {
+    /// The first request ID to try.
+    pub first_request_id: u32,
+    /// The last request ID to try.
+    pub last_request_id: u32,
+    /// What to add to a request ID for its reply ID.
+    pub reply_offset: u32,
+}
+
+impl Discovery29 {
+    /// The most request IDs a range may hold: one byte of address, as VAG's scheme has.
+    pub const MAX_IDS: u32 = 256;
 }
 
 /// A range of request IDs to try for modules a profile doesn't list, each answering on its
@@ -211,7 +233,8 @@ pub enum ProfileError {
     PaddedName(String),
     /// No built-in profile has this name.
     UnknownBuiltin(String),
-    /// The discovery range's first request ID is after its last.
+    /// The discovery range's first request ID is after its last, or a 29-bit range holds more
+    /// than [`Discovery29::MAX_IDS`].
     DiscoveryRange,
     /// The discovery range doesn't fit the modules: a candidate's request ID is a reply ID, is
     /// outside 0x700..=0x7FF, or is a module's request ID with another reply ID, and so on.
@@ -411,6 +434,22 @@ impl Profile {
             .collect()
     }
 
+    /// Each request ID in the 29-bit discovery range with its reply ID, in order; none without
+    /// one.
+    #[must_use]
+    pub fn candidates_29bit(&self) -> Vec<ModuleIds> {
+        let Some(discovery) = self.discovery_29bit else {
+            return Vec::new();
+        };
+        (discovery.first_request_id..=discovery.last_request_id)
+            .take(Discovery29::MAX_IDS as usize)
+            .map(|request| ModuleIds {
+                request,
+                reply: request.saturating_add(discovery.reply_offset),
+            })
+            .collect()
+    }
+
     /// Like [`Profile::narrow`], but also allows `extra`: modules discovery found, or candidates
     /// to look for.
     ///
@@ -511,6 +550,38 @@ impl Profile {
         }
         if let Some(discovery) = self.discovery {
             self.validate_discovery(discovery)?;
+        }
+        if let Some(discovery) = self.discovery_29bit {
+            Self::validate_29_bit_discovery(discovery)?;
+            self.narrow_with(Policy::read_only(), &self.candidates_29bit())
+                .map_err(ProfileError::Discovery)?;
+        }
+        Ok(())
+    }
+
+    // The 29-bit discovery range's own checks, for `validate`: every ID in it a 29-bit pair
+    // the policy accepts.
+    fn validate_29_bit_discovery(discovery: Discovery29) -> Result<(), ProfileError> {
+        let Discovery29 {
+            first_request_id: first,
+            last_request_id: last,
+            reply_offset,
+        } = discovery;
+        if first > last || last - first >= Discovery29::MAX_IDS {
+            return Err(ProfileError::DiscoveryRange);
+        }
+        for request in first..=last {
+            // An 11-bit ID is no 29-bit candidate, whatever the policy says about it.
+            if request <= *DIAGNOSTIC_IDS.end() {
+                return Err(ProfileError::Discovery(NarrowingError::Request(request)));
+            }
+            let candidate = ModuleIds {
+                request,
+                reply: request.saturating_add(reply_offset),
+            };
+            Policy::read_only()
+                .narrowed_to(&[candidate])
+                .map_err(ProfileError::Discovery)?;
         }
         Ok(())
     }

@@ -72,7 +72,7 @@ pub fn read_dtc_detail<T: Transport + ?Sized>(
     dtc: UdsDtc,
     timing: Timing,
 ) -> Result<DtcDetail, FingerprintError> {
-    let target = Target::Physical(module.request_id);
+    let target = Target::physical(module.request_id);
     let approve = |payload: &[u8]| {
         policy
             .approve(Protocol::Uds, target, payload)

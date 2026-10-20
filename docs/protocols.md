@@ -2,7 +2,7 @@
 
 | Layer | Protocol | Used by | Status |
 |---|---|---|---|
-| Physical | CAN 500 kbit/s (OBD pins 6/14), 11- and 29-bit IDs | every US car since 2008 | 11-bit done through the ELM driver; 29-bit planned |
+| Physical | CAN 500 kbit/s (OBD pins 6/14), 11- and 29-bit IDs | every US car since 2008 | done through the ELM driver: 11-bit, and 29-bit physical requests (ISO 15765-4 `0x18DA<module>F1` and VAG's `0x17FC00xx`, #111). The 29-bit OBD-II broadcast (`0x18DB33F1`) isn't sent yet |
 | Physical | K-line (pin 7): ISO 9141-2, ISO 14230, VW KW1281 | pre-CAN cars, a few older modules | if a profile needs it |
 | Physical | DoIP (ISO 13400, Ethernet on pins 3/11/12/13) | newer cars (around 2020+) | not yet; the transport trait leaves room |
 | Physical | CAN FD | newer cars | not yet |

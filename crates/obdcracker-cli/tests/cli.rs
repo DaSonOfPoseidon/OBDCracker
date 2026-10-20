@@ -987,3 +987,67 @@ fn dtc_refuses_bad_codes_modules_and_a_missing_profile() {
         assert!(out.stdout.is_empty(), "nothing sent: {out:?}");
     }
 }
+
+#[test]
+fn sim_scan_discover_29bit_tries_each_vag_29_bit_id_and_goes_back_to_11_bit() {
+    // The sim's A7 has no module on 29-bit IDs (none is known yet), so nothing answers there,
+    // and the scan's 11-bit reads still do.
+    let log = temp_log("scan-29bit");
+    let out = obdcracker(&[
+        "--sim",
+        "a7",
+        "--audit-log",
+        log.to_str().unwrap(),
+        "scan",
+        "--discover-29bit",
+    ]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("29-bit discovery: 0 of 256 request IDs answered"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains("77A gateway F197 J533--Gateway"),
+        "{stdout}"
+    );
+    let audit = std::fs::read_to_string(&log).unwrap();
+    let sent: Vec<&str> = audit
+        .lines()
+        .filter(|l| l.contains(r#""dir":"tx""#))
+        .collect();
+    for (line, id) in sent.iter().zip(0x17FC_0000u32..=0x17FC_00FF) {
+        assert!(
+            line.contains(&format!(r#""id":"{id:08X}","payload":"22 F1 87""#)),
+            "{line}"
+        );
+    }
+    assert!(
+        !audit.contains(r#""id":"17FE"#),
+        "nothing sent on a reply ID"
+    );
+}
+
+#[test]
+fn dry_run_scan_discover_29bit_lists_the_29_bit_reads() {
+    let out = obdcracker(&["--dry-run", "--profile", "a7", "scan", "--discover-29bit"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("17FC0000 03 22 F1 87"), "{stdout}");
+    assert!(stdout.contains("17FC00FF 03 22 F1 87"), "{stdout}");
+}
+
+#[test]
+fn scan_discover_29bit_needs_a_profile() {
+    let out = obdcracker(&["--dry-run", "scan", "--discover-29bit"]);
+    assert_eq!(out.status.code(), Some(2), "{out:?}");
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "", "nothing sent");
+}

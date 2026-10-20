@@ -290,7 +290,7 @@ fn module_requests(
             .approve(Protocol::Uds, target, payload)
             .map_err(FingerprintError::Rejected)
     };
-    let target = Target::Physical(scanned.module.request_id);
+    let target = Target::physical(scanned.module.request_id);
     let did_requests = |dids: Vec<ExtraDid>| {
         let batches = batches_of(&dids)
             .into_iter()
@@ -634,7 +634,7 @@ fn scan_module<T: Transport + ?Sized>(
             // A module that answered nothing isn't there: no session to enter.
             Some(_) if !answered(&dids, batch_answered) => dids.extend(unread(ReadError::NoReply)),
             Some(s3) => {
-                let target = Target::Physical(module.request_id);
+                let target = Target::physical(module.request_id);
                 match ExtendedSession::enter(transport, policy, target, timing, s3) {
                     Ok(mut session) => {
                         let (values, answered) = read_dids(&mut session, extended)?;

@@ -114,6 +114,32 @@ mod frames {
     }
 
     #[test]
+    fn parses_a_29_bit_frame_from_its_four_header_bytes() {
+        let f = frame("18 DA F1 10 03 62 F1 87");
+        assert_eq!(f.id(), 0x18DA_F110);
+        assert!(f.is_29_bit());
+        assert_eq!(f.data(), [0x03, 0x62, 0xF1, 0x87]);
+        // VAG's reply IDs, with the trailing space ELM327s print.
+        let f = frame("17 FE 00 76 10 14 62 F1 87 34 47 30 ");
+        assert_eq!(f.id(), 0x17FE_0076);
+        assert_eq!(f.data().len(), 8);
+        assert!(!frame("7E8 01").is_29_bit());
+        for line in [
+            // More than 29 bits, or an 11-bit value in a 29-bit header.
+            "20 00 00 00 01",
+            "00 00 07 E8 01",
+            // A header and no data, or too much.
+            "18 DA F1 10",
+            "18 DA F1 10 01 02 03 04 05 06 07 08 09",
+            // Not two hex digits each.
+            "18 DA F1 1 03 62",
+            "18 DA +1 10 03 62",
+        ] {
+            assert!(matches!(parse_line(line), Line::Text(_)), "{line}");
+        }
+    }
+
+    #[test]
     fn takes_one_to_eight_data_bytes() {
         assert_eq!(frame("7E8 01").data(), [0x01]);
         assert_eq!(frame("7E8 01 02 03 04 05 06 07 08").data().len(), 8);

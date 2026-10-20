@@ -229,7 +229,8 @@ impl Transport for SimBus {
         for ecu in &mut self.ecus {
             let listens = match request.target() {
                 Target::ObdFunctional => ecu.has_obd(),
-                Target::Physical(id) => ecu.request_id == id,
+                // A profile's IDs say their width, so a module's 29-bit ID is never 11-bit.
+                Target::Physical(id) | Target::Physical29(id) => ecu.request_id == id,
             };
             if !listens {
                 continue;
