@@ -462,17 +462,19 @@ fn profile_module(cli: &Cli, name: &str, command: &str) -> Result<(UdsModule, Po
     Ok((module, policy(cli)?))
 }
 
-// Six hex digits.
+// Six hex digits, and not 000000 (no code) or FFFFFF (every group).
 fn parse_dtc(text: &str) -> Result<UdsDtc, String> {
     // Only hex digits: from_str_radix also takes a leading `+`.
-    if text.len() == 6 && text.bytes().all(|b| b.is_ascii_hexdigit()) {
-        u32::from_str_radix(text, 16)
-            .map(UdsDtc::new)
-            .map_err(|e| e.to_string())
-    } else {
-        Err(format!(
+    if text.len() != 6 || !text.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Err(format!(
             "{text:?} isn't a DTC: give six hex digits, such as 0016A0"
-        ))
+        ));
+    }
+    match u32::from_str_radix(text, 16).map_err(|e| e.to_string())? {
+        0 | 0xFF_FFFF => Err(format!(
+            "{text} isn't one DTC: 000000 is no code and FFFFFF means every group"
+        )),
+        code => Ok(UdsDtc::new(code)),
     }
 }
 
@@ -527,8 +529,14 @@ fn run_dtc<T: Transport>(
     match &found.extended_data {
         Some(value) => line("extended data", value),
         None => println!(
-            "{:03X} {} DTC {code} extended data not read: the snapshot read went unanswered",
-            module.response_id, module.name
+            "{:03X} {} DTC {code} extended data not read: the snapshot read {}",
+            module.response_id,
+            module.name,
+            if found.out_of_step {
+                "went unanswered"
+            } else {
+                "found the module busy"
+            }
         ),
     }
     if found.out_of_step {
@@ -537,7 +545,15 @@ fn run_dtc<T: Transport>(
             module.name
         );
     }
-    ExitCode::SUCCESS
+    if found.answered() {
+        ExitCode::SUCCESS
+    } else {
+        eprintln!(
+            "{} answered nothing: check the ignition, the adapter's connection and the profile",
+            module.name
+        );
+        ExitCode::FAILURE
+    }
 }
 
 // Reads each DID in the range from one profile module and lists those it has.

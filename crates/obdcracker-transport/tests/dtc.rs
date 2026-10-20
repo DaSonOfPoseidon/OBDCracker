@@ -164,9 +164,9 @@ fn an_unanswered_extended_data_read_says_replies_may_be_out_of_step() {
 }
 
 #[test]
-fn another_dtcs_answer_is_kept_as_undecodable() {
+fn a_reply_cut_short_after_its_dtc_is_kept_as_undecodable() {
     let mut car = Car::new(|_, request| match request {
-        [0x19, 0x04, ..] => reply(&[0x59, 0x04, 0x00, 0x16, 0xA1, 0x01]),
+        [0x19, 0x04, ..] => reply(&[0x59, 0x04, 0x00, 0x16, 0xA0]),
         [0x19, 0x06, ..] => reply(&[0x59, 0x06, 0x00, 0x16, 0xA0, 0x01]),
         _ => Vec::new(),
     });
@@ -174,8 +174,8 @@ fn another_dtcs_answer_is_kept_as_undecodable() {
     assert_eq!(
         got.snapshots,
         Err(ReadError::Undecodable {
-            error: ReplyError::Malformed,
-            reply: vec![0x59, 0x04, 0x00, 0x16, 0xA1, 0x01],
+            error: ReplyError::TooShort,
+            reply: vec![0x59, 0x04, 0x00, 0x16, 0xA0],
         })
     );
 }
@@ -192,4 +192,51 @@ fn both_reads_are_approved_before_anything_is_sent() {
     let got = read_dtc_detail(&mut car, &policy(), &other, UdsDtc::new(DTC), TIMING);
     assert_eq!(got, Err(FingerprintError::Rejected(Rejection::WrongTarget)));
     assert_eq!(car.sent, Vec::<String>::new());
+}
+
+#[test]
+fn a_busy_module_isnt_sent_the_second_read() {
+    // "Busy, repeat request" isn't an answer: the module is still on the snapshot read.
+    let mut car = Car::new(|_, request| match request {
+        [0x19, 0x04, ..] => reply(&[0x7F, 0x19, 0x21]),
+        [0x19, 0x06, ..] => reply(&[0x59, 0x06, 0x00, 0x16, 0xA0, 0x01]),
+        _ => Vec::new(),
+    });
+    let got = read(&mut car);
+    assert_eq!(
+        got.snapshots,
+        Err(ReadError::Reply(ReplyError::Negative(NegativeResponse {
+            sid: 0x19,
+            nrc: Nrc::BusyRepeatRequest,
+        })))
+    );
+    assert_eq!(got.extended_data, None);
+    assert!(!got.out_of_step);
+    assert!(got.answered());
+    assert_eq!(car.sent, ["710 19 04 00 16 A0 FF"]);
+}
+
+#[test]
+fn a_late_answer_for_another_dtc_is_passed_over_for_the_right_one() {
+    let mut car = Car::new(|_, request| match request {
+        [0x19, 0x04, ..] => [
+            reply(&[0x59, 0x04, 0x00, 0x16, 0xA1, 0x01]),
+            reply(&[0x59, 0x04, 0x00, 0x16, 0xA0, 0x09]),
+        ]
+        .concat(),
+        _ => Vec::new(),
+    });
+    let got = read(&mut car);
+    assert_eq!(
+        got.snapshots,
+        Ok(RecordData {
+            status: DtcStatus(0x09),
+            records: Vec::new(),
+        })
+    );
+}
+
+#[test]
+fn a_silent_module_answered_nothing() {
+    assert!(!read(&mut Car::new(|_, _| Vec::new())).answered());
 }

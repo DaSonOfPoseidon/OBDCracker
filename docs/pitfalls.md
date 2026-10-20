@@ -125,8 +125,9 @@ Each entry names the class, what to check, and where it bit us.
   (`Sweep::out_of_step`, #82), or the caller's next read on the same connection can take the late refusal as its
   answer.
 - **Match a reply to its request by what it echoes**, not only the service ID: the PID (mode 09), a requested PID
-  (mode 01), a requested DID (0x22) or the subfunction. A late reply to an earlier request has the same SID
-  (`response::answers`).
+  (mode 01), a requested DID (0x22), the subfunction, and every field the reply repeats, such as the DTC of a
+  `19 04`/`19 06` reply: matching those by subfunction alone took a late answer for another DTC (#141, Codex). A late
+  reply to an earlier request has the same SID (`response::answers`).
 - **A deadline on the far side of the bus needs a margin for the trip, and the earliest safe time.** The guard
   checked S3 against its own clock, so a `3E 00` sent just in time could reach the module after its session
   lapsed. The module answered it in the default session anyway, so nothing showed. The next fix timed S3 from

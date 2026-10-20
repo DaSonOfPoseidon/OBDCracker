@@ -2,6 +2,7 @@
 //! when the fault happened, and the extended data records (`19 06`), such as how often it
 //! happened. Reads only.
 
+use obdcracker_core::response::{Error as ReplyError, Nrc};
 use obdcracker_core::uds::{self, DtcStatus, UdsDtc};
 use obdcracker_safety::{Policy, Protocol, Target};
 
@@ -21,6 +22,17 @@ pub struct RecordData {
     pub records: Vec<u8>,
 }
 
+impl DtcDetail {
+    /// Whether the module answered either read, a refusal included.
+    #[must_use]
+    pub fn answered(&self) -> bool {
+        let answered = |value: &Result<RecordData, ReadError>| {
+            !matches!(value, Err(ReadError::NoReply | ReadError::StillPending))
+        };
+        answered(&self.snapshots) || self.extended_data.as_ref().is_some_and(answered)
+    }
+}
+
 impl From<uds::DtcData<'_>> for RecordData {
     fn from(data: uds::DtcData<'_>) -> Self {
         Self {
@@ -35,9 +47,10 @@ impl From<uds::DtcData<'_>> for RecordData {
 pub struct DtcDetail {
     /// Every snapshot record (`19 04 <DTC> FF`).
     pub snapshots: Result<RecordData, ReadError>,
-    /// Every extended data record (`19 06 <DTC> FF`). `None` if it wasn't asked, because the
-    /// snapshot read went unanswered: a refusal doesn't name its DTC, so that read's late
-    /// refusal could have passed for this one's answer.
+    /// Every extended data record (`19 06 <DTC> FF`). `None` if it wasn't asked: the snapshot
+    /// read went unanswered (a refusal doesn't name its DTC, so that read's late refusal could
+    /// have passed for this one's answer), or the module said it was busy (NRC 0x21), so it
+    /// isn't sent another request.
     pub extended_data: Option<Result<RecordData, ReadError>>,
     /// A read went unanswered, so its reply may still arrive as the answer to the connection's
     /// next request.
@@ -45,7 +58,8 @@ pub struct DtcDetail {
 }
 
 /// Reads `dtc`'s snapshot records, then its extended data records, from `module`. Both requests
-/// are approved before anything is sent.
+/// are approved before anything is sent. The extended data isn't asked after an unanswered or
+/// busy snapshot read ([`DtcDetail::extended_data`]).
 ///
 /// # Errors
 ///
@@ -81,6 +95,16 @@ pub fn read_dtc_detail<T: Transport + ?Sized>(
             snapshots,
             extended_data: None,
             out_of_step: true,
+        });
+    }
+    // "Busy, repeat request" isn't an answer: the module is still on the first read.
+    if matches!(&snapshots, Err(ReadError::Reply(ReplyError::Negative(refusal)))
+        if refusal.nrc == Nrc::BusyRepeatRequest)
+    {
+        return Ok(DtcDetail {
+            snapshots,
+            extended_data: None,
+            out_of_step: false,
         });
     }
     let extended_data = ask(

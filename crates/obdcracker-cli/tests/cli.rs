@@ -977,6 +977,9 @@ fn dtc_refuses_bad_codes_modules_and_a_missing_profile() {
         dtc(Some("a7"), "gateway", "0016A00"),
         dtc(Some("a7"), "gateway", "+016A0"),
         dtc(Some("a7"), "gateway", "0016AG"),
+        dtc(Some("a7"), "gateway", "000000"),
+        dtc(Some("a7"), "gateway", "FFFFFF"),
+        dtc(Some("a7"), "gateway", "ffffff"),
         dtc(Some("a7"), "nowhere", "0016A0"),
         dtc(None, "gateway", "0016A0"),
     ] {
