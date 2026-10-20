@@ -542,6 +542,7 @@ fn reads_obd_data_then_each_modules_dids_and_dtcs() {
                     (0x1C, Ok(PidValue::Raw(vec![0x06]))),
                     (0x42, quantity(14.0, Unit::Volts)),
                 ]),
+                pids_cut_short: None,
                 supported_info: Ok(vec![0x02, 0x04, 0x06, 0x0A]),
                 ecu_name: Ok("ECM-EngineControl".to_owned()),
                 stored_dtcs: Ok(vec![Dtc::new(0x0299)]),
@@ -549,6 +550,7 @@ fn reads_obd_data_then_each_modules_dids_and_dtcs() {
             ObdEcu {
                 source: 0x7E9,
                 pids: Ok(vec![(0x05, quantity(85.0, Unit::Celsius))]),
+                pids_cut_short: None,
                 supported_info: Err(ReadError::NoReply),
                 ecu_name: Err(ReadError::NoReply),
                 stored_dtcs: Ok(vec![]),
@@ -925,6 +927,46 @@ fn a_garbled_first_bitmap_is_an_error_not_an_empty_list() {
         Err(undecodable(ReplyError::TooShort, &[0x41, 0x00, 0x08]))
     );
     assert_eq!(got.ecus[0].stored_dtcs, Ok(vec![]));
+}
+
+#[test]
+fn a_later_bitmap_that_is_garbled_or_missing_says_where_the_list_was_cut_short() {
+    // PID 00 lists PID 05 and the next page (20), whose reply is truncated or never comes. Page
+    // 00's PIDs are still read, and the list says it stops at 20 and why.
+    for (page_20, why) in [
+        (
+            vec![reply(0x7E8, &[0x41, 0x20, 0x08])],
+            undecodable(ReplyError::TooShort, &[0x41, 0x20, 0x08]),
+        ),
+        (Vec::new(), ReadError::NoReply),
+    ] {
+        let mut car = Car::new(move |id, request| match (id, request) {
+            (0x7DF, [0x01, 0x00]) => vec![reply(0x7E8, &[0x41, 0x00, 0x08, 0x00, 0x00, 0x01])],
+            (0x7DF, [0x01, 0x20]) => page_20.clone(),
+            (0x7DF, [0x01, 0x05]) => vec![reply(0x7E8, &[0x41, 0x05, 0x82])],
+            _ => Vec::new(),
+        });
+        let got = scan(&mut car, &Policy::read_only(), &[], TIMING).unwrap();
+        assert_eq!(
+            got.ecus[0].pids,
+            Ok(vec![(
+                0x05,
+                Ok(PidValue::Quantity {
+                    value: 90.0,
+                    unit: Unit::Celsius
+                })
+            )])
+        );
+        assert_eq!(got.ecus[0].pids_cut_short, Some((0x20, why)));
+    }
+    // A chain that ends where the ECU said it does isn't cut short.
+    let mut car = Car::new(|id, request| match (id, request) {
+        (0x7DF, [0x01, 0x00]) => vec![reply(0x7E8, &[0x41, 0x00, 0x08, 0x00, 0x00, 0x00])],
+        (0x7DF, [0x01, 0x05]) => vec![reply(0x7E8, &[0x41, 0x05, 0x82])],
+        _ => Vec::new(),
+    });
+    let got = scan(&mut car, &Policy::read_only(), &[], TIMING).unwrap();
+    assert_eq!(got.ecus[0].pids_cut_short, None);
 }
 
 #[test]
