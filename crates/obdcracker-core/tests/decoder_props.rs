@@ -122,3 +122,35 @@ proptest! {
         prop_assert_eq!(listed, contained);
     }
 }
+
+proptest! {
+    #[test]
+    fn tp20_decoders_never_panic_and_messages_fit_their_buffer(
+        reply in any_reply(),
+        frames in prop::collection::vec(prop::collection::vec(any::<u8>(), 0..10), 0..40),
+    ) {
+        use obdcracker_core::tp20;
+        let _ = tp20::decode_channel_setup(&reply);
+        let _ = tp20::decode_channel_parameters(&reply);
+        let _ = tp20::Frame::parse(&reply);
+        let mut buf = [0u8; 32];
+        let mut reassembler = tp20::Reassembler::new(&mut buf[..]);
+        for frame in &frames {
+            if let Ok(tp20::Progress::Complete { payload, .. }) = reassembler.feed(frame) {
+                prop_assert!(!payload.is_empty() && payload.len() <= 32);
+            }
+        }
+    }
+
+    #[test]
+    fn every_tp20_request_frame_reads_back(sequence in 0u8..=0x0F, payload in prop::collection::vec(any::<u8>(), 1..=5)) {
+        use obdcracker_core::tp20;
+        let frame = tp20::data_frame(sequence, &payload).unwrap();
+        let mut buf = [0u8; 8];
+        let mut reassembler = tp20::Reassembler::new(&mut buf[..]);
+        prop_assert_eq!(
+            reassembler.feed(frame.data()),
+            Ok(tp20::Progress::Complete { payload: &payload[..], ack: Some((sequence + 1) & 0x0F) })
+        );
+    }
+}
