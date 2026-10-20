@@ -80,8 +80,9 @@ pub enum Why {
     /// and [`Stop::at`] is the next one), or refused the
     /// extended session or didn't confirm it.
     Module(ReadError),
-    /// After a DID went unanswered, a later read got a refusal or another DID's value, which may
-    /// be the late answer to the earlier one: UDS refusals don't name the DID. Later
+    /// After a DID went unanswered, a later read got a refusal or a reply it couldn't decode (such
+    /// as another DID's value), which may be the late answer to the earlier one: UDS refusals
+    /// don't name the DID. Later
     /// replies may then answer earlier requests, so the sweep stops. Sweeping again from
     /// [`Stop::at`] on a fresh connection asks that DID first.
     Unmatched(ReadError),
@@ -314,16 +315,17 @@ fn read_each(
                 return halt(found, resume, stopped(Err(e)), out_of_step);
             }
         };
-        // After an unanswered read, a refusal or another DID's value may be the late answer to
-        // that one, even past answers that were plainly this connection's own. Asking again
-        // could leave this DID's own answer queued for the next.
-        if out_of_step && let Err(e @ ReadError::Reply(_)) = value {
+        // After an unanswered read, a refusal or a reply that can't be decoded (another DID's
+        // value) may be the late answer to that one, even past answers that were plainly this
+        // connection's own. Asking again could leave this DID's own answer queued for the next.
+        if out_of_step && let Err(e @ (ReadError::Reply(_) | ReadError::Undecodable { .. })) = value
+        {
             found.extend(unanswered(&mut quiet));
             return halt(found, *did, Why::Unmatched(e), true);
         }
         match value {
             Err(e @ (ReadError::NoReply | ReadError::StillPending)) => {
-                quiet.push((*did, e));
+                quiet.push((*did, e.clone()));
                 out_of_step = true;
                 if quiet.len() == QUIET_LIMIT {
                     return halt(found, resume, Why::Module(e), true);
@@ -341,7 +343,7 @@ fn read_each(
                 if refusal.nrc == Nrc::GeneralReject =>
             {
                 found.extend(unanswered(&mut quiet));
-                found.push((*did, Err(e)));
+                found.push((*did, Err(e.clone())));
                 let next = requests
                     .iter()
                     .map(|(next, _)| *next)

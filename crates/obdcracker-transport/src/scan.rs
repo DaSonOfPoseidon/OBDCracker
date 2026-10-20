@@ -9,7 +9,8 @@ use obdcracker_core::uds::{self, DiagnosticSession, DtcCount, DtcRecord, did};
 use obdcracker_safety::{Approved, Policy, Target};
 
 use crate::fingerprint::{
-    DidValue, FingerprintError, ReadError, UdsModule, ask, broadcast, decode_did_value, from,
+    DidValue, FingerprintError, ReadError, UdsModule, ask, broadcast, decode_did_value, decoded,
+    from,
 };
 use crate::{Error, ExtendedSession, S3, SessionError, Timing, Transport};
 
@@ -395,7 +396,7 @@ impl<T: Transport + ?Sized> Ask for ExtendedSession<'_, T> {
             return session_error(e).map(|e| (false, Err(e)));
         }
         match self.exchange_prepared(request) {
-            Ok(reply) => Ok((true, decode(&reply.payload).map_err(ReadError::Reply))),
+            Ok(reply) => Ok((true, decoded(&reply.payload, decode))),
             Err(e) => session_error(e).map(|e| (true, Err(e))),
         }
     }
@@ -421,11 +422,12 @@ pub(crate) fn session_error(e: SessionError) -> Result<ReadError, ScanError> {
                 [sid, ..] => sid.wrapping_sub(0x40),
                 [] => uds::DIAGNOSTIC_SESSION_CONTROL,
             };
-            Ok(ReadError::SessionRefused(
-                response::positive(sid, &reply)
+            Ok(ReadError::SessionRefused {
+                error: response::positive(sid, &reply)
                     .err()
                     .unwrap_or(ReplyError::Malformed),
-            ))
+                reply,
+            })
         }
         e => Err(FingerprintError::Session(e)),
     }
@@ -519,14 +521,14 @@ fn supported_pids<T: Transport + ?Sized>(
                 }
             };
             chain.next = None;
-            match decode_bitmap(&reply.payload, base) {
+            match decoded(&reply.payload, |payload| decode_bitmap(payload, base)) {
                 Ok(bitmap) => {
                     if let Ok(pids) = &mut chain.pids {
                         pids.extend(bitmap.iter().filter(|pid| pid % 0x20 != 0));
                     }
                     chain.next = after.filter(|&after| bitmap.contains(after));
                 }
-                Err(e) if base == 0 => chain.pids = Err(ReadError::Reply(e)),
+                Err(e) if base == 0 => chain.pids = Err(e),
                 Err(_) => {}
             }
         }
@@ -607,7 +609,12 @@ fn scan_module<T: Transport + ?Sized>(
     };
     let extended = &requests.extended;
     if !extended.dids.is_empty() {
-        let unread = |e: ReadError| extended.dids.iter().map(move |(did, _)| (did.id, Err(e)));
+        let unread = |e: ReadError| {
+            extended
+                .dids
+                .iter()
+                .map(move |(did, _)| (did.id, Err(e.clone())))
+        };
         match options.extended {
             None => dids.extend(unread(ReadError::NeedsExtendedSession)),
             // A module that answered nothing isn't there: no session to enter.
@@ -682,7 +689,9 @@ fn read_dids(
                 single.extend(id.to_be_bytes());
                 single.extend(data);
                 let format = did_requests[i].0.format;
-                values[i] = Some(decode_scanned(&single, id, format).map_err(ReadError::Reply));
+                values[i] = Some(decoded(&single, |single| {
+                    decode_scanned(single, id, format)
+                }));
             }
         }
         // Then those it left out. The multi-DID read's reply may still arrive during these reads

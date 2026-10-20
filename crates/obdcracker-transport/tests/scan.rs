@@ -106,6 +106,14 @@ const F187: &[u8] = b"\xF1\x874G0907401N ";
 const F189: &[u8] = b"\xF1\x890016";
 const F191: &[u8] = b"\xF1\x914G0907401E ";
 
+// A reply that couldn't be decoded, kept as it came.
+fn undecodable(error: ReplyError, reply: &[u8]) -> ReadError {
+    ReadError::Undecodable {
+        error,
+        reply: reply.to_vec(),
+    }
+}
+
 // A positive 0x22 reply carrying `values`, each a DID and its data.
 fn dids_reply(values: &[&[u8]]) -> Vec<Response> {
     let mut payload = vec![0x62];
@@ -249,7 +257,10 @@ fn a_late_batched_reply_isnt_taken_for_one_did() {
     .unwrap();
     assert_eq!(
         did_value(&got, 0xF187),
-        Some(Err(ReadError::Reply(ReplyError::Malformed)))
+        Some(Err(undecodable(
+            ReplyError::Malformed,
+            &[&[0x62][..], F187, F189, F191].concat()
+        )))
     );
     assert_eq!(
         did_value(&got, 0xF189),
@@ -273,7 +284,10 @@ fn a_late_batched_reply_isnt_taken_for_one_did() {
     .unwrap();
     assert_eq!(
         did_value(&got, 0xF187),
-        Some(Err(ReadError::Reply(ReplyError::Malformed)))
+        Some(Err(undecodable(
+            ReplyError::Malformed,
+            &[&b"\x62\xF1\x874G0907401N"[..], F189, F191].concat()
+        )))
     );
     // A reply to a read alone may still carry just that DID at its length.
     let mut car = Car::new(|id, request| match (id, request) {
@@ -315,7 +329,10 @@ fn after_any_failed_batch_a_did_must_have_its_length() {
     .unwrap();
     assert_eq!(
         did_value(&got, 0xF187),
-        Some(Err(ReadError::Reply(ReplyError::Malformed)))
+        Some(Err(undecodable(
+            ReplyError::Malformed,
+            b"\x62\xF1\x874G0907401ABC"
+        )))
     );
 }
 
@@ -725,13 +742,10 @@ fn f190_must_be_a_vin() {
     for (data, want) in [
         (
             &b"WAU2MBFC6EN093415"[..],
-            Ok(DidValue::Text("WAU2MBFC6EN093415".into())),
+            Ok::<_, ReplyError>(DidValue::Text("WAU2MBFC6EN093415".into())),
         ),
-        (b"abc", Err(ReadError::Reply(ReplyError::Malformed))),
-        (
-            b"WAU2MBFC6EN09341 ",
-            Err(ReadError::Reply(ReplyError::Malformed)),
-        ),
+        (b"abc", Err(ReplyError::Malformed)),
+        (b"WAU2MBFC6EN09341 ", Err(ReplyError::Malformed)),
         // A module with no VIN stored sends 17 of one filler byte: dashes on the A7's rear lid,
         // parking brake and top view camera (#54, #63).
         (b"-----------------", Ok(DidValue::NotSet)),
@@ -739,21 +753,13 @@ fn f190_must_be_a_vin() {
         (&[0xFF; 17], Ok(DidValue::NotSet)),
         (&[b' '; 17], Ok(DidValue::NotSet)),
         // Only a whole VIN's worth of one filler.
-        (
-            b"----------------",
-            Err(ReadError::Reply(ReplyError::Malformed)),
-        ),
-        (
-            b"------------------",
-            Err(ReadError::Reply(ReplyError::Malformed)),
-        ),
-        (
-            b"----------------\0",
-            Err(ReadError::Reply(ReplyError::Malformed)),
-        ),
-        (&[0x2E; 17], Err(ReadError::Reply(ReplyError::Malformed))),
+        (b"----------------", Err(ReplyError::Malformed)),
+        (b"------------------", Err(ReplyError::Malformed)),
+        (b"----------------\0", Err(ReplyError::Malformed)),
+        (&[0x2E; 17], Err(ReplyError::Malformed)),
     ] {
         let payload = [&[0x62, 0xF1, 0x90][..], data].concat();
+        let want = want.map_err(|error| undecodable(error, &payload));
         let mut car = Car::new(move |id, request| match (id, request) {
             (0x7E0, [0x22, 0xF1, 0x90]) => vec![reply(0x7E8, &payload)],
             _ => Vec::new(),
@@ -895,7 +901,13 @@ fn a_pid_reply_with_extra_bytes_is_malformed() {
     let got = scan(&mut car, &Policy::read_only(), &[], TIMING).unwrap();
     assert_eq!(
         got.ecus[0].pids,
-        Ok(vec![(0x05, Err(ReadError::Reply(ReplyError::Malformed)))])
+        Ok(vec![(
+            0x05,
+            Err(undecodable(
+                ReplyError::Malformed,
+                &[0x41, 0x05, 0x82, 0x0C]
+            ))
+        )])
     );
 }
 
@@ -910,7 +922,7 @@ fn a_garbled_first_bitmap_is_an_error_not_an_empty_list() {
     let got = scan(&mut car, &Policy::read_only(), &[], TIMING).unwrap();
     assert_eq!(
         got.ecus[0].pids,
-        Err(ReadError::Reply(ReplyError::TooShort))
+        Err(undecodable(ReplyError::TooShort, &[0x41, 0x00, 0x08]))
     );
     assert_eq!(got.ecus[0].stored_dtcs, Ok(vec![]));
 }
@@ -1098,17 +1110,43 @@ fn a_module_that_refuses_the_extended_session_doesnt_stop_the_scan() {
     for did in [0x0600, 0x0601, 0x0602] {
         assert_eq!(
             value(&got, did),
-            Err(ReadError::SessionRefused(ReplyError::Negative(
-                NegativeResponse {
+            Err(ReadError::SessionRefused {
+                error: ReplyError::Negative(NegativeResponse {
                     sid: 0x10,
                     nrc: Nrc::ConditionsNotCorrect,
-                }
-            )))
+                }),
+                reply: vec![0x7F, 0x10, 0x22],
+            })
         );
     }
     // A plain refusal leaves the module in the default session: nothing to leave.
     assert!(!car.sent.iter().any(|sent| sent == "7E0 10 01"));
     assert_eq!(got.modules.len(), 2);
+}
+
+#[test]
+fn an_undecodable_answer_to_10_03_is_kept_with_its_bytes() {
+    // A positive answer cut short of its timing.
+    let mut car = session_car(&[0x50, 0x03, 0x00]);
+    let got = scan_with(
+        &mut car,
+        &Policy::read_only(),
+        &[engine_with_extended()],
+        TIMING,
+        &extended(),
+    )
+    .unwrap();
+    let want = ReadError::SessionRefused {
+        error: ReplyError::Malformed,
+        reply: vec![0x50, 0x03, 0x00],
+    };
+    assert_eq!(
+        want.to_string(),
+        "not read: extended session: reply is malformed: 50 03 00"
+    );
+    for did in [0x0600, 0x0601, 0x0602] {
+        assert_eq!(value(&got, did), Err(want.clone()));
+    }
 }
 
 #[test]
@@ -1275,11 +1313,12 @@ fn a_refused_tester_present_is_reported_as_its_own_refusal() {
     .unwrap();
     assert_eq!(
         value(&got, 0x0600),
-        Err(ReadError::SessionRefused(ReplyError::Negative(
-            NegativeResponse {
+        Err(ReadError::SessionRefused {
+            error: ReplyError::Negative(NegativeResponse {
                 sid: 0x3E,
                 nrc: Nrc::ConditionsNotCorrect,
-            }
-        )))
+            }),
+            reply: vec![0x7F, 0x3E, 0x22],
+        })
     );
 }
