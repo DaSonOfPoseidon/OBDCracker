@@ -530,8 +530,9 @@ pub struct DtcData<'a> {
 ///
 /// # Errors
 ///
-/// A refusal, a reply for another subfunction or DTC, one cut short before the status, or one
-/// whose first record isn't the one asked for (unless every record was).
+/// A refusal, a reply for another subfunction or DTC, one cut short before the status or inside
+/// its first record (a record number alone), or one whose first record isn't the one asked for
+/// (unless every record was).
 pub fn decode_dtc_snapshots(reply: &[u8], dtc: UdsDtc, record: u8) -> Result<DtcData<'_>, Error> {
     dtc_data(reply, REPORT_DTC_SNAPSHOT_BY_DTC, dtc, record)
 }
@@ -562,6 +563,11 @@ fn dtc_data(reply: &[u8], sub: u8, dtc: UdsDtc, record: u8) -> Result<DtcData<'_
         || (sub == REPORT_DTC_EXTENDED_DATA_BY_DTC && record == ALL_OBD_RECORDS);
     if !any && records.first().is_some_and(|&first| first != record) {
         return Err(Error::Malformed);
+    }
+    // A snapshot record is at least its number and how many identifiers it holds; an extended
+    // data record its number and some data.
+    if records.len() == 1 {
+        return Err(Error::TooShort);
     }
     Ok(DtcData {
         status: DtcStatus(*status),

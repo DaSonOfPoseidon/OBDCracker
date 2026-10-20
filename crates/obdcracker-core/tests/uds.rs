@@ -237,8 +237,13 @@ mod read_dtc_information {
                 0x01,
                 Error::Malformed,
             ),
-            // Cut short before the status.
+            // Cut short before the status, or after a record number.
             (&[0x59, 0x04, 0x00, 0x16, 0xA0], 0xFF, Error::TooShort),
+            (
+                &[0x59, 0x04, 0x00, 0x16, 0xA0, 0x01, 0x01],
+                0xFF,
+                Error::TooShort,
+            ),
             (&[0x59, 0x04, 0x00], 0xFF, Error::TooShort),
             (&[0x59], 0xFF, Error::TooShort),
         ] {
@@ -258,6 +263,10 @@ mod read_dtc_information {
         assert_eq!(
             decode_dtc_extended_data(&[0x59, 0x06, 0x00, 0x16, 0xA0, 0x01, 0x02, 0x07], dtc, 0x01),
             Err(Error::Malformed)
+        );
+        assert_eq!(
+            decode_dtc_extended_data(&[0x59, 0x06, 0x00, 0x16, 0xA0, 0x01, 0x01], dtc, 0xFF),
+            Err(Error::TooShort)
         );
     }
 

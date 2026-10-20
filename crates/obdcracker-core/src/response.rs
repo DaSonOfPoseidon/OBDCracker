@@ -222,6 +222,18 @@ pub fn kwp2000_answers(request: &[u8], reply: &[u8]) -> bool {
     }
 }
 
+// Whether a `ReadDTCInformation` 0x04 or 0x06 reply (`echo`: subfunction, DTC, status,
+// records) is for the DTC `asked` for (subfunction, DTC, record), and starts with its record
+// unless every record (0xFF, or 0xFE for every OBD extended data record) was asked for. A reply
+// with no records has none to compare.
+fn dtc_detail_echoed(sub: u8, asked: &[u8], echo: &[u8]) -> bool {
+    let (Some(dtc), Some(&record)) = (asked.get(1..4), asked.get(4)) else {
+        return false;
+    };
+    let every = record == 0xFF || (sub == 0x06 && record == 0xFE);
+    echo.get(1..4) == Some(dtc) && (every || echo.get(5).is_none_or(|&first| first == record))
+}
+
 // `answers`, with `pending` saying whether the module sent response-pending for this request.
 fn matches(request: &[u8], reply: &[u8], pending: bool) -> bool {
     let Some((&sid, asked)) = request.split_first() else {
@@ -245,10 +257,11 @@ fn matches(request: &[u8], reply: &[u8], pending: bool) -> bool {
                 (Some(&got), Some(&sub)) => {
                     (pending || sub & 0x80 == 0)
                         && got == sub & 0x7F
-                        // One DTC's snapshots or extended data: the DTC too.
+                        // One DTC's snapshots or extended data: the DTC too, and the record
+                        // when one was asked for.
                         && (sid != 0x19
                             || !matches!(got, 0x04 | 0x06)
-                            || echo.get(1..4) == asked.get(1..4))
+                            || dtc_detail_echoed(got, asked, echo))
                 }
                 _ => false,
             },

@@ -85,7 +85,9 @@ proptest! {
         let dtc = uds::UdsDtc::new(code);
         let _ = uds::decode_dtc_snapshots(&reply, dtc, record);
         let _ = uds::decode_dtc_extended_data(&reply, dtc, record);
-        // A well-formed reply for this DTC gives back its status and every byte after it.
+        // A well-formed reply for this DTC gives back its status and every byte after it. A
+        // record number alone is cut short.
+        prop_assume!(records.len() != 1);
         let [_, high, mid, low] = code.to_be_bytes();
         for sub in [0x04, 0x06] {
             let mut reply = vec![0x59, sub, high, mid, low, status];
