@@ -6,10 +6,6 @@ name: Codex review
 # finished review. GitHub runs issue_comment workflows from the default branch.
 # Resolving a thread doesn't trigger workflows, so after resolving run it by hand:
 #   gh workflow run codex-review.yml -f pr=<number>
-# A repo's first PR (the one that adds this file) can't rely on the status: Codex reports a clean
-# review by editing a comment, which runs main's workflow, and main doesn't have it yet. Require
-# `codex-review` in branch protection only after that PR merges, or it can't merge without an
-# admin override.
 on:
   pull_request:
     types: [opened, synchronize, reopened]
