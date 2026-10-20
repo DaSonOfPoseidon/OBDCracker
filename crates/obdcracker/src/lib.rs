@@ -8,12 +8,12 @@
 //! use std::time::Duration;
 //!
 //! use obdcracker::core::obd;
-//! use obdcracker::safety::{Policy, Target};
+//! use obdcracker::safety::{Policy, Protocol, Target};
 //! use obdcracker::transport::{DryRun, Mock, Response, Transport};
 //!
 //! // Ask every emissions ECU for the VIN (OBD-II mode 09 PID 02).
 //! let vin = Policy::read_only()
-//!     .approve(Target::ObdFunctional, &obd::vehicle_info(0x02))
+//!     .approve(Protocol::Uds, Target::ObdFunctional, &obd::vehicle_info(0x02))
 //!     .unwrap();
 //! let mut adapter = DryRun::new(Vec::new());
 //! adapter.send(&vin).unwrap();
@@ -30,7 +30,7 @@
 //! assert_eq!(obd::decode_vin(&reply.payload).unwrap(), "WAUZZZ4G1EN000000");
 //!
 //! // Flashing requests are refused at every tier.
-//! assert!(Policy::read_only().approve(Target::Physical(0x7E0), &[0x10, 0x02]).is_err());
+//! assert!(Policy::read_only().approve(Protocol::Uds, Target::Physical(0x7E0), &[0x10, 0x02]).is_err());
 //! ```
 //!
 //! A real adapter is a driver over a link. An ELM327 or STN adapter (such as an `OBDLink EX`)
@@ -40,7 +40,7 @@
 //! use std::time::Duration;
 //!
 //! use obdcracker::core::obd;
-//! use obdcracker::safety::{Policy, Target};
+//! use obdcracker::safety::{Policy, Protocol, Target};
 //! use obdcracker::transport::elm::Elm;
 //! use obdcracker::transport::link::TcpLink;
 //! use obdcracker::transport::{Audited, Expect, exchange};
@@ -48,7 +48,7 @@
 //! # fn main() -> Result<(), Box<dyn std::error::Error>> {
 //! let link = TcpLink::connect("192.168.0.10:35000", Duration::from_secs(5))?;
 //! let mut adapter = Audited::open("session.audit.jsonl".as_ref(), Elm::connect(link)?, "tcp")?;
-//! let vin = Policy::read_only().approve(Target::ObdFunctional, &obd::vehicle_info(0x02))?;
+//! let vin = Policy::read_only().approve(Protocol::Uds, Target::ObdFunctional, &obd::vehicle_info(0x02))?;
 //! for reply in exchange(&mut adapter, &vin, Expect::ObdEcus, Elm::<TcpLink>::timing())? {
 //!     println!("{:03X} {}", reply.source, obd::decode_vin(&reply.payload)?);
 //! }

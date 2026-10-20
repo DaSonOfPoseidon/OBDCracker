@@ -2,13 +2,13 @@
 
 use std::time::Duration;
 
-use obdcracker_safety::{Policy, Target};
+use obdcracker_safety::{Policy, Protocol, Target};
 use obdcracker_transport::{DryRun, Error, Transport};
 
 #[test]
 fn writes_the_can_frame_instead_of_sending_it() {
     let vin = Policy::read_only()
-        .approve(Target::ObdFunctional, &[0x09, 0x02])
+        .approve(Protocol::Uds, Target::ObdFunctional, &[0x09, 0x02])
         .unwrap();
     let mut dry = DryRun::new(Vec::new());
     dry.send(&vin).unwrap();
@@ -25,6 +25,7 @@ fn prints_first_and_consecutive_frames_of_a_long_request() {
     // continue-to-send.
     let long = Policy::read_only()
         .approve(
+            Protocol::Uds,
             Target::Physical(0x7E0),
             &[0x22, 0xF1, 0x87, 0xF1, 0x89, 0xF1, 0x90, 0xF1, 0x91],
         )

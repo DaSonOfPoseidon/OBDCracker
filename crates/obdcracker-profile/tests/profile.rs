@@ -264,9 +264,29 @@ fn a7_modules_are_targets_the_policy_still_checks() {
     let policy = Policy::read_only();
     for module in &a7.modules {
         let target = Target::Physical(module.request_id);
-        assert!(policy.approve(target, &[0x22, 0xF1, 0x90]).is_ok());
-        assert!(policy.approve(target, &[0x10, 0x02]).is_err());
-        assert!(policy.approve(target, &[0x2E, 0xF1, 0x90, 0x00]).is_err());
+        assert!(
+            policy
+                .approve(
+                    obdcracker_safety::Protocol::Uds,
+                    target,
+                    &[0x22, 0xF1, 0x90]
+                )
+                .is_ok()
+        );
+        assert!(
+            policy
+                .approve(obdcracker_safety::Protocol::Uds, target, &[0x10, 0x02])
+                .is_err()
+        );
+        assert!(
+            policy
+                .approve(
+                    obdcracker_safety::Protocol::Uds,
+                    target,
+                    &[0x2E, 0xF1, 0x90, 0x00]
+                )
+                .is_err()
+        );
     }
 }
 
@@ -277,18 +297,42 @@ fn a7_profile_narrows_the_policy_to_its_modules() {
     let read = [0x22, 0xF1, 0x87];
     for module in &a7.modules {
         let approved = policy
-            .approve(Target::Physical(module.request_id), &read)
+            .approve(
+                obdcracker_safety::Protocol::Uds,
+                Target::Physical(module.request_id),
+                &read,
+            )
             .unwrap();
         assert_eq!(approved.reply_id(), Some(module.response_id));
         assert!(
             policy
-                .approve(Target::Physical(module.response_id), &read)
+                .approve(
+                    obdcracker_safety::Protocol::Uds,
+                    Target::Physical(module.response_id),
+                    &read
+                )
                 .is_err()
         );
     }
     // In 0x700..=0x7FF, but no A7 module listens there.
-    assert!(policy.approve(Target::Physical(0x711), &read).is_err());
-    assert!(policy.approve(Target::ObdFunctional, &[0x09, 0x02]).is_ok());
+    assert!(
+        policy
+            .approve(
+                obdcracker_safety::Protocol::Uds,
+                Target::Physical(0x711),
+                &read
+            )
+            .is_err()
+    );
+    assert!(
+        policy
+            .approve(
+                obdcracker_safety::Protocol::Uds,
+                Target::ObdFunctional,
+                &[0x09, 0x02]
+            )
+            .is_ok()
+    );
 }
 
 #[test]
@@ -550,17 +594,33 @@ fn a_discovery_policy_allows_candidates_but_never_their_reply_ids() {
     let read = [0x22, 0xF1, 0x87];
     let modules_only = profile.narrow(Policy::read_only()).unwrap();
     let discovery = profile.narrow_for_discovery(Policy::read_only()).unwrap();
-    let approved = discovery.approve(Target::Physical(0x74F), &read).unwrap();
+    let approved = discovery
+        .approve(
+            obdcracker_safety::Protocol::Uds,
+            Target::Physical(0x74F),
+            &read,
+        )
+        .unwrap();
     assert_eq!(approved.reply_id(), Some(0x7B9));
     // A plain narrowed policy still refuses modules the profile doesn't list.
     assert!(
         modules_only
-            .approve(Target::Physical(0x74F), &read)
+            .approve(
+                obdcracker_safety::Protocol::Uds,
+                Target::Physical(0x74F),
+                &read
+            )
             .is_err()
     );
     for reply in [0x76A, 0x77A, 0x7B9, 0x7D3, 0x7E8] {
         assert!(
-            discovery.approve(Target::Physical(reply), &read).is_err(),
+            discovery
+                .approve(
+                    obdcracker_safety::Protocol::Uds,
+                    Target::Physical(reply),
+                    &read
+                )
+                .is_err(),
             "{reply:03X}"
         );
     }
@@ -667,14 +727,32 @@ fn a_wide_discovery_policy_allows_wide_candidates_and_what_was_found() {
     let mut extra = found.to_vec();
     extra.extend(profile.wide_candidates(&found));
     let policy = profile.narrow_with(Policy::read_only(), &extra).unwrap();
-    let mmi = policy.approve(Target::Physical(0x773), &read).unwrap();
+    let mmi = policy
+        .approve(
+            obdcracker_safety::Protocol::Uds,
+            Target::Physical(0x773),
+            &read,
+        )
+        .unwrap();
     assert_eq!(mmi.reply_id(), Some(0x7DD));
-    let module = policy.approve(Target::Physical(0x705), &read).unwrap();
+    let module = policy
+        .approve(
+            obdcracker_safety::Protocol::Uds,
+            Target::Physical(0x705),
+            &read,
+        )
+        .unwrap();
     assert_eq!(module.reply_id(), Some(0x76F));
     // Pass 1's other candidates aren't allowed any more, and replies never are.
     for refused in [0x700, 0x76F, 0x77A] {
         assert!(
-            policy.approve(Target::Physical(refused), &read).is_err(),
+            policy
+                .approve(
+                    obdcracker_safety::Protocol::Uds,
+                    Target::Physical(refused),
+                    &read
+                )
+                .is_err(),
             "{refused:03X}"
         );
     }

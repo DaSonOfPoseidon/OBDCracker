@@ -17,11 +17,11 @@ use std::error::Error;
 use std::time::Duration;
 
 use obdcracker::core::obd;
-use obdcracker::safety::{Policy, Target};
+use obdcracker::safety::{Policy, Protocol, Target};
 use obdcracker::transport::{Audited, DryRun, Transport};
 
 fn main() -> Result<(), Box<dyn Error>> {
-    let vin = Policy::read_only().approve(Target::ObdFunctional, &obd::vehicle_info(0x02))?;
+    let vin = Policy::read_only().approve(Protocol::Uds, Target::ObdFunctional, &obd::vehicle_info(0x02))?;
     let adapter = DryRun::new(std::io::stdout());
     let mut adapter = Audited::open("session.audit.jsonl".as_ref(), adapter, "dry-run")?;
     adapter.send(&vin)?; // prints "7DF 02 09 02"

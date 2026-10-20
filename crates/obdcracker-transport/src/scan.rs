@@ -6,7 +6,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use obdcracker_core::obd::{self, Dtc, SupportedPids, Unit, Value};
 use obdcracker_core::response::{self, Error as ReplyError};
 use obdcracker_core::uds::{self, DiagnosticSession, DtcCount, DtcRecord, did};
-use obdcracker_safety::{Approved, Policy, Target};
+use obdcracker_safety::{Approved, Policy, Protocol, Target};
 
 use crate::fingerprint::{
     DidValue, FingerprintError, ReadError, UdsModule, ask, broadcast, decode_did_value, decoded,
@@ -210,7 +210,7 @@ pub fn scan_with<T: Transport + ?Sized>(
 ) -> Result<Scan, ScanError> {
     let approve = |target, payload: &[u8]| {
         policy
-            .approve(target, payload)
+            .approve(Protocol::Uds, target, payload)
             .map_err(FingerprintError::Rejected)
     };
     // Which PIDs are asked for depends on the bitmaps, so every one is approved up front.
@@ -287,7 +287,7 @@ fn module_requests(
 ) -> Result<ModuleRequests, ScanError> {
     let approve = |target, payload: &[u8]| {
         policy
-            .approve(target, payload)
+            .approve(Protocol::Uds, target, payload)
             .map_err(FingerprintError::Rejected)
     };
     let target = Target::Physical(scanned.module.request_id);

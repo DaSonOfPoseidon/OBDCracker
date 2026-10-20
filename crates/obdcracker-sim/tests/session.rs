@@ -7,7 +7,7 @@ use std::time::Duration;
 use obdcracker_core::response::Nrc;
 use obdcracker_core::uds;
 use obdcracker_profile::Profile;
-use obdcracker_safety::{Policy, Target};
+use obdcracker_safety::{Policy, Protocol, Target};
 use obdcracker_sim::{Session, SimBus};
 use obdcracker_transport::{Error, Expect, ExtendedSession, S3, SessionError, Timing, exchange};
 
@@ -30,7 +30,9 @@ fn car() -> SimBus {
 }
 
 fn ask(bus: &mut SimBus, payload: &[u8]) -> Vec<u8> {
-    let request = Policy::read_only().approve(ENGINE, payload).unwrap();
+    let request = Policy::read_only()
+        .approve(Protocol::Uds, ENGINE, payload)
+        .unwrap();
     exchange(bus, &request, Expect::Module(0x7E8), Timing::default())
         .unwrap()
         .remove(0)
@@ -81,7 +83,7 @@ fn guard_enters_the_extended_session() {
     )
     .unwrap();
     let read = Policy::read_only()
-        .approve(ENGINE, &uds::read_did(CODING))
+        .approve(Protocol::Uds, ENGINE, &uds::read_did(CODING))
         .unwrap();
     let reply = guard.exchange(&read).unwrap();
     assert!(uds::decode_did(&reply.payload, CODING).is_ok());
@@ -105,7 +107,7 @@ fn guard_keeps_the_session_alive_with_tester_present() {
         guard.keep_alive().unwrap();
     }
     let read = Policy::read_only()
-        .approve(ENGINE, &uds::read_did(CODING))
+        .approve(Protocol::Uds, ENGINE, &uds::read_did(CODING))
         .unwrap();
     assert!(uds::decode_did(&guard.exchange(&read).unwrap().payload, CODING).is_ok());
     drop(guard);
@@ -152,7 +154,7 @@ fn guard_reenters_a_session_that_lapsed() {
     .unwrap();
     sleep(SIM_S3 + Duration::from_millis(100));
     let read = Policy::read_only()
-        .approve(ENGINE, &uds::read_did(CODING))
+        .approve(Protocol::Uds, ENGINE, &uds::read_did(CODING))
         .unwrap();
     assert!(uds::decode_did(&guard.exchange(&read).unwrap().payload, CODING).is_ok());
 
@@ -217,7 +219,11 @@ fn guard_refuses_requests_for_another_module() {
     )
     .unwrap();
     let other = Policy::read_only()
-        .approve(Target::Physical(0x7E1), &uds::read_did(0xF190))
+        .approve(
+            Protocol::Uds,
+            Target::Physical(0x7E1),
+            &uds::read_did(0xF190),
+        )
         .unwrap();
     assert_eq!(guard.exchange(&other), Err(SessionError::WrongTarget));
     drop(guard);
@@ -279,7 +285,9 @@ fn guard_refuses_session_changes_it_does_not_make() {
     )
     .unwrap();
     for payload in [[0x10, 0x01], [0x10, 0x03], [0x10, 0x81]] {
-        let request = Policy::read_only().approve(ENGINE, &payload).unwrap();
+        let request = Policy::read_only()
+            .approve(Protocol::Uds, ENGINE, &payload)
+            .unwrap();
         assert_eq!(guard.exchange(&request), Err(SessionError::SessionChange));
     }
     drop(guard);

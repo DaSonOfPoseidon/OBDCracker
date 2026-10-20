@@ -2,7 +2,7 @@
 
 use std::time::{Duration, Instant};
 
-use obdcracker_safety::{Approved, Policy, Target};
+use obdcracker_safety::{Approved, Policy, Protocol, Target};
 use obdcracker_transport::{Error, Expect, Mock, Response, Timing, Transport, exchange};
 
 const FAST: Timing = Timing {
@@ -12,7 +12,9 @@ const FAST: Timing = Timing {
 };
 
 fn approve(target: Target, payload: &[u8]) -> Approved {
-    Policy::read_only().approve(target, payload).unwrap()
+    Policy::read_only()
+        .approve(Protocol::Uds, target, payload)
+        .unwrap()
 }
 
 fn reply(source: u32, payload: &[u8]) -> Response {

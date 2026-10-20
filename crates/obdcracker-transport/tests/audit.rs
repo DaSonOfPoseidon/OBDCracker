@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use obdcracker_safety::Approved;
-use obdcracker_safety::{Policy, Target};
+use obdcracker_safety::{Policy, Protocol, Target};
 use obdcracker_transport::{Audited, Error, LinkEvent, Mock, Response, Transport, log_failure};
 
 fn temp_log(name: &str) -> PathBuf {
@@ -26,7 +26,7 @@ fn logs_requests_and_replies_with_the_link() {
     });
     let mut audited = Audited::open(&log, mock, "mock").unwrap();
     let rpm = Policy::read_only()
-        .approve(Target::ObdFunctional, &[0x01, 0x0C])
+        .approve(Protocol::Uds, Target::ObdFunctional, &[0x01, 0x0C])
         .unwrap();
     audited.send(&rpm).unwrap();
     audited.recv(Duration::from_millis(10)).unwrap();
@@ -50,7 +50,7 @@ fn logs_requests_and_replies_with_the_link() {
 fn appends_to_an_existing_log() {
     let log = temp_log("append");
     let vin = Policy::read_only()
-        .approve(Target::ObdFunctional, &[0x09, 0x02])
+        .approve(Protocol::Uds, Target::ObdFunctional, &[0x09, 0x02])
         .unwrap();
     for _ in 0..2 {
         Audited::open(&log, Mock::default(), "mock")
@@ -73,7 +73,7 @@ fn every_line_is_valid_json_whatever_the_link_name() {
         "",
     ];
     let vin = Policy::read_only()
-        .approve(Target::ObdFunctional, &[0x09, 0x02])
+        .approve(Protocol::Uds, Target::ObdFunctional, &[0x09, 0x02])
         .unwrap();
     for (i, link) in names.iter().enumerate() {
         let log = temp_log(&format!("escape-{i}"));
@@ -116,7 +116,7 @@ fn logs_adapter_errors_as_valid_json() {
     let error = Error::Adapter("the adapter echoed \"09 12\"\r\n\\ instead".to_string());
     let mut audited = Audited::open(&log, Failing(error.clone()), "mock").unwrap();
     let vin = Policy::read_only()
-        .approve(Target::Physical(0x7E0), &[0x09, 0x02])
+        .approve(Protocol::Uds, Target::Physical(0x7E0), &[0x09, 0x02])
         .unwrap();
     assert_eq!(audited.send(&vin), Err(error.clone()));
     assert_eq!(audited.recv(Duration::from_millis(10)).unwrap_err(), error);
@@ -217,7 +217,7 @@ fn logs_adapter_commands_and_unread_reply_lines() {
         };
         let mut audited = Audited::open(&log, chatty, "mock").unwrap();
         let rpm = Policy::read_only()
-            .approve(Target::Physical(0x7E0), &[0x01, 0x0C])
+            .approve(Protocol::Uds, Target::Physical(0x7E0), &[0x01, 0x0C])
             .unwrap();
         assert_eq!(audited.send(&rpm).is_err(), fail);
         let audit = std::fs::read_to_string(&log).unwrap();
@@ -331,7 +331,7 @@ fn a_session_settled_already_is_not_settled_again_when_dropped() {
     let mut audited = Audited::open(&log, FailsToSettle, "mock").unwrap();
     assert!(audited.settle().is_err());
     let rpm = Policy::read_only()
-        .approve(Target::Physical(0x7E0), &[0x01, 0x0C])
+        .approve(Protocol::Uds, Target::Physical(0x7E0), &[0x01, 0x0C])
         .unwrap();
     audited.send(&rpm).unwrap();
     drop(audited);

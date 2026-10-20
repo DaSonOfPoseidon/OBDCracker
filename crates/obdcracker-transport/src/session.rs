@@ -3,7 +3,7 @@ use std::time::{Duration, Instant};
 
 use obdcracker_core::response;
 use obdcracker_core::uds::{self, DiagnosticSession};
-use obdcracker_safety::{Approved, Policy, Rejection, Target};
+use obdcracker_safety::{Approved, Policy, Protocol, Rejection, Target};
 
 use crate::{Error, Expect, Response, Timing, Transport, exchange};
 
@@ -133,7 +133,7 @@ impl From<Error> for SessionError {
 /// use std::time::Duration;
 ///
 /// use obdcracker_core::uds::{self, DiagnosticSession};
-/// use obdcracker_safety::{Policy, Target};
+/// use obdcracker_safety::{Policy, Protocol, Target};
 /// use obdcracker_transport::{ExtendedSession, Mock, Response, S3, Timing};
 ///
 /// let mut adapter = Mock::default();
@@ -144,7 +144,7 @@ impl From<Error> for SessionError {
 /// let engine = Target::Physical(0x7E0);
 /// let mut session =
 ///     ExtendedSession::enter(&mut adapter, &policy, engine, Timing::default(), S3::default())?;
-/// let coding = policy.approve(engine, &uds::read_did(0x0600))?;
+/// let coding = policy.approve(Protocol::Uds, engine, &uds::read_did(0x0600))?;
 /// assert_eq!(session.exchange(&coding)?.payload, [0x62, 0x06, 0x00, 0x01]);
 /// session.keep_alive()?; // between requests: sends `3E 00` once 2 s have passed
 /// drop(session); // sends `10 01`
@@ -184,7 +184,7 @@ impl<'a, T: Transport + ?Sized> ExtendedSession<'a, T> {
     ) -> Result<Self, SessionError> {
         let approve = |payload: &[u8]| {
             policy
-                .approve(target, payload)
+                .approve(Protocol::Uds, target, payload)
                 .map_err(SessionError::Policy)
         };
         let enter = approve(&uds::session_control(DiagnosticSession::Extended))?;

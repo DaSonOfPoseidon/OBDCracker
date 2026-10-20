@@ -2,7 +2,7 @@
 //! its spare part number (UDS `22 F187`), and whatever answers, a refusal included, is there.
 
 use obdcracker_core::uds::{self, did};
-use obdcracker_safety::{ModuleIds, Policy, Rejection, Target};
+use obdcracker_safety::{ModuleIds, Policy, Protocol, Rejection, Target};
 
 use crate::fingerprint::{DidValue, FingerprintError, ReadError, ask, decode_did_value};
 use std::time::Duration;
@@ -77,6 +77,7 @@ pub fn discover<T: Transport + ?Sized>(
         .map(|candidate| {
             let request = policy
                 .approve(
+                    Protocol::Uds,
                     Target::Physical(candidate.request),
                     &uds::read_did(did::SPARE_PART_NUMBER),
                 )
