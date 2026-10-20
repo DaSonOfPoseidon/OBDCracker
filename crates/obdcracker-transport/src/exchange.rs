@@ -1,7 +1,7 @@
 use std::time::{Duration, Instant};
 
 use obdcracker_core::response::{self, Error as ReplyError};
-use obdcracker_safety::Approved;
+use obdcracker_safety::{Approved, Protocol};
 
 use crate::{Error, Response, Transport};
 
@@ -55,8 +55,8 @@ impl Default for Timing {
 /// (`7F <service> 78`), within P2 of the request. A module that sent response-pending has P2*
 /// from its latest one to answer. A module that has answered, or let its P2* run out, is done.
 /// Replies that break these rules are dropped, and so are replies from CAN IDs that `expect`
-/// doesn't accept and replies that don't answer this request (see [`response::answers`]), such
-/// as a late reply to an earlier one. (An [`crate::Audited`] transport still logs them all.)
+/// doesn't accept and replies that don't answer this request (see [`response::answers`], or
+/// [`response::kwp2000_answers`] for a KWP2000 request), such as a late reply to an earlier one. (An [`crate::Audited`] transport still logs them all.)
 ///
 /// - [`Expect::ObdEcus`] returns each ECU's answer, which may be none, once every ECU has
 ///   answered or run out of time.
@@ -105,11 +105,14 @@ pub fn exchange<T: Transport + ?Sized>(
         if !expect.accepts(reply.source) {
             continue;
         }
-        // After response-pending, even a suppressed request gets its positive reply.
-        let answers = if pending_until.iter().any(|&(s, _)| s == reply.source) {
-            response::answers_after_pending
-        } else {
-            response::answers
+        // After response-pending, even a suppressed UDS request gets its positive reply.
+        // KWP2000 has its own rules.
+        let answers = match request.protocol() {
+            Protocol::Kwp2000 => response::kwp2000_answers,
+            Protocol::Uds if pending_until.iter().any(|&(s, _)| s == reply.source) => {
+                response::answers_after_pending
+            }
+            Protocol::Uds => response::answers,
         };
         if !answers(asked, &reply.payload) {
             continue;

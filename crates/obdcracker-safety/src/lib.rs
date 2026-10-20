@@ -353,21 +353,20 @@ fn classify_uds(payload: &[u8]) -> Option<(Tier, Kind)> {
 fn classify_kwp2000(payload: &[u8]) -> Option<Tier> {
     let (&sid, data) = payload.split_first()?;
     let tier = match sid {
-        // StartDiagnosticSession: the standard session is a read; programming and development
-        // reprogram, and adjustment changes adaptations. Manufacturer sessions (0x89 and up) mean
-        // different things per make.
+        // StartDiagnosticSession: programming and development reprogram, and adjustment changes
+        // adaptations. No session is a read: what each value means is up to the manufacturer
+        // (ISO 14230-3 leaves 0x80..=0xFF to them), so a profile-specific one will need its own
+        // rule.
         0x10 if data.len() == 1 => match data[0] {
-            0x81 => Tier::Read,
             0x85 | 0x86 => Tier::Flash,
             0x87 => Tier::Coding,
             _ => return None,
         },
         // ClearDiagnosticInformation: a 2-byte DTC group
         0x14 if data.len() == 2 => Tier::ClearDtc,
-        // ReadStatusOfDiagnosticTroubleCodes: a 2-byte DTC group
-        0x17 if data.len() == 2 => Tier::Read,
-        // ReadDiagnosticTroubleCodesByStatus: a status byte, then a 2-byte DTC group
-        0x18 if data.len() == 3 => Tier::Read,
+        // ReadStatusOfDiagnosticTroubleCodes and ReadDiagnosticTroubleCodesByStatus: the status
+        // and DTC group parameters' widths are up to the manufacturer (ISO 14230-3)
+        0x17 | 0x18 if !data.is_empty() => Tier::Read,
         // ReadEcuIdentification (one identification option) and ReadDataByLocalIdentifier (one
         // local ID)
         0x1A | 0x21 if data.len() == 1 => Tier::Read,

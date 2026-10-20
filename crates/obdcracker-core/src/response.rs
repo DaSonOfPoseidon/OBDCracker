@@ -196,6 +196,30 @@ pub fn answers_after_pending(request: &[u8], reply: &[u8]) -> bool {
     matches(request, reply, true)
 }
 
+/// Whether `reply` answers the KWP2000 (ISO 14230-3) `request`. [`answers`] reads UDS: KWP2000
+/// has no suppress-positive-response bit, and some of its positive replies echo nothing, such as
+/// `7E` for `TesterPresent`.
+///
+/// A positive reply must have the request's service ID + 0x40 and echo the identification option
+/// (`ReadEcuIdentification`, 0x1A) or local ID (`ReadDataByLocalIdentifier`, 0x21) it asked
+/// for; other services are matched by service ID alone. A negative reply answers any request for
+/// its service, before or after response-pending.
+#[must_use]
+pub fn kwp2000_answers(request: &[u8], reply: &[u8]) -> bool {
+    let Some((&sid, asked)) = request.split_first() else {
+        return false;
+    };
+    match reply {
+        [NEGATIVE, refused, _] => *refused == sid,
+        [NEGATIVE, ..] => false,
+        [first, echo @ ..] if *first == sid.wrapping_add(POSITIVE_OFFSET) => match sid {
+            0x1A | 0x21 => echo.first().is_some_and(|got| asked.first() == Some(got)),
+            _ => true,
+        },
+        _ => false,
+    }
+}
+
 // `answers`, with `pending` saying whether the module sent response-pending for this request.
 fn matches(request: &[u8], reply: &[u8], pending: bool) -> bool {
     let Some((&sid, asked)) = request.split_first() else {

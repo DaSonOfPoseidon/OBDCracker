@@ -555,3 +555,36 @@ fn a_transport_that_stops_listening_after_pending_says_the_module_never_answered
     );
     assert_eq!(got, Err(Error::Timeout));
 }
+
+#[test]
+fn a_kwp2000_request_is_matched_by_kwp2000_rules() {
+    let kwp2000 = |payload: &[u8]| {
+        Policy::read_only()
+            .approve(Protocol::Kwp2000, Target::Physical(0x7E0), payload)
+            .unwrap()
+    };
+    // TesterPresent's positive reply echoes nothing in KWP2000; UDS's matcher would drop it.
+    let tester_present = kwp2000(&[0x3E, 0x01]);
+    let got = exchange(
+        &mut mock(&[reply(0x7E8, &[0x7E])]),
+        &tester_present,
+        Expect::Module(0x7E8),
+        FAST,
+    )
+    .unwrap();
+    assert_eq!(got, [reply(0x7E8, &[0x7E])]);
+    // A late answer to another identification option is dropped, and the right one taken.
+    let identification = kwp2000(&[0x1A, 0x9B]);
+    let got = exchange(
+        &mut mock(&[
+            reply(0x7E8, &[0x5A, 0x9A, 0x01]),
+            reply(0x7E8, &[0x7F, 0x1A, 0x78]),
+            reply(0x7E8, &[0x5A, 0x9B, 0x02]),
+        ]),
+        &identification,
+        Expect::Module(0x7E8),
+        FAST,
+    )
+    .unwrap();
+    assert_eq!(got, [reply(0x7E8, &[0x5A, 0x9B, 0x02])]);
+}

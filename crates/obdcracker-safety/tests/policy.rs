@@ -8,9 +8,38 @@ const ENGINE: Target = Target::Physical(0x7E0);
 // Kept separate from the crate's own tables, so a change to the allowlist has to change this too.
 const READ_SERVICES: [u8; 7] = [0x01, 0x03, 0x09, 0x10, 0x19, 0x22, 0x3E];
 const FLASH_SERVICES: [u8; 7] = [0x11, 0x31, 0x34, 0x35, 0x36, 0x37, 0x3D];
-// KWP2000 (ISO 14230-3): StartDiagnosticSession, ReadStatusOfDTC, ReadDTCByStatus,
-// ReadEcuIdentification, ReadDataByLocalIdentifier, TesterPresent.
-const KWP2000_READ_SERVICES: [u8; 6] = [0x10, 0x17, 0x18, 0x1A, 0x21, 0x3E];
+// KWP2000 (ISO 14230-3): ReadStatusOfDTC, ReadDTCByStatus, ReadEcuIdentification,
+// ReadDataByLocalIdentifier, TesterPresent.
+const KWP2000_READ_SERVICES: [u8; 5] = [0x17, 0x18, 0x1A, 0x21, 0x3E];
+// Every read each protocol approves, one example of each form, for the cross-protocol check.
+const UDS_READS: &[&[u8]] = &[
+    &[0x01, 0x0C],
+    &[0x01, 0x0C, 0x0D, 0x05, 0x0F, 0x10, 0x11],
+    &[0x03],
+    &[0x09, 0x02],
+    &[0x10, 0x01],
+    &[0x10, 0x03],
+    &[0x10, 0x81],
+    &[0x10, 0x83],
+    &[0x19, 0x02, 0xAF],
+    &[0x19, 0x04, 0x00, 0x16, 0xA0, 0xFF],
+    &[0x19, 0x0A],
+    &[0x22, 0xF1, 0x87],
+    &[0x22, 0xF1, 0x87, 0xF1, 0x89, 0xF1, 0x91],
+    &[0x3E, 0x00],
+    &[0x3E, 0x80],
+];
+const KWP2000_READS: &[&[u8]] = &[
+    &[0x17, 0xFF, 0x00],
+    &[0x17, 0xFF],
+    &[0x18, 0x02, 0xFF, 0x00],
+    &[0x18, 0x02],
+    &[0x1A, 0x9B],
+    &[0x21, 0x01],
+    &[0x3E],
+    &[0x3E, 0x01],
+    &[0x3E, 0x02],
+];
 // ECUReset, the routines by local ID and by address, RequestDownload/Upload, TransferData,
 // RequestTransferExit, WriteMemoryByAddress.
 const KWP2000_FLASH_SERVICES: [u8; 12] = [
@@ -101,13 +130,14 @@ fn locks_clear_dtc_and_coding_in_read_only() {
 #[test]
 fn approves_kwp2000_reads_on_a_physical_address() {
     for payload in [
-        &[0x1A, 0x9B][..],         // ReadEcuIdentification: VAG's identification
-        &[0x21, 0x01],             // ReadDataByLocalIdentifier
-        &[0x18, 0x02, 0xFF, 0x00], // ReadDTCByStatus: stored DTCs, all groups
-        &[0x17, 0xFF, 0x00],       // ReadStatusOfDTC
-        &[0x3E],                   // TesterPresent
-        &[0x3E, 0x01],             // TesterPresent, response required
-        &[0x10, 0x81],             // StartDiagnosticSession: standard session
+        &[0x1A, 0x9B][..],               // ReadEcuIdentification: VAG's identification
+        &[0x21, 0x01],                   // ReadDataByLocalIdentifier
+        &[0x18, 0x02, 0xFF, 0x00],       // ReadDTCByStatus: stored DTCs, all groups
+        &[0x18, 0x02, 0xFF, 0xFF, 0x00], // the widths are the manufacturer's
+        &[0x17, 0xFF, 0x00],             // ReadStatusOfDTC
+        &[0x17, 0xFF],
+        &[0x3E],       // TesterPresent
+        &[0x3E, 0x01], // TesterPresent, response required
     ] {
         assert_eq!(
             approve_kwp2000(ENGINE, payload),
@@ -130,6 +160,8 @@ fn kwp2000_parameters_are_read_unmasked() {
         (&[0x10, 0x85][..], Err(Rejection::Banned)), // programming
         (&[0x10, 0x86], Err(Rejection::Banned)),     // development
         (&[0x10, 0x87], Err(Rejection::Locked(Tier::Coding))), // adjustment
+        // What a session value means is up to the manufacturer, so none is a read.
+        (&[0x10, 0x81], Err(Rejection::NotAllowed)),
         (&[0x10, 0x01], Err(Rejection::NotAllowed)),
         (&[0x10, 0x02], Err(Rejection::NotAllowed)),
         (&[0x10, 0x03], Err(Rejection::NotAllowed)),
@@ -186,16 +218,41 @@ fn rejects_malformed_kwp2000_reads() {
         &[0x1A, 0x9B, 0x00], // trailing byte
         &[0x21],             // no local ID
         &[0x21, 0x01, 0x02],
-        &[0x18, 0x02, 0xFF], // half a group
-        &[0x17, 0xFF],
-        &[0x17, 0xFF, 0x00, 0x00],
+        &[0x18],       // no status or group
+        &[0x17],       // no group
         &[0x3E, 0x03], // unknown responseRequired
         &[0x3E, 0x01, 0x00],
         &[0x10], // no session
-        &[0x10, 0x81, 0x00],
+        &[0x10, 0x87, 0x00],
         &[0x14, 0xFF], // clear: half a group
     ] {
         assert!(approve_kwp2000(ENGINE, payload).is_err(), "{payload:02X?}");
+    }
+}
+
+#[test]
+fn every_read_in_one_protocol_is_at_most_a_read_in_the_other() {
+    // A module doesn't know which protocol the tester meant.
+    for (reads, from, to) in [
+        (UDS_READS, Protocol::Uds, Protocol::Kwp2000),
+        (KWP2000_READS, Protocol::Kwp2000, Protocol::Uds),
+    ] {
+        for payload in reads {
+            assert_eq!(
+                Policy::read_only()
+                    .approve(from, ENGINE, payload)
+                    .map(|a| a.tier()),
+                Ok(Tier::Read),
+                "{payload:02X?} as {from:?}"
+            );
+            let other = Policy::read_only()
+                .approve(to, ENGINE, payload)
+                .map(|a| a.tier());
+            assert!(
+                matches!(other, Ok(Tier::Read) | Err(Rejection::NotAllowed)),
+                "{payload:02X?} as {to:?}: {other:?}"
+            );
+        }
     }
 }
 
