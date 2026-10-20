@@ -1,6 +1,6 @@
 # Using the CLI
 
-Plug the adapter into the car and turn the ignition on. `vin`, `fingerprint`, `scan` and `sweep` send requests only
+Plug the adapter into the car and turn the ignition on. `vin`, `fingerprint`, `scan`, `sweep` and `dtc` send requests only
 through the [safety policy](safety.md), and with a real adapter they append to an audit log. `ports` and `adapter`
 send nothing to the car. `ports` writes no audit log; `adapter` writes one only if connecting to the adapter fails,
 recording what it sent the adapter and heard back.
@@ -18,7 +18,7 @@ On macOS use the `/dev/cu.*` port. Leaving a wireless adapter plugged in drains 
 connect, so the CLI warns about it, and the audit log records which link a session used. See
 [adapters](adapters.md) for what's supported.
 
-Two options work with `vin`, `fingerprint`, `scan` and `sweep` (not `ports` or `adapter`):
+Two options work with `vin`, `fingerprint`, `scan`, `sweep` and `dtc` (not `ports` or `adapter`):
 
 - `--dry-run` prints the frames the command would send and opens no adapter.
 - `--sim a7` runs it against a simulated A7.
@@ -100,3 +100,15 @@ not supported in active session"), says it's busy, or the adapter fails, and pri
 that can help. `--extended` sweeps in the extended session, entered and left as `scan --extended` does, and warns if
 the module may not have left it. A sweep that finishes with reads still unanswered notes that a late answer may yet
 arrive, so connect again before reading from that module again.
+
+## `dtc`
+
+```sh
+obdcracker --serial <PORT> --profile a7 dtc --module gateway --code 0016A0  # one DTC's stored detail
+```
+
+Reads one DTC from one profile module: every snapshot record (`19 04 <DTC> FF`), what the module stored when the fault
+happened, then every extended data record (`19 06 <DTC> FF`), such as how often it happened. The code is the six hex
+digits `scan` lists. Records print as hex, each a record number and its data: their lengths depend on the module's data
+identifiers, so they aren't split up. A refusal of one read doesn't stop the other. If the snapshot read goes
+unanswered, the extended data isn't asked, because a late refusal doesn't say which read it answers.

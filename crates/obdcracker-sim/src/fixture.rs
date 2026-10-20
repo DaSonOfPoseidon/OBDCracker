@@ -54,8 +54,8 @@ struct RawFixture {
 }
 
 // The ReadDTCInformation reports the sim implements: count by status mask, DTCs by status mask,
-// and supported DTCs.
-const DTC_REPORTS: [u8; 3] = [0x01, 0x02, 0x0A];
+// one DTC's snapshots and extended data (with no records), and supported DTCs.
+const DTC_REPORTS: [u8; 5] = [0x01, 0x02, 0x04, 0x06, 0x0A];
 
 fn every_status_bit() -> u8 {
     0xFF

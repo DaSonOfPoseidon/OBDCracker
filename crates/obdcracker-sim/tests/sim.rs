@@ -454,12 +454,36 @@ fn a_module_answers_only_the_dtc_reports_it_supports() {
 }
 
 #[test]
+fn a_dtcs_detail_is_its_status_with_no_records() {
+    // The fixture holds no snapshot or extended data, so a DTC in the table has none, and one
+    // that isn't is out of range (ISO 14229-1).
+    let fixture = DTC_REPORTS.replace("dtc_reports = [0x02]", "dtc_reports = [0x02, 0x04, 0x06]");
+    let mut bus = SimBus::new(&Profile::builtin("a7").unwrap(), &fixture).unwrap();
+    let dtc = uds::UdsDtc::new(0x02_9900);
+    let reply = ask_one(&mut bus, ENGINE, &uds::dtc_snapshots(dtc, 0xFF));
+    let data = uds::decode_dtc_snapshots(&reply, dtc, 0xFF).unwrap();
+    assert_eq!((data.status, data.records), (DtcStatus(0x08), &[][..]));
+    let reply = ask_one(&mut bus, ENGINE, &uds::dtc_extended_data(dtc, 0xFF));
+    let data = uds::decode_dtc_extended_data(&reply, dtc, 0xFF).unwrap();
+    assert_eq!((data.status, data.records), (DtcStatus(0x08), &[][..]));
+    let missing = uds::UdsDtc::new(0x00_16A0);
+    let reply = ask_one(&mut bus, ENGINE, &uds::dtc_snapshots(missing, 0xFF));
+    assert_eq!(nrc(&reply, 0x19), Nrc::RequestOutOfRange);
+    let reply = ask_one(&mut bus, ENGINE, &[0x19, 0x04, 0x02, 0x99, 0x00]);
+    assert_eq!(nrc(&reply, 0x19), Nrc::IncorrectMessageLength);
+    // A module that doesn't list the reports refuses them, as the A7's do.
+    let mut bus = a7();
+    let reply = ask_one(&mut bus, GATEWAY, &uds::dtc_snapshots(missing, 0xFF));
+    assert_eq!(nrc(&reply, 0x19), Nrc::SubFunctionNotSupported);
+}
+
+#[test]
 fn dtc_report_settings_are_checked() {
     let a7 = Profile::builtin("a7").unwrap();
     let engine = "[[ecu]]\nmodule = \"engine\"\n";
     for bad in [
         // Not a report the sim implements, or listed twice.
-        "dtc_reports = [0x04]\n",
+        "dtc_reports = [0x03]\n",
         "dtc_reports = [0x02, 0x02]\n",
         // A module that reports no DTCs at all doesn't support the service; leave it out.
         "dtc_reports = []\n",

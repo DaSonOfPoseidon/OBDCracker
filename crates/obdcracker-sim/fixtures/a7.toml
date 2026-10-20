@@ -21,9 +21,9 @@
 # Differences from the car, because the sim can't express them yet:
 # - The engine also lists mode 09 PID 0B in its PID 00 bitmap; the sim builds that bitmap from the
 #   PIDs it has, so 0B is missing.
-# - Whether a module answers ReadDTCInformation 0x0A (supported DTCs) is untested; only 0x02 is
-#   listed, plus 0x01 for the one module that answered it (the sensor cluster). The others refused
-#   0x01 (NRC 0x12).
+# - Whether a module answers ReadDTCInformation 0x0A (supported DTCs) or 0x04/0x06 (a DTC's
+#   snapshots and extended data) is untested; only 0x02 is listed, plus 0x01 for the one module
+#   that answered it (the sensor cluster). The others refused 0x01 (NRC 0x12).
 # - The head-up display answers `10 03` with P2* 2000 ms (`50 03 00 32 00 C8`, #86); the sim
 #   answers every module with the standard 5000 ms (`00 32 01 F4`).
 #

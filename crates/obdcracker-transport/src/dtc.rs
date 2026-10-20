@@ -1,0 +1,98 @@
+//! One DTC's detail from one module: the snapshot records (UDS `19 04`), what the module stored
+//! when the fault happened, and the extended data records (`19 06`), such as how often it
+//! happened. Reads only.
+
+use obdcracker_core::uds::{self, DtcStatus, UdsDtc};
+use obdcracker_safety::{Policy, Protocol, Target};
+
+use crate::fingerprint::{FingerprintError, ReadError, UdsModule, ask};
+use crate::{Timing, Transport};
+
+// The record number that asks for every record.
+const ALL_RECORDS: u8 = 0xFF;
+
+/// A DTC's snapshot or extended data, as one module sent it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecordData {
+    /// The DTC's status.
+    pub status: DtcStatus,
+    /// The records, each a record number and its data, as the module sent them. Their lengths
+    /// depend on the module's data identifiers, so they aren't split. Empty if it stored none.
+    pub records: Vec<u8>,
+}
+
+impl From<uds::DtcData<'_>> for RecordData {
+    fn from(data: uds::DtcData<'_>) -> Self {
+        Self {
+            status: data.status,
+            records: data.records.to_vec(),
+        }
+    }
+}
+
+/// What [`read_dtc_detail`] found.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DtcDetail {
+    /// Every snapshot record (`19 04 <DTC> FF`).
+    pub snapshots: Result<RecordData, ReadError>,
+    /// Every extended data record (`19 06 <DTC> FF`). `None` if it wasn't asked, because the
+    /// snapshot read went unanswered: a refusal doesn't name its DTC, so that read's late
+    /// refusal could have passed for this one's answer.
+    pub extended_data: Option<Result<RecordData, ReadError>>,
+    /// A read went unanswered, so its reply may still arrive as the answer to the connection's
+    /// next request.
+    pub out_of_step: bool,
+}
+
+/// Reads `dtc`'s snapshot records, then its extended data records, from `module`. Both requests
+/// are approved before anything is sent.
+///
+/// # Errors
+///
+/// [`FingerprintError::Rejected`] if the policy refuses either request (nothing is sent), or
+/// [`FingerprintError::Transport`] if the adapter fails.
+pub fn read_dtc_detail<T: Transport + ?Sized>(
+    transport: &mut T,
+    policy: &Policy,
+    module: &UdsModule,
+    dtc: UdsDtc,
+    timing: Timing,
+) -> Result<DtcDetail, FingerprintError> {
+    let target = Target::Physical(module.request_id);
+    let approve = |payload: &[u8]| {
+        policy
+            .approve(Protocol::Uds, target, payload)
+            .map_err(FingerprintError::Rejected)
+    };
+    let snapshot_request = approve(&uds::dtc_snapshots(dtc, ALL_RECORDS))?;
+    let extended_request = approve(&uds::dtc_extended_data(dtc, ALL_RECORDS))?;
+    let unanswered = |value: &Result<RecordData, ReadError>| {
+        matches!(value, Err(ReadError::NoReply | ReadError::StillPending))
+    };
+    let snapshots = ask(
+        transport,
+        &snapshot_request,
+        module.response_id,
+        timing,
+        |reply| uds::decode_dtc_snapshots(reply, dtc, ALL_RECORDS).map(RecordData::from),
+    )?;
+    if unanswered(&snapshots) {
+        return Ok(DtcDetail {
+            snapshots,
+            extended_data: None,
+            out_of_step: true,
+        });
+    }
+    let extended_data = ask(
+        transport,
+        &extended_request,
+        module.response_id,
+        timing,
+        |reply| uds::decode_dtc_extended_data(reply, dtc, ALL_RECORDS).map(RecordData::from),
+    )?;
+    Ok(DtcDetail {
+        snapshots,
+        out_of_step: unanswered(&extended_data),
+        extended_data: Some(extended_data),
+    })
+}

@@ -139,10 +139,14 @@ mod read_dtc_information {
     use obdcracker_core::obd::Dtc;
     use obdcracker_core::response::Error;
     use obdcracker_core::uds::{
-        DtcCount, DtcFormat, DtcRecord, DtcStatus, J2012Dtc, UdsDtc, decode_dtc_count,
-        decode_dtcs_by_status_mask, decode_supported_dtcs, dtc_count_by_status_mask,
+        DtcCount, DtcData, DtcFormat, DtcRecord, DtcStatus, J2012Dtc, UdsDtc, decode_dtc_count,
+        decode_dtc_extended_data, decode_dtc_snapshots, decode_dtcs_by_status_mask,
+        decode_supported_dtcs, dtc_count_by_status_mask, dtc_extended_data, dtc_snapshots,
         dtcs_by_status_mask, supported_dtcs,
     };
+
+    // The A7 gateway's 0016A0, from session 5 (#92).
+    const GATEWAY_DTC: u32 = 0x00_16_A0;
 
     #[test]
     fn a_status_shows_its_flags_in_bit_order() {
@@ -164,6 +168,97 @@ mod read_dtc_information {
         assert_eq!(dtc_count_by_status_mask(0xFF), [0x19, 0x01, 0xFF]);
         assert_eq!(dtcs_by_status_mask(0x08), [0x19, 0x02, 0x08]);
         assert_eq!(supported_dtcs(), [0x19, 0x0A]);
+        let dtc = UdsDtc::new(GATEWAY_DTC);
+        assert_eq!(
+            dtc_snapshots(dtc, 0xFF),
+            [0x19, 0x04, 0x00, 0x16, 0xA0, 0xFF]
+        );
+        assert_eq!(
+            dtc_extended_data(dtc, 0x01),
+            [0x19, 0x06, 0x00, 0x16, 0xA0, 0x01]
+        );
+    }
+
+    #[test]
+    fn decodes_a_dtcs_snapshots_and_extended_data_as_raw_records() {
+        let dtc = UdsDtc::new(GATEWAY_DTC);
+        // Record 01, two identifiers: their lengths aren't known, so the records stay raw.
+        let snapshots = [
+            0x59, 0x04, 0x00, 0x16, 0xA0, 0x01, 0x01, 0x02, 0x02, 0x00, 0x12, 0x02, 0x03, 0x34,
+        ];
+        assert_eq!(
+            decode_dtc_snapshots(&snapshots, dtc, 0xFF),
+            Ok(DtcData {
+                status: DtcStatus(0x01),
+                records: &[0x01, 0x02, 0x02, 0x00, 0x12, 0x02, 0x03, 0x34],
+            })
+        );
+        assert_eq!(
+            decode_dtc_snapshots(&snapshots, dtc, 0x01).map(|data| data.records.len()),
+            Ok(8)
+        );
+        let extended = [0x59, 0x06, 0x00, 0x16, 0xA0, 0x01, 0x01, 0x05];
+        assert_eq!(
+            decode_dtc_extended_data(&extended, dtc, 0xFF),
+            Ok(DtcData {
+                status: DtcStatus(0x01),
+                records: &[0x01, 0x05],
+            })
+        );
+        // No records stored: just the DTC and its status.
+        assert_eq!(
+            decode_dtc_snapshots(&[0x59, 0x04, 0x00, 0x16, 0xA0, 0x01], dtc, 0xFF),
+            Ok(DtcData {
+                status: DtcStatus(0x01),
+                records: &[],
+            })
+        );
+    }
+
+    #[test]
+    fn a_dtc_detail_reply_must_echo_the_dtc_and_record_asked_for() {
+        let dtc = UdsDtc::new(GATEWAY_DTC);
+        for (reply, record, error) in [
+            // Another DTC's answer, such as a late one.
+            (
+                &[0x59, 0x04, 0x00, 0x16, 0xA1, 0x01][..],
+                0xFF,
+                Error::Malformed,
+            ),
+            // Another subfunction: the extended data answers no snapshot request.
+            (
+                &[0x59, 0x06, 0x00, 0x16, 0xA0, 0x01],
+                0xFF,
+                Error::Malformed,
+            ),
+            // Another record than the one asked for.
+            (
+                &[0x59, 0x04, 0x00, 0x16, 0xA0, 0x01, 0x02, 0x00],
+                0x01,
+                Error::Malformed,
+            ),
+            // Cut short before the status.
+            (&[0x59, 0x04, 0x00, 0x16, 0xA0], 0xFF, Error::TooShort),
+            (&[0x59, 0x04, 0x00], 0xFF, Error::TooShort),
+            (&[0x59], 0xFF, Error::TooShort),
+        ] {
+            assert_eq!(
+                decode_dtc_snapshots(reply, dtc, record),
+                Err(error),
+                "{reply:02X?}"
+            );
+        }
+        // 0xFE asks for every OBD extended data record (ISO 14229-1), so any record number may
+        // come first.
+        assert_eq!(
+            decode_dtc_extended_data(&[0x59, 0x06, 0x00, 0x16, 0xA0, 0x01, 0x90, 0x07], dtc, 0xFE)
+                .map(|data| data.records),
+            Ok(&[0x90, 0x07][..])
+        );
+        assert_eq!(
+            decode_dtc_extended_data(&[0x59, 0x06, 0x00, 0x16, 0xA0, 0x01, 0x02, 0x07], dtc, 0x01),
+            Err(Error::Malformed)
+        );
     }
 
     #[test]

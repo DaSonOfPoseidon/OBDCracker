@@ -200,6 +200,9 @@ impl Ecu {
             return one(negative(0x19, Nrc::IncorrectMessageLength));
         };
         let sub = raw & !SUPPRESS_POSITIVE;
+        if matches!(sub, 0x04 | 0x06) {
+            return self.dtc_detail(raw, args);
+        }
         let mask = match (sub, args) {
             (0x01 | 0x02, &[mask]) => mask,
             (0x0A, []) => 0xFF,
@@ -233,6 +236,30 @@ impl Ecu {
             }
         }
         replies.push(reply);
+        replies
+    }
+
+    // A DTC's snapshots (0x04) or extended data (0x06). The fixture holds no records, so a DTC
+    // in its table is answered with its status and none; any other is out of range.
+    fn dtc_detail(&self, raw: u8, args: &[u8]) -> Vec<Vec<u8>> {
+        let sub = raw & !SUPPRESS_POSITIVE;
+        // ISO 14229-1 checks the subfunction is supported before the message's full length.
+        if !self.dtc.reports.contains(&sub) {
+            return one(negative(0x19, Nrc::SubFunctionNotSupported));
+        }
+        let &[high, mid, low, _record] = args else {
+            return one(negative(0x19, Nrc::IncorrectMessageLength));
+        };
+        let code = u32::from_be_bytes([0, high, mid, low]);
+        let Some(&(_, status)) = self.dtc.dtcs.iter().find(|&&(dtc, _)| dtc == code) else {
+            return one(negative(0x19, Nrc::RequestOutOfRange));
+        };
+        let mut replies = vec![negative(0x19, Nrc::ResponsePending); usize::from(self.dtc.pending)];
+        // ISO 14229-1: after response-pending the positive reply is sent even with the bit set.
+        if raw & SUPPRESS_POSITIVE != 0 && self.dtc.pending == 0 {
+            return Vec::new();
+        }
+        replies.push(vec![0x59, sub, high, mid, low, status]);
         replies
     }
 

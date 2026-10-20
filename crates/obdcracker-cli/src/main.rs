@@ -8,11 +8,12 @@ use clap::builder::PossibleValuesParser;
 use clap::{Parser, Subcommand};
 use obdcracker_core::obd;
 use obdcracker_core::response::{Error as ReplyError, Nrc};
-use obdcracker_core::uds::DiagnosticSession;
+use obdcracker_core::uds::{DiagnosticSession, UdsDtc};
 use obdcracker_profile::{Decode, DidSession, Profile, Protocol};
 use obdcracker_safety::{ModuleIds, Policy, Target};
 use obdcracker_sim::SimBus;
 use obdcracker_transport::discover;
+use obdcracker_transport::dtc::{self, RecordData};
 use obdcracker_transport::elm::Elm;
 use obdcracker_transport::fingerprint::{self, DidValue, Fingerprint, ReadError, UdsModule};
 use obdcracker_transport::link::{Link, SerialLink, TcpLink};
@@ -113,6 +114,17 @@ enum Command {
         /// keep it there with a tester-present request (0x3E 00), and switch it back (0x10 01)
         #[arg(long)]
         extended: bool,
+    },
+    /// Read one DTC's snapshot records and extended data records from a module (UDS 0x19 04
+    /// and 06, every record). Reads only. Needs a profile (--profile or --sim) that lists the
+    /// module
+    Dtc {
+        /// The module's name in the profile, such as "gateway"
+        #[arg(long)]
+        module: String,
+        /// The DTC, as six hex digits, as scan lists it, such as 0016A0
+        #[arg(long, value_parser = parse_dtc)]
+        code: UdsDtc,
     },
     /// List this computer's serial ports
     Ports,
@@ -253,6 +265,9 @@ fn run<T: Transport>(cli: &Cli, transport: T, link: &str, timing: Timing) -> Exi
     {
         return run_sweep(cli, &mut transport, timing, module, *range, *extended);
     }
+    if let Command::Dtc { module, code } = &cli.command {
+        return run_dtc(cli, &mut transport, timing, module, *code);
+    }
     let (target, payload, expect) = match cli.command {
         Command::Vin => (
             Target::ObdFunctional,
@@ -264,7 +279,8 @@ fn run<T: Transport>(cli: &Cli, transport: T, link: &str, timing: Timing) -> Exi
         | Command::Adapter
         | Command::Fingerprint
         | Command::Scan { .. }
-        | Command::Sweep { .. } => {
+        | Command::Sweep { .. }
+        | Command::Dtc { .. } => {
             unreachable!()
         }
     };
@@ -423,6 +439,107 @@ fn parse_did_range(text: &str) -> Result<(u16, u16), String> {
     Ok((first, last))
 }
 
+// The plain UDS module `name` from the profile, and the policy narrowed to it, for `command`.
+fn profile_module(cli: &Cli, name: &str, command: &str) -> Result<(UdsModule, Policy), String> {
+    let Some(profile_name) = cli.profile.as_ref().or(cli.sim.as_ref()) else {
+        return Err(format!(
+            "{command} needs a profile that lists the module (--profile or --sim)"
+        ));
+    };
+    let profile =
+        Profile::builtin(profile_name).map_err(|e| format!("profile {profile_name}: {e}"))?;
+    let module = profile
+        .module(name)
+        .ok_or_else(|| format!("profile {profile_name} has no module named {name:?}"))?;
+    if module.protocol != Protocol::Uds || module.extended_address.is_some() {
+        return Err(format!("{name} isn't plain UDS, which {command} needs"));
+    }
+    let module = UdsModule {
+        name: module.name.clone(),
+        request_id: module.request_id,
+        response_id: module.response_id,
+    };
+    Ok((module, policy(cli)?))
+}
+
+// Six hex digits.
+fn parse_dtc(text: &str) -> Result<UdsDtc, String> {
+    // Only hex digits: from_str_radix also takes a leading `+`.
+    if text.len() == 6 && text.bytes().all(|b| b.is_ascii_hexdigit()) {
+        u32::from_str_radix(text, 16)
+            .map(UdsDtc::new)
+            .map_err(|e| e.to_string())
+    } else {
+        Err(format!(
+            "{text:?} isn't a DTC: give six hex digits, such as 0016A0"
+        ))
+    }
+}
+
+// Reads one DTC's snapshots and extended data from one profile module.
+fn run_dtc<T: Transport>(
+    cli: &Cli,
+    transport: &mut T,
+    timing: Timing,
+    name: &str,
+    code: UdsDtc,
+) -> ExitCode {
+    let (module, policy) = match profile_module(cli, name, "dtc") {
+        Ok(found) => found,
+        Err(e) => {
+            eprintln!("{e}");
+            return ExitCode::from(2);
+        }
+    };
+    let found = match dtc::read_dtc_detail(transport, &policy, &module, code, timing) {
+        Ok(found) => found,
+        Err(e) => {
+            eprintln!("{e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    if cli.dry_run {
+        println!("dry run: nothing was sent");
+        // Nothing answers a dry run, so the second read was left out.
+        println!(
+            "a live read also sends 19 06 {code} FF once 19 04 {code} FF is answered",
+            code = hex(&code.code().to_be_bytes()[1..])
+        );
+        return ExitCode::SUCCESS;
+    }
+    let line = |what: &str, value: &Result<RecordData, ReadError>| {
+        let (id, name) = (module.response_id, &module.name);
+        match value {
+            Ok(data) if data.records.is_empty() => println!(
+                "{id:03X} {name} DTC {code} {what}: none (status {:02X}, {})",
+                data.status.0, data.status
+            ),
+            Ok(data) => println!(
+                "{id:03X} {name} DTC {code} {what}: [{}] (status {:02X}, {})",
+                hex(&data.records),
+                data.status.0,
+                data.status
+            ),
+            Err(e) => println!("{id:03X} {name} DTC {code} {what} ({e})"),
+        }
+    };
+    line("snapshots", &found.snapshots);
+    match &found.extended_data {
+        Some(value) => line("extended data", value),
+        None => println!(
+            "{:03X} {} DTC {code} extended data not read: the snapshot read went unanswered",
+            module.response_id, module.name
+        ),
+    }
+    if found.out_of_step {
+        eprintln!(
+            "note: a read went unanswered, so a late answer may still arrive; connect again              before reading from {} again",
+            module.name
+        );
+    }
+    ExitCode::SUCCESS
+}
+
 // Reads each DID in the range from one profile module and lists those it has.
 fn run_sweep<T: Transport>(
     cli: &Cli,
@@ -432,33 +549,12 @@ fn run_sweep<T: Transport>(
     (first, last): (u16, u16),
     extended: bool,
 ) -> ExitCode {
-    let usage = |e: String| {
-        eprintln!("{e}");
-        ExitCode::from(2)
-    };
-    let Some(profile_name) = cli.profile.as_ref().or(cli.sim.as_ref()) else {
-        return usage("sweep needs a profile that lists the module (--profile or --sim)".into());
-    };
-    let profile = match Profile::builtin(profile_name) {
-        Ok(profile) => profile,
-        Err(e) => return usage(format!("profile {profile_name}: {e}")),
-    };
-    let Some(module) = profile.module(name) else {
-        return usage(format!(
-            "profile {profile_name} has no module named {name:?}"
-        ));
-    };
-    if module.protocol != Protocol::Uds || module.extended_address.is_some() {
-        return usage(format!("{name} isn't plain UDS, which sweep needs"));
-    }
-    let module = UdsModule {
-        name: module.name.clone(),
-        request_id: module.request_id,
-        response_id: module.response_id,
-    };
-    let policy = match policy(cli) {
-        Ok(policy) => policy,
-        Err(e) => return usage(e),
+    let (module, policy) = match profile_module(cli, name, "sweep") {
+        Ok(found) => found,
+        Err(e) => {
+            eprintln!("{e}");
+            return ExitCode::from(2);
+        }
     };
     let count = u32::from(last) - u32::from(first) + 1;
     // About what an ELM adapter takes per refused read.
