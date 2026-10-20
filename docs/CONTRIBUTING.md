@@ -104,10 +104,10 @@ third unless the maintainer asks for one, which they do when they have a P0 or P
 
 A PR is ready for approval when Codex has reviewed its head commit, every Codex thread is resolved, CI is green on
 the head commit, and `scripts/pr-gate.sh` passes. Branch protection enforces the Codex part with the
-`codex-review` status (`scripts/codex-status.sh`, run by `.github/workflows/codex-review.yml`): it passes only
-once Codex has completed a review of the head commit, finishing after that commit was pushed, and no Codex
-thread is unresolved. Resolving a thread doesn't trigger workflows, so after resolving, re-run the check with
-`gh workflow run codex-review.yml -f pr=<pr>`. Check it locally with `DRY_RUN=1 scripts/codex-status.sh <pr>`.
+`codex-review` status (the `DaSonOfPoseidon/claude-ship@v1` action, run by `.github/workflows/codex-review.yml`):
+it passes only once Codex has completed a review of the head commit, finishing after that commit was pushed, and
+no Codex thread is unresolved. Resolving a thread doesn't trigger workflows, so after resolving, re-run the check
+with `gh workflow run codex-review.yml -f pr=<pr>`, then see the result with `gh pr checks <pr>`.
 
 ## Commits
 

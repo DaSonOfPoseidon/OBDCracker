@@ -1,11 +1,15 @@
 name: Codex review
 
-# Sets the `codex-review` status that branch protection requires before merging (see
-# scripts/codex-status.sh). It re-checks when the PR gets a new commit, when Codex posts a
-# review, and when Codex edits its summary comment, which is how it reports a finished review.
-# GitHub runs issue_comment workflows from the default branch, so that trigger uses main's copy.
+# Sets the `codex-review` status that branch protection requires before merging, with the
+# claude-ship action (its scripts/codex-status.sh). It re-checks when the PR gets a new commit,
+# when Codex posts a review, and when Codex edits its summary comment, which is how it reports a
+# finished review. GitHub runs issue_comment workflows from the default branch.
 # Resolving a thread doesn't trigger workflows, so after resolving run it by hand:
 #   gh workflow run codex-review.yml -f pr=<number>
+# A repo's first PR (the one that adds this file) can't rely on the status: Codex reports a clean
+# review by editing a comment, which runs main's workflow, and main doesn't have it yet. Require
+# `codex-review` in branch protection only after that PR merges, or it can't merge without an
+# admin override.
 on:
   pull_request:
     types: [opened, synchronize, reopened]
@@ -20,6 +24,7 @@ on:
         required: true
 
 permissions:
+  # codex-status.sh reads the branch's push activity, which needs contents read.
   contents: read
   issues: read
   pull-requests: read
@@ -42,19 +47,9 @@ jobs:
       cancel-in-progress: true
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      # claude-ship's v1 tag decides, not this repo's files. v1 moves (owner only) when claude-ship
+      # releases, which changes this check here without a PR in this repo. (A PR that changes this ref
+      # needs write access; fork PRs get a read-only token, which can't set statuses.)
+      - uses: DaSonOfPoseidon/claude-ship@v1
         with:
-          # main's copy of the script decides, so a PR's own changes to it don't count. (A PR
-          # that edits this workflow needs write access; fork PRs get a read-only token, which
-          # can't set statuses.)
-          ref: ${{ github.event.repository.default_branch }}
-      - run: |
-          if [ ! -x scripts/codex-status.sh ]; then
-            echo "scripts/codex-status.sh isn't on the default branch yet; skipping"
-            exit 0
-          fi
-          scripts/codex-status.sh "$PR"
-        env:
-          GH_TOKEN: ${{ github.token }}
-          REPO: ${{ github.repository }}
-          PR: ${{ github.event.pull_request.number || github.event.issue.number || inputs.pr }}
+          pr: ${{ github.event.pull_request.number || github.event.issue.number || inputs.pr }}
