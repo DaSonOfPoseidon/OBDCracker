@@ -62,6 +62,14 @@ const TIMING: Timing = Timing {
     max_pending: 20,
 };
 
+// A reply that couldn't be decoded, kept as it came.
+fn undecodable(error: ReplyError, reply: &[u8]) -> ReadError {
+    ReadError::Undecodable {
+        error,
+        reply: reply.to_vec(),
+    }
+}
+
 fn calid(text: &str) -> Vec<u8> {
     let mut bytes = text.as_bytes().to_vec();
     bytes.resize(16, 0);
@@ -167,12 +175,11 @@ fn a_silent_module_and_a_silent_car_lose_only_their_values() {
 #[test]
 fn a_bad_reply_is_reported_not_trusted() {
     // A CALID with a control character, and DIDs echoed with no data
-    let mut car = Car::new(|id, request| match (id, request) {
-        (0x7DF, [0x09, 0x04]) => {
-            let mut payload = vec![0x49, 0x04, 0x01];
-            payload.extend(calid("4G0907401\x1B  0010"));
-            vec![reply(0x7E8, &payload)]
-        }
+    let mut calids = vec![0x49, 0x04, 0x01];
+    calids.extend(calid("4G0907401\x1B  0010"));
+    let sent = calids.clone();
+    let mut car = Car::new(move |id, request| match (id, request) {
+        (0x7DF, [0x09, 0x04]) => vec![reply(0x7E8, &sent)],
         (0x7E0, [0x22, high, low]) => vec![reply(0x7E8, &[0x62, *high, *low])],
         _ => Vec::new(),
     });
@@ -183,16 +190,15 @@ fn a_bad_reply_is_reported_not_trusted() {
         TIMING,
     )
     .unwrap();
+    // Each with the bytes that couldn't be decoded.
     assert_eq!(
         got.ecus[0].calids,
-        Err(ReadError::Reply(ReplyError::Malformed))
+        Err(undecodable(ReplyError::Malformed, &calids))
     );
-    assert!(
-        got.modules[0]
-            .dids
-            .iter()
-            .all(|(_, v)| *v == Err(ReadError::Reply(ReplyError::TooShort)))
-    );
+    assert!(got.modules[0].dids.iter().all(|(did, v)| {
+        let [high, low] = did.to_be_bytes();
+        *v == Err(undecodable(ReplyError::TooShort, &[0x62, high, low]))
+    }));
 }
 
 #[test]
@@ -283,20 +289,19 @@ fn cvns_that_dont_pair_with_the_calids_are_an_error() {
 #[test]
 fn cvns_are_checked_against_the_declared_count_even_when_a_calid_is_bad() {
     // Two well-framed calibration IDs, one with a control character, and only one CVN.
-    let mut car = Car::new(|id, request| match (id, request) {
-        (0x7DF, [0x09, 0x04]) => {
-            let mut payload = vec![0x49, 0x04, 0x02];
-            payload.extend(calid("4G0907401A  0010"));
-            payload.extend(calid("4G0907401\x1B  0020"));
-            vec![reply(0x7E8, &payload)]
-        }
+    let mut calids = vec![0x49, 0x04, 0x02];
+    calids.extend(calid("4G0907401A  0010"));
+    calids.extend(calid("4G0907401\x1B  0020"));
+    let sent = calids.clone();
+    let mut car = Car::new(move |id, request| match (id, request) {
+        (0x7DF, [0x09, 0x04]) => vec![reply(0x7E8, &sent)],
         (0x7DF, [0x09, 0x06]) => vec![reply(0x7E8, &[0x49, 0x06, 0x01, 0x1A, 0x2B, 0x3C, 0x4D])],
         _ => Vec::new(),
     });
     let got = fingerprint(&mut car, &Policy::read_only(), &[], TIMING).unwrap();
     assert_eq!(
         got.ecus[0].calids,
-        Err(ReadError::Reply(ReplyError::Malformed))
+        Err(undecodable(ReplyError::Malformed, &calids))
     );
     assert_eq!(
         got.ecus[0].cvns,

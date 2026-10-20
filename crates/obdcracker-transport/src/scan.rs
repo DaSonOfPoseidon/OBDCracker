@@ -9,7 +9,8 @@ use obdcracker_core::uds::{self, DiagnosticSession, DtcCount, DtcRecord, did};
 use obdcracker_safety::{Approved, Policy, Target};
 
 use crate::fingerprint::{
-    DidValue, FingerprintError, ReadError, UdsModule, ask, broadcast, decode_did_value, from,
+    DidValue, FingerprintError, ReadError, UdsModule, ask, broadcast, decode_did_value, decoded,
+    from,
 };
 use crate::{Error, ExtendedSession, S3, SessionError, Timing, Transport};
 
@@ -122,8 +123,12 @@ pub struct ObdEcu {
     pub source: u32,
     /// Each mode 01 PID the ECU says it supports, other than the bitmap PIDs (00, 20, …), and
     /// its value. An error if its first bitmap (PID 00) was missing or couldn't be decoded. A
-    /// later bitmap that's missing or garbled ends its list there.
+    /// later bitmap that's missing or garbled ends its list there ([`ObdEcu::pids_cut_short`]).
     pub pids: Result<Vec<PidReading>, ReadError>,
+    /// Where its PID list was cut short, if it was: the later bitmap PID (20, 40, …) it said it
+    /// supports but that was missing or couldn't be decoded, and why. No PID from that page on
+    /// was read.
+    pub pids_cut_short: Option<(u8, ReadError)>,
     /// The mode 09 PIDs it supports (mode 09 PID 00).
     pub supported_info: Result<Vec<u8>, ReadError>,
     /// Its name (mode 09 PID 0A), as `acronym-name`, such as `ECM-EngineControl`.
@@ -233,23 +238,26 @@ pub fn scan_with<T: Transport + ?Sized>(
         .collect();
     let ecus = sources
         .into_iter()
-        .map(|source| ObdEcu {
-            source,
-            pids: supported
+        .map(|source| {
+            let (pids, pids_cut_short) = supported
                 .get(&source)
                 .cloned()
-                .unwrap_or(Err(ReadError::NoReply))
-                .map(|_| values.remove(&source).unwrap_or_default()),
-            supported_info: from(&info, source, |payload| {
-                Ok(obd::decode_supported_info(payload)?.iter().collect())
-            }),
-            ecu_name: from(&names, source, |payload| {
-                let name = obd::decode_ecu_name(payload)?;
-                Ok(format!("{}-{}", name.acronym, name.name))
-            }),
-            stored_dtcs: from(&dtcs, source, |payload| {
-                Ok(obd::decode_stored_dtcs(payload)?.collect())
-            }),
+                .unwrap_or((Err(ReadError::NoReply), None));
+            ObdEcu {
+                source,
+                pids: pids.map(|_| values.remove(&source).unwrap_or_default()),
+                pids_cut_short,
+                supported_info: from(&info, source, |payload| {
+                    Ok(obd::decode_supported_info(payload)?.iter().collect())
+                }),
+                ecu_name: from(&names, source, |payload| {
+                    let name = obd::decode_ecu_name(payload)?;
+                    Ok(format!("{}-{}", name.acronym, name.name))
+                }),
+                stored_dtcs: from(&dtcs, source, |payload| {
+                    Ok(obd::decode_stored_dtcs(payload)?.collect())
+                }),
+            }
         })
         .collect();
 
@@ -395,7 +403,7 @@ impl<T: Transport + ?Sized> Ask for ExtendedSession<'_, T> {
             return session_error(e).map(|e| (false, Err(e)));
         }
         match self.exchange_prepared(request) {
-            Ok(reply) => Ok((true, decode(&reply.payload).map_err(ReadError::Reply))),
+            Ok(reply) => Ok((true, decoded(&reply.payload, decode))),
             Err(e) => session_error(e).map(|e| (true, Err(e))),
         }
     }
@@ -421,11 +429,12 @@ pub(crate) fn session_error(e: SessionError) -> Result<ReadError, ScanError> {
                 [sid, ..] => sid.wrapping_sub(0x40),
                 [] => uds::DIAGNOSTIC_SESSION_CONTROL,
             };
-            Ok(ReadError::SessionRefused(
-                response::positive(sid, &reply)
+            Ok(ReadError::SessionRefused {
+                error: response::positive(sid, &reply)
                     .err()
                     .unwrap_or(ReplyError::Malformed),
-            ))
+                reply,
+            })
         }
         e => Err(FingerprintError::Session(e)),
     }
@@ -486,11 +495,16 @@ fn split_batch(payload: &[u8], layout: &[(u16, usize)]) -> Result<Vec<(u16, Vec<
     Ok(values)
 }
 
-// One ECU's supported PIDs so far, and the bitmap it said comes next, if any.
+// One ECU's supported PIDs so far, the bitmap it said comes next, if any, and where and why its
+// chain broke, if it did after the first bitmap.
 struct Chain {
     pids: Result<Vec<u8>, ReadError>,
     next: Option<u8>,
+    cut_short: Option<(u8, ReadError)>,
 }
+
+// What `supported_pids` found for one ECU: its PIDs, and where and why the list was cut short.
+type Supported = (Result<Vec<u8>, ReadError>, Option<(u8, ReadError)>);
 
 // Each ECU that answered the first bitmap and the PIDs it supports. Each ECU's chain follows only
 // the bitmaps it says it supports, and ends at a missing or garbled one, even while another
@@ -499,7 +513,7 @@ fn supported_pids<T: Transport + ?Sized>(
     transport: &mut T,
     pid_requests: &[Approved],
     timing: Timing,
-) -> Result<BTreeMap<u32, Result<Vec<u8>, ReadError>>, ScanError> {
+) -> Result<BTreeMap<u32, Supported>, ScanError> {
     let mut chains: BTreeMap<u32, Chain> = BTreeMap::new();
     let mut base = 0u8;
     loop {
@@ -510,6 +524,7 @@ fn supported_pids<T: Transport + ?Sized>(
                 chains.entry(reply.source).or_insert(Chain {
                     pids: Ok(Vec::new()),
                     next: Some(0),
+                    cut_short: None,
                 })
             } else {
                 match chains.get_mut(&reply.source) {
@@ -519,21 +534,22 @@ fn supported_pids<T: Transport + ?Sized>(
                 }
             };
             chain.next = None;
-            match decode_bitmap(&reply.payload, base) {
+            match decoded(&reply.payload, |payload| decode_bitmap(payload, base)) {
                 Ok(bitmap) => {
                     if let Ok(pids) = &mut chain.pids {
                         pids.extend(bitmap.iter().filter(|pid| pid % 0x20 != 0));
                     }
                     chain.next = after.filter(|&after| bitmap.contains(after));
                 }
-                Err(e) if base == 0 => chain.pids = Err(ReadError::Reply(e)),
-                Err(_) => {}
+                Err(e) if base == 0 => chain.pids = Err(e),
+                Err(e) => chain.cut_short = Some((base, e)),
             }
         }
         // An ECU that said this page comes next but didn't answer it ends its chain here.
         for chain in chains.values_mut() {
             if chain.next == Some(base) {
                 chain.next = None;
+                chain.cut_short = Some((base, ReadError::NoReply));
             }
         }
         match after {
@@ -543,7 +559,7 @@ fn supported_pids<T: Transport + ?Sized>(
     }
     Ok(chains
         .into_iter()
-        .map(|(source, chain)| (source, chain.pids))
+        .map(|(source, chain)| (source, (chain.pids, chain.cut_short)))
         .collect())
 }
 
@@ -551,19 +567,19 @@ fn supported_pids<T: Transport + ?Sized>(
 fn pid_values<T: Transport + ?Sized>(
     transport: &mut T,
     pid_requests: &[Approved],
-    supported: &BTreeMap<u32, Result<Vec<u8>, ReadError>>,
+    supported: &BTreeMap<u32, Supported>,
     timing: Timing,
 ) -> Result<BTreeMap<u32, Vec<PidReading>>, ScanError> {
     let wanted: BTreeSet<u8> = supported
         .values()
-        .filter_map(|pids| pids.as_ref().ok())
+        .filter_map(|(pids, _)| pids.as_ref().ok())
         .flatten()
         .copied()
         .collect();
     let mut values: BTreeMap<u32, Vec<PidReading>> = BTreeMap::new();
     for pid in wanted {
         let replies = broadcast(transport, &pid_requests[usize::from(pid)], timing)?;
-        for (&source, pids) in supported {
+        for (&source, (pids, _)) in supported {
             if pids.as_ref().is_ok_and(|pids| pids.contains(&pid)) {
                 let value = from(&replies, source, |payload| decode_pid_value(payload, pid));
                 values.entry(source).or_default().push((pid, value));
@@ -607,7 +623,12 @@ fn scan_module<T: Transport + ?Sized>(
     };
     let extended = &requests.extended;
     if !extended.dids.is_empty() {
-        let unread = |e: ReadError| extended.dids.iter().map(move |(did, _)| (did.id, Err(e)));
+        let unread = |e: ReadError| {
+            extended
+                .dids
+                .iter()
+                .map(move |(did, _)| (did.id, Err(e.clone())))
+        };
         match options.extended {
             None => dids.extend(unread(ReadError::NeedsExtendedSession)),
             // A module that answered nothing isn't there: no session to enter.
@@ -682,7 +703,9 @@ fn read_dids(
                 single.extend(id.to_be_bytes());
                 single.extend(data);
                 let format = did_requests[i].0.format;
-                values[i] = Some(decode_scanned(&single, id, format).map_err(ReadError::Reply));
+                values[i] = Some(decoded(&single, |single| {
+                    decode_scanned(single, id, format)
+                }));
             }
         }
         // Then those it left out. The multi-DID read's reply may still arrive during these reads

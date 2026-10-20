@@ -181,7 +181,7 @@ fn a_refused_session_stops_the_sweep_before_any_read() {
             got.stop,
             Some(Stop {
                 at: 0x0600,
-                why: Why::Module(ReadError::SessionRefused(_))
+                why: Why::Module(ReadError::SessionRefused { .. })
             })
         ),
         "{:?}",
@@ -462,6 +462,38 @@ fn a_refusal_right_after_an_unanswered_read_stops_the_sweep_there() {
 }
 
 #[test]
+fn an_undecodable_reply_right_after_an_unanswered_read_stops_the_sweep_there() {
+    // After 0x0600 goes unanswered, 0x0601's answer has no data, so it can't be decoded. Like a
+    // refusal, it may belong to another read, so the sweep stops there.
+    let mut car = Car::new(|_, request| match request {
+        [0x22, 0x06, 0x00] => Vec::new(),
+        [0x22, high, low] => reply(&[0x62, *high, *low]),
+        _ => Vec::new(),
+    });
+    let got = sweep_dids(
+        &mut car,
+        &Policy::read_only(),
+        &engine(),
+        0x0600..=0x0602,
+        TIMING,
+        &SweepOptions::default(),
+    )
+    .unwrap();
+    assert_eq!(got.found, [(0x0600, Err(ReadError::NoReply))]);
+    assert_eq!(
+        got.stop,
+        Some(Stop {
+            at: 0x0601,
+            why: Why::Unmatched(ReadError::Undecodable {
+                error: ReplyError::TooShort,
+                reply: vec![0x62, 0x06, 0x01],
+            }),
+        })
+    );
+    assert_eq!(car.sent.len(), 2, "0x0602 isn't asked");
+}
+
+#[test]
 fn a_module_stuck_on_response_pending_stops_the_sweep() {
     // Response-pending past the limit for every DID: as good as no answer.
     let mut car = Car::new(|_, request| match request {
@@ -545,7 +577,7 @@ fn a_module_that_refuses_to_leave_the_extended_session_is_reported() {
     assert_eq!(got.found, [(0x0600, Ok(vec![0x12]))]);
     assert_eq!(got.stop, None);
     assert!(
-        matches!(got.still_extended, Some(ReadError::SessionRefused(_))),
+        matches!(got.still_extended, Some(ReadError::SessionRefused { .. })),
         "{:?}",
         got.still_extended
     );
@@ -589,7 +621,7 @@ fn an_unconfirmed_entry_and_leave_say_the_module_may_still_be_extended() {
         })
     );
     assert!(
-        matches!(got.still_extended, Some(ReadError::SessionRefused(_))),
+        matches!(got.still_extended, Some(ReadError::SessionRefused { .. })),
         "{:?}",
         got.still_extended
     );
@@ -616,12 +648,12 @@ fn a_general_reject_is_listed_and_stops_the_sweep_after_it() {
         sid: 0x22,
         nrc: Nrc::GeneralReject,
     }));
-    assert_eq!(got.found, [(0x0600, Err(reject))]);
+    assert_eq!(got.found, [(0x0600, Err(reject.clone()))]);
     assert_eq!(
         got.stop,
         Some(Stop {
             at: 0x0601,
-            why: Why::Module(reject)
+            why: Why::Module(reject.clone())
         })
     );
     // At the end of the range there's nothing left to stop before.

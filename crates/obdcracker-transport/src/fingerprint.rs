@@ -126,22 +126,35 @@ impl fmt::Display for DidValue {
 
 /// Why one value is missing from a fingerprint. Modules often don't support every DID, so this
 /// doesn't stop the others being read.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ReadError {
     /// Nothing answered in time.
     NoReply,
     /// The module said it was busy (response-pending) but didn't answer in time
     /// ([`crate::Error::StillPending`]).
     StillPending,
-    /// The reply was a refusal or couldn't be decoded.
+    /// The module refused the request ([`response::Error::Negative`]).
     Reply(response::Error),
+    /// The reply couldn't be decoded. It's kept so the reason can be seen without the audit log.
+    Undecodable {
+        /// Why it couldn't be decoded.
+        error: response::Error,
+        /// The reply, service ID first. For a DID read with others in one request, its own part
+        /// of the reply: `62`, the DID and its data.
+        reply: Vec<u8>,
+    },
     /// Only the extended diagnostic session reads it, and the scan wasn't asked to enter it
     /// ([`crate::scan::ScanOptions::extended`]). Nothing was sent for it.
     NeedsExtendedSession,
     /// The module refused to enter the extended diagnostic session (`10 03`) or to stay in it
     /// (`3E 00`), or its answer couldn't be decoded, so this value, which needs the session,
     /// wasn't read. The error names the refused service.
-    SessionRefused(response::Error),
+    SessionRefused {
+        /// The refusal, or why the answer couldn't be decoded.
+        error: response::Error,
+        /// The module's answer, service ID first.
+        reply: Vec<u8>,
+    },
     /// The CVNs don't pair with the calibration IDs: J1979 gives one CVN per calibration ID, so
     /// neither can be trusted to say which calibration a CVN checks. The raw replies are in the
     /// audit log.
@@ -159,8 +172,16 @@ impl fmt::Display for ReadError {
             Self::NoReply => f.write_str("no reply"),
             Self::StillPending => crate::Error::StillPending.fmt(f),
             Self::Reply(e) => e.fmt(f),
+            Self::Undecodable { error, reply } => write!(f, "{error}:{}", Spaced(reply)),
             Self::NeedsExtendedSession => f.write_str("not read: needs the extended session"),
-            Self::SessionRefused(e) => write!(f, "not read: extended session: {e}"),
+            // A refusal says all there is to say; the bytes show why anything else failed.
+            Self::SessionRefused {
+                error: error @ response::Error::Negative(_),
+                ..
+            } => write!(f, "not read: extended session: {error}"),
+            Self::SessionRefused { error, reply } => {
+                write!(f, "not read: extended session: {error}:{}", Spaced(reply))
+            }
             Self::CountMismatch { calids, cvns } => {
                 write!(f, "{cvns} CVNs for {calids} calibration IDs")
             }
@@ -169,6 +190,15 @@ impl fmt::Display for ReadError {
 }
 
 impl std::error::Error for ReadError {}
+
+// Bytes as hex, each after a space.
+struct Spaced<'a>(&'a [u8]);
+
+impl fmt::Display for Spaced<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.iter().try_for_each(|byte| write!(f, " {byte:02X}"))
+    }
+}
 
 /// Why a fingerprint couldn't be taken at all.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -306,7 +336,7 @@ pub(crate) fn ask<T: Transport + ?Sized, V>(
 ) -> Result<Result<V, ReadError>, FingerprintError> {
     match exchange(transport, request, Expect::Module(response_id), timing) {
         Ok(replies) => Ok(replies.first().map_or(Err(ReadError::NoReply), |reply| {
-            decode(&reply.payload).map_err(ReadError::Reply)
+            decoded(&reply.payload, decode)
         })),
         Err(Error::Timeout) => Ok(Err(ReadError::NoReply)),
         Err(Error::StillPending) => Ok(Err(ReadError::StillPending)),
@@ -333,5 +363,19 @@ pub(crate) fn from<V>(
         .iter()
         .find(|r| r.source == source)
         .ok_or(ReadError::NoReply)?;
-    decode(&reply.payload).map_err(ReadError::Reply)
+    decoded(&reply.payload, decode)
+}
+
+// `reply` decoded: a refusal as such, any other failure with the reply's bytes.
+pub(crate) fn decoded<V>(
+    reply: &[u8],
+    decode: impl FnOnce(&[u8]) -> Result<V, response::Error>,
+) -> Result<V, ReadError> {
+    decode(reply).map_err(|error| match error {
+        response::Error::Negative(_) => ReadError::Reply(error),
+        error => ReadError::Undecodable {
+            error,
+            reply: reply.to_vec(),
+        },
+    })
 }

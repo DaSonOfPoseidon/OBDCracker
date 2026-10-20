@@ -973,6 +973,9 @@ fn print_scan(found: &Scan) {
             }
             Err(e) => println!("{id:03X} PIDs ({e})"),
         }
+        if let Some((page, e)) = &ecu.pids_cut_short {
+            println!("{id:03X} PIDs from {page:02X} on not read ({e})");
+        }
         match &ecu.supported_info {
             Ok(pids) => {
                 let pids: Vec<_> = pids.iter().map(|pid| format!("{pid:02X}")).collect();
