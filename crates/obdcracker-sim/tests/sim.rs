@@ -7,7 +7,7 @@ use obdcracker_core::obd::{self, Unit, Value};
 use obdcracker_core::response::{Error as ReplyError, Nrc};
 use obdcracker_core::uds::{self, DtcFormat, DtcStatus};
 use obdcracker_profile::{DidSession, Profile, ProfileError};
-use obdcracker_safety::{Approved, Policy, Target};
+use obdcracker_safety::{Approved, Policy, Protocol, Target};
 use obdcracker_sim::{Fault, FixtureError, Session, SimBus};
 use obdcracker_transport::{Error, Expect, Response, Timing, Transport, exchange};
 use proptest::prelude::*;
@@ -59,7 +59,9 @@ fn features() -> SimBus {
 
 // Sends one read and returns every reply it produced.
 fn ask(bus: &mut SimBus, target: Target, payload: &[u8]) -> Vec<Response> {
-    let request = Policy::read_only().approve(target, payload).unwrap();
+    let request = Policy::read_only()
+        .approve(Protocol::Uds, target, payload)
+        .unwrap();
     bus.send(&request).unwrap();
     let mut replies = Vec::new();
     loop {
@@ -537,7 +539,11 @@ fn slow_did_sends_response_pending_first() {
 #[test]
 fn exchange_collects_the_calids_from_every_obd_ecu() {
     let calids = Policy::read_only()
-        .approve(Target::ObdFunctional, &obd::vehicle_info(0x04))
+        .approve(
+            Protocol::Uds,
+            Target::ObdFunctional,
+            &obd::vehicle_info(0x04),
+        )
         .unwrap();
     let replies = exchange(&mut a7(), &calids, Expect::ObdEcus, Timing::default()).unwrap();
     let counts: Vec<_> = replies
@@ -551,7 +557,7 @@ fn exchange_collects_the_calids_from_every_obd_ecu() {
 fn exchange_waits_through_a_slow_did() {
     let mut bus = SimBus::new(&Profile::builtin("a7").unwrap(), PENDING).unwrap();
     let read = Policy::read_only()
-        .approve(ENGINE, &uds::read_did(0xF190))
+        .approve(Protocol::Uds, ENGINE, &uds::read_did(0xF190))
         .unwrap();
     let replies = exchange(&mut bus, &read, Expect::Module(0x7E8), Timing::default()).unwrap();
     assert_eq!(replies.len(), 1);
@@ -845,7 +851,7 @@ proptest! {
         let target = if id == 0x7DF { Target::ObdFunctional } else { Target::Physical(id) };
         let mut payload = vec![sid];
         payload.extend(data);
-        let Ok(request) = Policy::read_only().approve(target, &payload) else {
+        let Ok(request) = Policy::read_only().approve(Protocol::Uds, target, &payload) else {
             return Ok(());
         };
         check_replies(&request).map_err(TestCaseError::fail)?;
@@ -883,7 +889,7 @@ fn check_replies(request: &Approved) -> Result<(), String> {
 fn a_suppressed_dtc_request_gets_its_report_after_response_pending() {
     // The transmission sends response-pending before each DTC report (session 3).
     let request = Policy::read_only()
-        .approve(TRANSMISSION, &[0x19, 0x82, 0xAF])
+        .approve(Protocol::Uds, TRANSMISSION, &[0x19, 0x82, 0xAF])
         .unwrap();
     check_replies(&request).unwrap();
 }

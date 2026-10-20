@@ -5,7 +5,7 @@ use std::fmt;
 use obdcracker_core::obd::{self, Cvn};
 use obdcracker_core::response;
 use obdcracker_core::uds::{self, did};
-use obdcracker_safety::{Approved, Policy, Rejection, Target};
+use obdcracker_safety::{Approved, Policy, Protocol, Rejection, Target};
 
 use crate::{Error, Expect, Response, SessionError, Timing, Transport, exchange, hex};
 
@@ -239,7 +239,7 @@ pub fn fingerprint<T: Transport + ?Sized>(
 ) -> Result<Fingerprint, FingerprintError> {
     let approve = |target, payload: &[u8]| {
         policy
-            .approve(target, payload)
+            .approve(Protocol::Uds, target, payload)
             .map_err(FingerprintError::Rejected)
     };
     let calid_request = approve(Target::ObdFunctional, &obd::vehicle_info(0x04))?;

@@ -5,7 +5,7 @@ mod support;
 use std::io;
 use std::time::{Duration, Instant};
 
-use obdcracker_safety::{Approved, ModuleIds, Policy, Target};
+use obdcracker_safety::{Approved, ModuleIds, Policy, Protocol, Target};
 use obdcracker_transport::elm::{ADAPTER_TIMEOUT, Elm};
 use obdcracker_transport::link::{Driver, Link, LinkKind};
 use obdcracker_transport::{Audited, Error, Expect, Response, Transport, exchange, hex};
@@ -24,7 +24,9 @@ const INSTRUMENTS: ModuleIds = ModuleIds {
 };
 
 fn approve(target: Target, payload: &[u8]) -> Approved {
-    Policy::read_only().approve(target, payload).unwrap()
+    Policy::read_only()
+        .approve(Protocol::Uds, target, payload)
+        .unwrap()
 }
 
 fn connect(elm: FakeElm) -> Elm<FakeLink> {
@@ -109,7 +111,7 @@ mod setup {
         let narrowed = Policy::read_only().narrowed_to(&[INSTRUMENTS]).unwrap();
         elm.send(
             &narrowed
-                .approve(Target::Physical(0x714), &[0x22, 0xF1, 0x87])
+                .approve(Protocol::Uds, Target::Physical(0x714), &[0x22, 0xF1, 0x87])
                 .unwrap(),
         )
         .unwrap();
@@ -445,7 +447,7 @@ mod requests {
     fn a_profile_module_shows_only_its_own_replies() {
         let narrowed = Policy::read_only().narrowed_to(&[GATEWAY]).unwrap();
         let request = narrowed
-            .approve(Target::Physical(0x710), &[0x22, 0xF1, 0x87])
+            .approve(Protocol::Uds, Target::Physical(0x710), &[0x22, 0xF1, 0x87])
             .unwrap();
         let mut elm = connect(busy_bus());
         elm.send(&request).unwrap();
@@ -1363,7 +1365,11 @@ mod pacing {
         } else {
             Policy::read_only()
         };
-        elm.send(&policy.approve(target, &[0x22, 0xF1, 0x87]).unwrap())?;
+        elm.send(
+            &policy
+                .approve(Protocol::Uds, target, &[0x22, 0xF1, 0x87])
+                .unwrap(),
+        )?;
         elm.recv(Duration::from_secs(30))
     }
 

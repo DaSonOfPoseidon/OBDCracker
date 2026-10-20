@@ -268,13 +268,14 @@ fn run<T: Transport>(cli: &Cli, transport: T, link: &str, timing: Timing) -> Exi
             unreachable!()
         }
     };
-    let request = match Policy::read_only().approve(target, &payload) {
-        Ok(request) => request,
-        Err(rejection) => {
-            eprintln!("safety policy {rejection}");
-            return ExitCode::FAILURE;
-        }
-    };
+    let request =
+        match Policy::read_only().approve(obdcracker_safety::Protocol::Uds, target, &payload) {
+            Ok(request) => request,
+            Err(rejection) => {
+                eprintln!("safety policy {rejection}");
+                return ExitCode::FAILURE;
+            }
+        };
     let replies = match exchange(&mut transport, &request, expect, timing) {
         Ok(replies) => replies,
         Err(e) => {

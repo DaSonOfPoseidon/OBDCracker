@@ -8,7 +8,7 @@ use std::ops::RangeInclusive;
 
 use obdcracker_core::response::{Error as ReplyError, Nrc};
 use obdcracker_core::uds::{self, DiagnosticSession};
-use obdcracker_safety::{Policy, Target};
+use obdcracker_safety::{Policy, Protocol, Target};
 
 use crate::fingerprint::{FingerprintError, ReadError, UdsModule};
 use crate::scan::{Ask, Direct, session_error};
@@ -160,7 +160,7 @@ pub fn sweep_dids_reporting<T: Transport + ?Sized>(
     let target = Target::Physical(module.request_id);
     let approve = |payload: &[u8]| {
         policy
-            .approve(target, payload)
+            .approve(Protocol::Uds, target, payload)
             .map_err(FingerprintError::Rejected)
     };
     // A RangeInclusive's iterator stops at its end, even at u16::MAX.

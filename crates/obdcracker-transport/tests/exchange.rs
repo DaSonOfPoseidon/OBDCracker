@@ -2,7 +2,7 @@
 
 use std::time::{Duration, Instant};
 
-use obdcracker_safety::{Approved, Policy, Target};
+use obdcracker_safety::{Approved, Policy, Protocol, Target};
 use obdcracker_transport::{Error, Expect, Mock, Response, Timing, Transport, exchange};
 
 const FAST: Timing = Timing {
@@ -12,7 +12,9 @@ const FAST: Timing = Timing {
 };
 
 fn approve(target: Target, payload: &[u8]) -> Approved {
-    Policy::read_only().approve(target, payload).unwrap()
+    Policy::read_only()
+        .approve(Protocol::Uds, target, payload)
+        .unwrap()
 }
 
 fn reply(source: u32, payload: &[u8]) -> Response {
@@ -552,4 +554,38 @@ fn a_transport_that_stops_listening_after_pending_says_the_module_never_answered
         FAST,
     );
     assert_eq!(got, Err(Error::Timeout));
+}
+
+#[test]
+fn a_kwp2000_request_is_matched_by_kwp2000_rules() {
+    let kwp2000 = |payload: &[u8]| {
+        Policy::read_only()
+            .approve(Protocol::Kwp2000, Target::Physical(0x7E0), payload)
+            .unwrap()
+    };
+    // TesterPresent's positive reply echoes nothing in KWP2000; UDS's matcher would drop it.
+    let tester_present = kwp2000(&[0x3E, 0x01]);
+    let got = exchange(
+        &mut mock(&[reply(0x7E8, &[0x7E])]),
+        &tester_present,
+        Expect::Module(0x7E8),
+        FAST,
+    )
+    .unwrap();
+    assert_eq!(got, [reply(0x7E8, &[0x7E])]);
+    // A late answer to another local ID is dropped, and the right one taken after
+    // response-pending.
+    let local = kwp2000(&[0x21, 0x01]);
+    let got = exchange(
+        &mut mock(&[
+            reply(0x7E8, &[0x61, 0x02, 0x01]),
+            reply(0x7E8, &[0x7F, 0x21, 0x78]),
+            reply(0x7E8, &[0x61, 0x01, 0x02]),
+        ]),
+        &local,
+        Expect::Module(0x7E8),
+        FAST,
+    )
+    .unwrap();
+    assert_eq!(got, [reply(0x7E8, &[0x61, 0x01, 0x02])]);
 }

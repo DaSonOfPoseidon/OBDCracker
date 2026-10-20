@@ -74,11 +74,11 @@ obdcracker = { git = "https://github.com/DaSonOfPoseidon/OBDCracker" }
 
 ```rust,no_run
 use obdcracker::core::obd;
-use obdcracker::safety::{Policy, Target};
+use obdcracker::safety::{Policy, Protocol, Target};
 use obdcracker::transport::{DryRun, Transport};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let vin = Policy::read_only().approve(Target::ObdFunctional, &obd::vehicle_info(0x02))?;
+    let vin = Policy::read_only().approve(Protocol::Uds, Target::ObdFunctional, &obd::vehicle_info(0x02))?;
     DryRun::new(std::io::stdout()).send(&vin)?; // prints "7DF 02 09 02"
     Ok(())
 }

@@ -195,3 +195,29 @@ fn answers_takes_any_refusal_of_the_service() {
     assert!(!answers(&[0x22, 0xF1, 0x90], &[]));
     assert!(!answers(&[], &[0x62, 0xF1, 0x90]));
 }
+
+#[test]
+fn kwp2000_replies_match_by_their_own_rules() {
+    use obdcracker_core::response::kwp2000_answers;
+    // TesterPresent's positive reply echoes nothing (ISO 14230-3).
+    assert!(kwp2000_answers(&[0x3E, 0x01], &[0x7E]));
+    assert!(kwp2000_answers(&[0x3E], &[0x7E]));
+    // What follows ReadEcuIdentification's 5A is the manufacturer's record, so it's matched by
+    // service; the local ID is echoed.
+    assert!(kwp2000_answers(&[0x1A, 0x9B], &[0x5A, 0x9B, 0x34]));
+    assert!(kwp2000_answers(&[0x1A, 0x9B], &[0x5A, 0x34]));
+    assert!(kwp2000_answers(&[0x21, 0x01], &[0x61, 0x01, 0x00]));
+    assert!(!kwp2000_answers(&[0x21, 0x01], &[0x61, 0x02, 0x00]));
+    // DTC reads: by service.
+    assert!(kwp2000_answers(&[0x18, 0x02, 0xFF, 0x00], &[0x58, 0x00]));
+    // A refusal names the service; a pending one too.
+    assert!(kwp2000_answers(&[0x1A, 0x9B], &[0x7F, 0x1A, 0x78]));
+    assert!(!kwp2000_answers(&[0x1A, 0x9B], &[0x7F, 0x21, 0x31]));
+    assert!(!kwp2000_answers(&[0x1A, 0x9B], &[0x7F, 0x1A]));
+    // Another service's reply, and nothing.
+    assert!(!kwp2000_answers(&[0x1A, 0x9B], &[0x61, 0x9B]));
+    assert!(!kwp2000_answers(&[0x1A, 0x9B], &[]));
+    assert!(!kwp2000_answers(&[], &[0x7E]));
+    // UDS's matcher would have dropped TesterPresent's bare reply.
+    assert!(!obdcracker_core::response::answers(&[0x3E, 0x01], &[0x7E]));
+}

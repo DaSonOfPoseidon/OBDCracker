@@ -8,13 +8,13 @@
 //! use std::time::Duration;
 //!
 //! use obdcracker_core::obd;
-//! use obdcracker_safety::{Policy, Target};
+//! use obdcracker_safety::{Policy, Protocol, Target};
 //! use obdcracker_sim::SimBus;
 //! use obdcracker_transport::Transport;
 //!
 //! let mut car = SimBus::builtin("a7").unwrap();
 //! let vin = Policy::read_only()
-//!     .approve(Target::ObdFunctional, &obd::vehicle_info(0x02))
+//!     .approve(Protocol::Uds, Target::ObdFunctional, &obd::vehicle_info(0x02))
 //!     .unwrap();
 //! car.send(&vin).unwrap();
 //! let reply = car.recv(Duration::from_millis(50)).unwrap();

@@ -202,6 +202,16 @@ Each entry names the class, what to check, and where it bit us.
 - **Datasheet examples aren't byte-exact.** Real ELM327s print a space after every byte, the last one included; the
   datasheet's typeset examples don't show it. Test parsers against an implementation you didn't write
   (ELM327-emulator), not only against fakes built from the same reading of the datasheet (M3 branch, #13).
+- **A value a standard leaves to the manufacturer isn't a standard value.** The first KWP2000 allowlist made `10 81`
+  a read as "the standard session", but ISO 14230-3 leaves the diagnostic modes 0x80..=0xFF to each manufacturer, so on
+  some make it could mean anything; and it fixed widths for `17`/`18` parameters the standard also leaves to them,
+  refusing valid reads, and a 2-byte clear-DTC group the standard makes optional (#137, Codex). The same goes for
+  replies: what follows `5A` is the manufacturer's record, so matching it on an echoed option would drop valid answers.
+  Before relying on a parameter, find its row in the standard's table; if it's the manufacturer's, it needs a
+  profile-specific rule.
+- **A new protocol reaches past the allowlist.** Approving KWP2000 requests wasn't enough: `exchange` still matched
+  their replies as UDS, so KWP2000's bare `7E` answer to `3E 01` was dropped as not answering it (#137, Codex). Follow
+  a request through everything that reads its reply: matching, response-pending, decoding.
 - **Don't confuse a transport limit with a protocol limit.** 4095 bytes is ISO-TP's short first-frame length, not a
   UDS maximum; the 32-bit escape carries more.
 

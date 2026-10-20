@@ -4,7 +4,7 @@
 use std::thread::sleep;
 use std::time::Duration;
 
-use obdcracker_safety::{Policy, Target};
+use obdcracker_safety::{Policy, Protocol, Target};
 use obdcracker_transport::{ExtendedSession, Mock, Response, S3, SessionError, Timing};
 
 const ENGINE: Target = Target::Physical(0x7E0);
@@ -187,7 +187,7 @@ fn a_wait_longer_than_the_margin_is_followed_by_a_new_10_03() {
         (0, &[0x62, 0xF1, 0x87, 0x41]),
     ]);
     let read = Policy::read_only()
-        .approve(ENGINE, &[0x22, 0xF1, 0x87])
+        .approve(Protocol::Uds, ENGINE, &[0x22, 0xF1, 0x87])
         .unwrap();
     let mut guard =
         ExtendedSession::enter(&mut adapter, &Policy::read_only(), ENGINE, PATIENT, short).unwrap();
@@ -220,7 +220,7 @@ fn the_timing_the_module_gives_is_used() {
         (120, &[0x62, 0xF1, 0x87, 0x41]),
     ]);
     let read = Policy::read_only()
-        .approve(ENGINE, &[0x22, 0xF1, 0x87])
+        .approve(Protocol::Uds, ENGINE, &[0x22, 0xF1, 0x87])
         .unwrap();
     let mut guard =
         ExtendedSession::enter(&mut adapter, &Policy::read_only(), ENGINE, base, GUARD).unwrap();

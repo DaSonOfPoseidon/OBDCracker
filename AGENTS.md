@@ -27,10 +27,12 @@ or anything CI already checks (rustfmt, clippy, tests, cargo-deny).
 - Nothing sent may brick the car. Every request goes through `obdcracker-safety`: `Policy::approve` →
   `Approved`, which can't be built anywhere else. Transports take only `&Approved`. No send path may skip
   it, and there is no raw-frame escape hatch.
-- A new service goes into `classify` in `crates/obdcracker-safety/src/lib.rs` and into the independent
-  coverage for its tier in `crates/obdcracker-safety/tests/policy.rs`: the `READ_SERVICES` or
-  `FLASH_SERVICES` list, or the clear-DTC/coding table in `locks_clear_dtc_and_coding_in_read_only`. Only
-  T0 Read is unlocked; T3 Flash is banned.
+- A new service goes into its protocol's allowlist in `crates/obdcracker-safety/src/lib.rs`
+  (`classify_uds` or `classify_kwp2000`) and into the independent coverage for its tier in
+  `crates/obdcracker-safety/tests/policy.rs`: the `READ_SERVICES`/`FLASH_SERVICES` or
+  `KWP2000_READ_SERVICES`/`KWP2000_FLASH_SERVICES` list, or the clear-DTC/coding tables in
+  `locks_clear_dtc_and_coding_in_read_only`. A read in one protocol must never be locked or banned in
+  the other. Only T0 Read is unlocked; T3 Flash is banned.
 - Vehicle profiles can only narrow the policy, never widen it.
 - `obdcracker-core` stays `no_std` and IO-free.
 - All public items have docs (`missing_docs`); the facade doctest must keep working.

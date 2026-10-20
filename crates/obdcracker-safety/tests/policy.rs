@@ -1,6 +1,6 @@
 //! The safety policy: allowlist cases and properties that must hold for any input.
 
-use obdcracker_safety::{ModuleIds, NarrowingError, Policy, Rejection, Target, Tier};
+use obdcracker_safety::{ModuleIds, NarrowingError, Policy, Protocol, Rejection, Target, Tier};
 use proptest::prelude::*;
 
 const ENGINE: Target = Target::Physical(0x7E0);
@@ -8,13 +8,56 @@ const ENGINE: Target = Target::Physical(0x7E0);
 // Kept separate from the crate's own tables, so a change to the allowlist has to change this too.
 const READ_SERVICES: [u8; 7] = [0x01, 0x03, 0x09, 0x10, 0x19, 0x22, 0x3E];
 const FLASH_SERVICES: [u8; 7] = [0x11, 0x31, 0x34, 0x35, 0x36, 0x37, 0x3D];
+// KWP2000 (ISO 14230-3): ReadStatusOfDTC, ReadDTCByStatus, ReadEcuIdentification,
+// ReadDataByLocalIdentifier, TesterPresent.
+const KWP2000_READ_SERVICES: [u8; 5] = [0x17, 0x18, 0x1A, 0x21, 0x3E];
+// Every read each protocol approves, one example of each form, for the cross-protocol check.
+const UDS_READS: &[&[u8]] = &[
+    &[0x01, 0x0C],
+    &[0x01, 0x0C, 0x0D, 0x05, 0x0F, 0x10, 0x11],
+    &[0x03],
+    &[0x09, 0x02],
+    &[0x10, 0x01],
+    &[0x10, 0x03],
+    &[0x10, 0x81],
+    &[0x10, 0x83],
+    &[0x19, 0x02, 0xAF],
+    &[0x19, 0x04, 0x00, 0x16, 0xA0, 0xFF],
+    &[0x19, 0x0A],
+    &[0x22, 0xF1, 0x87],
+    &[0x22, 0xF1, 0x87, 0xF1, 0x89, 0xF1, 0x91],
+    &[0x3E, 0x00],
+    &[0x3E, 0x80],
+];
+const KWP2000_READS: &[&[u8]] = &[
+    &[0x17, 0xFF, 0x00],
+    &[0x17, 0xFF],
+    &[0x18, 0x02, 0xFF, 0x00],
+    &[0x18, 0x02],
+    &[0x1A, 0x9B],
+    &[0x21, 0x01],
+    &[0x3E],
+    &[0x3E, 0x01],
+    &[0x3E, 0x02],
+];
+// ECUReset, the routines by local ID and by address, RequestDownload/Upload, TransferData,
+// RequestTransferExit, WriteMemoryByAddress.
+const KWP2000_FLASH_SERVICES: [u8; 12] = [
+    0x11, 0x31, 0x32, 0x33, 0x34, 0x35, 0x36, 0x37, 0x38, 0x39, 0x3A, 0x3D,
+];
 // ISO 15765-4: the IDs emissions ECUs answer on (0x7E8..=0x7EF), and the request IDs they listen on.
 const OBD_RESPONSE_IDS: [u32; 8] = [0x7E8, 0x7E9, 0x7EA, 0x7EB, 0x7EC, 0x7ED, 0x7EE, 0x7EF];
 const OBD_REQUEST_IDS: [u32; 8] = [0x7E0, 0x7E1, 0x7E2, 0x7E3, 0x7E4, 0x7E5, 0x7E6, 0x7E7];
 
 fn approve(target: Target, payload: &[u8]) -> Result<Tier, Rejection> {
     Policy::read_only()
-        .approve(target, payload)
+        .approve(Protocol::Uds, target, payload)
+        .map(|approved| approved.tier())
+}
+
+fn approve_kwp2000(target: Target, payload: &[u8]) -> Result<Tier, Rejection> {
+    Policy::read_only()
+        .approve(Protocol::Kwp2000, target, payload)
         .map(|approved| approved.tier())
 }
 
@@ -45,7 +88,7 @@ fn approves_uds_reads_on_a_physical_address() {
 #[test]
 fn approved_request_carries_its_payload_and_target_unchanged() {
     let approved = Policy::read_only()
-        .approve(ENGINE, &[0x22, 0xF1, 0x90])
+        .approve(Protocol::Uds, ENGINE, &[0x22, 0xF1, 0x90])
         .unwrap();
     assert_eq!(approved.payload(), &[0x22, 0xF1, 0x90]);
     assert_eq!(approved.target(), ENGINE);
@@ -66,6 +109,169 @@ fn locks_clear_dtc_and_coding_in_read_only() {
         (&[0x27, 0x03], Tier::Coding),
     ] {
         assert_eq!(approve(ENGINE, payload), Err(Rejection::Locked(tier)));
+    }
+    // KWP2000: ClearDiagnosticInformation takes a 2-byte group; the adjustment session,
+    // SecurityAccess and the writes by common and by local ID change coding.
+    for (payload, tier) in [
+        (&[0x14, 0xFF, 0x00][..], Tier::ClearDtc),
+        // The group is optional, and its width the manufacturer's.
+        (&[0x14], Tier::ClearDtc),
+        (&[0x14, 0xFF], Tier::ClearDtc),
+        (&[0x2E, 0xF1], Tier::Coding),
+        (&[0x3B, 0x01], Tier::Coding),
+        (&[0x10, 0x87], Tier::Coding),
+        (&[0x27, 0x01], Tier::Coding),
+        (&[0x2E, 0xF1, 0x98, 0x00], Tier::Coding),
+        (&[0x3B, 0x01, 0x00], Tier::Coding),
+    ] {
+        assert_eq!(
+            approve_kwp2000(ENGINE, payload),
+            Err(Rejection::Locked(tier)),
+            "{payload:02X?}"
+        );
+    }
+}
+
+#[test]
+fn approves_kwp2000_reads_on_a_physical_address() {
+    for payload in [
+        &[0x1A, 0x9B][..],               // ReadEcuIdentification: VAG's identification
+        &[0x21, 0x01],                   // ReadDataByLocalIdentifier
+        &[0x18, 0x02, 0xFF, 0x00],       // ReadDTCByStatus: stored DTCs, all groups
+        &[0x18, 0x02, 0xFF, 0xFF, 0x00], // the widths are the manufacturer's
+        &[0x17, 0xFF, 0x00],             // ReadStatusOfDTC
+        &[0x17, 0xFF],
+        &[0x3E],       // TesterPresent
+        &[0x3E, 0x01], // TesterPresent, response required
+    ] {
+        assert_eq!(
+            approve_kwp2000(ENGINE, payload),
+            Ok(Tier::Read),
+            "{payload:02X?}"
+        );
+    }
+    let approved = Policy::read_only()
+        .approve(Protocol::Kwp2000, ENGINE, &[0x1A, 0x9B])
+        .unwrap();
+    assert_eq!(approved.protocol(), Protocol::Kwp2000);
+    assert_eq!(approved.payload(), &[0x1A, 0x9B]);
+}
+
+#[test]
+fn kwp2000_parameters_are_read_unmasked() {
+    // KWP2000 has no suppress-positive-response bit (#32): 10 85 is its programming session,
+    // not UDS's reserved 05, and 10 83 isn't an extended session.
+    for (payload, want) in [
+        (&[0x10, 0x85][..], Err(Rejection::Banned)), // programming
+        (&[0x10, 0x86], Err(Rejection::Banned)),     // development
+        (&[0x10, 0x87], Err(Rejection::Locked(Tier::Coding))), // adjustment
+        // What a session value means is up to the manufacturer, so none is a read.
+        (&[0x10, 0x81], Err(Rejection::NotAllowed)),
+        (&[0x10, 0x01], Err(Rejection::NotAllowed)),
+        (&[0x10, 0x02], Err(Rejection::NotAllowed)),
+        (&[0x10, 0x03], Err(Rejection::NotAllowed)),
+        (&[0x10, 0x83], Err(Rejection::NotAllowed)),
+        (&[0x10, 0x82], Err(Rejection::NotAllowed)), // periodic transmissions
+        // Manufacturer sessions mean different things per make.
+        (&[0x10, 0x89], Err(Rejection::NotAllowed)),
+        (&[0x10, 0xC0], Err(Rejection::NotAllowed)),
+        (&[0x3E, 0x80], Err(Rejection::NotAllowed)),
+    ] {
+        assert_eq!(approve_kwp2000(ENGINE, payload), want, "{payload:02X?}");
+    }
+    // The same bytes in UDS, where bit 7 suppresses the reply.
+    assert_eq!(approve(ENGINE, &[0x10, 0x83]), Ok(Tier::Read));
+    assert_eq!(approve(ENGINE, &[0x3E, 0x80]), Ok(Tier::Read));
+    // ECUReset, manufacturer resets (0x80..=0xFF) included.
+    for sub in 0..=0xFF {
+        assert_eq!(
+            approve_kwp2000(ENGINE, &[0x11, sub]),
+            Err(Rejection::Banned),
+            "{sub:02X}"
+        );
+    }
+}
+
+#[test]
+fn rejects_kwp2000_services_that_drive_the_car_or_arent_reads() {
+    for payload in [
+        &[0x30, 0x01, 0x07, 0x00][..],   // InputOutputControlByLocalIdentifier
+        &[0x2F, 0x00, 0x01, 0x03],       // InputOutputControlByCommonIdentifier
+        &[0x23, 0x12, 0x00, 0x10, 0x10], // ReadMemoryByAddress
+        &[0x28, 0x01],                   // DisableNormalMessageTransmission
+        &[0x85, 0x02],                   // ControlDTCSetting
+        &[0x83, 0x00],                   // AccessTimingParameters
+        &[0x20],                         // StopDiagnosticSession
+        &[0x22, 0xF1, 0x90],             // a UDS read is no KWP2000 read
+        &[0x19, 0x02, 0xAF],
+        &[0x09, 0x02], // OBD-II modes aren't KWP2000
+        &[0x01, 0x00],
+    ] {
+        assert_eq!(
+            approve_kwp2000(ENGINE, payload),
+            Err(Rejection::NotAllowed),
+            "{payload:02X?}"
+        );
+    }
+}
+
+#[test]
+fn rejects_malformed_kwp2000_reads() {
+    for payload in [
+        &[][..],
+        &[0x1A],             // no identification option
+        &[0x1A, 0x9B, 0x00], // trailing byte
+        &[0x21],             // no local ID
+        &[0x21, 0x01, 0x02],
+        &[0x18],       // no status or group
+        &[0x17],       // no group
+        &[0x3E, 0x03], // unknown responseRequired
+        &[0x3E, 0x01, 0x00],
+        &[0x10], // no session
+        &[0x10, 0x87, 0x00],
+    ] {
+        assert!(approve_kwp2000(ENGINE, payload).is_err(), "{payload:02X?}");
+    }
+}
+
+#[test]
+fn every_read_in_one_protocol_is_at_most_a_read_in_the_other() {
+    // A module doesn't know which protocol the tester meant.
+    for (reads, from, to) in [
+        (UDS_READS, Protocol::Uds, Protocol::Kwp2000),
+        (KWP2000_READS, Protocol::Kwp2000, Protocol::Uds),
+    ] {
+        for payload in reads {
+            assert_eq!(
+                Policy::read_only()
+                    .approve(from, ENGINE, payload)
+                    .map(|a| a.tier()),
+                Ok(Tier::Read),
+                "{payload:02X?} as {from:?}"
+            );
+            let other = Policy::read_only()
+                .approve(to, ENGINE, payload)
+                .map(|a| a.tier());
+            assert!(
+                matches!(other, Ok(Tier::Read) | Err(Rejection::NotAllowed)),
+                "{payload:02X?} as {to:?}: {other:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn kwp2000_follows_the_same_target_rules() {
+    assert_eq!(
+        approve_kwp2000(Target::ObdFunctional, &[0x1A, 0x9B]),
+        Err(Rejection::WrongTarget)
+    );
+    for id in OBD_RESPONSE_IDS.into_iter().chain([0x6FF, 0x7DF, 0x800]) {
+        assert_eq!(
+            approve_kwp2000(Target::Physical(id), &[0x1A, 0x9B]),
+            Err(Rejection::WrongTarget),
+            "{id:X}"
+        );
     }
 }
 
@@ -162,7 +368,7 @@ fn approves_reads_on_every_obd_request_id() {
 #[test]
 fn rejections_work_with_the_question_mark_operator() {
     fn send_flash() -> Result<(), Box<dyn std::error::Error>> {
-        Policy::read_only().approve(ENGINE, &[0x10, 0x02])?;
+        Policy::read_only().approve(Protocol::Uds, ENGINE, &[0x10, 0x02])?;
         Ok(())
     }
     assert_eq!(
@@ -207,8 +413,9 @@ fn any_target() -> impl Strategy<Value = Target> {
 proptest! {
     #[test]
     fn only_read_services_are_ever_approved(target in any_target(), payload in prop::collection::vec(any::<u8>(), 0..16)) {
-        if let Ok(approved) = Policy::read_only().approve(target, &payload) {
+        if let Ok(approved) = Policy::read_only().approve(Protocol::Uds, target, &payload) {
             prop_assert_eq!(approved.tier(), Tier::Read);
+            prop_assert_eq!(approved.protocol(), Protocol::Uds);
             prop_assert!(READ_SERVICES.contains(&payload[0]));
             prop_assert_eq!(approved.payload(), &payload[..]);
             prop_assert!(!OBD_RESPONSE_IDS.contains(&approved.target().can_id()));
@@ -219,14 +426,58 @@ proptest! {
     fn flash_services_are_banned_everywhere(target in any_target(), sid in prop::sample::select(&FLASH_SERVICES[..]), rest in prop::collection::vec(any::<u8>(), 0..16)) {
         let mut payload = vec![sid];
         payload.extend(rest);
-        let result = Policy::read_only().approve(target, &payload);
+        let result = Policy::read_only().approve(Protocol::Uds, target, &payload);
         prop_assert_eq!(result.map(|a| a.tier()), Err(Rejection::Banned));
+    }
+
+    #[test]
+    fn only_kwp2000_reads_are_ever_approved(target in any_target(), payload in prop::collection::vec(any::<u8>(), 0..16)) {
+        if let Ok(approved) = Policy::read_only().approve(Protocol::Kwp2000, target, &payload) {
+            prop_assert_eq!(approved.tier(), Tier::Read);
+            prop_assert_eq!(approved.protocol(), Protocol::Kwp2000);
+            prop_assert!(KWP2000_READ_SERVICES.contains(&payload[0]));
+            prop_assert_eq!(approved.payload(), &payload[..]);
+            prop_assert!(!OBD_RESPONSE_IDS.contains(&approved.target().can_id()));
+        }
+    }
+
+    #[test]
+    fn kwp2000_flash_services_are_banned_everywhere(target in any_target(), sid in prop::sample::select(&KWP2000_FLASH_SERVICES[..]), rest in prop::collection::vec(any::<u8>(), 0..16)) {
+        let mut payload = vec![sid];
+        payload.extend(rest);
+        let result = Policy::read_only().approve(Protocol::Kwp2000, target, &payload);
+        prop_assert_eq!(result.map(|a| a.tier()), Err(Rejection::Banned));
+    }
+
+    #[test]
+    fn kwp2000_programming_and_development_sessions_are_banned_everywhere(target in any_target(), session in prop::sample::select(&[0x85u8, 0x86][..])) {
+        let result = Policy::read_only().approve(Protocol::Kwp2000, target, &[0x10, session]);
+        prop_assert_eq!(result.map(|a| a.tier()), Err(Rejection::Banned));
+    }
+
+    #[test]
+    fn a_read_in_one_protocol_is_never_locked_or_banned_in_the_other(
+        sid in prop::sample::select([&READ_SERVICES[..], &KWP2000_READ_SERVICES[..]].concat()),
+        data in prop::collection::vec(any::<u8>(), 0..8),
+    ) {
+        // A module doesn't know which protocol the tester meant.
+        let mut payload = vec![sid];
+        payload.extend(data);
+        for (from, to) in [(Protocol::Uds, Protocol::Kwp2000), (Protocol::Kwp2000, Protocol::Uds)] {
+            if Policy::read_only().approve(from, ENGINE, &payload).is_ok() {
+                let other = Policy::read_only().approve(to, ENGINE, &payload);
+                prop_assert!(
+                    matches!(other.map(|a| a.tier()), Ok(Tier::Read) | Err(Rejection::NotAllowed)),
+                    "{:02X?} as {:?}", payload, to
+                );
+            }
+        }
     }
 
     #[test]
     fn programming_session_is_banned_everywhere(target in any_target(), suppress in any::<bool>()) {
         let sub = if suppress { 0x82 } else { 0x02 };
-        let result = Policy::read_only().approve(target, &[0x10, sub]);
+        let result = Policy::read_only().approve(Protocol::Uds, target, &[0x10, sub]);
         prop_assert_eq!(result.map(|a| a.tier()), Err(Rejection::Banned));
     }
 }
@@ -260,25 +511,27 @@ fn a_narrowed_policy_accepts_only_its_modules_request_ids() {
     let read = [0x22, 0xF1, 0x87];
     for module in A7 {
         let approved = a7()
-            .approve(Target::Physical(module.request), &read)
+            .approve(Protocol::Uds, Target::Physical(module.request), &read)
             .unwrap();
         assert_eq!(approved.reply_id(), Some(module.reply));
         // A request on a reply ID would look like that module's answer to everyone listening.
         assert_eq!(
-            a7().approve(Target::Physical(module.reply), &read),
+            a7().approve(Protocol::Uds, Target::Physical(module.reply), &read),
             Err(Rejection::WrongTarget)
         );
     }
     // In the bare policy's range, but not a module of this car.
     for id in [0x700, 0x711, 0x7E2, 0x7A0] {
         assert_eq!(
-            a7().approve(Target::Physical(id), &read),
+            a7().approve(Protocol::Uds, Target::Physical(id), &read),
             Err(Rejection::WrongTarget),
             "{id:03X}"
         );
     }
     // The OBD-II broadcast isn't a module, and is unaffected.
-    let vin = a7().approve(Target::ObdFunctional, &[0x09, 0x02]).unwrap();
+    let vin = a7()
+        .approve(Protocol::Uds, Target::ObdFunctional, &[0x09, 0x02])
+        .unwrap();
     assert_eq!(vin.reply_id(), None);
 }
 
@@ -288,13 +541,13 @@ fn reply_ids_are_known_for_obd_ids_or_from_a_profile() {
     // ISO 15765-4: an OBD-II ECU answers on its request ID + 8.
     for (request, reply) in OBD_REQUEST_IDS.iter().zip(OBD_RESPONSE_IDS) {
         let approved = Policy::read_only()
-            .approve(Target::Physical(*request), &read)
+            .approve(Protocol::Uds, Target::Physical(*request), &read)
             .unwrap();
         assert_eq!(approved.reply_id(), Some(reply));
     }
     // Without a profile, any other module's reply ID is unknown.
     let approved = Policy::read_only()
-        .approve(Target::Physical(0x710), &read)
+        .approve(Protocol::Uds, Target::Physical(0x710), &read)
         .unwrap();
     assert_eq!(approved.reply_id(), None);
 }
@@ -355,13 +608,14 @@ proptest! {
     fn narrowing_never_widens_the_policy(
         modules in any_modules(),
         target in any_target(),
+        protocol in prop::sample::select(&[Protocol::Uds, Protocol::Kwp2000][..]),
         payload in prop::collection::vec(any::<u8>(), 0..8),
     ) {
         let Ok(narrowed) = Policy::read_only().narrowed_to(&modules) else {
             return Ok(());
         };
-        if let Ok(approved) = narrowed.approve(target, &payload) {
-            prop_assert!(Policy::read_only().approve(target, &payload).is_ok());
+        if let Ok(approved) = narrowed.approve(protocol, target, &payload) {
+            prop_assert!(Policy::read_only().approve(protocol, target, &payload).is_ok());
             if let Target::Physical(id) = target {
                 prop_assert!(modules.iter().any(|m| m.request == id));
                 prop_assert!(!modules.iter().any(|m| m.reply == id));

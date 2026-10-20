@@ -12,7 +12,7 @@ use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
 use obdcracker_core::{obd, uds};
-use obdcracker_safety::{Policy, Target};
+use obdcracker_safety::{Policy, Protocol, Target};
 use obdcracker_transport::elm::Elm;
 use obdcracker_transport::link::TcpLink;
 use obdcracker_transport::{Audited, Expect, Response, exchange};
@@ -91,7 +91,9 @@ fn read(
     payload: &[u8],
     expect: Expect,
 ) -> Response {
-    let request = Policy::read_only().approve(target, payload).unwrap();
+    let request = Policy::read_only()
+        .approve(Protocol::Uds, target, payload)
+        .unwrap();
     let mut replies = exchange(elm, &request, expect, Elm::<TcpLink>::timing())
         .unwrap_or_else(|e| panic!("{payload:02X?}: {e}"));
     assert_eq!(replies.len(), 1, "{payload:02X?}: {replies:02X?}");

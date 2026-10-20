@@ -2,7 +2,7 @@
 
 use std::time::Duration;
 
-use obdcracker_safety::{Policy, Target};
+use obdcracker_safety::{Policy, Protocol, Target};
 use obdcracker_transport::{Error, Mock, Response, Transport};
 
 const WAIT: Duration = Duration::from_millis(100);
@@ -11,10 +11,10 @@ const WAIT: Duration = Duration::from_millis(100);
 fn records_each_sent_request() {
     let policy = Policy::read_only();
     let vin = policy
-        .approve(Target::ObdFunctional, &[0x09, 0x02])
+        .approve(Protocol::Uds, Target::ObdFunctional, &[0x09, 0x02])
         .unwrap();
     let rpm = policy
-        .approve(Target::ObdFunctional, &[0x01, 0x0C])
+        .approve(Protocol::Uds, Target::ObdFunctional, &[0x01, 0x0C])
         .unwrap();
     let mut mock = Mock::default();
     mock.send(&vin).unwrap();

@@ -4,7 +4,7 @@
 #[path = "../../obdcracker-transport/tests/support/fake_elm.rs"]
 mod fake_elm;
 
-use obdcracker_safety::{Policy, Target};
+use obdcracker_safety::{Policy, Protocol, Target};
 use obdcracker_sim::SimBus;
 use obdcracker_transport::elm::Elm;
 use obdcracker_transport::{Error, Expect, Response, Transport, exchange};
@@ -25,7 +25,7 @@ fn a7_behind_an_elm() -> Elm<FakeLink> {
     let mut car = SimBus::builtin("a7").unwrap();
     let elm = FakeElm::new(Box::new(move |header, request| {
         let request = Policy::read_only()
-            .approve(target(header), request)
+            .approve(Protocol::Uds, target(header), request)
             .unwrap();
         car.send(&request).unwrap();
         let mut replies = Vec::new();
@@ -70,7 +70,9 @@ fn every_read_matches_the_simulator() {
     let mut direct = SimBus::builtin("a7").unwrap();
     let mut elm = a7_behind_an_elm();
     for &(id, payload, expect) in READS {
-        let request = Policy::read_only().approve(target(id), payload).unwrap();
+        let request = Policy::read_only()
+            .approve(Protocol::Uds, target(id), payload)
+            .unwrap();
         let want = exchange(&mut direct, &request, expect, Elm::<FakeLink>::timing());
         let got = exchange(&mut elm, &request, expect, Elm::<FakeLink>::timing());
         assert_eq!(got, want, "{id:03X} {payload:02X?}");
@@ -85,7 +87,7 @@ fn every_read_matches_the_simulator() {
 fn a_module_that_isnt_there_times_out() {
     let mut elm = a7_behind_an_elm();
     let request = Policy::read_only()
-        .approve(Target::Physical(0x7E5), &[0x22, 0xF1, 0x90])
+        .approve(Protocol::Uds, Target::Physical(0x7E5), &[0x22, 0xF1, 0x90])
         .unwrap();
     assert_eq!(
         exchange(

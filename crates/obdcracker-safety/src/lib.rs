@@ -4,9 +4,13 @@
 //! Approval checks the payload against a closed allowlist. Anything that isn't on it is rejected,
 //! unknown services included.
 //!
+//! Service IDs mean different things per protocol, so each request names its [`Protocol`], and each
+//! protocol has its own allowlist: in UDS `85` is `ControlDTCSetting`, while in KWP2000 `10 85` is the
+//! programming session.
+//!
 //! ```compile_fail
 //! // Approved can't be built outside this crate, so nothing can skip the policy.
-//! let forged = obdcracker_safety::Approved { target: obdcracker_safety::Target::Physical(0x7E0), payload: vec![0x34], tier: obdcracker_safety::Tier::Read };
+//! let forged = obdcracker_safety::Approved { protocol: obdcracker_safety::Protocol::Uds, target: obdcracker_safety::Target::Physical(0x7E0), payload: vec![0x34], tier: obdcracker_safety::Tier::Read };
 //! ```
 
 /// What a request could do to the car, from harmless to dangerous.
@@ -20,6 +24,17 @@ pub enum Tier {
     Coding,
     /// Reprograms or resets a module. These requests are always banned.
     Flash,
+}
+
+/// The diagnostic protocol a request is in, which says what its bytes mean.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Protocol {
+    /// UDS (ISO 14229-1) and the OBD-II modes (SAE J1979) on ISO-TP. They share one set of service
+    /// IDs: OBD-II modes are below 0x10, UDS services from 0x10 up.
+    Uds,
+    /// KWP2000 (ISO 14230-3). It has no suppress-positive-response bit, and its session and reset
+    /// parameters mean other things than UDS's.
+    Kwp2000,
 }
 
 /// Where a request goes on the bus.
@@ -51,7 +66,7 @@ pub enum Rejection {
     Banned,
     /// Not on the allowlist, malformed, or empty.
     NotAllowed,
-    /// UDS sent to the broadcast address, a physical ID outside 0x700..=0x7FF, an ID that
+    /// UDS or KWP2000 sent to the broadcast address, a physical ID outside 0x700..=0x7FF, an ID that
     /// OBD-II ECUs answer on (0x7E8..=0x7EF), or, once the policy is narrowed to a car's modules
     /// ([`Policy::narrowed_to`]), any ID that isn't one of their request IDs.
     WrongTarget,
@@ -120,6 +135,7 @@ impl std::error::Error for NarrowingError {}
 /// A request that passed the policy. Only this crate can create one.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Approved {
+    protocol: Protocol,
     target: Target,
     payload: Vec<u8>,
     tier: Tier,
@@ -127,6 +143,12 @@ pub struct Approved {
 }
 
 impl Approved {
+    /// The protocol the request was approved as.
+    #[must_use]
+    pub fn protocol(&self) -> Protocol {
+        self.protocol
+    }
+
     /// Where the request goes.
     #[must_use]
     pub fn target(&self) -> Target {
@@ -185,7 +207,7 @@ impl Policy {
     /// that is both a request ID and a reply ID, or a request ID with two reply IDs.
     pub fn narrowed_to(self, modules: &[ModuleIds]) -> Result<Self, NarrowingError> {
         for module in modules {
-            if check_target(Target::Physical(module.request), Kind::Uds).is_err() {
+            if check_target(Target::Physical(module.request), Kind::Physical).is_err() {
                 return Err(NarrowingError::Request(module.request));
             }
             if !(0x700..=0x7FF).contains(&module.reply) || module.reply == OBD_FUNCTIONAL_ID {
@@ -215,11 +237,21 @@ impl Policy {
         })
     }
 
-    /// Checks a request against the allowlist and returns it as [`Approved`] if it may be sent.
+    /// Checks a request in `protocol` against that protocol's allowlist and returns it as
+    /// [`Approved`] if it may be sent.
     ///
     /// Flash-tier requests are always [`Rejection::Banned`], whatever the policy unlocks.
-    pub fn approve(&self, target: Target, payload: &[u8]) -> Result<Approved, Rejection> {
-        let (tier, kind) = classify(payload).ok_or(Rejection::NotAllowed)?;
+    pub fn approve(
+        &self,
+        protocol: Protocol,
+        target: Target,
+        payload: &[u8],
+    ) -> Result<Approved, Rejection> {
+        let (tier, kind) = match protocol {
+            Protocol::Uds => classify_uds(payload),
+            Protocol::Kwp2000 => classify_kwp2000(payload).map(|tier| (tier, Kind::Physical)),
+        }
+        .ok_or(Rejection::NotAllowed)?;
         if tier == Tier::Flash {
             return Err(Rejection::Banned);
         }
@@ -239,6 +271,7 @@ impl Policy {
             (Target::Physical(id), None) => OBD_REQUEST_IDS.contains(&id).then(|| id + 8),
         };
         Ok(Approved {
+            protocol,
             target,
             payload: payload.to_vec(),
             tier,
@@ -249,8 +282,10 @@ impl Policy {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Kind {
+    // OBD-II: the broadcast or an emissions ECU.
     Obd,
-    Uds,
+    // UDS and KWP2000: one module, never the broadcast.
+    Physical,
 }
 
 const OBD_FUNCTIONAL_ID: u32 = 0x7DF;
@@ -273,8 +308,8 @@ fn check_target(target: Target, kind: Kind) -> Result<(), Rejection> {
     }
 }
 
-// The allowlist. Returns None for anything not on it, including malformed lengths.
-fn classify(payload: &[u8]) -> Option<(Tier, Kind)> {
+// The UDS and OBD-II allowlist. Returns None for anything not on it, including malformed lengths.
+fn classify_uds(payload: &[u8]) -> Option<(Tier, Kind)> {
     let (&sid, data) = payload.split_first()?;
     // UDS subfunctions use bit 7 to suppress the positive response; it doesn't change the meaning.
     let sub = data.first().map(|b| b & 0x7F);
@@ -289,26 +324,63 @@ fn classify(payload: &[u8]) -> Option<(Tier, Kind)> {
         0x09 if data.len() == 1 => (Tier::Read, Kind::Obd),
         // DiagnosticSessionControl: default and extended are reads; programming is flashing
         0x10 if data.len() == 1 => match sub? {
-            0x01 | 0x03 => (Tier::Read, Kind::Uds),
-            0x02 => (Tier::Flash, Kind::Uds),
+            0x01 | 0x03 => (Tier::Read, Kind::Physical),
+            0x02 => (Tier::Flash, Kind::Physical),
             _ => return None,
         },
         // ClearDiagnosticInformation: a 3-byte DTC group
-        0x14 if data.len() == 3 => (Tier::ClearDtc, Kind::Uds),
+        0x14 if data.len() == 3 => (Tier::ClearDtc, Kind::Physical),
         // ReadDTCInformation: every subfunction is a read
-        0x19 if !data.is_empty() => (Tier::Read, Kind::Uds),
+        0x19 if !data.is_empty() => (Tier::Read, Kind::Physical),
         // ReadDataByIdentifier: one or more 2-byte DIDs
-        0x22 if !data.is_empty() && data.len() % 2 == 0 => (Tier::Read, Kind::Uds),
+        0x22 if !data.is_empty() && data.len() % 2 == 0 => (Tier::Read, Kind::Physical),
         // SecurityAccess unlocks coding
-        0x27 if !data.is_empty() => (Tier::Coding, Kind::Uds),
+        0x27 if !data.is_empty() => (Tier::Coding, Kind::Physical),
         // WriteDataByIdentifier: a DID and at least one byte
-        0x2E if data.len() >= 3 => (Tier::Coding, Kind::Uds),
+        0x2E if data.len() >= 3 => (Tier::Coding, Kind::Physical),
         // TesterPresent
-        0x3E if data.len() == 1 && sub? == 0x00 => (Tier::Read, Kind::Uds),
+        0x3E if data.len() == 1 && sub? == 0x00 => (Tier::Read, Kind::Physical),
         // ECUReset, RoutineControl, RequestDownload/Upload, TransferData, RequestTransferExit,
         // WriteMemoryByAddress: banned whatever their length
-        0x11 | 0x31 | 0x34 | 0x35 | 0x36 | 0x37 | 0x3D => (Tier::Flash, Kind::Uds),
+        0x11 | 0x31 | 0x34 | 0x35 | 0x36 | 0x37 | 0x3D => (Tier::Flash, Kind::Physical),
         _ => return None,
     };
     Some(class)
+}
+
+// The KWP2000 allowlist (ISO 14230-3). Returns None for anything not on it, including malformed
+// lengths. KWP2000 has no suppress-positive-response bit, so every parameter is read unmasked.
+fn classify_kwp2000(payload: &[u8]) -> Option<Tier> {
+    let (&sid, data) = payload.split_first()?;
+    let tier = match sid {
+        // StartDiagnosticSession: programming and development reprogram, and adjustment changes
+        // adaptations. No session is a read: what each value means is up to the manufacturer
+        // (ISO 14230-3 leaves 0x80..=0xFF to them), so a profile-specific one will need its own
+        // rule.
+        0x10 if data.len() == 1 => match data[0] {
+            0x85 | 0x86 => Tier::Flash,
+            0x87 => Tier::Coding,
+            _ => return None,
+        },
+        // ClearDiagnosticInformation: its DTC group is optional, and its width the
+        // manufacturer's (ISO 14230-3)
+        0x14 => Tier::ClearDtc,
+        // ReadStatusOfDiagnosticTroubleCodes and ReadDiagnosticTroubleCodesByStatus: the status
+        // and DTC group parameters' widths are up to the manufacturer (ISO 14230-3)
+        0x17 | 0x18 if !data.is_empty() => Tier::Read,
+        // ReadEcuIdentification (one identification option) and ReadDataByLocalIdentifier (one
+        // local ID; a transmission mode after it would ask for periodic replies, not one read)
+        0x1A | 0x21 if data.len() == 1 => Tier::Read,
+        // SecurityAccess unlocks coding; WriteDataByCommonIdentifier and
+        // WriteDataByLocalIdentifier, whatever their record's length, change it
+        0x27 | 0x2E | 0x3B if !data.is_empty() => Tier::Coding,
+        // TesterPresent, with or without responseRequired (01 yes, 02 no)
+        0x3E if matches!(data, [] | [0x01 | 0x02]) => Tier::Read,
+        // ECUReset (0x80..=0xFF are manufacturers' resets), the routines by local ID and by
+        // address, RequestDownload/Upload, TransferData, RequestTransferExit and
+        // WriteMemoryByAddress: banned whatever their length
+        0x11 | 0x31..=0x3A | 0x3D => Tier::Flash,
+        _ => return None,
+    };
+    Some(tier)
 }
