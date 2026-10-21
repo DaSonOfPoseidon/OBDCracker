@@ -42,6 +42,32 @@ Anything else is rejected, including KWP2000's IO control (0x30), memory reads (
 banned and locked ones: ISO 14230-3 leaves what each value means to the manufacturer, so VAG's `10 89` will need a
 rule of its own.
 
+## Addressing
+
+`approve` checks where a request goes as well as what it says. The constants are in
+`crates/obdcracker-safety/src/lib.rs`.
+
+- **11-bit IDs:** a module's request ID is in `0x700..=0x7FF`, except the broadcast `0x7DF` and the IDs OBD-II
+  ECUs answer on (`0x7E8..=0x7EF`). A request on a response ID looks like an ECU's reply to everyone listening, so
+  it is refused. Emissions ECUs listen on `0x7E0..=0x7E7` and answer on that ID + 8 (ISO 15765-4), which is the one
+  reply ID the bare policy knows.
+- **29-bit IDs:** two request ranges.
+  - ISO 15765-4 normal fixed addressing: requests `0x18DA<module>F1` from the tester at `0xF1` (the module is never
+    `0xF1`), answered on `0x18DAF1<module>`.
+  - VAG: requests `0x17FC00xx`, answered on `0x17FE00xx`. Without a profile their reply IDs are unknown.
+  - The ranges don't overlap the 11-bit one, so an ID's width follows from its value (`Target::physical`), and a
+    29-bit ID is never sent as 11-bit or the other way round.
+- **Narrowing to a profile:** a request must go to one of its modules' request IDs, never a reply ID. A module's
+  reply ID must have its request ID's width: for 11-bit, `0x700..=0x7FF` but not `0x7DF`; for 29-bit, `0x18DAF1xx`
+  (`xx` not `0xF1`) or `0x17FE00xx`. An ID can't be both one module's request and a module's reply, and a request ID
+  has one reply ID. A profile only narrows, so it can't make a refused ID allowed.
+- **VW TP2.0:** the tester is address 0, never a channel setup's target. A setup is `<address> C0 00 10 00 03 01` on
+  `0x200`: the module picks the ID it listens on, and the tester asks to be answered on `0x300` (for KWP2000). The
+  module answers on `0x200 + address`. A disconnect (`A8`) is approved only on a channel whose receive ID is `0x300`
+  and whose send ID is in `0x300..=0x7FF` (below it are the car's own frames and the setup range), not in
+  `0x7DF..=0x7EF` (OBD-II) and, once the policy is narrowed to modules, not one of their IDs, since `A8` there would
+  reach that module.
+
 ## Back up before every change
 
 A write (T1 and up) can't be approved without a `Backup` of what is on the module right now: read from the same
