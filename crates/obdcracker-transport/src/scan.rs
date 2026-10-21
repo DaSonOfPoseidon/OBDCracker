@@ -14,11 +14,8 @@ use crate::fingerprint::{
 };
 use crate::{Error, ExtendedSession, S3, SessionError, Timing, Transport};
 
-/// The identification DIDs (ISO 14229-1 annex C) read from every module, in this order: spare
-/// part number (F187), software number (F188), software version (F189), system supplier
-/// (F18A), manufacture date (F18B), serial number (F18C), VIN (F190), hardware number (F191),
-/// supplier hardware number and version (F192, F193), supplier software number and version
-/// (F194, F195), system name (F197) and ODX file (F19E).
+/// The identification DIDs (ISO 14229-1 annex C) read from every module, in this order:
+/// F187, F188, F189, F18A, F18B, F18C, F190 (VIN), F191, F192, F193, F194, F195, F197, F19E.
 pub const SCAN_DIDS: [u16; 14] = [
     did::SPARE_PART_NUMBER,
     did::SOFTWARE_NUMBER,
@@ -36,10 +33,8 @@ pub const SCAN_DIDS: [u16; 14] = [
     did::ODX_FILE,
 ];
 
-/// The DTC status bits scan asks for (ISO 14229-1 D.2): failed, failed this operation cycle,
-/// pending, confirmed, failed since the last clear (an intermittent fault that passes now) and
-/// warning lamp. The "not tested" bits are left out: with them, a module lists every DTC it has
-/// never tested, which on the A7 is its whole DTC table (#49).
+/// The DTC status bits scan asks for (ISO 14229-1 D.2), without the "not tested" bits.
+/// See docs/scanning.md#dtcs.
 pub const FAULT_MASK: u8 = 0xAF;
 
 /// Why a scan couldn't be taken at all.
@@ -50,11 +45,10 @@ pub type ScanError = FingerprintError;
 pub struct ScanModule {
     /// Where it sits on the bus.
     pub module: UdsModule,
-    /// More DIDs to read after [`SCAN_DIDS`], such as VAG's F1A3 or 0600, or how to show one of
-    /// [`SCAN_DIDS`] that has no fixed format, such as the manufacture date (F18B). Each DID is
-    /// read once, however often it's listed, in its first entry's format. A DID ISO 14229-1
-    /// makes text ([`did::is_text`]) stays text, and F190 must be a VIN or the placeholder for
-    /// none ([`DidValue::NotSet`]).
+    /// More DIDs to read after [`SCAN_DIDS`], or how to show one of them that has no fixed
+    /// format, such as F18B. Each DID is read once, in its first entry's format. A DID
+    /// ISO 14229-1 makes text ([`did::is_text`]) stays text, and F190 must be a VIN or
+    /// [`DidValue::NotSet`].
     pub extra_dids: Vec<ExtraDid>,
 }
 
@@ -66,8 +60,7 @@ pub struct ExtraDid {
     /// How to show its value.
     pub format: DidFormat,
     /// Its value's length in bytes, if the module always sends this many. DIDs with a length
-    /// are read up to three in one request (a single CAN frame), since a multi-DID reply
-    /// doesn't say where each value ends.
+    /// are read up to three to a request (docs/scanning.md#did-batching).
     pub length: Option<u16>,
     /// The diagnostic session the module reads it in. One that needs the extended session is
     /// read only when [`ScanOptions::extended`] asks for it.
@@ -78,11 +71,9 @@ pub struct ExtraDid {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct ScanOptions {
-    /// Read the DIDs that need the extended diagnostic session ([`ExtraDid::session`]): after
-    /// its other reads, each module that has any is put in the extended session, with these
-    /// S3 timings ([`ExtendedSession`]), and returned to the default session. `None`, the
-    /// default, changes no module's session, and those DIDs are
-    /// [`ReadError::NeedsExtendedSession`].
+    /// Read the DIDs that need the extended session ([`ExtraDid::session`]), with these S3
+    /// timings ([`ExtendedSession`]). `None`, the default, changes no module's session, and
+    /// those DIDs are [`ReadError::NeedsExtendedSession`].
     pub extended: Option<S3>,
 }
 
@@ -158,21 +149,17 @@ pub struct ModuleScan {
     pub name: String,
     /// The CAN ID it answers on.
     pub response_id: u32,
-    /// Each of [`SCAN_DIDS`], then each of [`ScanModule::extra_dids`], and its value. DIDs with a
-    /// length are read up to three at a time; any a multi-DID reply leaves out, or all of them
-    /// if it's refused or doesn't fit their lengths, are read again one at a time, and must then be
-    /// exactly their length.
+    /// Each of [`SCAN_DIDS`], then each of [`ScanModule::extra_dids`], and its value. Batching
+    /// and re-reads: docs/scanning.md#did-batching.
     pub dids: Vec<(u16, Result<DidValue, ReadError>)>,
     /// How it encodes DTCs, and how many have a [`FAULT_MASK`] bit set (`ReadDTCInformation`
     /// 0x01).
     pub dtc_count: Result<DtcCount, ReadError>,
     /// Its DTCs with a [`FAULT_MASK`] bit set, and their status (`ReadDTCInformation` 0x02).
-    /// Only bits the module says it supports count, so a module that ignores the mask can't
-    /// list untested DTCs.
+    /// Only bits the module says it supports count.
     pub dtcs: Result<Vec<DtcRecord>, ReadError>,
-    /// Whether the module answered anything at all, a refusal included. That covers a
-    /// multi-DID read whose DIDs were then read again one at a time, so it can be true when
-    /// every value above is [`ReadError::NoReply`].
+    /// Whether the module answered anything at all, a refusal included. It can be true when
+    /// every value above is [`ReadError::NoReply`] (docs/scanning.md#did-batching).
     pub answered: bool,
 }
 
@@ -195,12 +182,10 @@ pub fn scan<T: Transport + ?Sized>(
 /// [`scan`], with `options`.
 ///
 /// With [`ScanOptions::extended`], each module with DIDs that need the extended session is put
-/// in it after its other reads (`10 03`), kept there with `TesterPresent` if needed, and
-/// returned to the default session (`10 01`). Those requests are approved by `policy` before
-/// anything is sent too, and the policy must know each such module's reply ID (narrow it with
-/// the vehicle profile), or [`FingerprintError::Session`] is returned. A module that refuses
-/// the session or doesn't answer loses only those DIDs. One that doesn't confirm `10 01`
-/// returns to the default session on its own after S3.
+/// in it (`10 03`) after its other reads and returned to the default session (`10 01`). Those
+/// requests are approved before anything is sent too, and the policy must know each such
+/// module's reply ID, or [`FingerprintError::Session`] is returned. A module that refuses the
+/// session or doesn't answer loses only those DIDs. See docs/scanning.md#when-a-session-fails.
 pub fn scan_with<T: Transport + ?Sized>(
     transport: &mut T,
     policy: &Policy,
@@ -213,7 +198,7 @@ pub fn scan_with<T: Transport + ?Sized>(
             .approve(Protocol::Uds, target, payload)
             .map_err(FingerprintError::Rejected)
     };
-    // Which PIDs are asked for depends on the bitmaps, so every one is approved up front.
+    // Which PIDs are asked for depends on the bitmaps, so all are approved up front.
     let pid_requests = (0..=u8::MAX)
         .map(|pid| approve(Target::ObdFunctional, &obd::current_data(pid)))
         .collect::<Result<Vec<_>, _>>()?;
@@ -278,8 +263,6 @@ pub fn scan_with<T: Transport + ?Sized>(
     })
 }
 
-// Approves every request scan may send a module: its DID reads, in batches and alone, the
-// extended session's own requests if it will be used, and the DTC reads.
 fn module_requests(
     policy: &Policy,
     scanned: &ScanModule,
@@ -315,7 +298,7 @@ fn module_requests(
         .partition(|did| did.session == DiagnosticSession::Extended);
     let extended = did_requests(extended)?;
     if options.extended.is_some() && !extended.dids.is_empty() {
-        // What `ExtendedSession` sends, checked now so nothing is sent if it can't be.
+        // What `ExtendedSession` sends, approved now so nothing is sent if it can't be.
         let enter = approve(target, &uds::session_control(DiagnosticSession::Extended))?;
         approve(target, &uds::tester_present())?;
         approve(target, &uds::session_control(DiagnosticSession::Default))?;
@@ -332,8 +315,7 @@ fn module_requests(
     })
 }
 
-// A module's requests, all approved: its DID reads in the default session and in the extended
-// one, the DTC count and the DTC list. `order` is the order its DIDs' values are given in.
+// `order` is the order the module's DID values are given in.
 struct ModuleRequests {
     order: Vec<u16>,
     default: DidRequests,
@@ -342,14 +324,13 @@ struct ModuleRequests {
     dtcs: Approved,
 }
 
-// A read for each DID, and the multi-DID reads (the indexes of the DIDs each reads).
+// A read for each DID, and the multi-DID reads (by the indexes of the DIDs they read).
 struct DidRequests {
     dids: Vec<(ExtraDid, Approved)>,
     batches: Vec<(Vec<usize>, Approved)>,
 }
 
-// Sends one read and decodes its answer: straight to the transport, or through an extended
-// session.
+// Sends one read: straight to the transport, or through an extended session.
 pub(crate) trait Ask {
     fn ask<V>(
         &mut self,
@@ -359,8 +340,7 @@ pub(crate) trait Ask {
         self.ask_sent(request, decode).map(|(_, value)| value)
     }
 
-    // `ask`, also saying whether `request` was sent: a session's keepalive or re-entry can fail
-    // before it is.
+    // `ask`, also saying whether `request` was sent: a session's keepalive can fail before it.
     fn ask_sent<V>(
         &mut self,
         request: &Approved,
@@ -398,7 +378,6 @@ impl<T: Transport + ?Sized> Ask for ExtendedSession<'_, T> {
         request: &Approved,
         decode: impl FnOnce(&[u8]) -> Result<V, ReplyError>,
     ) -> Result<(bool, Result<V, ReadError>), ScanError> {
-        // `TesterPresent` if a slow module took long enough, so the session doesn't lapse.
         if let Err(e) = self.keep_alive().and_then(|()| self.prepare(request)) {
             return session_error(e).map(|e| (false, Err(e)));
         }
@@ -409,18 +388,16 @@ impl<T: Transport + ?Sized> Ask for ExtendedSession<'_, T> {
     }
 }
 
-// What a session failure means for the values it was for: the module didn't answer or refused
-// the session, which loses only those; or the adapter failed, which stops the scan.
+// What a session failure means for the values it was for: a lost answer or refusal loses only
+// those, an adapter failure stops the scan. See docs/scanning.md#when-a-session-fails.
 pub(crate) fn session_error(e: SessionError) -> Result<ReadError, ScanError> {
     match e {
         SessionError::Transport(Error::Timeout) => Ok(ReadError::NoReply),
         SessionError::Transport(Error::StillPending) => Ok(ReadError::StillPending),
         SessionError::Transport(e) => Err(FingerprintError::Transport(e)),
-        // What matters for the values is that the session wasn't entered. The module leaves it
-        // by itself after S3 if it did.
+        // As far as the values go the session wasn't entered; the module leaves by itself after S3.
         SessionError::Unconfirmed { entry, .. } => session_error(*entry),
-        // A refusal of `10 03` or `3E 00`, or a positive answer whose timing couldn't be decoded:
-        // decoded as an answer to the service it names.
+        // A refusal of `10 03` or `3E 00`, or a positive answer with unusable timing.
         SessionError::Refused(reply) => {
             let sid = match *reply.as_slice() {
                 // A refusal: `7F <service ID> <code>`.
@@ -440,18 +417,15 @@ pub(crate) fn session_error(e: SessionError) -> Result<ReadError, ScanError> {
     }
 }
 
-// A multi-DID request fits one CAN frame with up to three DIDs (7 bytes), which every adapter
-// driver can send.
+// Three DIDs (7 bytes) fit one CAN frame, which every adapter driver can send.
 const BATCH: usize = 3;
-// A positive ReadDataByIdentifier reply's first byte.
 const READ_DIDS_REPLY: u8 = uds::READ_DATA_BY_IDENTIFIER + 0x40;
 
 // The longest reply ISO-TP carries.
 const MAX_REPLY: usize = 4095;
 
 // Groups the DIDs with a length, in order, up to BATCH a request and as many as one reply can
-// carry (the service byte, then each DID and its value). A DID left alone is read on its own, and
-// so is one whose length is 0: every DID value has at least one byte.
+// carry. A DID left alone, or with length 0, is read on its own.
 fn batches_of(dids: &[ExtraDid]) -> Vec<Vec<usize>> {
     let mut batches = Vec::new();
     let mut batch: Vec<usize> = Vec::new();
@@ -473,9 +447,8 @@ fn batches_of(dids: &[ExtraDid]) -> Vec<Vec<usize>> {
     batches
 }
 
-// Splits a multi-DID reply into each DID's data by the lengths asked for. The module may leave
-// out DIDs it doesn't support (ISO 14229-1), but those it sends must come in the order asked,
-// each at its length, with nothing left over.
+// Splits a multi-DID reply by the lengths asked for. A module may leave DIDs out (ISO 14229-1),
+// but those it sends must come in order, each at its length, with nothing left over.
 fn split_batch(payload: &[u8], layout: &[(u16, usize)]) -> Result<Vec<(u16, Vec<u8>)>, ReplyError> {
     let mut rest = response::positive(uds::READ_DATA_BY_IDENTIFIER, payload)?;
     let mut layout = layout.iter();
@@ -495,20 +468,17 @@ fn split_batch(payload: &[u8], layout: &[(u16, usize)]) -> Result<Vec<(u16, Vec<
     Ok(values)
 }
 
-// One ECU's supported PIDs so far, the bitmap it said comes next, if any, and where and why its
-// chain broke, if it did after the first bitmap.
+// One ECU's supported PIDs so far, the bitmap that comes next, and where its chain broke.
 struct Chain {
     pids: Result<Vec<u8>, ReadError>,
     next: Option<u8>,
     cut_short: Option<(u8, ReadError)>,
 }
 
-// What `supported_pids` found for one ECU: its PIDs, and where and why the list was cut short.
 type Supported = (Result<Vec<u8>, ReadError>, Option<(u8, ReadError)>);
 
-// Each ECU that answered the first bitmap and the PIDs it supports. Each ECU's chain follows only
-// the bitmaps it says it supports, and ends at a missing or garbled one, even while another
-// ECU's chain keeps the requests going. PID E0 is the last bitmap.
+// Each ECU that answered the first bitmap and the PIDs it supports, per
+// docs/scanning.md#module-discovery. PID E0 is the last bitmap.
 fn supported_pids<T: Transport + ?Sized>(
     transport: &mut T,
     pid_requests: &[Approved],
@@ -545,7 +515,7 @@ fn supported_pids<T: Transport + ?Sized>(
                 Err(e) => chain.cut_short = Some((base, e)),
             }
         }
-        // An ECU that said this page comes next but didn't answer it ends its chain here.
+        // Said this page comes next but didn't answer it.
         for chain in chains.values_mut() {
             if chain.next == Some(base) {
                 chain.next = None;
@@ -563,7 +533,6 @@ fn supported_pids<T: Transport + ?Sized>(
         .collect())
 }
 
-// Each supported PID's value from each ECU that supports it, one broadcast per PID.
 fn pid_values<T: Transport + ?Sized>(
     transport: &mut T,
     pid_requests: &[Approved],
@@ -664,8 +633,8 @@ fn scan_module<T: Transport + ?Sized>(
     })
 }
 
-// Reads each DID in `requests`, several at a time where it can, and whether any multi-DID read
-// got an answer, which the values may not show.
+// Reads each DID in `requests`, and whether any multi-DID read got an answer, which the values
+// may not show.
 #[allow(clippy::type_complexity)]
 fn read_dids(
     asker: &mut impl Ask,
@@ -692,8 +661,7 @@ fn read_dids(
                 Some((did.id, usize::from(did.length?)))
             })
             .collect();
-        // A refusal, no reply, or a reply that doesn't fit the lengths: every DID in it is read
-        // alone next.
+        // On a refusal, silence or a misfit reply, every DID in it is read alone next.
         let found = asker.ask(request, |payload| split_batch(payload, &layout))?;
         batch_answered |= found.as_ref().err() != Some(&ReadError::NoReply);
         let found = found.unwrap_or_default();
@@ -708,11 +676,8 @@ fn read_dids(
                 }));
             }
         }
-        // Then those it left out. The multi-DID read's reply may still arrive during these reads
-        // (after a timeout, or after a late refusal to an earlier read was taken for its
-        // answer, since refusals echo no DID) and pass for the first DID, the others' bytes
-        // taken for its value. So each must be exactly its length; a value of another length
-        // (another ECU variant) is malformed until the profile is fixed.
+        // Then the DIDs it left out. A late multi-DID reply could pass for the first DID's, so
+        // each must be exactly its length (docs/scanning.md#did-batching).
         for &i in batch {
             if values[i].is_none() {
                 let (
@@ -739,9 +704,7 @@ fn read_dids(
     Ok((dids, batch_answered))
 }
 
-// SCAN_DIDS, then the module's other extra DIDs, each once. A DID takes its first extra entry's
-// length, and its format except where ISO 14229-1 makes it text; a SCAN_DIDS entry with no extra
-// entry is text, with no known length.
+// SCAN_DIDS, then the module's other extra DIDs, each once, as docs/scanning.md#did-batching says.
 fn dids_of(scanned: &ScanModule) -> Vec<ExtraDid> {
     let mut dids: Vec<ExtraDid> = SCAN_DIDS
         .iter()
@@ -771,8 +734,7 @@ fn dids_of(scanned: &ScanModule) -> Vec<ExtraDid> {
     dids
 }
 
-// A DID's value in `format`. ISO 14229-1 makes F190 a VIN, so anything there other than a VIN or
-// the placeholder for none is malformed.
+// ISO 14229-1 makes F190 a VIN, so anything there but a VIN or the placeholder is malformed.
 fn decode_scanned(payload: &[u8], id: u16, format: DidFormat) -> Result<DidValue, ReplyError> {
     match format {
         DidFormat::Text if id == did::VIN => {
@@ -787,7 +749,6 @@ fn decode_scanned(payload: &[u8], id: u16, format: DidFormat) -> Result<DidValue
     }
 }
 
-// The one reading in a single-PID mode 01 reply, which must be `pid`.
 fn single_reading(payload: &[u8], pid: u8) -> Result<Value<'_>, ReplyError> {
     let mut readings = obd::decode_current_data(payload)?;
     let reading = readings.next().ok_or(ReplyError::TooShort)??;
