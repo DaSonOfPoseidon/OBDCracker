@@ -1,13 +1,8 @@
 //! ELM327 and STN adapters (such as an `OBDLink EX`), over any [`Link`].
 //!
-//! The adapter takes text commands: `AT` commands configure it, and a line of hex digits is a
-//! request it puts on the bus. [`Elm`] only ever writes a fixed set of `AT` commands and the
-//! hex of [`Approved`] requests. No single bit flipped on the way, which a serial line can do,
-//! turns one of those commands into a line of hex digits, and the adapter's echo of every line
-//! is checked against what was written: a request's before its carriage return, so a misheard
-//! one never reaches the bus, when the adapter echoes characters as it reads them. It never ends
-//! an empty line with a carriage return, which repeats the adapter's last command. Behaviour is
-//! from the ELM327 datasheet (ELM327DS v2.0) and measurements on an STN; see `docs/elm327.md`.
+//! A line of hex digits is a request the adapter puts on the bus, so [`Elm`] writes only a fixed
+//! set of `AT` commands and the hex of [`Approved`] requests, checks every echo, and never
+//! writes an empty line. See `docs/elm327.md` for the adapter's behaviour and why.
 
 pub mod codec;
 
@@ -21,22 +16,14 @@ use crate::link::{Driver, Link, LinkKind};
 use crate::{Error, LinkEvent, Response, Timing, Transport, hex};
 use codec::{Event, Line, LineSplitter, Status, parse_line};
 
-// Run after the reset, in order. Each must answer OK. One flipped bit must not turn any of them
-// into a line of hex digits, so commands with a single non-hex letter (`ATE0`, `ATCAF1`,
-// `ATCF700`) are out. Echo stays on, and CAN auto formatting and flow control stay at their
-// defaults (on), which `check_defaults` makes sure no programmable parameter changed.
+// Sent after the reset, each must answer OK (docs/elm327.md#setup). Never automatic protocol
+// search (`ATSP6`): it sends probe frames that no policy approved and no audit log records.
 #[rustfmt::skip]
 const SETUP: &[&str] = &[
-    // Linefeeds off; spaces and headers on, so every frame shows its CAN ID and PCI byte
     "ATL0", "ATS1", "ATH1",
-    // ISO 15765-4 CAN, 11-bit IDs, 500 kbit/s. Never automatic search: it sends probe frames
-    // that no policy approved and no audit log records.
     "ATSP6",
-    // Wait for replies after every request
     "ATR1",
-    // Show every 11-bit reply ID from 0x700 to 0x7FF (`WIDE_FILTER`) until a request narrows it
     "ATCRA7XX",
-    // Adaptive timing, capped at the longest timeout (0xFF x 4 ms)
     "ATAT1", "ATSTFF",
 ];
 
@@ -46,23 +33,17 @@ const KEPT_DEFAULTS: &[(u8, u8, &str)] = &[
     (0x09, 0x00, "echo"),
     (0x24, 0x00, "CAN auto formatting"),
     (0x25, 0x00, "CAN flow control"),
-    // Off, or every frame line has its data length between the CAN ID and the data
     (0x29, 0xFF, "CAN data length display"),
 ];
 
-// Raw frames for VW TP2.0: automatic flow control off first, since the adapter answers anything
-// that looks like a First Frame whatever `CAF` is (datasheet p. 14); variable DLC on, or even with
-// `CAF0` every frame is padded to 8 bytes (pp. 27, 46); then no ISO-TP formatting (p. 13).
+// Raw frames for VW TP2.0 and back; the order matters (docs/elm327.md#vw-tp20-channel-frames).
 const RAW_ON: [&str; 3] = ["ATCFC0", "ATV1", "ATCAF0"];
-// And back to the defaults, flow control last.
 const RAW_OFF: [&str; 3] = ["ATCAF1", "ATV0", "ATCFC1"];
 
-// `AT CRA` patterns: three hex digits, each of which may be `X` (any). Every diagnostic reply ID,
-// and every OBD-II emissions ECU's.
+// `AT CRA` patterns (docs/elm327.md#receive-filter): every diagnostic reply ID, and every
+// OBD-II emissions ECU's; for 29-bit IDs, every ISO 15765-4 reply to the tester and every VAG one.
 const WIDE_FILTER: &str = "7XX";
 const OBD_FILTER: &str = "7EX";
-// Eight hex digits for 29-bit IDs: every ISO 15765-4 reply to the tester (0x18DAF1xx), and
-// every VAG one (0x17FE00xx).
 const ISO_29_BIT_FILTER: &str = "18DAF1XX";
 const VAG_29_BIT_FILTER: &str = "17FE00XX";
 
@@ -79,121 +60,66 @@ pub const ADAPTER_TIMEOUT: Duration = Duration::from_millis(0xFF * 4);
 /// [`ADAPTER_TIMEOUT`].
 pub const STN_LONGEST_TIMEOUT: Duration = Duration::from_millis(65_535);
 
-// How long to wait for the adapter to go quiet before the reset, and the most time to spend.
+// How long the adapter must stay quiet before the reset, and the most time to spend waiting.
 const QUIET: Duration = Duration::from_millis(100);
 const DRAIN_LIMIT: Duration = Duration::from_secs(2);
-// How long a reset may take, and how many to try: the first may only interrupt the adapter.
+// The first reset may only interrupt the adapter, hence two tries.
 const RESET_WAIT: Duration = Duration::from_secs(3);
 const RESET_TRIES: usize = 2;
-// How long to look for output the adapter shouldn't have printed before writing to it.
 const IDLE_CHECK: Duration = Duration::from_millis(1);
-// The most lines an answer to a command may have: `AT PPS` prints 12. A reset, whose noise
-// can be long, keeps that many for the report and reports how many more it dropped.
+// `AT PPS` prints 12 lines. A reset keeps this many for the report and counts the rest as lost.
 const MAX_ANSWER_LINES: usize = 32;
-// How long an AT command may take.
 const COMMAND_WAIT: Duration = Duration::from_secs(2);
-// How long the adapter may take to print the longest reply, 4095 bytes (a first frame and 585
-// consecutive frames, each a line of up to 37 characters), at 9600 baud, the slowest an ELM327
-// starts at (datasheet p. 7), 10 bits a character: about 23 s.
+// Time to print the longest reply (4095 bytes) at 9600 baud: about 23 s
+// (docs/elm327.md#timing).
 const LONGEST_PRINT: Duration =
     Duration::from_millis(586 * FRAME_LINE_29 as u64 * 10 * 1000 / 9600 + 1);
-// The most modules whose multi-frame replies are reassembled at once. Frames from more are
-// dropped.
 const MAX_SENDERS: usize = 16;
-// The time to print the longest reply from every one of them.
 const LONGEST_PRINT_ALL: Duration = LONGEST_PRINT.saturating_mul(16);
 const _: () = assert!(MAX_SENDERS == 16, "update LONGEST_PRINT_ALL");
-// The longest a request may run: the adapter's timeout for the first reply, the time to print
-// the longest reply from every module (about 7 minutes at 9600 baud), and time for the link.
-// Only an adapter that keeps printing gets near it: a working one ends each request with its
-// prompt, and one that goes quiet is caught by the silence limit (its timeout plus
-// `SILENCE_MARGIN`).
 const LONGEST_REQUEST: Duration = STN_LONGEST_TIMEOUT
     .saturating_add(LONGEST_PRINT_ALL)
     .saturating_add(Duration::from_secs(1));
-// How much longer than its own timeout the adapter may stay quiet during a request: the default
-// P2* (5 s) that v2.1 and STN chips wait after a response-pending reply (ELM327DS v2.1, p. 90),
-// plus time for the link. Any longer and it has hung.
+// How much longer than its own timeout the adapter may stay quiet in a request before it counts
+// as hung (ELM327DS v2.1, p. 90; docs/elm327.md#timing).
 const SILENCE_MARGIN: Duration = Duration::from_secs(6);
 // The longest any single receive waits, so a huge timeout can't overflow the clock.
 const LONGEST_WAIT: Duration = Duration::from_secs(3600);
-// How long a request's digits may take to echo before its carriage return. The STN in an
-// `OBDLink EX` echoes each character within about 15 ms (#54); this leaves room for a slow link.
+// How long a request's digits may take to echo before its carriage return (#54).
 const ECHO_WAIT: Duration = Duration::from_secs(1);
-// Ends a line the adapter misheard so that it refuses it: two letters that aren't hex digits, so
-// no single flipped bit of this leaves a line of hex digits, then the carriage return the adapter
-// needs before it drops the line (an STN holds an unfinished line indefinitely, #54).
+// Ends a misheard line so the adapter refuses it: no single flipped bit of this leaves a line of
+// hex digits (docs/elm327.md#safety).
 const KILL: &[u8] = b"XX\r";
-// The characters a consecutive frame takes as the adapter prints it, with headers and spaces on
-// and linefeeds off: `7E8 21 41 41 41 41 41 41 41 \r`.
+// Characters in a printed consecutive frame, `7E8 21 41 41 41 41 41 41 41 \r`, and with a 29-bit
+// ID, `17 FE 00 76 21 41 41 41 41 41 41 41 \r`.
 const FRAME_LINE: u32 = 29;
-// The same with a 29-bit ID, which prints as four bytes: `17 FE 00 76 21 41 41 41 41 41 41 41 \r`.
 const FRAME_LINE_29: u32 = 37;
-// The link's byte rate when it can't be known: 9600 baud, the slowest an ELM327 starts at.
+// 9600 baud, the slowest an ELM327 starts at, for a link whose rate can't be known.
 const SLOWEST_RATE: u32 = 9600 / 10;
-// The byte rate at and above which an STN was seen to print a long reply with no gap between
-// frames (#49: about 770 bytes at 115200 baud, no `BUFFER FULL`).
+// From here an STN was seen to print a long reply with no `BUFFER FULL` (#49).
 const STN_UNPACED_RATE: u32 = 115_200 / 10;
 
-/// An ELM327-compatible adapter on CAN (ISO 15765-4, 11-bit IDs, 500 kbit/s).
+/// An ELM327-compatible adapter on CAN (ISO 15765-4, 11-bit IDs, 500 kbit/s; 29-bit IDs when a
+/// request needs them).
 ///
 /// The adapter must accept `AT CRA` with `X` digits: an ELM327 v2.0 or later, or an STN chip
 /// (`OBDLink` adapters, which call themselves v1.4b). Older chips refuse it, and
 /// [`Elm::connect`] fails.
 ///
-/// Replies still arriving when the next request is sent are dropped: checked for signs of a
-/// reset, but not returned, as that would let a late reply to a repeated request pass for a
-/// fresh one. Their lines are reported as [`LinkEvent::Unread`] instead (status lines such as
-/// `NO DATA` as [`LinkEvent::Status`], read or not), which an
-/// [`crate::Audited`] wrapper logs, along with every command sent to the adapter
-/// ([`Transport::take_events`]); dropping the wrapper reads what's left of the last request
-/// first ([`Transport::settle`]).
+/// Requests must fit one CAN frame (up to 7 bytes) and are refused otherwise, before anything is
+/// written. Multi-frame replies are reassembled per module, for up to 16 modules per request.
+/// Replies still arriving at the next request are dropped and reported as [`LinkEvent`]s,
+/// along with every command sent ([`Transport::take_events`]).
 ///
-/// Requests must fit one CAN frame: up to 7 bytes. That covers the OBD-II reads and UDS 0x22
-/// with up to 3 DIDs, but not every request the policy allows (0x22 with 4 DIDs is 9 bytes).
-/// Longer ones are refused before anything is written. Multi-frame replies are reassembled
-/// here, per module, from the frames the adapter prints, for up to 16 modules per request;
-/// frames from any more are dropped, so those modules' replies time out.
+/// The adapter sends ISO-TP flow control frames itself, which no audit log records. A physical
+/// request's asks for a gap between frames from the link's rate ([`Link::byte_rate`], 9600 baud
+/// when unknown).
 ///
-/// The adapter shows only the frames its receive filter (`AT CRA`) passes, set per request: the
-/// module's reply ID when the request knows it (an OBD-II ECU, or a module the policy was
-/// narrowed to with a vehicle profile), 0x7E0..=0x7EF for a broadcast, and 0x700..=0x7FF
-/// otherwise; for a 29-bit request ([`Target::Physical29`]) its reply ID, or every reply to the
-/// tester on its scheme (0x18DAF1xx or VAG's 0x17FE00xx). The adapter is switched between
-/// 11-bit and 29-bit CAN (protocols 6 and 7) only when a request needs the other width. Frames it doesn't show get no flow control, so another module's long reply on a
-/// busy bus isn't acknowledged in the tester's name.
+/// If the adapter does anything unexpected (it misechoes, resets, goes quiet, refuses a setting
+/// or the link fails), its state is unknown: every later call fails without writing anything,
+/// and the caller must connect again.
 ///
-/// The adapter sends ISO-TP flow control frames itself, which no audit log records: for a
-/// broadcast (0x7DF), its standard ones to each ECU, and for a physical request to the module's
-/// request ID. Each says continue, with no block limit. A physical request's also asks for a gap
-/// between frames (`STmin`) of the time the adapter takes to print one frame on the link
-/// ([`Link::byte_rate`], or 9600 baud when unknown), up to 127 ms. A broadcast's can't: only
-/// the adapter's standard flow control reaches each ECU's own request ID, and it asks for no
-/// gap. OBD-II broadcast replies are short, but several ECUs sending multi-frame replies at
-/// once on a slow link can still fill the buffer. Frames arrive faster than a
-/// slow link carries them away as text, and a plain ELM327 holds only 512 bytes before it
-/// prints `BUFFER FULL` and drops the rest. An STN chip on a link of 115200 baud or faster gets
-/// no gap, which a real one handled (#49).
-///
-/// The adapter's state is unknown, and every later call fails without writing anything (connect
-/// again), if:
-/// - it doesn't finish a command in time, or stays quiet in a request for longer than its own
-///   timeout plus a response-pending wait (about 7 s, counted while the driver waits);
-/// - it refuses a setting;
-/// - it echoes a line other than the one written (a serial error). A request's digits are
-///   written first, and its carriage return only once they've echoed correctly; otherwise the
-///   line is ended with `XX` so the adapter refuses it, and nothing reaches the bus. An adapter
-///   that echoes nothing before the carriage return on the first request is taken to echo whole
-///   lines only, and a request it misheard has gone on the bus by the time its echo shows it;
-/// - it prints something unexpected: an overlong line, `STOPPED` (the driver never interrupts
-///   it, so something else did), a frame from outside its receive filter, or anything at all
-///   between its prompt and the next line it's sent;
-/// - it says it reset (`LV RESET`, `ERRxx`, `LP ALERT`, a banner) or is searching for a
-///   protocol (`SEARCHING...`, `UNABLE TO CONNECT`);
-/// - or the link fails.
-///
-/// [`Elm::connect`] also refuses an adapter whose programmable parameters turn off echo, CAN auto
-/// formatting or CAN flow control, or turn on the CAN data length display, by default.
+/// See docs/elm327.md#failure-states, #flow-control-per-target and #receive-filter.
 #[derive(Debug)]
 pub struct Elm<L> {
     link: L,
@@ -353,23 +279,16 @@ impl<L: Link> Elm<L> {
         let stn = elm.command("STI")?.join(" ");
         elm.stn = stn.starts_with("STN").then_some(stn);
         elm.pace = pace(elm.stn.is_some(), elm.link.byte_rate());
-        // Adaptive timing learns the timeout from response times and may set it below the gap
-        // a paced module leaves between frames, ending the reply early (ELM327DS p. 12; the
-        // OBDLink FRPM says the same timer waits for each next frame). So it's off when pacing,
-        // and the timeout is always `AT ST FF`: every request then waits about 1 s after its
-        // last reply.
+        // A learned timeout could be shorter than a paced module's gap and end its reply early.
         if elm.pace.is_some() {
             elm.expect_ok("ATAT0")?;
         }
         Ok(())
     }
 
-    /// Timing for [`crate::exchange`] through this adapter. The adapter decides when a request
-    /// is over: it prints its prompt, which ends the exchange at once. So P2 is only an outer
-    /// bound: [`STN_LONGEST_TIMEOUT`] plus the time to print the longest reply (4095 bytes) from
-    /// each of up to 16 modules at 9600 baud, about 7 minutes. P2* gets the same print
-    /// allowance on top of the default. An adapter that goes quiet in a request without
-    /// finishing it fails within seconds instead (see [`Elm`]).
+    /// Timing for [`crate::exchange`] through this adapter. The adapter's prompt ends a request,
+    /// so P2 and P2* are only outer bounds, about 7 minutes; an adapter that goes quiet
+    /// fails within seconds instead. See docs/elm327.md#timing.
     #[must_use]
     pub fn timing() -> Timing {
         let default = Timing::default();
@@ -382,8 +301,8 @@ impl<L: Link> Elm<L> {
 
     /// Asks the adapter what voltage it sees, and says what it is.
     ///
-    /// The ID is the banner from the reset and the STN version is `STI`'s answer from
-    /// [`Elm::connect`]: asking again with `ATI` would make a reset now look like an answer.
+    /// The ID and STN version come from [`Elm::connect`], not `ATI`, so a reset now can't pass for
+    /// an answer.
     pub fn info(&mut self) -> Result<AdapterInfo, Error> {
         let voltage = self.command("ATRV")?.join(" ");
         Ok(AdapterInfo {
@@ -403,8 +322,8 @@ impl<L: Link> Elm<L> {
         &self.link
     }
 
-    /// The link to the adapter. A [`Link`] can't be written to or read from outside this crate,
-    /// so this can't be used to send anything or to hide the adapter's output from the driver.
+    /// The link to the adapter. A [`Link`] can't be written to or read outside this crate, so this
+    /// can't send anything or hide the adapter's output from the driver.
     pub fn link_mut(&mut self) -> &mut L {
         &mut self.link
     }
@@ -438,7 +357,6 @@ impl<L: Link> Elm<L> {
             }
             let deadline = Instant::now() + RESET_WAIT;
             let mut banner = None;
-            // What it printed, for the report; a flood isn't kept, only counted as lost.
             let mut answer = Vec::new();
             let mut skipped = 0;
             let reset = loop {
@@ -470,7 +388,6 @@ impl<L: Link> Elm<L> {
                 command: "ATZ".to_owned(),
                 answer,
             });
-            // Next to the reset, in order, not at the end with what nothing took in time.
             if skipped > 0 {
                 self.note(LinkEvent::Lost(skipped));
             }
@@ -517,8 +434,7 @@ impl<L: Link> Elm<L> {
                 }
             }
         }
-        // `PPS` and all of these arrived together in ELM327 v1.1 (ELM327DS v2.1, p. 90), and STN
-        // chips list them too, so a summary without one was cut short.
+        // A summary without one was cut short (docs/elm327.md#safety).
         if let Some((pp, ..)) = KEPT_DEFAULTS.iter().find(|(pp, ..)| !seen.contains(pp)) {
             return Err(self.break_down(format!("ATPPS didn't list PP {pp:02X}")));
         }
@@ -561,10 +477,9 @@ impl<L: Link> Elm<L> {
         self.read_answer(command, lines)
     }
 
-    // A command whose only non-hex letter may be its `T` (`ATCAF0`, `ATCFC1`), so one flipped
-    // bit could make it a bus request: written as a request is, its characters first and its
-    // carriage return only once they've echoed correctly, else ended with `XX` so the adapter
-    // refuses it. So only on an adapter that has shown it echoes characters as it reads them.
+    // For a command whose only non-hex letter is its `T` (`ATCAF0`): written like a request, so
+    // a flipped bit is caught before the carriage return. Needs an adapter that has shown it
+    // echoes characters as it reads them.
     fn guarded_command(&mut self, command: &str) -> Result<(), Error> {
         if self.early_echo != Some(true) {
             return Err(Error::Adapter(format!(
@@ -576,8 +491,7 @@ impl<L: Link> Elm<L> {
         self.check_idle()?;
         let at = SystemTime::now();
         let mut lines = Vec::new();
-        // Noted however it ends, like every command: a misheard one may still have done
-        // something.
+        // Noted however it ends: a misheard command may still have done something.
         let answered = self
             .write(command.as_bytes())
             .and_then(|()| self.check_early_echo(command))
@@ -602,8 +516,7 @@ impl<L: Link> Elm<L> {
         let mut echoed = false;
         loop {
             match self.next_event(deadline)? {
-                // Without the prompt the answer may not be over, so the next command can't tell
-                // where its own starts. Some clones leave it off (python-OBD #160, #205).
+                // Some clones leave the prompt off (python-OBD #160, #205).
                 None if !lines.is_empty() || (echoed && self.splitter.partial().is_some()) => {
                     return Err(self.break_down(format!(
                         "the adapter answered {command} but never printed its prompt (>)"
@@ -621,8 +534,6 @@ impl<L: Link> Elm<L> {
                     return Err(self.break_down(format!("the adapter didn't echo {command}")));
                 }
                 Some(Event::Prompt) => break,
-                // The rest of the answer may still be coming, so the next command can't tell
-                // where its own answer starts.
                 Some(Event::Overlong) => {
                     return Err(self.break_down(format!("overlong answer to {command}")));
                 }
@@ -641,11 +552,9 @@ impl<L: Link> Elm<L> {
                     {
                         return Err(self.break_down(format!("the adapter said {status}")));
                     }
-                    // The banner means a reset; `info` never asks for it.
                     if line.starts_with("ELM327") {
                         return Err(self.break_down(format!("the adapter reset: {line}")));
                     }
-                    // A working adapter's answers are a few lines; don't collect a flood.
                     if lines.len() == MAX_ANSWER_LINES {
                         return Err(self.break_down(format!("the answer to {command} is too long")));
                     }
@@ -675,8 +584,7 @@ impl<L: Link> Elm<L> {
         )
     }
 
-    // What a refused command says about the adapter: `X` digits in `AT CRA` arrived in ELM327
-    // v2.0, and most clones that claim it (or v1.5, which was never released) refuse them.
+    // `X` digits in `AT CRA` arrived in ELM327 v2.0, and most clones claiming it refuse them.
     fn needs_hint(&self, command: &str) -> String {
         if command.starts_with("ATCRA") && command.contains('X') {
             format!(
@@ -699,8 +607,7 @@ impl<L: Link> Elm<L> {
         if !self.busy {
             return self.check_idle();
         }
-        // The rest of the last request's replies are dropped, but a reset among them still
-        // counts. Unfinished replies' lines were read first, so they're reported first.
+        // Dropped, but a reset among them still counts.
         self.drop_senders();
         let deadline = Instant::now() + LONGEST_REQUEST;
         loop {
@@ -713,13 +620,11 @@ impl<L: Link> Elm<L> {
                     break;
                 }
                 Some(Event::Line(text)) => {
-                    // Not the request's echo, which `reply_line` checks.
                     if self.echo.is_none() {
                         self.note(left_over(self.event_at, text.clone()));
                     }
                     self.reply_line(&text)?;
                 }
-                // It can't be read, so it could hide a reset.
                 Some(Event::Overlong) => {
                     return Err(self.break_down("the adapter printed an overlong line".into()));
                 }
@@ -732,10 +637,8 @@ impl<L: Link> Elm<L> {
     // The adapter prints nothing between its prompt and the next line it's sent, so anything
     // already read past the prompt, or waiting on the link, could be a reset.
     fn check_idle(&mut self) -> Result<(), Error> {
-        // Read until the deadline whatever arrives: a stray NUL (datasheet p. 8) makes no event
-        // but may come just ahead of a reset. A reset whose first byte is still on its way at
-        // the deadline can't be seen before writing; the checks on the reply catch it then (a
-        // reset adapter has headers off, and may say SEARCHING...).
+        // Reads until the deadline whatever arrives: a stray NUL makes no event but may precede
+        // a reset (docs/elm327.md#safety).
         let deadline = Instant::now() + IDLE_CHECK;
         let mut buf = [0; 256];
         let mut events = Vec::new();
@@ -811,9 +714,7 @@ impl<L: Link> Elm<L> {
     }
 
     // The next thing the adapter printed during a request, or None once the deadline passes.
-    // An adapter quiet for longer than its timeout plus `SILENCE_MARGIN` in a request has hung.
-    // Silence is the time the driver spent waiting, added up across calls, so neither a caller
-    // that reads late nor one that polls with short timeouts skews it.
+    // Fails once the adapter has been quiet for its timeout plus `SILENCE_MARGIN`.
     fn next_request_event(&mut self, deadline: Instant) -> Result<Option<Event>, Error> {
         loop {
             let Some(left) = self
@@ -829,7 +730,6 @@ impl<L: Link> Elm<L> {
             let started = Instant::now();
             self.last_byte = None;
             let event = self.next_event(deadline.min(started + left))?;
-            // Only the silent tail counts once anything arrived.
             self.quiet = match self.last_byte {
                 Some(at) => at.elapsed(),
                 None => self.quiet.saturating_add(started.elapsed()),
@@ -866,8 +766,7 @@ impl<L: Link> Elm<L> {
             sender.lines.clear();
         }
         sender.lines.push(number);
-        // A frame that doesn't fit its module's transfer drops that transfer only; the
-        // reassembler starts over at the module's next single or first frame.
+        // A bad frame drops only its module's transfer.
         match sender.reassembler.feed(data) {
             Ok(Progress::Complete(payload)) => {
                 let reply = Response {
@@ -877,7 +776,7 @@ impl<L: Link> Elm<L> {
                 let used = std::mem::take(&mut sender.lines);
                 let kept = self.heard.len();
                 self.heard.retain(|(number, ..)| !used.contains(number));
-                // The reply's other lines didn't fit in `heard`, and aren't lost after all.
+                // Lines that didn't fit in `heard` but belong to this reply aren't lost.
                 let found = kept - self.heard.len();
                 self.overflowed = self.overflowed.saturating_sub(used.len() - found);
                 Some(reply)
@@ -890,8 +789,7 @@ impl<L: Link> Elm<L> {
         }
     }
 
-    // Keeps a line of the request in progress, read at `event_at`, until it's known whether
-    // it's part of a reply. Returns its number.
+    // Keeps a line read at `event_at` until it's known whether it's part of a reply.
     fn hear(&mut self, line: &str) -> u64 {
         let number = self.next_heard;
         self.next_heard += 1;
@@ -921,19 +819,17 @@ impl<L: Link> Elm<L> {
         let id = target.can_id();
         let bits29 = target.is_29_bit();
         if self.bits29 != bits29 {
-            // The header, flow control and filter were set for the other width. Forgotten
-            // first: a command that fails may still have taken effect.
+            // Forgotten first: a command that fails may still have taken effect.
             self.header = None;
             self.flow = None;
             self.filter.clear();
             self.bits29 = bits29;
-            // ISO 15765-4 CAN at 500 kbit/s, 29-bit or 11-bit IDs. Never automatic search.
+            // Never automatic search (see `SETUP`).
             self.expect_ok(if bits29 { "ATSP7" } else { "ATSP6" })?;
         }
         if self.header != Some(id) {
             if bits29 {
-                // The top 5 bits are the priority (`AT CP`), the rest the header. Each keeps
-                // two non-hex letters (T and P, or T, S and H).
+                // Each keeps two non-hex letters, so no flipped bit makes a bus request.
                 self.expect_ok(&format!("ATCP{:02X}", id >> 24))?;
                 self.expect_ok(&format!("ATSH{:06X}", id & 0x00FF_FFFF))?;
             } else {
@@ -941,15 +837,9 @@ impl<L: Link> Elm<L> {
             }
             self.header = Some(id);
         }
-        // A broadcast's flow control must go to each answering ECU's own request ID, which only
-        // the adapter's ISO 15765-4 handling does, with no gap. Mode 2 (driver's data, adapter's
-        // header) can't: it sends to the First Frame's own ID (p. 48). So only a physical
-        // request is paced: mode 1, to its request ID.
-        // A 29-bit request's flow control always goes to its request ID: the adapter's own would
-        // swap the reply ID's bytes, which is right for 0x18DAF1xx but not for VAG's 0x17FE00xx.
+        // See docs/elm327.md#flow-control-per-target.
         let gap = st_min(self.pace, bits29);
         let flow = if self.raw {
-            // Raw frames get no ISO-TP flow control; whatever was set stays.
             self.flow.unwrap_or(Flow::Standard)
         } else if !bits29 && (id == 0x7DF || (gap == 0 && (0x7E0..=0x7E7).contains(&id))) {
             Flow::Standard
@@ -960,8 +850,6 @@ impl<L: Link> Elm<L> {
             match flow {
                 Flow::Standard => self.expect_ok("ATFCSM0")?,
                 Flow::To(id, gap) => {
-                    // Continue to send, no block limit, and the gap. `AT FC SD` keeps two
-                    // non-hex letters (T, S), so one flipped bit can't make it a bus request.
                     self.expect_ok(&can_id_command("ATFCSH", id))?;
                     self.expect_ok(&format!("ATFCSD3000{gap:02X}"))?;
                     self.expect_ok("ATFCSM1")?;
@@ -969,8 +857,6 @@ impl<L: Link> Elm<L> {
             }
             self.flow = Some(flow);
         }
-        // Each `ATCRA` line keeps two non-hex letters (T, R), so one flipped bit can't make it a
-        // bus request.
         let filter = match (request.reply_id(), target) {
             (Some(reply), _) => can_id_text(reply, bits29),
             (None, Target::ObdFunctional) => OBD_FILTER.to_owned(),
@@ -989,15 +875,15 @@ impl<L: Link> Elm<L> {
     }
 }
 
-// The link's byte rate if replies are paced to it: always, except for an STN on a fast link.
+// The link's byte rate if replies are paced to it: always, except for an STN on a fast link
+// (docs/elm327.md#timing).
 fn pace(stn: bool, byte_rate: Option<u32>) -> Option<u32> {
     let rate = byte_rate.filter(|&rate| rate > 0).unwrap_or(SLOWEST_RATE);
     (!stn || rate < STN_UNPACED_RATE).then_some(rate)
 }
 
-// The gap between a module's consecutive frames, in ms, that keeps the adapter's output buffer
-// from filling: the time to print one frame line, at the ID's width, at the link's byte rate,
-// rounded up, at most 127 ms (the most STmin allows).
+// STmin in ms that keeps the adapter's 512-byte buffer from filling: the time to print one frame
+// line at the link's rate, rounded up, at most 127.
 fn st_min(pace: Option<u32>, bits29: bool) -> u8 {
     let Some(rate) = pace else {
         return 0;
@@ -1021,8 +907,7 @@ fn can_id_command(command: &str, id: u32) -> String {
     format!("{command}{}", can_id_text(id, id > 0x7FF))
 }
 
-// Whether an `AT CRA` pattern shows frames from `id`: a 3-digit pattern only 11-bit frames, an
-// 8-digit one only 29-bit frames.
+// A 3-digit pattern shows only 11-bit frames, an 8-digit one only 29-bit frames.
 fn filter_shows(pattern: &str, id: u32) -> bool {
     let id = can_id_text(id, pattern.len() == 8);
     id.len() == pattern.len()
@@ -1032,8 +917,8 @@ fn filter_shows(pattern: &str, id: u32) -> bool {
             .all(|(want, got)| want == b'X' || want == got)
 }
 
-// A line of a request that's in no reply, read at `at`: a status line such as `NO DATA` was the
-// adapter's answer (#88); anything else is a reply line nobody read.
+// A status line such as `NO DATA` was the adapter's answer (#88); anything else is a reply line
+// nobody read.
 fn left_over(at: SystemTime, line: String) -> LinkEvent {
     if matches!(parse_line(&line), Line::Status(_)) {
         LinkEvent::Status { at, line }
@@ -1042,9 +927,7 @@ fn left_over(at: SystemTime, line: String) -> LinkEvent {
     }
 }
 
-// Whether a status means the adapter's settings, or what it reads next, can't be trusted: it
-// lost its settings, or it was interrupted (`STOPPED`), which this driver never does, so
-// something else wrote to it and the interrupting byte may start the next line it reads.
+// The driver never interrupts the adapter, so `STOPPED` means something else wrote to it.
 fn leaves_unknown_state(status: Status) -> bool {
     status.loses_settings() || status == Status::Stopped
 }
@@ -1084,7 +967,6 @@ impl<L: Link> Transport for Elm<L> {
         self.set_target(request)?;
         // A setting command's prompt may have been followed by a reset.
         self.check_idle()?;
-        // The adapter ignores spaces, but leaving them out keeps the line short.
         let line = hex(payload).replace(' ', "");
         if self.early_echo == Some(false) {
             self.write(format!("{line}\r").as_bytes())?;
@@ -1100,10 +982,7 @@ impl<L: Link> Transport for Elm<L> {
         Ok(())
     }
 
-    // Adaptive timing off, so a timeout learned from fast modules can't cut a slow one short;
-    // when pacing it's always off (see `connect`). An STN always waits its whole timeout for a
-    // first reply, so only a longer timeout (`STPTO`, in ms) lets a slow module answer (#87).
-    // A plain ELM327 can't wait longer than `AT ST FF`.
+    // See docs/elm327.md#timing: an STN needs `STPTO`, a plain ELM327 can't wait longer.
     fn patient(&mut self, wait: Option<Duration>) -> Result<Option<Duration>, Error> {
         let Some(wait) = wait else {
             if self.timeout != ADAPTER_TIMEOUT {
@@ -1121,7 +1000,6 @@ impl<L: Link> Transport for Elm<L> {
         if self.stn.is_none() {
             return Ok(Some(ADAPTER_TIMEOUT));
         }
-        // Whole milliseconds, as `STPTO` takes them, and never shorter than usual.
         let ms = wait.min(STN_LONGEST_TIMEOUT).as_millis();
         let wait =
             Duration::from_millis(u64::try_from(ms).unwrap_or(u64::MAX)).max(ADAPTER_TIMEOUT);
@@ -1131,17 +1009,14 @@ impl<L: Link> Transport for Elm<L> {
             } else {
                 format!("STPTO{ms}")
             };
-            // Recorded first: a command that fails may still have taken effect. (A failed
-            // command leaves the adapter unusable until it's connected, and reset, again.)
+            // Recorded first: a command that fails may still have taken effect.
             self.timeout = wait;
             self.expect_ok(&command)?;
         }
         Ok(Some(self.timeout))
     }
 
-    // The rest of the last request's output is read, and reported as unread.
     fn settle(&mut self) -> Result<(), Error> {
-        // Even if the adapter broke and nothing more can be read.
         if self.broken.is_some() {
             self.drop_senders();
         }
@@ -1168,13 +1043,10 @@ impl<L: Link> Transport for Elm<L> {
                     self.drop_senders();
                     return Err(Error::Timeout);
                 }
-                // It can't be read, so it could hide a reset.
                 Some(Event::Overlong) => {
                     return Err(self.break_down("the adapter printed an overlong line".into()));
                 }
-                // `None` is the echo.
                 Some(Event::Line(text)) => match self.reply_line(&text)? {
-                    // A raw frame is a reply of its own.
                     Some(Line::Frame(frame)) if self.raw => {
                         return Ok(Response {
                             source: frame.id(),
@@ -1196,7 +1068,6 @@ impl<L: Link> Transport for Elm<L> {
                     Some(Line::Status(status)) if status.is_failure() => {
                         return Err(Error::Adapter(format!("the adapter said {status}")));
                     }
-                    // Such as NO DATA: heard, but no reply; reported as a status, in turn.
                     Some(_) => {
                         self.hear(&text);
                     }
@@ -1208,10 +1079,9 @@ impl<L: Link> Transport for Elm<L> {
 }
 
 impl<L: Link> Elm<L> {
-    // Reads the echo of a request's digits, written without their carriage return, so a line the
-    // adapter misheard is caught before it can go on the bus. The adapter holds the line until
-    // the carriage return. An adapter that echoes nothing before it, on the first request, is
-    // taken to echo only whole lines, and its echo is checked after the carriage return instead.
+    // Reads the echo of a request's digits, written without their carriage return, so a misheard
+    // line is caught before it reaches the bus. An adapter that echoes nothing on the first
+    // request is taken to echo whole lines only (docs/elm327.md#safety).
     fn check_early_echo(&mut self, line: &str) -> Result<(), Error> {
         let mut echoed = vec![0; line.len()];
         let mut got = 0;
@@ -1232,7 +1102,7 @@ impl<L: Link> Elm<L> {
         }
         if echoed.eq_ignore_ascii_case(line.as_bytes()) {
             self.early_echo = Some(true);
-            // The line's carriage return completes it, and its echo is checked again then.
+            // Its echo is checked again once the carriage return completes the line.
             let mut events = Vec::new();
             self.splitter.push(&echoed, &mut events);
             let now = SystemTime::now();
@@ -1243,7 +1113,7 @@ impl<L: Link> Elm<L> {
         let why = if echoed.is_empty() {
             format!("the adapter didn't echo {line}")
         } else {
-            // Untrusted output that reaches a terminal: only printable ASCII.
+            // Untrusted output that reaches a terminal: printable ASCII only.
             let shown: String = echoed
                 .iter()
                 .map(|&b| {
@@ -1261,12 +1131,11 @@ impl<L: Link> Elm<L> {
         Err(self.break_down(format!("{why}; the request wasn't sent")))
     }
 
-    // Classifies a line printed after a request: `None` for its echo. Anything that means the
-    // adapter lost its settings or misheard the request, or that isn't a reply at all, leaves
-    // it in an unknown state.
+    // Classifies a line printed after a request: `None` for its echo. Anything but a reply
+    // leaves the adapter in an unknown state.
     fn reply_line(&mut self, text: &str) -> Result<Option<Line>, Error> {
         if let Some(request) = self.echo.take() {
-            // By now the adapter has sent whatever it heard; all that's left is to stop.
+            // The adapter has already acted on what it heard; all that's left is to stop.
             if !text.eq_ignore_ascii_case(&request) {
                 return Err(
                     self.break_down(format!("the adapter echoed {text} instead of {request}"))
@@ -1275,13 +1144,12 @@ impl<L: Link> Elm<L> {
             return Ok(None);
         }
         match parse_line(text) {
-            // Its settings are gone: it may even search for a protocol on the next request,
-            // sending frames nobody approved.
+            // It may search for a protocol next, sending frames nobody approved.
             Line::Status(status) if leaves_unknown_state(status) => {
                 Err(self.break_down(format!("the adapter said {status}")))
             }
-            // A frame the receive filter hides: the adapter lost the filter, and may be sending
-            // flow control for frames it shouldn't see.
+            // The adapter lost the filter, and may be sending flow control for frames it
+            // shouldn't see.
             Line::Frame(frame) if !filter_shows(&self.filter, frame.id()) => {
                 Err(self.break_down(format!(
                     "a frame from {:03X} got past the receive filter",
@@ -1296,7 +1164,6 @@ impl<L: Link> Elm<L> {
         }
     }
 
-    // The adapter finished a request; it must have echoed it first.
     fn prompt_after_request(&mut self) -> Result<(), Error> {
         match self.echo.take() {
             Some(request) => Err(self.break_down(format!("the adapter didn't echo {request}"))),
@@ -1304,7 +1171,6 @@ impl<L: Link> Elm<L> {
         }
     }
 
-    // Receiving needs a request in progress; after the prompt there's nothing more to come.
     fn ready_to_receive(&mut self) -> Result<(), Error> {
         if let Some(why) = &self.broken {
             return Err(Error::Adapter(format!(
