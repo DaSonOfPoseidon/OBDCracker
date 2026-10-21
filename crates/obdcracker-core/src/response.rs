@@ -175,7 +175,8 @@ pub(crate) fn printable(bytes: &[u8]) -> Result<&str, Error> {
 /// A positive reply must have the request's service ID + 0x40 and echo what the request asked
 /// for: the PID (mode 09), one of the requested PIDs (mode 01, which leaves out unsupported ones),
 /// one of the requested DIDs (`ReadDataByIdentifier`), or the subfunction
-/// (`DiagnosticSessionControl`, `ReadDTCInformation`, `TesterPresent`). A request with the
+/// (`DiagnosticSessionControl`, `ReadDTCInformation`, `TesterPresent`), and for one DTC's
+/// snapshots or extended data (`ReadDTCInformation` 0x04 and 0x06) the DTC too. A request with the
 /// suppress-positive-response bit set gets no positive reply unless the module first sent
 /// response-pending, so none answers it here (see [`answers_after_pending`]). A negative
 /// reply echoes only the service ID, so any `7F <service> <code>` for the request's service
@@ -221,6 +222,18 @@ pub fn kwp2000_answers(request: &[u8], reply: &[u8]) -> bool {
     }
 }
 
+// Whether a `ReadDTCInformation` 0x04 or 0x06 reply (`echo`: subfunction, DTC, status,
+// records) is for the DTC `asked` for (subfunction, DTC, record), and starts with its record
+// unless every record (0xFF, or 0xFE for every OBD extended data record) was asked for. A reply
+// with no records has none to compare.
+fn dtc_detail_echoed(sub: u8, asked: &[u8], echo: &[u8]) -> bool {
+    let (Some(dtc), Some(&record)) = (asked.get(1..4), asked.get(4)) else {
+        return false;
+    };
+    let every = record == 0xFF || (sub == 0x06 && record == 0xFE);
+    echo.get(1..4) == Some(dtc) && (every || echo.get(5).is_none_or(|&first| first == record))
+}
+
 // `answers`, with `pending` saying whether the module sent response-pending for this request.
 fn matches(request: &[u8], reply: &[u8], pending: bool) -> bool {
     let Some((&sid, asked)) = request.split_first() else {
@@ -241,7 +254,15 @@ fn matches(request: &[u8], reply: &[u8], pending: bool) -> bool {
             // Subfunction services: bit 7 is the suppress-positive-response bit. It isn't echoed,
             // and a request with it set gets a positive reply only after response-pending.
             0x10 | 0x19 | 0x3E => match (echo.first(), asked.first()) {
-                (Some(&got), Some(&sub)) => (pending || sub & 0x80 == 0) && got == sub & 0x7F,
+                (Some(&got), Some(&sub)) => {
+                    (pending || sub & 0x80 == 0)
+                        && got == sub & 0x7F
+                        // One DTC's snapshots or extended data: the DTC too, and the record
+                        // when one was asked for.
+                        && (sid != 0x19
+                            || !matches!(got, 0x04 | 0x06)
+                            || dtc_detail_echoed(got, asked, echo))
+                }
                 _ => false,
             },
             _ => true,

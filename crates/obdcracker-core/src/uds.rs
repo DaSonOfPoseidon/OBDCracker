@@ -19,6 +19,12 @@ pub const READ_DTC_INFORMATION: u8 = 0x19;
 const REPORT_NUMBER_BY_STATUS_MASK: u8 = 0x01;
 const REPORT_DTC_BY_STATUS_MASK: u8 = 0x02;
 const REPORT_SUPPORTED_DTC: u8 = 0x0A;
+const REPORT_DTC_SNAPSHOT_BY_DTC: u8 = 0x04;
+const REPORT_DTC_EXTENDED_DATA_BY_DTC: u8 = 0x06;
+// The record number that asks for every record.
+const ALL_RECORDS: u8 = 0xFF;
+// The extended data record number that asks for every OBD record (ISO 14229-1).
+const ALL_OBD_RECORDS: u8 = 0xFE;
 
 /// Standard identification data identifiers (ISO 14229-1 annex C). Manufacturer DIDs come from
 /// vehicle profiles.
@@ -246,6 +252,25 @@ pub fn dtcs_by_status_mask(mask: u8) -> [u8; 3] {
 #[must_use]
 pub fn supported_dtcs() -> [u8; 2] {
     [READ_DTC_INFORMATION, REPORT_SUPPORTED_DTC]
+}
+
+/// A request for one DTC's snapshot records (`ReadDTCInformation` 0x04): what the module stored
+/// when the fault happened. Record 0xFF asks for every record.
+#[must_use]
+pub fn dtc_snapshots(dtc: UdsDtc, record: u8) -> [u8; 6] {
+    dtc_detail_request(REPORT_DTC_SNAPSHOT_BY_DTC, dtc, record)
+}
+
+/// A request for one DTC's extended data records (`ReadDTCInformation` 0x06), such as its
+/// occurrence counter. Record 0xFF asks for every record, 0xFE for every OBD record.
+#[must_use]
+pub fn dtc_extended_data(dtc: UdsDtc, record: u8) -> [u8; 6] {
+    dtc_detail_request(REPORT_DTC_EXTENDED_DATA_BY_DTC, dtc, record)
+}
+
+fn dtc_detail_request(sub: u8, dtc: UdsDtc, record: u8) -> [u8; 6] {
+    let [_, high, mid, low] = dtc.code().to_be_bytes();
+    [READ_DTC_INFORMATION, sub, high, mid, low, record]
 }
 
 /// A DTC's status byte (ISO 14229-1 D.2), one flag per bit.
@@ -487,6 +512,67 @@ pub fn decode_dtcs_by_status_mask(reply: &[u8]) -> Result<(DtcStatus, DtcRecords
 /// it can store with its status.
 pub fn decode_supported_dtcs(reply: &[u8]) -> Result<(DtcStatus, DtcRecords<'_>), Error> {
     dtc_records(reply, REPORT_SUPPORTED_DTC)
+}
+
+/// One DTC's snapshot or extended data, from the reply to [`dtc_snapshots`] or
+/// [`dtc_extended_data`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DtcData<'a> {
+    /// The DTC's status.
+    pub status: DtcStatus,
+    /// The records, each a record number and its data, as the module sent them. A record's
+    /// length depends on the module's data identifiers, so they aren't split. Empty if the
+    /// module stored none.
+    pub records: &'a [u8],
+}
+
+/// Decodes the reply to [`dtc_snapshots`] for `dtc` and `record`.
+///
+/// # Errors
+///
+/// A refusal, a reply for another subfunction or DTC, one cut short before the status or inside
+/// its first record (a record number alone), or one whose first record isn't the one asked for
+/// (unless every record was).
+pub fn decode_dtc_snapshots(reply: &[u8], dtc: UdsDtc, record: u8) -> Result<DtcData<'_>, Error> {
+    dtc_data(reply, REPORT_DTC_SNAPSHOT_BY_DTC, dtc, record)
+}
+
+/// Decodes the reply to [`dtc_extended_data`] for `dtc` and `record`.
+///
+/// # Errors
+///
+/// As [`decode_dtc_snapshots`]; 0xFE, every OBD record, also takes any first record.
+pub fn decode_dtc_extended_data(
+    reply: &[u8],
+    dtc: UdsDtc,
+    record: u8,
+) -> Result<DtcData<'_>, Error> {
+    dtc_data(reply, REPORT_DTC_EXTENDED_DATA_BY_DTC, dtc, record)
+}
+
+// The status and records after the echoed subfunction `sub` and `dtc`.
+fn dtc_data(reply: &[u8], sub: u8, dtc: UdsDtc, record: u8) -> Result<DtcData<'_>, Error> {
+    let rest = dtc_reply(reply, sub)?;
+    let [high, mid, low, status, records @ ..] = rest else {
+        return Err(Error::TooShort);
+    };
+    if UdsDtc::new(u32::from_be_bytes([0, *high, *mid, *low])) != dtc {
+        return Err(Error::Malformed);
+    }
+    let any = record == ALL_RECORDS
+        || (sub == REPORT_DTC_EXTENDED_DATA_BY_DTC && record == ALL_OBD_RECORDS);
+    if !any && records.first().is_some_and(|&first| first != record) {
+        return Err(Error::Malformed);
+    }
+    // A snapshot record is at least its number and how many identifiers it holds; an extended
+    // data record its number and some data.
+    if records.len() == 1 {
+        return Err(Error::TooShort);
+    }
+    Ok(DtcData {
+        status: DtcStatus(*status),
+        records,
+    })
 }
 
 // The availability mask and 4-byte DTC records after the echoed subfunction `sub`.

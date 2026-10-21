@@ -75,6 +75,35 @@ proptest! {
     }
 
     #[test]
+    fn dtc_detail_decoders_take_exactly_what_follows_the_echo(
+        reply in any_reply(),
+        code in 0u32..=0xFF_FFFF,
+        record in any::<u8>(),
+        records in prop::collection::vec(any::<u8>(), 0..32),
+        status in any::<u8>(),
+    ) {
+        let dtc = uds::UdsDtc::new(code);
+        let _ = uds::decode_dtc_snapshots(&reply, dtc, record);
+        let _ = uds::decode_dtc_extended_data(&reply, dtc, record);
+        // A well-formed reply for this DTC gives back its status and every byte after it. A
+        // record number alone is cut short.
+        prop_assume!(records.len() != 1);
+        let [_, high, mid, low] = code.to_be_bytes();
+        for sub in [0x04, 0x06] {
+            let mut reply = vec![0x59, sub, high, mid, low, status];
+            reply.extend(&records);
+            let got = if sub == 0x04 {
+                uds::decode_dtc_snapshots(&reply, dtc, 0xFF)
+            } else {
+                uds::decode_dtc_extended_data(&reply, dtc, 0xFF)
+            }
+            .unwrap();
+            prop_assert_eq!(got.status, uds::DtcStatus(status));
+            prop_assert_eq!(got.records, &records[..]);
+        }
+    }
+
+    #[test]
     fn dtc_text_is_a_system_letter_and_four_hex_digits(code in any::<u16>()) {
         let text = Dtc::new(code).to_string();
         prop_assert_eq!(text.len(), 5);

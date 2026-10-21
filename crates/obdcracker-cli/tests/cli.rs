@@ -896,3 +896,94 @@ fn sweep_refuses_bad_ranges_modules_and_a_missing_profile() {
         assert!(String::from_utf8_lossy(&out.stdout).is_empty(), "{args:?}");
     }
 }
+
+#[test]
+fn sim_dtc_reads_snapshots_then_extended_data() {
+    // The A7's modules were only ever asked 19 02, so the sim's gateway refuses 19 04 and 06 as
+    // not supported, and the refusal of the first doesn't stop the second.
+    let log = temp_log("dtc");
+    let out = obdcracker(&[
+        "--sim",
+        "a7",
+        "--audit-log",
+        log.to_str().unwrap(),
+        "dtc",
+        "--module",
+        "gateway",
+        "--code",
+        "0016A0",
+    ]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    for what in ["snapshots", "extended data"] {
+        let line = format!(
+            "77A gateway DTC 0016A0 {what} (service 0x19 refused: subfunction not supported (0x12))"
+        );
+        assert!(stdout.lines().any(|l| l == line), "{line:?} in:\n{stdout}");
+    }
+    let audit = std::fs::read_to_string(&log).unwrap();
+    let sent: Vec<&str> = audit
+        .lines()
+        .filter(|l| l.contains(r#""dir":"tx""#))
+        .collect();
+    assert_eq!(sent.len(), 2, "{audit}");
+    assert!(sent[0].contains(r#""id":"710","payload":"19 04 00 16 A0 FF""#));
+    assert!(sent[1].contains(r#""id":"710","payload":"19 06 00 16 A0 FF""#));
+}
+
+#[test]
+fn dry_run_dtc_says_what_a_live_one_reads() {
+    let out = obdcracker(&[
+        "--dry-run",
+        "--profile",
+        "a7",
+        "dtc",
+        "--module",
+        "gateway",
+        "--code",
+        "0016a0",
+    ]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("710 06 19 04 00 16 A0 FF"), "{stdout}");
+    assert!(
+        stdout.contains(
+            "a live read also sends 19 06 00 16 A0 FF once 19 04 00 16 A0 FF is answered"
+        ),
+        "{stdout}"
+    );
+}
+
+#[test]
+fn dtc_refuses_bad_codes_modules_and_a_missing_profile() {
+    let dtc = |profile: Option<&str>, module: &str, code: &str| {
+        let mut args = vec!["--dry-run"];
+        if let Some(profile) = profile {
+            args.extend(["--profile", profile]);
+        }
+        args.extend(["dtc", "--module", module, "--code", code]);
+        obdcracker(&args)
+    };
+    for out in [
+        dtc(Some("a7"), "gateway", "16A0"),
+        dtc(Some("a7"), "gateway", "0016A00"),
+        dtc(Some("a7"), "gateway", "+016A0"),
+        dtc(Some("a7"), "gateway", "0016AG"),
+        dtc(Some("a7"), "gateway", "000000"),
+        dtc(Some("a7"), "gateway", "FFFFFF"),
+        dtc(Some("a7"), "gateway", "ffffff"),
+        dtc(Some("a7"), "nowhere", "0016A0"),
+        dtc(None, "gateway", "0016A0"),
+    ] {
+        assert_eq!(out.status.code(), Some(2), "{out:?}");
+        assert!(out.stdout.is_empty(), "nothing sent: {out:?}");
+    }
+}

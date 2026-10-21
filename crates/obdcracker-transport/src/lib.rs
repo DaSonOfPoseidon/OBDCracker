@@ -9,6 +9,7 @@ use obdcracker_safety::Approved;
 mod audit;
 pub mod discover;
 mod dry_run;
+pub mod dtc;
 pub mod elm;
 mod exchange;
 pub mod fingerprint;
