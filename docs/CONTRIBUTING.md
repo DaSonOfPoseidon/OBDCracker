@@ -14,6 +14,23 @@
 - **Changes land through pull requests.** Nobody pushes to `main` directly. Work on a branch, open a PR, and merge only
   once CI is green, including the Windows and macOS builds. PRs are squash-merged, the only merge method the repo
   allows, so each PR becomes one commit on `main`.
+- **Comments are for what the code can't say.** Reference material goes in `docs/`, not in code files. See
+  [Comments](#comments).
+
+## Comments
+
+- **Plain `//` comments:** only for a reason that isn't obvious from the code, a safety reason (why a request,
+  command or byte is or isn't sent), a spec or datasheet citation a value depends on, or code in another file that
+  must change with this. Never restate what the next line does.
+- **`///` on public items:** the contract: what it does, what it returns or refuses, its errors, limits and units.
+  Background, adapter quirks and derivations go in a page under `docs/`, linked with a `See docs/<page>.md` line.
+- **`//!` module docs:** a few lines on what the module is for, and a link to its page under `docs/`.
+- **Tests:** the test name says what is checked, and helper and fixture names say what the setup is. Comment only a
+  reason that isn't obvious, or which third-party test a case comes from.
+- **Said twice:** a note repeated at several call sites becomes one helper or constant, commented once.
+
+If what you'd write doesn't fit an existing page in `docs/`, start a new one and add it to
+[`docs/README.md`](README.md).
 
 ## Found a problem? File an issue and keep going
 
