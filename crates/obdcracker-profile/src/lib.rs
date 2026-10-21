@@ -233,9 +233,10 @@ pub enum ProfileError {
     PaddedName(String),
     /// No built-in profile has this name.
     UnknownBuiltin(String),
-    /// The discovery range's first request ID is after its last, or a 29-bit range holds more
-    /// than [`Discovery29::MAX_IDS`].
+    /// A discovery range's first request ID is after its last.
     DiscoveryRange,
+    /// The 29-bit discovery range holds more than [`Discovery29::MAX_IDS`] request IDs.
+    Discovery29TooLong,
     /// The discovery range doesn't fit the modules: a candidate's request ID is a reply ID, is
     /// outside 0x700..=0x7FF, or is a module's request ID with another reply ID, and so on.
     Discovery(NarrowingError),
@@ -274,8 +275,13 @@ impl fmt::Display for ProfileError {
             Self::PaddedName(name) => write!(f, "name {name:?} starts or ends with spaces"),
             Self::UnknownBuiltin(name) => write!(f, "no built-in profile named {name}"),
             Self::DiscoveryRange => {
-                f.write_str("discovery: the first request ID is after the last")
+                f.write_str("a discovery range's first request ID is after its last")
             }
+            Self::Discovery29TooLong => write!(
+                f,
+                "discovery_29bit: the range holds more than {} request IDs",
+                Discovery29::MAX_IDS
+            ),
             Self::Discovery(e) => write!(f, "discovery: {e}"),
             Self::WideDiscoveryRange => f.write_str(
                 "discovery: the wide range must lie within the discovery range's reply IDs",
@@ -567,8 +573,11 @@ impl Profile {
             last_request_id: last,
             reply_offset,
         } = discovery;
-        if first > last || last - first >= Discovery29::MAX_IDS {
+        if first > last {
             return Err(ProfileError::DiscoveryRange);
+        }
+        if last - first >= Discovery29::MAX_IDS {
+            return Err(ProfileError::Discovery29TooLong);
         }
         for request in first..=last {
             // An 11-bit ID is no 29-bit candidate, whatever the policy says about it.

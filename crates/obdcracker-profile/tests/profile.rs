@@ -930,21 +930,39 @@ fn a_29_bit_discovery_range_lists_each_candidate_and_its_reply_id() {
 #[test]
 fn rejects_29_bit_discovery_ranges_the_policy_refuses_or_that_are_too_long() {
     for (first, last, offset) in [
-        // Backwards.
-        (0x17FC_0002, 0x17FC_0000, 0x2_0000),
         // 11-bit IDs.
         (0x700, 0x710, 0x6A),
         // Past VAG's request range, or onto a request ID.
         (0x17FC_00FF, 0x17FC_0100, 0x2_0000),
         (0x17FC_0000, 0x17FC_0001, 0x1),
-        // More than 256 IDs.
-        (0x18DA_00F1, 0x18DA_FFF1, 0x0000),
     ] {
         assert!(
-            Profile::from_toml(&with_29_bit_discovery(first, last, offset)).is_err(),
+            matches!(
+                Profile::from_toml(&with_29_bit_discovery(first, last, offset)),
+                Err(ProfileError::Discovery(_))
+            ),
             "{first:X}-{last:X} +{offset:X}"
         );
     }
+    assert_eq!(
+        Profile::from_toml(&with_29_bit_discovery(0x17FC_0002, 0x17FC_0000, 0x2_0000)).unwrap_err(),
+        ProfileError::DiscoveryRange
+    );
+    // More than 256 IDs, in order: the error says so, not that the range is backwards.
+    for (first, last) in [(0x17FC_0000, 0x17FC_0100), (0x18DA_00F1, 0x18DA_FFF1)] {
+        let error = Profile::from_toml(&with_29_bit_discovery(first, last, 0x2_0000)).unwrap_err();
+        assert_eq!(
+            error,
+            ProfileError::Discovery29TooLong,
+            "{first:X}-{last:X}"
+        );
+        assert_eq!(
+            error.to_string(),
+            "discovery_29bit: the range holds more than 256 request IDs"
+        );
+    }
+    // 256 is allowed.
+    assert!(Profile::from_toml(&with_29_bit_discovery(0x17FC_0000, 0x17FC_00FF, 0x2_0000)).is_ok());
 }
 
 #[test]
