@@ -1,8 +1,6 @@
 //! A read-only DID sweep: one `ReadDataByIdentifier` (`22`) per DID over a range, to find what a
-//! module answers that no profile lists yet, such as the head-up display's adaptation values.
-//!
-//! It only reads, so it needs nothing beyond the read-only tier, but it sends one request per DID:
-//! a whole range is 65 536 of them. Give it the narrowest range that can hold what you're after.
+//! module answers that no profile lists yet. A whole range is 65 536 requests, so give it the
+//! narrowest range that can hold what you're after. See docs/scanning.md#sweeps.
 
 use std::ops::RangeInclusive;
 
@@ -18,8 +16,7 @@ use crate::{Error, ExtendedSession, S3, SessionError, Timing, Transport};
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct SweepOptions {
-    /// Read in the extended diagnostic session, entered first (`10 03`), kept with
-    /// `TesterPresent` and left at the end (`10 01`), with these S3 timings. `None`, the default,
+    /// Read in the extended diagnostic session, with these S3 timings. `None`, the default,
     /// reads in the default session.
     pub extended: Option<S3>,
 }
@@ -28,20 +25,17 @@ pub struct SweepOptions {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Sweep {
     /// Each DID the module has, in order: its value, or why it refused it. A DID refused as out
-    /// of range (NRC 0x31) isn't there, so it isn't listed. A DID that got no final answer is
-    /// listed as [`ReadError::NoReply`] or [`ReadError::StillPending`], as it may be worth
-    /// reading again, unless the sweep stopped before an answer came after it: then
-    /// [`Stop::at`] is at or before it.
+    /// of range (NRC 0x31) isn't listed. One with no final answer is listed as
+    /// [`ReadError::NoReply`] or [`ReadError::StillPending`]; if the sweep stopped before an
+    /// answer came after it, [`Stop::at`] is at or before it.
     pub found: Vec<(u16, Result<Vec<u8>, ReadError>)>,
     /// Where the sweep stopped early, if it did: sweep again from [`Stop::at`] to go on.
     pub stop: Option<Stop>,
     /// With [`SweepOptions::extended`]: why the module may still be in the extended session
-    /// afterwards, as it refused `10 01` or didn't answer it. It returns to the default session by
-    /// itself once S3 runs out without a `TesterPresent` (5 s by default).
+    /// afterwards, as it refused `10 01` or didn't answer it.
     pub still_extended: Option<ReadError>,
-    /// Whether a read went without a final answer: its answer may still arrive, and be taken
-    /// for the answer to a later read on this connection, as UDS refusals don't name the DID.
-    /// Connect again before reading from this module again.
+    /// Whether a read went without a final answer, so its answer may still arrive and be taken
+    /// for a later read's. Connect again before reading from this module again.
     pub out_of_step: bool,
 }
 
@@ -72,19 +66,15 @@ pub struct Stop {
 /// Why a sweep stopped early.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Why {
-    /// The module stopped answering ([`ReadError::NoReply`] or [`ReadError::StillPending`],
-    /// [`QUIET_LIMIT`] times in a row),
-    /// refused `22` itself (service not supported, in this session or at all, or a bad format),
-    /// said it was busy (NRC 0x21: sweep again from [`Stop::at`] a little later), rejected a DID
-    /// with no reason given (NRC 0x10, which may be its answer to every DID: that DID is listed,
-    /// and [`Stop::at`] is the next one), or refused the
-    /// extended session or didn't confirm it.
+    /// The module stopped answering ([`QUIET_LIMIT`] unanswered reads in a row), refused `22`
+    /// itself (not supported, or a bad format), said it was busy (NRC 0x21: sweep again from
+    /// [`Stop::at`] a little later), rejected a DID with no reason (NRC 0x10: that DID is
+    /// listed and [`Stop::at`] is the next one), or refused or didn't confirm the extended
+    /// session.
     Module(ReadError),
-    /// After a DID went unanswered, a later read got a refusal or a reply it couldn't decode (such
-    /// as another DID's value), which may be the late answer to the earlier one: UDS refusals
-    /// don't name the DID. Later
-    /// replies may then answer earlier requests, so the sweep stops. Sweeping again from
-    /// [`Stop::at`] on a fresh connection asks that DID first.
+    /// After a DID went unanswered, a later read got a refusal or an undecodable reply, which
+    /// may be the late answer to the earlier one. Sweeping again from [`Stop::at`] on a fresh
+    /// connection asks that DID first.
     Unmatched(ReadError),
     /// The adapter failed, such as `BUFFER FULL`; its state may be unknown, so connect again.
     Adapter(Error),
@@ -101,9 +91,8 @@ impl std::fmt::Display for Why {
     }
 }
 
-// Refusals of the request as a whole rather than of one DID (ISO 14229-1): the service or the
-// session doesn't allow it, or the request's format is wrong. Every later read would get the same.
-// Busy, repeat request: asking the next DID at once would only keep the module busy.
+// Refusals of the request as a whole rather than of one DID (ISO 14229-1), so every later read
+// would get the same; busy included, as asking again at once would only keep the module busy.
 const SERVICE_REFUSALS: [Nrc; 6] = [
     Nrc::BusyRepeatRequest,
     Nrc::ServiceNotSupported,
@@ -114,17 +103,15 @@ const SERVICE_REFUSALS: [Nrc; 6] = [
 ];
 
 /// How many DIDs in a row may go without a final answer (no reply, or response-pending past
-/// [`Timing::max_pending`]) before a sweep takes the module to be gone or stuck.
+/// [`Timing::max_pending`]) before a sweep stops.
 pub const QUIET_LIMIT: usize = 3;
 
 /// Reads each DID in `range` from `module`, in order, and returns those it has.
 ///
 /// Every read is approved by `policy` before the first is sent, and with
 /// [`SweepOptions::extended`] so are the session's own requests; the policy must then know the
-/// module's reply ID (narrow it with the vehicle profile), or [`FingerprintError::Session`] is
-/// returned with nothing sent. The sweep stops early, keeping what it found, when the module
-/// goes quiet ([`QUIET_LIMIT`]), refuses `22` itself or the session, or the adapter fails
-/// ([`Stop`]).
+/// module's reply ID, or [`FingerprintError::Session`] is returned with nothing sent. The sweep
+/// stops early, keeping what it found ([`Stop`]).
 ///
 /// # Errors
 ///
@@ -141,9 +128,7 @@ pub fn sweep_dids<T: Transport + ?Sized>(
 }
 
 /// [`sweep_dids`], calling `progress` with each DID once its read was sent and answered or
-/// timed out. If the extended session's keepalive or re-entry fails before a read goes out, that
-/// DID isn't reported and the sweep stops there. Resume from [`Stop::at`], not the last DID
-/// reported.
+/// timed out. Resume from [`Stop::at`], not the last DID reported.
 ///
 /// # Errors
 ///
@@ -163,7 +148,6 @@ pub fn sweep_dids_reporting<T: Transport + ?Sized>(
             .approve(Protocol::Uds, target, payload)
             .map_err(FingerprintError::Rejected)
     };
-    // A RangeInclusive's iterator stops at its end, even at u16::MAX.
     let requests = range
         .clone()
         .map(|did| Ok((did, approve(&uds::read_did(did))?)))
@@ -177,7 +161,7 @@ pub fn sweep_dids_reporting<T: Transport + ?Sized>(
         });
     };
     if let Some(s3) = options.extended {
-        // What `ExtendedSession` sends, checked now so nothing is sent if it can't be.
+        // What `ExtendedSession` sends, approved now so nothing is sent if it can't be.
         let enter = approve(&uds::session_control(DiagnosticSession::Extended))?;
         approve(&uds::tester_present())?;
         approve(&uds::session_control(DiagnosticSession::Default))?;
@@ -186,8 +170,7 @@ pub fn sweep_dids_reporting<T: Transport + ?Sized>(
         }
         let mut session = match ExtendedSession::enter(transport, policy, target, timing, s3) {
             Ok(session) => session,
-            // A session that may have been entered was left, or why it may not have been is
-            // reported.
+            // `still_extended` reports why a session that may have been entered wasn't left.
             Err(e) => {
                 let (entry, still_extended) = match e {
                     SessionError::Unconfirmed { entry, leave } => {
@@ -208,8 +191,8 @@ pub fn sweep_dids_reporting<T: Transport + ?Sized>(
             }
         };
         let sweep = read_each(&mut session, &requests, &mut progress);
-        // A module that doesn't confirm `10 01` leaves the session after S3. An adapter that
-        // fails then is in an unknown state, which matters more than why the sweep stopped.
+        // An adapter failure on `10 01` leaves it in an unknown state, so it outranks why the
+        // sweep stopped.
         return Ok(match session.end().map_err(session_error) {
             Err(Ok(e)) => Sweep {
                 still_extended: Some(e),
@@ -250,7 +233,6 @@ pub fn sweep_dids_reporting<T: Transport + ?Sized>(
     Ok(read_each(&mut direct, &requests, &mut progress))
 }
 
-// Why a sweep stops, from a failure to read or to use the session.
 fn stopped(failure: Result<ReadError, FingerprintError>) -> Why {
     match failure {
         Ok(e) => Why::Module(e),
@@ -260,7 +242,6 @@ fn stopped(failure: Result<ReadError, FingerprintError>) -> Why {
     }
 }
 
-// A sweep that stopped at `at`.
 fn halt(
     found: Vec<(u16, Result<Vec<u8>, ReadError>)>,
     at: u16,
@@ -281,11 +262,8 @@ fn read_each(
     progress: &mut impl FnMut(u16),
 ) -> Sweep {
     let mut found = Vec::new();
-    // DIDs that got no final answer (no reply, or response-pending past the limit) since the
-    // last answer. Each ends up listed with its error or covered by `Stop::at`, never neither.
+    // DIDs with no final answer since the last answer: each ends up listed or covered by `Stop::at`.
     let mut quiet: Vec<(u16, ReadError)> = Vec::new();
-    // Whether any read went without a final answer: its answer may still come, as another's,
-    // at any later read on this connection.
     let mut out_of_step = false;
     let unanswered = |quiet: &mut Vec<(u16, ReadError)>| {
         quiet
@@ -294,7 +272,7 @@ fn read_each(
             .collect::<Vec<_>>()
     };
     for (did, request) in requests {
-        // Where to resume after a stop that no answer came before: the first unanswered DID.
+        // Where to resume: the first unanswered DID.
         let resume = quiet.first().map_or(*did, |(did, _)| *did);
         let answer = asker.ask_sent(request, |payload| {
             Ok(uds::decode_did(payload, *did)?.to_vec())
@@ -304,9 +282,8 @@ fn read_each(
                 progress(*did);
                 value
             }
-            // The session's keepalive or re-entry failed before the read was sent. Going on
-            // would report later DIDs past this one, and a caller checkpointing on progress
-            // would skip it, so the sweep stops here.
+            // Keepalive or re-entry failed before the read was sent: stop here, or a caller
+            // checkpointing on progress would skip this DID.
             Ok((false, value)) => {
                 let e = value.err().unwrap_or(ReadError::NoReply);
                 return halt(found, resume, Why::Module(e), out_of_step);
@@ -315,9 +292,8 @@ fn read_each(
                 return halt(found, resume, stopped(Err(e)), out_of_step);
             }
         };
-        // After an unanswered read, a refusal or a reply that can't be decoded (another DID's
-        // value) may be the late answer to that one, even past answers that were plainly this
-        // connection's own. Asking again could leave this DID's own answer queued for the next.
+        // After an unanswered read, a refusal or undecodable reply may be its late answer, even
+        // past answers that were plainly this connection's own (docs/scanning.md#sweeps).
         if out_of_step && let Err(e @ (ReadError::Reply(_) | ReadError::Undecodable { .. })) = value
         {
             found.extend(unanswered(&mut quiet));
@@ -331,14 +307,13 @@ fn read_each(
                     return halt(found, resume, Why::Module(e), true);
                 }
             }
-            // Not there, but the module answered, so the DIDs before it are listed.
+            // Not there, but the module answered, so earlier unanswered DIDs are listed.
             Err(ReadError::Reply(ReplyError::Negative(refusal)))
                 if refusal.nrc == Nrc::RequestOutOfRange =>
             {
                 found.extend(unanswered(&mut quiet));
             }
-            // No reason given, so it may be every DID's answer: listed, and the sweep stops
-            // before the next DID, so going on always gets further.
+            // No reason given, so it may be every DID's answer: list it and stop after it.
             Err(e @ ReadError::Reply(ReplyError::Negative(refusal)))
                 if refusal.nrc == Nrc::GeneralReject =>
             {
@@ -365,7 +340,6 @@ fn read_each(
             }
         }
     }
-    // Fewer than QUIET_LIMIT unanswered at the end: listed, as there's nothing to resume.
     found.extend(unanswered(&mut quiet));
     Sweep {
         found,
