@@ -36,6 +36,8 @@ or anything CI already checks (rustfmt, clippy, tests, cargo-deny).
 - Vehicle profiles can only narrow the policy, never widen it.
 - `obdcracker-core` stays `no_std` and IO-free.
 - All public items have docs (`missing_docs`); the facade doctest must keep working.
+- Comments follow `docs/CONTRIBUTING.md` › Comments: code comments only for a reason the code can't show;
+  reference material lives in `docs/`.
 - The audit log logs requests before sending.
 - ECU replies are untrusted input: every length, count and echoed ID is checked exactly.
 - No emissions-control delete/defeat features; no tune files, maps or dumps in the repo.
