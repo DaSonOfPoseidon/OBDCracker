@@ -50,6 +50,13 @@ const KEPT_DEFAULTS: &[(u8, u8, &str)] = &[
     (0x29, 0xFF, "CAN data length display"),
 ];
 
+// Raw frames for VW TP2.0: automatic flow control off first, since the adapter answers anything
+// that looks like a First Frame whatever `CAF` is (datasheet p. 14); variable DLC on, or even with
+// `CAF0` every frame is padded to 8 bytes (pp. 27, 46); then no ISO-TP formatting (p. 13).
+const RAW_ON: [&str; 3] = ["ATCFC0", "ATV1", "ATCAF0"];
+// And back to the defaults, flow control last.
+const RAW_OFF: [&str; 3] = ["ATCAF1", "ATV0", "ATCFC1"];
+
 // `AT CRA` patterns: three hex digits, each of which may be `X` (any). Every diagnostic reply ID,
 // and every OBD-II emissions ECU's.
 const WIDE_FILTER: &str = "7XX";
@@ -198,7 +205,7 @@ pub struct Elm<L> {
     header: Option<u32>,
     // Whether the adapter is on 29-bit CAN (`ATSP7`) rather than 11-bit (`ATSP6`, the setup's).
     bits29: bool,
-    // Whether CAN auto formatting is off (`ATCAF0`), for VW TP2.0's raw frames.
+    // Whether the adapter sends raw frames ([`RAW_ON`]), for VW TP2.0.
     raw: bool,
     flow: Option<Flow>,
     // The `AT CRA` pattern in effect.
@@ -554,8 +561,8 @@ impl<L: Link> Elm<L> {
         self.read_answer(command, lines)
     }
 
-    // A command whose only non-hex letter is its `T` (`ATCAF0`, `ATCAF1`), so one flipped bit
-    // could make it a bus request: written as a request is, its characters first and its
+    // A command whose only non-hex letter may be its `T` (`ATCAF0`, `ATCFC1`), so one flipped
+    // bit could make it a bus request: written as a request is, its characters first and its
     // carriage return only once they've echoed correctly, else ended with `XX` so the adapter
     // refuses it. So only on an adapter that has shown it echoes characters as it reads them.
     fn guarded_command(&mut self, command: &str) -> Result<(), Error> {
@@ -1067,7 +1074,9 @@ impl<L: Link> Transport for Elm<L> {
         }
         self.ready()?;
         if self.raw != raw {
-            self.guarded_command(if raw { "ATCAF0" } else { "ATCAF1" })?;
+            for command in if raw { RAW_ON } else { RAW_OFF } {
+                self.guarded_command(command)?;
+            }
             self.raw = raw;
         }
         self.set_target(request)?;

@@ -281,6 +281,11 @@ Each entry names the class, what to check, and where it bit us.
 - **Emulators have quirks too.** ELM327-emulator prints `SEARCHING...` on the first `01 00` even with a fixed
   protocol, which a real adapter doesn't; the test reads PID 20 instead. Note each workaround where it's made
   (M3 branch).
+- **A mode switch changes only what its command says.** `AT CAF0` turns off ISO-TP formatting, but the adapter
+  still pads every frame to 8 bytes (`AT V1` stops that) and still answers anything that looks like a First Frame
+  with flow control of its own (`AT CFC0`). When a new mode relies on the adapter not doing something, find every
+  datasheet feature that does it and turn each off, and make the fake adapter do what the real one does by default
+  (PR #149).
 
 ## Docs vs code
 

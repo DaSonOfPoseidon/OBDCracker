@@ -656,6 +656,8 @@ mod requests {
         assert_eq!(
             commands(&elm)[before..],
             [
+                "ATCFC0",
+                "ATV1",
                 "ATCAF0",
                 "ATSH200",
                 "ATCRA25F",
@@ -664,6 +666,8 @@ mod requests {
                 "ATCRA300",
                 "A8",
                 "ATCAF1",
+                "ATV0",
+                "ATCFC1",
                 "ATSH7E0",
                 "ATCRA7E8",
                 "0902",
@@ -680,72 +684,89 @@ mod requests {
 
     #[test]
     fn raw_mode_needs_an_adapter_that_echoes_characters_as_it_reads_them() {
-        // Before any request has shown it, `ATCAF0` isn't written: one flipped bit could make it
+        // Before any request has shown it, `ATCFC0` isn't written: one flipped bit could make it
         // a bus request, and only an early echo stops that before its carriage return.
         let mut elm = connect(tp20_car());
         let written = elm.link().written.len();
         let err = elm
             .send(&Policy::read_only().approve_tp20_setup(0x5F).unwrap())
             .unwrap_err();
-        assert!(err.to_string().contains("ATCAF0"), "{err}");
+        assert!(err.to_string().contains("ATCFC0"), "{err}");
         assert_eq!(elm.link().written.len(), written);
         assert_eq!(elm.link().elm.sent, []);
     }
 
+    // The commands that switch the adapter to raw frames and back, in the order they're written.
+    const RAW_ON: [&str; 3] = ["ATCFC0", "ATV1", "ATCAF0"];
+    const RAW_OFF: [&str; 3] = ["ATCAF1", "ATV0", "ATCFC1"];
+
     #[test]
-    fn a_misheard_caf0_never_reaches_the_bus() {
-        // Every bit of every character: the echo shows the flip before the carriage return, so
-        // the line is ended with `XX` and the adapter refuses it, and nothing reaches the bus.
-        for index in 0.."ATCAF0".len() {
-            for bit in 0..8 {
-                let mut elm = connect(tp20_car());
-                elm.send(&approve(Target::Physical(0x7E0), &[0x09, 0x02]))
-                    .unwrap();
-                while elm.recv(Duration::from_secs(1)).is_ok() {}
-                let sent = elm.link().elm.sent.len();
-                elm.link_mut().corrupt_next_write = Some((index, 1 << bit));
-                let setup = Policy::read_only().approve_tp20_setup(0x5F).unwrap();
-                let result = elm.send(&setup);
-                let on_bus = &elm.link().elm.sent[sent..];
-                // A flip of a letter's case is the same command to the adapter: then only the
-                // setup itself goes out. Any other flip is caught before its carriage return.
-                if result.is_ok() {
-                    assert_eq!(bit, 5, "{index}");
-                    assert_eq!(on_bus, [(0x200, setup.payload().to_vec())], "{index} {bit}");
-                } else {
-                    assert_eq!(on_bus, [], "{index} {bit}");
+    fn a_misheard_mode_switch_never_reaches_the_bus() {
+        // Every bit of every character of every switch command: the echo shows the flip before
+        // the carriage return, so the line is ended with `XX` and the adapter refuses it.
+        let read = approve(Target::Physical(0x7E0), &[0x09, 0x02]);
+        for (leaving, command) in RAW_ON
+            .iter()
+            .map(|command| (false, command))
+            .chain(RAW_OFF.iter().map(|command| (true, command)))
+        {
+            for index in 0..command.len() {
+                for bit in 0..8 {
+                    let mut elm = connect(tp20_car());
+                    elm.send(&read).unwrap();
+                    while elm.recv(Duration::from_secs(1)).is_ok() {}
+                    let setup = Policy::read_only().approve_tp20_setup(0x5F).unwrap();
+                    if leaving {
+                        elm.send(&setup).unwrap();
+                        while elm.recv(Duration::from_secs(1)).is_ok() {}
+                    }
+                    let sent = elm.link().elm.sent.len();
+                    elm.link_mut().corrupt_write_of =
+                        Some((command.as_bytes().to_vec(), index, 1 << bit));
+                    let request = if leaving { &read } else { &setup };
+                    let result = elm.send(request);
+                    assert!(elm.link().corrupt_write_of.is_none(), "{command}");
+                    let on_bus = &elm.link().elm.sent[sent..];
+                    // A flip of a letter's case is the same command to the adapter: then only
+                    // the request itself goes out. Any other flip is caught before the return.
+                    if result.is_ok() {
+                        assert_eq!(bit, 5, "{command} {index}");
+                        assert_eq!(on_bus.len(), 1, "{command} {index}");
+                    } else {
+                        assert_eq!(on_bus, [], "{command} {index} {bit}");
+                    }
                 }
             }
         }
     }
 
     #[test]
-    fn a_misheard_caf1_never_reaches_the_bus() {
-        // The same for the switch back to ISO-TP, written before the next ISO-TP request.
-        let read = approve(Target::Physical(0x7E0), &[0x09, 0x02]);
-        for index in 0.."ATCAF1".len() {
-            for bit in 0..8 {
-                let mut elm = connect(tp20_car());
-                elm.send(&read).unwrap();
-                while elm.recv(Duration::from_secs(1)).is_ok() {}
-                let setup = Policy::read_only().approve_tp20_setup(0x5F).unwrap();
-                elm.send(&setup).unwrap();
-                while elm.recv(Duration::from_secs(1)).is_ok() {}
-                let sent = elm.link().elm.sent.len();
-                let writes = elm.link().writes.len();
-                elm.link_mut().corrupt_next_write = Some((index, 1 << bit));
-                let result = elm.send(&read);
-                // The flip landed on `ATCAF1`'s characters, written before their carriage return.
-                assert_eq!(elm.link().writes[writes], b"ATCAF1");
-                let on_bus = &elm.link().elm.sent[sent..];
-                if result.is_ok() {
-                    assert_eq!(bit, 5, "{index}");
-                    assert_eq!(on_bus, [(0x7E0, vec![0x09, 0x02])], "{index} {bit}");
-                } else {
-                    assert_eq!(on_bus, [], "{index} {bit}");
-                }
+    fn a_raw_reply_like_a_first_frame_gets_no_flow_control() {
+        // With `CAF0` alone the adapter would still answer a frame starting `1x` with flow
+        // control of its own, which the policy never approved.
+        let mut elm = connect(FakeElm::new(Box::new(|header, request| {
+            match (header, request) {
+                (0x200, [0x60, 0xC0, ..]) => vec![(0x260, vec![0x10, 0x00, 0x02, 0xAA, 0xBB])],
+                (0x7E0, [0x09, 0x02]) => vec![(0x7E8, VIN.to_vec())],
+                _ => Vec::new(),
             }
-        }
+        })));
+        elm.send(&approve(Target::Physical(0x7E0), &[0x09, 0x02]))
+            .unwrap();
+        while elm.recv(Duration::from_secs(1)).is_ok() {}
+        let before = elm.link().elm.flow_control_for.len();
+        elm.send(&Policy::read_only().approve_tp20_setup(0x60).unwrap())
+            .unwrap();
+        assert_eq!(
+            elm.recv(Duration::from_secs(1)).unwrap().payload,
+            [0x10, 0x00, 0x02, 0xAA, 0xBB]
+        );
+        assert_eq!(elm.link().elm.flow_control_for[before..], [0u32; 0]);
+        // And back on for ISO-TP, whose multi-frame replies need it.
+        elm.send(&approve(Target::Physical(0x7E0), &[0x09, 0x02]))
+            .unwrap();
+        while elm.recv(Duration::from_secs(1)).is_ok() {}
+        assert_eq!(elm.link().elm.flow_control_for[before..], [0x7E8]);
     }
 
     // A busy bus: while the gateway answers, the instruments send a long reply of their own.
