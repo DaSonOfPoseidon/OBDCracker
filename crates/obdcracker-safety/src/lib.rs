@@ -44,16 +44,36 @@ pub enum Target {
     ObdFunctional,
     /// One module's 11-bit request ID.
     Physical(u32),
+    /// One module's 29-bit request ID: ISO 15765-4 normal fixed addressing (`0x18DA<module>F1`,
+    /// from the tester at 0xF1) or VAG's (`0x17FC00xx`). An 11-bit ID is never one of these.
+    Physical29(u32),
 }
 
 impl Target {
-    /// The 11-bit CAN ID the request is sent to.
+    /// The physical target for `id`: 11-bit up to 0x7FF, 29-bit above. Every ID the policy
+    /// allows at one width is outside the other's ranges, so a profile's IDs say their width.
+    #[must_use]
+    pub fn physical(id: u32) -> Self {
+        if id <= MAX_11_BIT {
+            Self::Physical(id)
+        } else {
+            Self::Physical29(id)
+        }
+    }
+
+    /// The CAN ID the request is sent to.
     #[must_use]
     pub fn can_id(self) -> u32 {
         match self {
             Self::ObdFunctional => OBD_FUNCTIONAL_ID,
-            Self::Physical(id) => id,
+            Self::Physical(id) | Self::Physical29(id) => id,
         }
+    }
+
+    /// Whether the request goes out with a 29-bit CAN ID.
+    #[must_use]
+    pub fn is_29_bit(self) -> bool {
+        matches!(self, Self::Physical29(_))
     }
 }
 
@@ -66,8 +86,9 @@ pub enum Rejection {
     Banned,
     /// Not on the allowlist, malformed, or empty.
     NotAllowed,
-    /// UDS or KWP2000 sent to the broadcast address, a physical ID outside 0x700..=0x7FF, an ID that
-    /// OBD-II ECUs answer on (0x7E8..=0x7EF), or, once the policy is narrowed to a car's modules
+    /// UDS or KWP2000 sent to the broadcast address, an 11-bit ID outside 0x700..=0x7FF or one
+    /// OBD-II ECUs answer on (0x7E8..=0x7EF), a 29-bit ID outside the request ranges of
+    /// [`Target::Physical29`], or, once the policy is narrowed to a car's modules
     /// ([`Policy::narrowed_to`]), any ID that isn't one of their request IDs.
     WrongTarget,
 }
@@ -93,12 +114,13 @@ impl std::fmt::Display for Rejection {
 
 impl std::error::Error for Rejection {}
 
-/// A module's request and reply CAN IDs, as a vehicle profile gives them.
+/// A module's request and reply CAN IDs, as a vehicle profile gives them: both 11-bit (up to
+/// 0x7FF) or both 29-bit (above it, see [`Target::physical`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ModuleIds {
-    /// The 11-bit CAN ID requests are sent to.
+    /// The CAN ID requests are sent to.
     pub request: u32,
-    /// The 11-bit CAN ID the module answers on.
+    /// The CAN ID the module answers on.
     pub reply: u32,
 }
 
@@ -107,7 +129,9 @@ pub struct ModuleIds {
 pub enum NarrowingError {
     /// A request ID the policy refuses anyway.
     Request(u32),
-    /// A reply ID outside 0x700..=0x7FF, or the broadcast ID 0x7DF.
+    /// A reply ID of the wrong width for its request ID, outside 0x700..=0x7FF or the broadcast
+    /// ID 0x7DF for an 11-bit one, or outside the 29-bit reply ranges (`0x18DAF1xx`,
+    /// `0x17FE00xx`) for a 29-bit one.
     Reply(u32),
     /// An ID that is one module's request ID and a module's reply ID.
     RequestIsReply(u32),
@@ -203,14 +227,20 @@ impl Policy {
     ///
     /// # Errors
     ///
-    /// A request ID the policy refuses anyway, a reply ID outside 0x700..=0x7FF (or 0x7DF), an ID
-    /// that is both a request ID and a reply ID, or a request ID with two reply IDs.
+    /// A request ID the policy refuses anyway, a reply ID it can't be ([`NarrowingError::Reply`]),
+    /// an ID that is both a request ID and a reply ID, or a request ID with two reply IDs.
     pub fn narrowed_to(self, modules: &[ModuleIds]) -> Result<Self, NarrowingError> {
         for module in modules {
-            if check_target(Target::Physical(module.request), Kind::Physical).is_err() {
+            let target = Target::physical(module.request);
+            if check_target(target, Kind::Physical).is_err() {
                 return Err(NarrowingError::Request(module.request));
             }
-            if !(0x700..=0x7FF).contains(&module.reply) || module.reply == OBD_FUNCTIONAL_ID {
+            let reply_ok = if target.is_29_bit() {
+                is_29_bit_reply(module.reply)
+            } else {
+                (0x700..=MAX_11_BIT).contains(&module.reply) && module.reply != OBD_FUNCTIONAL_ID
+            };
+            if !reply_ok {
                 return Err(NarrowingError::Reply(module.reply));
             }
             if modules.iter().any(|other| other.reply == module.request) {
@@ -261,7 +291,7 @@ impl Policy {
         check_target(target, kind)?;
         let reply = match (target, &self.modules) {
             (Target::ObdFunctional, _) => None,
-            (Target::Physical(id), Some(modules)) => Some(
+            (Target::Physical(id) | Target::Physical29(id), Some(modules)) => Some(
                 modules
                     .iter()
                     .find(|module| module.request == id)
@@ -269,6 +299,11 @@ impl Policy {
                     .reply,
             ),
             (Target::Physical(id), None) => OBD_REQUEST_IDS.contains(&id).then(|| id + 8),
+            // ISO 15765-4: the module at `ta` answers the tester on 0x18DAF1<ta>. VAG's pairs come
+            // from a profile.
+            (Target::Physical29(id), None) => {
+                is_iso_29_bit_request(id).then_some(ISO_29_BIT_REPLY | ((id >> 8) & 0xFF))
+            }
         };
         Ok(Approved {
             protocol,
@@ -289,6 +324,27 @@ enum Kind {
 }
 
 const OBD_FUNCTIONAL_ID: u32 = 0x7DF;
+const MAX_11_BIT: u32 = 0x7FF;
+// ISO 15765-4 normal fixed addressing with the tester at 0xF1: requests 0x18DA<ta>F1, replies
+// 0x18DAF1<sa>. VAG: requests 0x17FC00xx, replies 0x17FE00xx.
+const ISO_29_BIT_REQUEST: u32 = 0x18DA_00F1;
+const ISO_29_BIT_REPLY: u32 = 0x18DA_F100;
+const TESTER: u32 = 0xF1;
+const VAG_29_BIT_REQUEST: u32 = 0x17FC_0000;
+const VAG_29_BIT_REPLY: u32 = 0x17FE_0000;
+
+fn is_iso_29_bit_request(id: u32) -> bool {
+    id & 0xFFFF_00FF == ISO_29_BIT_REQUEST && (id >> 8) & 0xFF != TESTER
+}
+
+fn is_29_bit_request(id: u32) -> bool {
+    is_iso_29_bit_request(id) || id & 0xFFFF_FF00 == VAG_29_BIT_REQUEST
+}
+
+fn is_29_bit_reply(id: u32) -> bool {
+    (id & 0xFFFF_FF00 == ISO_29_BIT_REPLY && id & 0xFF != TESTER)
+        || id & 0xFFFF_FF00 == VAG_29_BIT_REPLY
+}
 // ISO 15765-4: emissions ECUs answer on 0x7E8..=0x7EF (their request ID + 8).
 const OBD_REQUEST_IDS: core::ops::RangeInclusive<u32> = 0x7E0..=0x7E7;
 const OBD_RESPONSE_IDS: core::ops::RangeInclusive<u32> = 0x7E8..=0x7EF;
@@ -297,8 +353,9 @@ fn check_target(target: Target, kind: Kind) -> Result<(), Rejection> {
     match (target, kind) {
         (Target::ObdFunctional, Kind::Obd) => Ok(()),
         // Never a response ID: a request there looks like an ECU's reply to everyone listening.
+        (Target::Physical29(id), _) if is_29_bit_request(id) => Ok(()),
         (Target::Physical(id), _)
-            if (0x700..=0x7FF).contains(&id)
+            if (0x700..=MAX_11_BIT).contains(&id)
                 && id != OBD_FUNCTIONAL_ID
                 && !OBD_RESPONSE_IDS.contains(&id) =>
         {

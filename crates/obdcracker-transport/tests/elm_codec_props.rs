@@ -67,3 +67,19 @@ proptest! {
         prop_assert_eq!(frame.data(), &data[..]);
     }
 }
+
+proptest! {
+    #[test]
+    fn every_printed_29_bit_frame_round_trips(
+        id in 0x800u32..=0x1FFF_FFFF,
+        data in prop::collection::vec(any::<u8>(), 1..=8),
+    ) {
+        let line = format!("{} {}", hex(&id.to_be_bytes()), hex(&data));
+        let Line::Frame(frame) = parse_line(&line) else {
+            return Err(TestCaseError::fail(format!("{line:?} isn't a frame")));
+        };
+        prop_assert_eq!(frame.id(), id);
+        prop_assert!(frame.is_29_bit());
+        prop_assert_eq!(frame.data(), &data[..]);
+    }
+}

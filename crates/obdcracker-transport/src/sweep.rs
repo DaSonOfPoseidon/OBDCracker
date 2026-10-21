@@ -157,7 +157,7 @@ pub fn sweep_dids_reporting<T: Transport + ?Sized>(
     options: &SweepOptions,
     mut progress: impl FnMut(u16),
 ) -> Result<Sweep, FingerprintError> {
-    let target = Target::Physical(module.request_id);
+    let target = Target::physical(module.request_id);
     let approve = |payload: &[u8]| {
         policy
             .approve(Protocol::Uds, target, payload)

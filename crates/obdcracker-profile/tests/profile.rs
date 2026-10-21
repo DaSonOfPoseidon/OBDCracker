@@ -888,3 +888,93 @@ fn a7_did_lengths_match_the_cars_replies() {
         }
     }
 }
+
+// MINIMAL with a 29-bit discovery range.
+fn with_29_bit_discovery(first: u32, last: u32, offset: u32) -> String {
+    format!(
+        "{MINIMAL}\n[discovery_29bit]\nfirst_request_id = {first}\nlast_request_id = {last}\n\
+         reply_offset = {offset}\n"
+    )
+}
+
+#[test]
+fn a_29_bit_discovery_range_lists_each_candidate_and_its_reply_id() {
+    let profile =
+        Profile::from_toml(&with_29_bit_discovery(0x17FC_0000, 0x17FC_0002, 0x2_0000)).unwrap();
+    assert_eq!(
+        profile.candidates_29bit(),
+        [0x17FC_0000, 0x17FC_0001, 0x17FC_0002].map(|request| ModuleIds {
+            request,
+            reply: request + 0x2_0000,
+        })
+    );
+    // The 11-bit discovery range is a separate one.
+    assert_eq!(profile.candidates(), Vec::<ModuleIds>::new());
+    let policy = profile
+        .narrow_with(Policy::read_only(), &profile.candidates_29bit())
+        .unwrap();
+    let approved = policy
+        .approve(
+            obdcracker_safety::Protocol::Uds,
+            Target::Physical29(0x17FC_0001),
+            &[0x22, 0xF1, 0x87],
+        )
+        .unwrap();
+    assert_eq!(approved.reply_id(), Some(0x17FE_0001));
+    assert_eq!(
+        Profile::from_toml(MINIMAL).unwrap().candidates_29bit(),
+        Vec::<ModuleIds>::new()
+    );
+}
+
+#[test]
+fn rejects_29_bit_discovery_ranges_the_policy_refuses_or_that_are_too_long() {
+    for (first, last, offset) in [
+        // 11-bit IDs.
+        (0x700, 0x710, 0x6A),
+        // Past VAG's request range, or onto a request ID.
+        (0x17FC_00FF, 0x17FC_0100, 0x2_0000),
+        (0x17FC_0000, 0x17FC_0001, 0x1),
+    ] {
+        assert!(
+            matches!(
+                Profile::from_toml(&with_29_bit_discovery(first, last, offset)),
+                Err(ProfileError::Discovery(_))
+            ),
+            "{first:X}-{last:X} +{offset:X}"
+        );
+    }
+    assert_eq!(
+        Profile::from_toml(&with_29_bit_discovery(0x17FC_0002, 0x17FC_0000, 0x2_0000)).unwrap_err(),
+        ProfileError::DiscoveryRange
+    );
+    // More than 256 IDs, in order: the error says so, not that the range is backwards.
+    for (first, last) in [(0x17FC_0000, 0x17FC_0100), (0x18DA_00F1, 0x18DA_FFF1)] {
+        let error = Profile::from_toml(&with_29_bit_discovery(first, last, 0x2_0000)).unwrap_err();
+        assert_eq!(
+            error,
+            ProfileError::Discovery29TooLong,
+            "{first:X}-{last:X}"
+        );
+        assert_eq!(
+            error.to_string(),
+            "discovery_29bit: the range holds more than 256 request IDs"
+        );
+    }
+    // 256 is allowed.
+    assert!(Profile::from_toml(&with_29_bit_discovery(0x17FC_0000, 0x17FC_00FF, 0x2_0000)).is_ok());
+}
+
+#[test]
+fn the_a7_profile_has_a_29_bit_discovery_range_over_vags_ids() {
+    let profile = Profile::builtin("a7").unwrap();
+    let candidates = profile.candidates_29bit();
+    assert_eq!(candidates.len(), 256);
+    assert_eq!(
+        candidates[0x5F],
+        ModuleIds {
+            request: 0x17FC_005F,
+            reply: 0x17FE_005F,
+        }
+    );
+}

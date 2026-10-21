@@ -103,23 +103,47 @@ pub struct Settings {
     pub spaces: bool,
     pub linefeeds: bool,
     pub protocol: Option<String>,
+    /// The 11-bit header (`AT SH` with 3 digits).
     pub header: u32,
+    /// The 29-bit header's priority bits (`AT CP`) and the rest (`AT SH` with 6 digits).
+    pub priority: u8,
+    pub header29: u32,
     pub fc_header: Option<u32>,
     pub fc_data: Option<String>,
     pub fc_mode: u8,
-    /// The `AT CRA` receive filter: three hex digits, each of which may be `X` (any). `None`
-    /// shows every ID.
+    /// The `AT CRA` receive filter: three hex digits (eight for 29-bit IDs), each of which may
+    /// be `X` (any). `None` shows every ID.
     pub cra: Option<String>,
 }
 
 impl Settings {
+    // Whether the adapter is on 29-bit CAN (protocol 7).
+    pub fn bits29(&self) -> bool {
+        self.protocol.as_deref() == Some("7")
+    }
+
+    // The CAN ID requests go to.
+    pub fn request_id(&self) -> u32 {
+        if self.bits29() {
+            u32::from(self.priority) << 24 | self.header29
+        } else {
+            self.header
+        }
+    }
+
     // Whether the receive filter shows frames from `id`.
     fn shows(&self, id: u32) -> bool {
         self.cra.as_ref().is_none_or(|pattern| {
-            pattern
-                .chars()
-                .zip(format!("{id:03X}").chars())
-                .all(|(want, got)| want == 'X' || want == got)
+            let id = if pattern.len() == 8 {
+                format!("{id:08X}")
+            } else {
+                format!("{id:03X}")
+            };
+            pattern.len() == id.len()
+                && pattern
+                    .chars()
+                    .zip(id.chars())
+                    .all(|(want, got)| want == 'X' || want == got)
         })
     }
 }
@@ -133,6 +157,9 @@ impl Default for Settings {
             linefeeds: false,
             protocol: None,
             header: 0x7DF,
+            // The datasheet's defaults: the 29-bit OBD-II broadcast, 0x18DB33F1.
+            priority: 0x18,
+            header29: 0xDB_33F1,
             fc_header: None,
             fc_data: None,
             fc_mode: 0,
@@ -377,44 +404,62 @@ impl FakeElm {
                     false
                 }
             }
-            _ => {
-                if let Some(protocol) = cmd.strip_prefix("SP") {
-                    self.settings.protocol = Some(protocol.to_owned());
-                    true
-                } else if let Some(id) = cmd.strip_prefix("FCSH") {
-                    self.settings.fc_header = parse_id(id);
-                    self.settings.fc_header.is_some()
-                } else if let Some(pattern) = cmd.strip_prefix("CRA") {
-                    // Three hex digits or X (datasheet p. 15); a bare `AT CRA` shows every ID.
-                    let valid = pattern.len() == 3
-                        && pattern.bytes().all(|b| b.is_ascii_hexdigit() || b == b'X');
-                    if valid {
-                        self.settings.cra = Some(pattern.to_owned());
-                    } else if pattern.is_empty() {
-                        self.settings.cra = None;
-                    }
-                    valid || pattern.is_empty()
-                } else if let Some(data) = cmd.strip_prefix("FCSD") {
-                    self.settings.fc_data = Some(data.to_owned());
-                    true
-                } else if let Some(id) = cmd.strip_prefix("SH") {
-                    match parse_id(id) {
-                        Some(id) => {
-                            self.settings.header = id;
-                            true
-                        }
-                        None => false,
-                    }
-                } else {
-                    false
-                }
-            }
+            _ => self.set(cmd),
         };
         self.print(if ok { "OK" } else { "?" });
         self.prompt();
     }
 
     // `AT PPS`: four parameters a line, as `nn:vv N` (on) or `nn:vv F` (off).
+    // A setting with a value: whether the adapter took it.
+    fn set(&mut self, cmd: &str) -> bool {
+        if let Some(protocol) = cmd.strip_prefix("SP") {
+            self.settings.protocol = Some(protocol.to_owned());
+            true
+        } else if let Some(id) = cmd.strip_prefix("FCSH") {
+            self.settings.fc_header = parse_id(id);
+            self.settings.fc_header.is_some()
+        } else if let Some(priority) = cmd.strip_prefix("CP") {
+            // Two hex digits, at most 1F: the top 5 bits of a 29-bit ID.
+            match parse_hex(priority).as_deref() {
+                Some(&[priority]) if priority <= 0x1F => {
+                    self.settings.priority = priority;
+                    true
+                }
+                _ => false,
+            }
+        } else if let Some(pattern) = cmd.strip_prefix("CRA") {
+            // Three hex digits or X, or eight for 29-bit IDs (datasheet p. 15); a bare
+            // `AT CRA` shows every ID.
+            let valid = matches!(pattern.len(), 3 | 8)
+                && pattern.bytes().all(|b| b.is_ascii_hexdigit() || b == b'X');
+            if valid {
+                self.settings.cra = Some(pattern.to_owned());
+            } else if pattern.is_empty() {
+                self.settings.cra = None;
+            }
+            valid || pattern.is_empty()
+        } else if let Some(data) = cmd.strip_prefix("FCSD") {
+            self.settings.fc_data = Some(data.to_owned());
+            true
+        } else if let Some(id) = cmd.strip_prefix("SH") {
+            // Three hex digits, or six for the low 24 bits of a 29-bit header.
+            match (id.len(), parse_id(id)) {
+                (3, Some(id)) => {
+                    self.settings.header = id;
+                    true
+                }
+                (6, Some(id)) => {
+                    self.settings.header29 = id;
+                    true
+                }
+                _ => false,
+            }
+        } else {
+            false
+        }
+    }
+
     fn print_pps(&mut self) {
         let lines = self.pps.clone().unwrap_or_else(|| {
             PP_FACTORY
@@ -454,15 +499,16 @@ impl FakeElm {
         };
         // Recorded even without a protocol: a real adapter would then search for one, sending
         // probe frames.
-        self.sent.push((self.settings.header, bytes.clone()));
-        if self.settings.protocol.as_deref() != Some("6") {
+        let header = self.settings.request_id();
+        self.sent.push((header, bytes.clone()));
+        if !matches!(self.settings.protocol.as_deref(), Some("6" | "7")) {
             self.print("CAN ERROR");
             self.prompt();
             return;
         }
         // The receive filter hides frames from other IDs, and the adapter sends no flow control
         // for what it doesn't show.
-        let replies: Vec<_> = (self.responder)(self.settings.header, &bytes)
+        let replies: Vec<_> = (self.responder)(header, &bytes)
             .into_iter()
             .filter(|(source, _)| self.settings.shows(*source))
             .collect();
@@ -479,7 +525,6 @@ impl FakeElm {
         // modelled their frames interleave, each module's spaced by the gap its flow control
         // asked for; otherwise each reply is printed whole, in turn.
         let mut lines = Vec::new();
-        let header = self.settings.header;
         for (index, (source, payload)) in replies.into_iter().enumerate() {
             let mut frames = frames(&payload);
             if frames.len() > 1 {
@@ -488,13 +533,19 @@ impl FakeElm {
                 self.flow_control_ids.push(to);
                 // The module goes on only if the flow control came to its own request ID: the
                 // header, or for a broadcast the OBD-II one (ISO 15765-4: reply ID - 8).
-                let request_id = if header == 0x7DF { source - 8 } else { header };
+                let request_id = if header == 0x7DF && !self.settings.bits29() {
+                    source - 8
+                } else {
+                    header
+                };
                 if to != request_id {
                     frames.truncate(1);
                 }
             }
             for (k, frame) in frames.into_iter().enumerate() {
-                let line = if self.settings.headers {
+                let line = if self.settings.headers && self.settings.bits29() {
+                    format!("{} {}", hex(&source.to_be_bytes()), hex(&frame))
+                } else if self.settings.headers {
                     format!("{source:03X} {}", hex(&frame))
                 } else {
                     hex(&frame)
@@ -565,8 +616,9 @@ impl FakeElm {
     }
 }
 
+// Three hex digits, or six or eight (a 29-bit header's low 24 bits, or a whole 29-bit ID).
 fn parse_id(text: &str) -> Option<u32> {
-    (text.len() == 3 && text.bytes().all(|b| b.is_ascii_hexdigit()))
+    (matches!(text.len(), 3 | 6 | 8) && text.bytes().all(|b| b.is_ascii_hexdigit()))
         .then(|| u32::from_str_radix(text, 16).ok())
         .flatten()
 }

@@ -86,6 +86,17 @@ that doesn't answer `22 F1 87` at all could still own one, so `--wide` is opt-in
 reply ID: a frame no module receives, since modules only send on theirs. A module that speaks only KWP2000/TP2.0, as
 some older MMIs may, doesn't answer any pass.
 
+### `--discover-29bit`
+
+```sh
+obdcracker --serial <PORT> --profile a7 scan --discover-29bit  # look on 29-bit IDs too
+```
+
+Looks on 29-bit CAN IDs, as `--discover` does on 11-bit ones: the part number (`22 F1 87`) from each request ID in the
+profile's 29-bit discovery range, then a scan of whatever answered. On the A7 that's VAG's 0x17FC0000 to 0x17FC00FF,
+replies on 0x17FE00xx (256 reads, about 4 minutes on an ELM adapter). The adapter switches to 29-bit CAN for them and
+back. It can run with `--discover` or alone. Whether the A7 has any module on these IDs is unknown (#89).
+
 ## `sweep`
 
 ```sh

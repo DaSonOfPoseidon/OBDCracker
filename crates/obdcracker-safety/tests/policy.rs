@@ -407,6 +407,9 @@ fn any_target() -> impl Strategy<Value = Target> {
         any::<u32>().prop_map(Target::Physical),
         (0x700u32..=0x7FF).prop_map(Target::Physical),
         prop::sample::select(&OBD_RESPONSE_IDS[..]).prop_map(Target::Physical),
+        any::<u32>().prop_map(Target::Physical29),
+        (0x17FC_0000u32..=0x17FE_00FF).prop_map(Target::Physical29),
+        (0x18DA_0000u32..=0x18DB_FFFF).prop_map(Target::Physical29),
     ]
 }
 
@@ -595,10 +598,18 @@ fn narrowing_refuses_inconsistent_modules() {
     );
 }
 
+fn any_id() -> impl Strategy<Value = u32> {
+    prop_oneof![
+        0x6F0u32..=0x80F,
+        0x17FB_FF00u32..=0x17FE_01FF,
+        0x18DA_F000u32..=0x18DA_F2FF,
+        (0u32..=0xFF).prop_map(|ta| 0x18DA_00F1 | (ta << 8)),
+    ]
+}
+
 fn any_modules() -> impl Strategy<Value = Vec<ModuleIds>> {
     prop::collection::vec(
-        (0x6F0u32..=0x80F, 0x6F0u32..=0x80F)
-            .prop_map(|(request, reply)| ModuleIds { request, reply }),
+        (any_id(), any_id()).prop_map(|(request, reply)| ModuleIds { request, reply }),
         0..6,
     )
 }
@@ -616,11 +627,158 @@ proptest! {
         };
         if let Ok(approved) = narrowed.approve(protocol, target, &payload) {
             prop_assert!(Policy::read_only().approve(protocol, target, &payload).is_ok());
-            if let Target::Physical(id) = target {
+            if let Target::Physical(id) | Target::Physical29(id) = target {
                 prop_assert!(modules.iter().any(|m| m.request == id));
                 prop_assert!(!modules.iter().any(|m| m.reply == id));
             }
             prop_assert_eq!(approved.payload(), &payload[..]);
         }
     }
+}
+
+// VAG's 29-bit diagnostic IDs: requests on 0x17FC00xx, replies on 0x17FE00xx.
+const VAG29_REQUEST: u32 = 0x17FC_0076;
+const VAG29_REPLY: u32 = 0x17FE_0076;
+
+#[test]
+fn approves_reads_on_29_bit_physical_ids() {
+    for id in [
+        VAG29_REQUEST,
+        0x17FC_0000,
+        0x17FC_00FF,
+        // ISO 15765-4 normal fixed addressing: 0x18DA, the module, the tester (F1).
+        0x18DA_10F1,
+        0x18DA_00F1,
+        0x18DA_FFF1,
+    ] {
+        assert_eq!(
+            approve(Target::Physical29(id), &[0x22, 0xF1, 0x87]),
+            Ok(Tier::Read),
+            "{id:08X}"
+        );
+        assert_eq!(
+            approve_kwp2000(Target::Physical29(id), &[0x1A, 0x9B]),
+            Ok(Tier::Read),
+            "{id:08X}"
+        );
+    }
+    assert_eq!(Target::Physical29(VAG29_REQUEST).can_id(), VAG29_REQUEST);
+    assert!(Target::Physical29(VAG29_REQUEST).is_29_bit());
+    assert!(!ENGINE.is_29_bit());
+    assert!(!Target::ObdFunctional.is_29_bit());
+}
+
+#[test]
+fn rejects_29_bit_ids_outside_the_diagnostic_ranges_and_reply_ids() {
+    for id in [
+        VAG29_REPLY, // VAG's reply IDs
+        0x17FE_0000,
+        0x17FC_0100, // past VAG's request range
+        0x17FB_FFFF,
+        0x18DA_F110, // ISO replies: to the tester
+        0x18DA_F1F1, // the tester to itself
+        0x18DA_10F2, // another tester's
+        0x18DB_33F1, // the 29-bit OBD-II broadcast
+        0x1FFF_FFFF,
+        0x2000_0000, // more than 29 bits
+        0x0000_07E0, // an 11-bit ID can't be sent as 29-bit
+        0x0000_0710,
+        0,
+    ] {
+        assert_eq!(
+            approve(Target::Physical29(id), &[0x22, 0xF1, 0x87]),
+            Err(Rejection::WrongTarget),
+            "{id:08X}"
+        );
+    }
+    // Nor can a 29-bit ID be sent as 11-bit.
+    assert_eq!(
+        approve(Target::Physical(VAG29_REQUEST), &[0x22, 0xF1, 0x87]),
+        Err(Rejection::WrongTarget)
+    );
+    // OBD-II modes go to the 11-bit broadcast or emissions ECUs only.
+    assert_eq!(
+        approve(Target::Physical29(0x18DA_10F1), &[0x09, 0x02]),
+        Ok(Tier::Read)
+    );
+}
+
+#[test]
+fn iso_29_bit_reply_ids_are_known_and_vag_ones_come_from_a_profile() {
+    let read = [0x22, 0xF1, 0x87];
+    let approved = Policy::read_only()
+        .approve(Protocol::Uds, Target::Physical29(0x18DA_10F1), &read)
+        .unwrap();
+    assert_eq!(approved.reply_id(), Some(0x18DA_F110));
+    let approved = Policy::read_only()
+        .approve(Protocol::Uds, Target::Physical29(VAG29_REQUEST), &read)
+        .unwrap();
+    assert_eq!(approved.reply_id(), None);
+    let narrowed = Policy::read_only()
+        .narrowed_to(&[ModuleIds {
+            request: VAG29_REQUEST,
+            reply: VAG29_REPLY,
+        }])
+        .unwrap();
+    let approved = narrowed
+        .approve(Protocol::Uds, Target::Physical29(VAG29_REQUEST), &read)
+        .unwrap();
+    assert_eq!(approved.reply_id(), Some(VAG29_REPLY));
+    // The narrowed policy refuses the 11-bit IDs it wasn't narrowed to, and the 29-bit request ID
+    // as 11-bit.
+    for target in [Target::Physical(0x710), Target::Physical(VAG29_REQUEST)] {
+        assert_eq!(
+            narrowed.approve(Protocol::Uds, target, &read),
+            Err(Rejection::WrongTarget)
+        );
+    }
+}
+
+#[test]
+fn narrowing_refuses_29_bit_pairs_of_mixed_width_or_on_the_wrong_ranges() {
+    let ids = |request, reply| ModuleIds { request, reply };
+    for (modules, error) in [
+        // A request on a reply range.
+        (
+            vec![ids(VAG29_REPLY, VAG29_REQUEST)],
+            NarrowingError::Request(VAG29_REPLY),
+        ),
+        // A 29-bit request with an 11-bit reply, and the other way round.
+        (
+            vec![ids(VAG29_REQUEST, 0x77A)],
+            NarrowingError::Reply(0x77A),
+        ),
+        (
+            vec![ids(0x710, VAG29_REPLY)],
+            NarrowingError::Reply(VAG29_REPLY),
+        ),
+        // A 29-bit reply that's no reply ID: a request ID, the broadcast, more than 29 bits.
+        (
+            vec![ids(VAG29_REQUEST, 0x17FC_0077)],
+            NarrowingError::Reply(0x17FC_0077),
+        ),
+        (
+            vec![ids(VAG29_REQUEST, 0x18DB_33F1)],
+            NarrowingError::Reply(0x18DB_33F1),
+        ),
+        (
+            vec![ids(VAG29_REQUEST, 0x2000_0000)],
+            NarrowingError::Reply(0x2000_0000),
+        ),
+    ] {
+        assert_eq!(
+            Policy::read_only().narrowed_to(&modules).err(),
+            Some(error),
+            "{modules:X?}"
+        );
+    }
+    assert!(
+        Policy::read_only()
+            .narrowed_to(&[
+                ids(VAG29_REQUEST, VAG29_REPLY),
+                ids(0x18DA_10F1, 0x18DA_F110),
+                ids(0x710, 0x77A)
+            ])
+            .is_ok()
+    );
 }

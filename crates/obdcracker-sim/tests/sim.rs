@@ -1082,14 +1082,7 @@ fn wide_discovery_finds_a_module_past_the_first_range() {
             reply: 0x7DD
         }]
     );
-    let sent: Vec<u32> = bus
-        .sent()
-        .iter()
-        .map(|r| match r.target() {
-            Target::Physical(id) => id,
-            Target::ObdFunctional => 0x7DF,
-        })
-        .collect();
+    let sent: Vec<u32> = bus.sent().iter().map(|r| r.target().can_id()).collect();
     // Not 0x709, whose reply ID is the MMI's request ID, nor the gateway's reply ID.
     for never in [0x709, 0x77A, 0x7DD] {
         assert!(!sent.contains(&never), "{never:03X}");

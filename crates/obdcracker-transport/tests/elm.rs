@@ -22,6 +22,11 @@ const INSTRUMENTS: ModuleIds = ModuleIds {
     request: 0x714,
     reply: 0x77E,
 };
+// A module on VAG's 29-bit IDs.
+const VAG29: ModuleIds = ModuleIds {
+    request: 0x17FC_0076,
+    reply: 0x17FE_0076,
+};
 
 fn approve(target: Target, payload: &[u8]) -> Approved {
     Policy::read_only()
@@ -116,6 +121,35 @@ mod setup {
         )
         .unwrap();
         while elm.recv(Duration::from_secs(1)).is_ok() {}
+        // 29-bit IDs: ISO 15765-4's, whose reply ID is known, and VAG's from a profile, then back
+        // to 11-bit.
+        elm.send(&approve(
+            Target::Physical29(0x18DA_10F1),
+            &[0x22, 0xF1, 0x87],
+        ))
+        .unwrap();
+        while elm.recv(Duration::from_secs(1)).is_ok() {}
+        let narrowed = Policy::read_only().narrowed_to(&[VAG29]).unwrap();
+        elm.send(
+            &narrowed
+                .approve(
+                    Protocol::Uds,
+                    Target::Physical29(VAG29.request),
+                    &[0x22, 0xF1, 0x87],
+                )
+                .unwrap(),
+        )
+        .unwrap();
+        while elm.recv(Duration::from_secs(1)).is_ok() {}
+        elm.send(&approve(
+            Target::Physical29(0x17FC_0010),
+            &[0x22, 0xF1, 0x87],
+        ))
+        .unwrap();
+        while elm.recv(Duration::from_secs(1)).is_ok() {}
+        elm.send(&approve(Target::Physical(0x714), &[0x22, 0xF1, 0x87]))
+            .unwrap();
+        while elm.recv(Duration::from_secs(1)).is_ok() {}
         elm.patient(Some(Duration::from_secs(5))).unwrap();
         elm.patient(None).unwrap();
         commands(&elm)
@@ -138,6 +172,7 @@ mod setup {
             "ATSH714",
             "ATFCSD300000",
             "ATFCSD300003",
+            "ATFCSD300004",
             "ATFCSH7E0",
             "ATFCSM1",
             "ATFCSM0",
@@ -145,6 +180,16 @@ mod setup {
             "ATCRA7EX",
             "ATCRA7E8",
             "ATCRA77E",
+            "ATSP7",
+            "ATSP6",
+            "ATCP18",
+            "ATCP17",
+            "ATSHDA10F1",
+            "ATSHFC0076",
+            "ATFCSH17FC0076",
+            "ATCRA18DAF110",
+            "ATCRA17FE0076",
+            "ATCRA17FE00XX",
         ] {
             assert!(
                 commands.iter().any(|c| c == expected),
@@ -430,6 +475,138 @@ mod requests {
         );
     }
 
+    // A VAG module on 29-bit IDs whose part number takes several frames, and an ISO one.
+    fn bits29_car() -> FakeElm {
+        FakeElm::new(Box::new(|header, request| match (header, request) {
+            (0x17FC_0076, [0x22, 0xF1, 0x87]) => {
+                vec![(0x17FE_0076, b"\x62\xF1\x874G0907468AD".to_vec())]
+            }
+            (0x18DA_10F1, [0x22, 0xF1, 0x87]) => vec![(0x18DA_F110, b"\x62\xF1\x87AB".to_vec())],
+            (0x710, [0x22, 0xF1, 0x87]) => vec![(0x77A, b"\x62\xF1\x87GW".to_vec())],
+            _ => Vec::new(),
+        }))
+    }
+
+    #[test]
+    fn a_29_bit_request_switches_protocol_and_reassembles_its_reply() {
+        let narrowed = Policy::read_only().narrowed_to(&[VAG29, GATEWAY]).unwrap();
+        let read = |target| {
+            narrowed
+                .approve(Protocol::Uds, target, &[0x22, 0xF1, 0x87])
+                .unwrap()
+        };
+        let mut elm = connect(bits29_car());
+        let setup = commands(&elm).len();
+        elm.send(&read(Target::Physical29(VAG29.request))).unwrap();
+        let reply = elm.recv(Duration::from_secs(1)).unwrap();
+        assert_eq!(
+            reply,
+            Response {
+                source: 0x17FE_0076,
+                payload: b"\x62\xF1\x874G0907468AD".to_vec(),
+            }
+        );
+        while elm.recv(Duration::from_secs(1)).is_ok() {}
+        // Back to an 11-bit module: the protocol, header, flow control and filter are set again.
+        elm.send(&read(Target::Physical(0x710))).unwrap();
+        assert_eq!(elm.recv(Duration::from_secs(1)).unwrap().source, 0x77A);
+        while elm.recv(Duration::from_secs(1)).is_ok() {}
+        assert_eq!(
+            commands(&elm)[setup..],
+            [
+                "ATSP7",
+                "ATCP17",
+                "ATSHFC0076",
+                // Flow control goes to the request ID: the adapter's own would swap the reply
+                // ID's bytes, which only suits ISO's 0x18DAF1xx.
+                "ATFCSH17FC0076",
+                // A 29-bit frame line takes 37 characters to print, 4 ms at 115200 baud.
+                "ATFCSD300004",
+                "ATFCSM1",
+                "ATCRA17FE0076",
+                "22F187",
+                "ATSP6",
+                "ATSH710",
+                "ATFCSH710",
+                "ATFCSD300003",
+                "ATFCSM1",
+                "ATCRA77A",
+                "22F187",
+            ]
+        );
+        // The module acknowledged on its own request ID went on past its first frame.
+        assert_eq!(elm.link().elm.flow_control_ids, [0x17FC_0076]);
+        assert_eq!(
+            elm.link().elm.sent,
+            [
+                (0x17FC_0076, vec![0x22, 0xF1, 0x87]),
+                (0x710, vec![0x22, 0xF1, 0x87])
+            ]
+        );
+    }
+
+    #[test]
+    fn an_iso_29_bit_module_answers_on_its_known_reply_id() {
+        let mut elm = connect(bits29_car());
+        elm.send(&approve(
+            Target::Physical29(0x18DA_10F1),
+            &[0x22, 0xF1, 0x87],
+        ))
+        .unwrap();
+        assert_eq!(
+            elm.recv(Duration::from_secs(1)).unwrap().source,
+            0x18DA_F110
+        );
+        assert!(commands(&elm).iter().any(|c| c == "ATCRA18DAF110"));
+    }
+
+    #[test]
+    fn without_a_profile_a_vag_29_bit_request_shows_every_vag_reply() {
+        let mut elm = connect(FakeElm::new(Box::new(|header, _| match header {
+            0x17FC_0010 => vec![(0x17FE_0010, vec![0x62, 0xF1, 0x87, 0x01])],
+            _ => Vec::new(),
+        })));
+        elm.send(&approve(
+            Target::Physical29(0x17FC_0010),
+            &[0x22, 0xF1, 0x87],
+        ))
+        .unwrap();
+        assert_eq!(
+            elm.recv(Duration::from_secs(1)).unwrap().source,
+            0x17FE_0010
+        );
+        assert!(commands(&elm).iter().any(|c| c == "ATCRA17FE00XX"));
+    }
+
+    #[test]
+    fn a_frame_of_the_wrong_width_or_range_fails_closed_on_a_29_bit_request() {
+        // An 11-bit frame can't pass a 29-bit filter, nor an ISO reply VAG's: the adapter lost
+        // its settings.
+        // Each target is set up by a first request, so the frame follows the second's echo.
+        let fails_closed = |target: Target, frame: &[u8]| {
+            let request = approve(target, &[0x22, 0xF1, 0x87]);
+            let mut elm = connect(FakeElm::silent());
+            elm.send(&request).unwrap();
+            while elm.recv(Duration::from_secs(1)).is_ok() {}
+            elm.link_mut().elm.after_echo = frame.to_vec();
+            elm.send(&request).unwrap();
+            let err = elm.recv(Duration::from_secs(1)).unwrap_err();
+            assert!(
+                err.to_string().contains("receive filter"),
+                "{frame:?}: {err}"
+            );
+        };
+        for frame in [
+            &b"77A 03 62 F1 87\r"[..],
+            b"18 DA F1 10 03 62 F1 87\r",
+            b"17 FE 01 10 03 62 F1 87\r",
+        ] {
+            fails_closed(Target::Physical29(0x17FC_0010), frame);
+        }
+        // And the other way round.
+        fails_closed(Target::Physical(0x710), b"17 FE 00 10 03 62 F1 87\r");
+    }
+
     // A busy bus: while the gateway answers, the instruments send a long reply of their own.
     fn busy_bus() -> FakeElm {
         FakeElm::new(Box::new(|header, request| {
@@ -638,10 +815,10 @@ mod requests {
     #[test]
     fn p2_outlasts_printing_the_longest_reply_at_the_slowest_baud_rate() {
         // A 4095-byte reply is a first frame and 585 consecutive frames. Each prints as
-        // `7E8 21 xx xx xx xx xx xx xx \r`: 29 characters. At 9600 baud (the slowest an ELM327
-        // starts at), 8-N-1, that's 10 bits a character.
+        // `17 FE 00 76 21 xx xx xx xx xx xx xx \r` with a 29-bit ID: 37 characters. At 9600 baud
+        // (the slowest an ELM327 starts at), 8-N-1, that's 10 bits a character.
         let lines = 1 + (4095 - 6_u32).div_ceil(7);
-        let printing = Duration::from_secs_f64(f64::from(lines * 29 * 10) / 9600.0);
+        let printing = Duration::from_secs_f64(f64::from(lines * 37 * 10) / 9600.0);
         // Up to 16 modules can each send one, all printed before the prompt.
         let p2 = Elm::<FakeLink>::timing().p2;
         assert!(
@@ -654,7 +831,7 @@ mod requests {
     fn p2_star_also_outlasts_printing_the_longest_reply() {
         // After response-pending the final reply can be the longest one too.
         let lines = 1 + (4095 - 6_u32).div_ceil(7);
-        let printing = Duration::from_secs_f64(f64::from(lines * 29 * 10) / 9600.0);
+        let printing = Duration::from_secs_f64(f64::from(lines * 37 * 10) / 9600.0);
         let p2_star = Elm::<FakeLink>::timing().p2_star;
         assert!(
             p2_star > obdcracker_transport::Timing::default().p2_star + printing * 16,
@@ -1353,6 +1530,7 @@ mod pacing {
             match header {
                 0x7E0 => vec![(0x7E8, payload)],
                 0x714 => vec![(0x77E, payload)],
+                0x17FC_0076 => vec![(0x17FE_0076, payload)],
                 _ => Vec::new(),
             }
         }))
@@ -1362,6 +1540,8 @@ mod pacing {
     fn read_long(elm: &mut Elm<FakeLink>, target: Target) -> Result<Response, Error> {
         let policy = if target == Target::Physical(0x714) {
             Policy::read_only().narrowed_to(&[INSTRUMENTS]).unwrap()
+        } else if target == Target::Physical29(VAG29.request) {
+            Policy::read_only().narrowed_to(&[VAG29]).unwrap()
         } else {
             Policy::read_only()
         };
@@ -1403,6 +1583,18 @@ mod pacing {
                 assert_eq!(reply.payload.len(), 4095, "{baud} baud, {target:?}");
             }
             assert_eq!(elm.link().elm.flow_control_ids, [0x7E0, 0x714], "{baud}");
+        }
+    }
+
+    #[test]
+    fn the_longest_29_bit_reply_reads_on_a_plain_elm327_at_every_common_baud_rate() {
+        // A 29-bit frame line is 37 characters, `17 FE 00 76 21 41 41 41 41 41 41 41 \r`, so
+        // the gap an 11-bit line needs is too short (PR #147, Codex).
+        for baud in [9600, 38_400, 115_200] {
+            let mut elm = Elm::connect(FakeLink::at_baud(long_replies(), baud)).unwrap();
+            let reply = read_long(&mut elm, Target::Physical29(VAG29.request))
+                .unwrap_or_else(|e| panic!("{baud} baud: {e}"));
+            assert_eq!(reply.payload.len(), 4095, "{baud} baud");
         }
     }
 

@@ -54,6 +54,10 @@ const KEPT_DEFAULTS: &[(u8, u8, &str)] = &[
 // and every OBD-II emissions ECU's.
 const WIDE_FILTER: &str = "7XX";
 const OBD_FILTER: &str = "7EX";
+// Eight hex digits for 29-bit IDs: every ISO 15765-4 reply to the tester (0x18DAF1xx), and
+// every VAG one (0x17FE00xx).
+const ISO_29_BIT_FILTER: &str = "18DAF1XX";
+const VAG_29_BIT_FILTER: &str = "17FE00XX";
 
 /// The most [`LinkEvent`]s an [`Elm`] keeps until they're taken
 /// ([`Transport::take_events`]); it counts any more as lost.
@@ -82,9 +86,10 @@ const MAX_ANSWER_LINES: usize = 32;
 // How long an AT command may take.
 const COMMAND_WAIT: Duration = Duration::from_secs(2);
 // How long the adapter may take to print the longest reply, 4095 bytes (a first frame and 585
-// consecutive frames, each a line of up to 29 characters), at 9600 baud, the slowest an ELM327
-// starts at (datasheet p. 7), 10 bits a character: about 18 s.
-const LONGEST_PRINT: Duration = Duration::from_millis(586 * 29 * 10 * 1000 / 9600 + 1);
+// consecutive frames, each a line of up to 37 characters), at 9600 baud, the slowest an ELM327
+// starts at (datasheet p. 7), 10 bits a character: about 23 s.
+const LONGEST_PRINT: Duration =
+    Duration::from_millis(586 * FRAME_LINE_29 as u64 * 10 * 1000 / 9600 + 1);
 // The most modules whose multi-frame replies are reassembled at once. Frames from more are
 // dropped.
 const MAX_SENDERS: usize = 16;
@@ -92,7 +97,7 @@ const MAX_SENDERS: usize = 16;
 const LONGEST_PRINT_ALL: Duration = LONGEST_PRINT.saturating_mul(16);
 const _: () = assert!(MAX_SENDERS == 16, "update LONGEST_PRINT_ALL");
 // The longest a request may run: the adapter's timeout for the first reply, the time to print
-// the longest reply from every module (about 5 minutes at 9600 baud), and time for the link.
+// the longest reply from every module (about 7 minutes at 9600 baud), and time for the link.
 // Only an adapter that keeps printing gets near it: a working one ends each request with its
 // prompt, and one that goes quiet is caught by the silence limit (its timeout plus
 // `SILENCE_MARGIN`).
@@ -115,6 +120,8 @@ const KILL: &[u8] = b"XX\r";
 // The characters a consecutive frame takes as the adapter prints it, with headers and spaces on
 // and linefeeds off: `7E8 21 41 41 41 41 41 41 41 \r`.
 const FRAME_LINE: u32 = 29;
+// The same with a 29-bit ID, which prints as four bytes: `17 FE 00 76 21 41 41 41 41 41 41 41 \r`.
+const FRAME_LINE_29: u32 = 37;
 // The link's byte rate when it can't be known: 9600 baud, the slowest an ELM327 starts at.
 const SLOWEST_RATE: u32 = 9600 / 10;
 // The byte rate at and above which an STN was seen to print a long reply with no gap between
@@ -144,7 +151,9 @@ const STN_UNPACED_RATE: u32 = 115_200 / 10;
 /// The adapter shows only the frames its receive filter (`AT CRA`) passes, set per request: the
 /// module's reply ID when the request knows it (an OBD-II ECU, or a module the policy was
 /// narrowed to with a vehicle profile), 0x7E0..=0x7EF for a broadcast, and 0x700..=0x7FF
-/// otherwise. Frames it doesn't show get no flow control, so another module's long reply on a
+/// otherwise; for a 29-bit request ([`Target::Physical29`]) its reply ID, or every reply to the
+/// tester on its scheme (0x18DAF1xx or VAG's 0x17FE00xx). The adapter is switched between
+/// 11-bit and 29-bit CAN (protocols 6 and 7) only when a request needs the other width. Frames it doesn't show get no flow control, so another module's long reply on a
 /// busy bus isn't acknowledged in the tester's name.
 ///
 /// The adapter sends ISO-TP flow control frames itself, which no audit log records: for a
@@ -187,6 +196,8 @@ pub struct Elm<L> {
     // When the event last taken from `events` was read.
     event_at: SystemTime,
     header: Option<u32>,
+    // Whether the adapter is on 29-bit CAN (`ATSP7`) rather than 11-bit (`ATSP6`, the setup's).
+    bits29: bool,
     flow: Option<Flow>,
     // The `AT CRA` pattern in effect.
     filter: String,
@@ -291,6 +302,7 @@ impl<L: Link> Elm<L> {
             events: VecDeque::new(),
             event_at: SystemTime::UNIX_EPOCH,
             header: None,
+            bits29: false,
             flow: None,
             filter: WIDE_FILTER.to_owned(),
             busy: false,
@@ -345,7 +357,7 @@ impl<L: Link> Elm<L> {
     /// Timing for [`crate::exchange`] through this adapter. The adapter decides when a request
     /// is over: it prints its prompt, which ends the exchange at once. So P2 is only an outer
     /// bound: [`STN_LONGEST_TIMEOUT`] plus the time to print the longest reply (4095 bytes) from
-    /// each of up to 16 modules at 9600 baud, about 5 minutes. P2* gets the same print
+    /// each of up to 16 modules at 9600 baud, about 7 minutes. P2* gets the same print
     /// allowance on top of the default. An adapter that goes quiet in a request without
     /// finishing it fails within seconds instead (see [`Elm`]).
     #[must_use]
@@ -855,17 +867,38 @@ impl<L: Link> Elm<L> {
     }
 
     fn set_target(&mut self, request: &Approved) -> Result<(), Error> {
-        let id = request.target().can_id();
+        let target = request.target();
+        let id = target.can_id();
+        let bits29 = target.is_29_bit();
+        if self.bits29 != bits29 {
+            // The header, flow control and filter were set for the other width. Forgotten
+            // first: a command that fails may still have taken effect.
+            self.header = None;
+            self.flow = None;
+            self.filter.clear();
+            self.bits29 = bits29;
+            // ISO 15765-4 CAN at 500 kbit/s, 29-bit or 11-bit IDs. Never automatic search.
+            self.expect_ok(if bits29 { "ATSP7" } else { "ATSP6" })?;
+        }
         if self.header != Some(id) {
-            self.expect_ok(&format!("ATSH{id:03X}"))?;
+            if bits29 {
+                // The top 5 bits are the priority (`AT CP`), the rest the header. Each keeps
+                // two non-hex letters (T and P, or T, S and H).
+                self.expect_ok(&format!("ATCP{:02X}", id >> 24))?;
+                self.expect_ok(&format!("ATSH{:06X}", id & 0x00FF_FFFF))?;
+            } else {
+                self.expect_ok(&format!("ATSH{id:03X}"))?;
+            }
             self.header = Some(id);
         }
         // A broadcast's flow control must go to each answering ECU's own request ID, which only
         // the adapter's ISO 15765-4 handling does, with no gap. Mode 2 (driver's data, adapter's
         // header) can't: it sends to the First Frame's own ID (p. 48). So only a physical
         // request is paced: mode 1, to its request ID.
-        let gap = st_min(self.pace);
-        let flow = if id == 0x7DF || (gap == 0 && (0x7E0..=0x7E7).contains(&id)) {
+        // A 29-bit request's flow control always goes to its request ID: the adapter's own would
+        // swap the reply ID's bytes, which is right for 0x18DAF1xx but not for VAG's 0x17FE00xx.
+        let gap = st_min(self.pace, bits29);
+        let flow = if !bits29 && (id == 0x7DF || (gap == 0 && (0x7E0..=0x7E7).contains(&id))) {
             Flow::Standard
         } else {
             Flow::To(id, gap)
@@ -876,7 +909,7 @@ impl<L: Link> Elm<L> {
                 Flow::To(id, gap) => {
                     // Continue to send, no block limit, and the gap. `AT FC SD` keeps two
                     // non-hex letters (T, S), so one flipped bit can't make it a bus request.
-                    self.expect_ok(&format!("ATFCSH{id:03X}"))?;
+                    self.expect_ok(&can_id_command("ATFCSH", id))?;
                     self.expect_ok(&format!("ATFCSD3000{gap:02X}"))?;
                     self.expect_ok("ATFCSM1")?;
                 }
@@ -885,10 +918,12 @@ impl<L: Link> Elm<L> {
         }
         // Each `ATCRA` line keeps two non-hex letters (T, R), so one flipped bit can't make it a
         // bus request.
-        let filter = match (request.reply_id(), request.target()) {
-            (Some(reply), _) => format!("{reply:03X}"),
+        let filter = match (request.reply_id(), target) {
+            (Some(reply), _) => can_id_text(reply, bits29),
             (None, Target::ObdFunctional) => OBD_FILTER.to_owned(),
             (None, Target::Physical(_)) => WIDE_FILTER.to_owned(),
+            (None, Target::Physical29(id)) if id >> 16 == 0x18DA => ISO_29_BIT_FILTER.to_owned(),
+            (None, Target::Physical29(_)) => VAG_29_BIT_FILTER.to_owned(),
         };
         if self.filter != filter {
             self.expect_ok(&format!("ATCRA{filter}"))?;
@@ -905,19 +940,35 @@ fn pace(stn: bool, byte_rate: Option<u32>) -> Option<u32> {
 }
 
 // The gap between a module's consecutive frames, in ms, that keeps the adapter's output buffer
-// from filling: the time to print one frame line at the link's byte rate, rounded up, at most
-// 127 ms (the most STmin allows).
-fn st_min(pace: Option<u32>) -> u8 {
+// from filling: the time to print one frame line, at the ID's width, at the link's byte rate,
+// rounded up, at most 127 ms (the most STmin allows).
+fn st_min(pace: Option<u32>, bits29: bool) -> u8 {
     let Some(rate) = pace else {
         return 0;
     };
-    let ms = (FRAME_LINE * 1000).div_ceil(rate);
+    let line = if bits29 { FRAME_LINE_29 } else { FRAME_LINE };
+    let ms = (line * 1000).div_ceil(rate);
     u8::try_from(ms.min(0x7F)).unwrap_or(0x7F)
 }
 
-// Whether an `AT CRA` pattern shows frames from `id`.
+// A CAN ID as the adapter takes it: 3 hex digits, or 8 for a 29-bit one.
+fn can_id_text(id: u32, bits29: bool) -> String {
+    if bits29 {
+        format!("{id:08X}")
+    } else {
+        format!("{id:03X}")
+    }
+}
+
+// `command` followed by the request ID `id`, at the width its value says.
+fn can_id_command(command: &str, id: u32) -> String {
+    format!("{command}{}", can_id_text(id, id > 0x7FF))
+}
+
+// Whether an `AT CRA` pattern shows frames from `id`: a 3-digit pattern only 11-bit frames, an
+// 8-digit one only 29-bit frames.
 fn filter_shows(pattern: &str, id: u32) -> bool {
-    let id = format!("{id:03X}");
+    let id = can_id_text(id, pattern.len() == 8);
     id.len() == pattern.len()
         && pattern
             .bytes()

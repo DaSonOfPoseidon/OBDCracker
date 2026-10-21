@@ -5,8 +5,9 @@
 //! `ATS1`), which is how [`super::Elm`] sets the adapter up. Echo stays on; [`super::Elm`]
 //! checks each echoed line itself.
 
-/// The longest line kept, in bytes. A frame line with headers and spaces on is 27 characters,
-/// and one marked `<DATA ERROR` is under 40; anything longer isn't from a working adapter.
+/// The longest line kept, in bytes. A frame line with headers and spaces on is 27 characters
+/// (35 with a 29-bit ID), and one marked `<DATA ERROR` is under 50; anything longer isn't from
+/// a working adapter.
 pub const MAX_LINE: usize = 96;
 
 /// Something the adapter printed.
@@ -93,16 +94,22 @@ impl LineSplitter {
 /// One CAN frame as the adapter printed it: an 11-bit ID and 1 to 8 data bytes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CanFrame {
-    id: u16,
+    id: u32,
     data: [u8; 8],
     len: usize,
 }
 
 impl CanFrame {
-    /// The 11-bit CAN ID the frame came from.
+    /// The CAN ID the frame came from: 11-bit, or 29-bit if [`CanFrame::is_29_bit`].
     #[must_use]
     pub fn id(&self) -> u32 {
-        u32::from(self.id)
+        self.id
+    }
+
+    /// Whether the adapter printed a 29-bit header (four bytes) for the frame.
+    #[must_use]
+    pub fn is_29_bit(&self) -> bool {
+        self.id > 0x7FF
     }
 
     /// The frame's data bytes, PCI byte first.
@@ -255,16 +262,27 @@ fn parse_status(line: &str) -> Option<Status> {
     Some(status)
 }
 
-// "7E8 06 41 00 BE 3F A8 13": a 3-digit ID and 1 to 8 bytes, each separated by one space.
+// "7E8 06 41 00 BE 3F A8 13": a 3-digit ID and 1 to 8 bytes, each separated by one space. A
+// 29-bit ID is printed as four bytes instead, "18 DA F1 10 03 62 F1 87", its first at most 0x1F.
 // ELM327s print a space after the last byte too, so one trailing space is allowed.
 fn parse_frame(line: &str) -> Option<CanFrame> {
     let line = line.strip_suffix(' ').unwrap_or(line);
-    let mut tokens = line.split(' ');
-    let id = tokens.next()?;
-    if id.len() != 3 || !id.bytes().all(|b| b.is_ascii_hexdigit()) {
-        return None;
-    }
-    let id = u16::from_str_radix(id, 16).ok().filter(|&id| id <= 0x7FF)?;
+    let mut tokens = line.split(' ').peekable();
+    let first = *tokens.peek()?;
+    let id = if first.len() == 3 && first.bytes().all(|b| b.is_ascii_hexdigit()) {
+        tokens.next();
+        u32::from_str_radix(first, 16)
+            .ok()
+            .filter(|&id| id <= 0x7FF)?
+    } else {
+        let mut header = [0; 4];
+        for byte in &mut header {
+            *byte = hex_byte(tokens.next()?)?;
+        }
+        let id = u32::from_be_bytes(header);
+        // A 29-bit ID with an 11-bit value would read as an 11-bit frame's.
+        (0x800..=0x1FFF_FFFF).contains(&id).then_some(id)?
+    };
     let mut data = [0; 8];
     let mut len = 0;
     for token in tokens {

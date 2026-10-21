@@ -1537,3 +1537,10 @@ first_request_id = 0x700
 last_request_id = 0x769
 reply_offset = 0x6A
 wide_last_request_id = 0x795
+
+# VAG's 29-bit diagnostic IDs (requests 0x17FC00xx, replies 0x17FE00xx), for modules that are
+# silent on 11-bit ISO-TP (#89, #111). Hobbyist sources, unconfirmed on this car.
+[discovery_29bit]
+first_request_id = 0x17FC0000
+last_request_id = 0x17FC00FF
+reply_offset = 0x20000

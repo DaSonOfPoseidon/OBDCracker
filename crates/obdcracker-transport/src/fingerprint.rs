@@ -252,7 +252,7 @@ pub fn fingerprint<T: Transport + ?Sized>(
                 .map(|&did| {
                     Ok((
                         did,
-                        approve(Target::Physical(module.request_id), &uds::read_did(did))?,
+                        approve(Target::physical(module.request_id), &uds::read_did(did))?,
                     ))
                 })
                 .collect::<Result<Vec<_>, _>>()
