@@ -24,6 +24,11 @@ physical request's long reply to the link's speed, so its 512-byte buffer doesn'
 Broadcasts can't be paced: several ECUs' multi-frame replies at once on a slow link can still overflow it, which the
 driver reports as `BUFFER FULL` (#71).
 
+It sends VW TP2.0 channel setups and disconnects as raw frames (`AT CAF0`), and only on an adapter that echoes each
+character as it reads it, such as the OBDLink EX; whole-line echoers, such as many clones, can't send them. TP2.0 data
+transfer needs ACKs and keep-alives faster than an ELM327's command-per-frame link can promise, so that waits for #142
+([details](elm327.md#vw-tp20-channel-frames)).
+
 [`elm327.md`](elm327.md) lists the adapter behaviour it relies on, with datasheet pages. It's tested against a fake
 adapter written from the datasheet, against the simulated A7, and against
 [ELM327-emulator](https://github.com/Ircama/ELM327-emulator), an independent implementation. That last test is opt-in
