@@ -162,7 +162,7 @@ impl<'a, T: Transport + ?Sized> ExtendedSession<'a, T> {
                 .map_err(SessionError::Policy)
         };
         let enter = approve(&uds::session_control(DiagnosticSession::Extended))?;
-        // `3E 00`, not `3E 80`: a suppressed positive reply would make an ELM adapter wait out its timeout.
+        // `3E 00`, not `3E 80`: ELM would wait out its timeout for the suppressed reply.
         let present = approve(&uds::tester_present())?;
         let leave = approve(&uds::session_control(DiagnosticSession::Default))?;
         let reply = enter.reply_id().ok_or(SessionError::UnknownReplyId)?;
