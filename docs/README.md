@@ -12,6 +12,8 @@
 - [Adapters](adapters.md): supported adapter drivers and links
 - [Protocols](protocols.md): physical, transport and diagnostic protocol status
 - [Vehicle profiles](profiles.md): what a profile holds, and the profiles so far
+- [Scanning](scanning.md): module discovery, DID batching, the extended session and sweeps
+- [VW TP2.0](tp20.md): channel setup and disconnect
 - [ELM327 notes](elm327.md): the adapter behaviour the `elm` driver relies on, with datasheet pages
 
 ## Contributing
