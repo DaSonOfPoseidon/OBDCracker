@@ -27,6 +27,7 @@ use std::fmt;
 use std::time::{Duration, Instant};
 
 use obdcracker_core::isotp::Addressing;
+use obdcracker_core::tp20::{self, Channel};
 use obdcracker_core::{obd, uds};
 use obdcracker_profile::{Decode, Profile, ProfileError, Protocol, STANDARD_DIDS, standard_decode};
 use obdcracker_safety::{Approved, Target};
@@ -103,11 +104,21 @@ impl From<ProfileError> for FixtureError {
 /// A request to an ID no module listens on gets no reply.
 /// A module leaves a non-default diagnostic session after S3 without a request: 5 s, as
 /// ISO 14229-2 gives it, unless [`Ecu::set_s3`] changes it.
+/// A VW TP2.0 module ([`SimBus::add_tp20`]) answers a channel setup to its address and the
+/// disconnect of the channel it gave, once.
 #[derive(Debug)]
 pub struct SimBus {
     ecus: Vec<Ecu>,
+    tp20: Vec<Tp20Module>,
     sent: Vec<Approved>,
     replies: VecDeque<Response>,
+}
+
+#[derive(Debug)]
+struct Tp20Module {
+    address: u8,
+    channel: Channel,
+    open: bool,
 }
 
 impl SimBus {
@@ -190,6 +201,7 @@ impl SimBus {
         }
         Ok(Self {
             ecus,
+            tp20: Vec::new(),
             sent: Vec::new(),
             replies: VecDeque::new(),
         })
@@ -215,6 +227,42 @@ impl SimBus {
         self.ecus.iter_mut().find(|ecu| ecu.name == name)
     }
 
+    /// Adds a VW TP2.0 module at `address` that gives `channel` to a channel setup.
+    ///
+    /// # Errors
+    ///
+    /// [`FixtureError::Value`] for address 0 (the tester's), one already taken, or a channel a
+    /// setup reply can't carry or whose IDs another module already uses.
+    pub fn add_tp20(&mut self, address: u8, channel: Channel) -> Result<(), FixtureError> {
+        let reply = setup_reply(channel);
+        if address == 0 || tp20::decode_channel_setup(&reply) != Ok(channel) {
+            return Err(FixtureError::Value(format!(
+                "TP2.0 module {address:02X}: no setup reply gives {channel:X?}"
+            )));
+        }
+        let ids = [channel.send_id, channel.receive_id];
+        let taken = self.tp20.iter().any(|module| {
+            module.address == address
+                || ids.contains(&module.channel.send_id)
+                || ids.contains(&module.channel.receive_id)
+        }) || self
+            .ecus
+            .iter()
+            .any(|ecu| ids.contains(&ecu.request_id) || ids.contains(&ecu.response_id))
+            || ids.iter().any(|id| (0x7DF..=0x7EF).contains(id));
+        if taken {
+            return Err(FixtureError::Value(format!(
+                "TP2.0 module {address:02X}: the address or {channel:X?} is taken"
+            )));
+        }
+        self.tp20.push(Tp20Module {
+            address,
+            channel,
+            open: false,
+        });
+        Ok(())
+    }
+
     /// Every request sent so far, oldest first.
     #[must_use]
     pub fn sent(&self) -> &[Approved] {
@@ -225,13 +273,41 @@ impl SimBus {
 impl Transport for SimBus {
     fn send(&mut self, request: &Approved) -> Result<(), Error> {
         self.sent.push(request.clone());
+        match request.target() {
+            Target::Tp20Setup(address) => {
+                if let Some(module) = self.tp20.iter_mut().find(|m| m.address == address) {
+                    module.open = true;
+                    self.replies.push_back(Response {
+                        source: tp20::setup_reply_id(address),
+                        payload: setup_reply(module.channel).to_vec(),
+                    });
+                }
+                return Ok(());
+            }
+            Target::Tp20Channel(id) => {
+                let module = self
+                    .tp20
+                    .iter_mut()
+                    .find(|m| m.open && m.channel.send_id == id);
+                if let Some(module) = module
+                    && request.payload() == tp20::DISCONNECT
+                {
+                    module.open = false;
+                    self.replies.push_back(Response {
+                        source: module.channel.receive_id,
+                        payload: tp20::DISCONNECT.to_vec(),
+                    });
+                }
+                return Ok(());
+            }
+            Target::ObdFunctional | Target::Physical(_) | Target::Physical29(_) => {}
+        }
         let functional = request.target() == Target::ObdFunctional;
         for ecu in &mut self.ecus {
             let listens = match request.target() {
                 Target::ObdFunctional => ecu.has_obd(),
                 // A profile's IDs say their width, so a module's 29-bit ID is never 11-bit.
                 Target::Physical(id) | Target::Physical29(id) => ecu.request_id == id,
-                // No simulated module speaks TP2.0 yet: none is known on the A7 (#124).
                 Target::Tp20Setup(_) | Target::Tp20Channel(_) => false,
             };
             if !listens {
@@ -250,4 +326,12 @@ impl Transport for SimBus {
     fn recv(&mut self, _timeout: Duration) -> Result<Response, Error> {
         self.replies.pop_front().ok_or(Error::Timeout)
     }
+}
+
+// A positive answer to a channel setup that gives `channel`, for KWP2000.
+fn setup_reply(channel: Channel) -> [u8; 7] {
+    // An ID past 16 bits loses its top bytes here, so `add_tp20`'s round trip refuses it.
+    let [rx_low, rx_high, ..] = channel.receive_id.to_le_bytes();
+    let [tx_low, tx_high, ..] = channel.send_id.to_le_bytes();
+    [0x00, 0xD0, rx_low, rx_high, tx_low, tx_high, 0x01]
 }
