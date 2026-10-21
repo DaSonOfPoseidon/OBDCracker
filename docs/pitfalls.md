@@ -243,6 +243,10 @@ Each entry names the class, what to check, and where it bit us.
   (M3 branch, Codex). The fourth round (several modules' replies) showed the model was wrong: when the device says
   when it's done (the ELM prompt), bound silence, not total time. The driver now fails an adapter quiet for longer
   than its own timeout allows, and keeps a total limit only for one that never stops printing.
+- **A size measured on one ID width is wrong for the other.** The ELM pacing gap and P2's print allowance were sized
+  from an 11-bit frame line (29 characters); a 29-bit line is 37, so a long 29-bit reply overflowed the adapter's
+  buffer at 9600 baud. When a new ID width, header or format lands, grep for every constant derived from a line's or
+  frame's length and size it for the longest one (PR #147, Codex).
 - **A watchdog counts only the time you spend waiting, added up across calls.** The silence clock started at `send`,
   so a caller that read 8 s later found a healthy adapter "hung" without reading the reply waiting on the link.
   Restarting it on every call then let a caller polling in 1 s steps never trip it. Sum the time spent in each wait,

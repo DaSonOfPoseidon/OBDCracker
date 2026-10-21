@@ -172,6 +172,7 @@ mod setup {
             "ATSH714",
             "ATFCSD300000",
             "ATFCSD300003",
+            "ATFCSD300004",
             "ATFCSH7E0",
             "ATFCSM1",
             "ATFCSM0",
@@ -519,7 +520,8 @@ mod requests {
                 // Flow control goes to the request ID: the adapter's own would swap the reply
                 // ID's bytes, which only suits ISO's 0x18DAF1xx.
                 "ATFCSH17FC0076",
-                "ATFCSD300003",
+                // A 29-bit frame line takes 37 characters to print, 4 ms at 115200 baud.
+                "ATFCSD300004",
                 "ATFCSM1",
                 "ATCRA17FE0076",
                 "22F187",
@@ -813,10 +815,10 @@ mod requests {
     #[test]
     fn p2_outlasts_printing_the_longest_reply_at_the_slowest_baud_rate() {
         // A 4095-byte reply is a first frame and 585 consecutive frames. Each prints as
-        // `7E8 21 xx xx xx xx xx xx xx \r`: 29 characters. At 9600 baud (the slowest an ELM327
-        // starts at), 8-N-1, that's 10 bits a character.
+        // `17 FE 00 76 21 xx xx xx xx xx xx xx \r` with a 29-bit ID: 37 characters. At 9600 baud
+        // (the slowest an ELM327 starts at), 8-N-1, that's 10 bits a character.
         let lines = 1 + (4095 - 6_u32).div_ceil(7);
-        let printing = Duration::from_secs_f64(f64::from(lines * 29 * 10) / 9600.0);
+        let printing = Duration::from_secs_f64(f64::from(lines * 37 * 10) / 9600.0);
         // Up to 16 modules can each send one, all printed before the prompt.
         let p2 = Elm::<FakeLink>::timing().p2;
         assert!(
@@ -829,7 +831,7 @@ mod requests {
     fn p2_star_also_outlasts_printing_the_longest_reply() {
         // After response-pending the final reply can be the longest one too.
         let lines = 1 + (4095 - 6_u32).div_ceil(7);
-        let printing = Duration::from_secs_f64(f64::from(lines * 29 * 10) / 9600.0);
+        let printing = Duration::from_secs_f64(f64::from(lines * 37 * 10) / 9600.0);
         let p2_star = Elm::<FakeLink>::timing().p2_star;
         assert!(
             p2_star > obdcracker_transport::Timing::default().p2_star + printing * 16,
@@ -1528,6 +1530,7 @@ mod pacing {
             match header {
                 0x7E0 => vec![(0x7E8, payload)],
                 0x714 => vec![(0x77E, payload)],
+                0x17FC_0076 => vec![(0x17FE_0076, payload)],
                 _ => Vec::new(),
             }
         }))
@@ -1537,6 +1540,8 @@ mod pacing {
     fn read_long(elm: &mut Elm<FakeLink>, target: Target) -> Result<Response, Error> {
         let policy = if target == Target::Physical(0x714) {
             Policy::read_only().narrowed_to(&[INSTRUMENTS]).unwrap()
+        } else if target == Target::Physical29(VAG29.request) {
+            Policy::read_only().narrowed_to(&[VAG29]).unwrap()
         } else {
             Policy::read_only()
         };
@@ -1578,6 +1583,18 @@ mod pacing {
                 assert_eq!(reply.payload.len(), 4095, "{baud} baud, {target:?}");
             }
             assert_eq!(elm.link().elm.flow_control_ids, [0x7E0, 0x714], "{baud}");
+        }
+    }
+
+    #[test]
+    fn the_longest_29_bit_reply_reads_on_a_plain_elm327_at_every_common_baud_rate() {
+        // A 29-bit frame line is 37 characters, `17 FE 00 76 21 41 41 41 41 41 41 41 \r`, so
+        // the gap an 11-bit line needs is too short (PR #147, Codex).
+        for baud in [9600, 38_400, 115_200] {
+            let mut elm = Elm::connect(FakeLink::at_baud(long_replies(), baud)).unwrap();
+            let reply = read_long(&mut elm, Target::Physical29(VAG29.request))
+                .unwrap_or_else(|e| panic!("{baud} baud: {e}"));
+            assert_eq!(reply.payload.len(), 4095, "{baud} baud");
         }
     }
 

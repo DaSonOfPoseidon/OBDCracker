@@ -5,8 +5,9 @@
 //! `ATS1`), which is how [`super::Elm`] sets the adapter up. Echo stays on; [`super::Elm`]
 //! checks each echoed line itself.
 
-/// The longest line kept, in bytes. A frame line with headers and spaces on is 27 characters,
-/// and one marked `<DATA ERROR` is under 40; anything longer isn't from a working adapter.
+/// The longest line kept, in bytes. A frame line with headers and spaces on is 27 characters
+/// (35 with a 29-bit ID), and one marked `<DATA ERROR` is under 50; anything longer isn't from
+/// a working adapter.
 pub const MAX_LINE: usize = 96;
 
 /// Something the adapter printed.

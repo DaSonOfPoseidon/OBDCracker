@@ -86,9 +86,10 @@ const MAX_ANSWER_LINES: usize = 32;
 // How long an AT command may take.
 const COMMAND_WAIT: Duration = Duration::from_secs(2);
 // How long the adapter may take to print the longest reply, 4095 bytes (a first frame and 585
-// consecutive frames, each a line of up to 29 characters), at 9600 baud, the slowest an ELM327
-// starts at (datasheet p. 7), 10 bits a character: about 18 s.
-const LONGEST_PRINT: Duration = Duration::from_millis(586 * 29 * 10 * 1000 / 9600 + 1);
+// consecutive frames, each a line of up to 37 characters), at 9600 baud, the slowest an ELM327
+// starts at (datasheet p. 7), 10 bits a character: about 23 s.
+const LONGEST_PRINT: Duration =
+    Duration::from_millis(586 * FRAME_LINE_29 as u64 * 10 * 1000 / 9600 + 1);
 // The most modules whose multi-frame replies are reassembled at once. Frames from more are
 // dropped.
 const MAX_SENDERS: usize = 16;
@@ -96,7 +97,7 @@ const MAX_SENDERS: usize = 16;
 const LONGEST_PRINT_ALL: Duration = LONGEST_PRINT.saturating_mul(16);
 const _: () = assert!(MAX_SENDERS == 16, "update LONGEST_PRINT_ALL");
 // The longest a request may run: the adapter's timeout for the first reply, the time to print
-// the longest reply from every module (about 5 minutes at 9600 baud), and time for the link.
+// the longest reply from every module (about 7 minutes at 9600 baud), and time for the link.
 // Only an adapter that keeps printing gets near it: a working one ends each request with its
 // prompt, and one that goes quiet is caught by the silence limit (its timeout plus
 // `SILENCE_MARGIN`).
@@ -119,6 +120,8 @@ const KILL: &[u8] = b"XX\r";
 // The characters a consecutive frame takes as the adapter prints it, with headers and spaces on
 // and linefeeds off: `7E8 21 41 41 41 41 41 41 41 \r`.
 const FRAME_LINE: u32 = 29;
+// The same with a 29-bit ID, which prints as four bytes: `17 FE 00 76 21 41 41 41 41 41 41 41 \r`.
+const FRAME_LINE_29: u32 = 37;
 // The link's byte rate when it can't be known: 9600 baud, the slowest an ELM327 starts at.
 const SLOWEST_RATE: u32 = 9600 / 10;
 // The byte rate at and above which an STN was seen to print a long reply with no gap between
@@ -354,7 +357,7 @@ impl<L: Link> Elm<L> {
     /// Timing for [`crate::exchange`] through this adapter. The adapter decides when a request
     /// is over: it prints its prompt, which ends the exchange at once. So P2 is only an outer
     /// bound: [`STN_LONGEST_TIMEOUT`] plus the time to print the longest reply (4095 bytes) from
-    /// each of up to 16 modules at 9600 baud, about 5 minutes. P2* gets the same print
+    /// each of up to 16 modules at 9600 baud, about 7 minutes. P2* gets the same print
     /// allowance on top of the default. An adapter that goes quiet in a request without
     /// finishing it fails within seconds instead (see [`Elm`]).
     #[must_use]
@@ -894,7 +897,7 @@ impl<L: Link> Elm<L> {
         // request is paced: mode 1, to its request ID.
         // A 29-bit request's flow control always goes to its request ID: the adapter's own would
         // swap the reply ID's bytes, which is right for 0x18DAF1xx but not for VAG's 0x17FE00xx.
-        let gap = st_min(self.pace);
+        let gap = st_min(self.pace, bits29);
         let flow = if !bits29 && (id == 0x7DF || (gap == 0 && (0x7E0..=0x7E7).contains(&id))) {
             Flow::Standard
         } else {
@@ -937,13 +940,14 @@ fn pace(stn: bool, byte_rate: Option<u32>) -> Option<u32> {
 }
 
 // The gap between a module's consecutive frames, in ms, that keeps the adapter's output buffer
-// from filling: the time to print one frame line at the link's byte rate, rounded up, at most
-// 127 ms (the most STmin allows).
-fn st_min(pace: Option<u32>) -> u8 {
+// from filling: the time to print one frame line, at the ID's width, at the link's byte rate,
+// rounded up, at most 127 ms (the most STmin allows).
+fn st_min(pace: Option<u32>, bits29: bool) -> u8 {
     let Some(rate) = pace else {
         return 0;
     };
-    let ms = (FRAME_LINE * 1000).div_ceil(rate);
+    let line = if bits29 { FRAME_LINE_29 } else { FRAME_LINE };
+    let ms = (line * 1000).div_ceil(rate);
     u8::try_from(ms.min(0x7F)).unwrap_or(0x7F)
 }
 
