@@ -37,3 +37,17 @@ fn prints_first_and_consecutive_frames_of_a_long_request() {
         "7E0 10 09 22 F1 87 F1 89 F1\n7E0 21 90 F1 91\n"
     );
 }
+
+#[test]
+fn writes_a_tp20_channel_frame_as_it_is() {
+    // TP2.0 channel frames have no ISO-TP length byte.
+    let policy = Policy::read_only();
+    let mut dry = DryRun::new(Vec::new());
+    dry.send(&policy.approve_tp20_setup(0x5F).unwrap()).unwrap();
+    dry.send(&policy.approve_tp20_disconnect(0x740, 0x300).unwrap())
+        .unwrap();
+    assert_eq!(
+        String::from_utf8(dry.into_inner()).unwrap(),
+        "200 5F C0 00 10 00 03 01\n740 A8\n"
+    );
+}

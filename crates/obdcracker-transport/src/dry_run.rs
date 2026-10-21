@@ -2,7 +2,7 @@ use std::io::Write;
 use std::time::Duration;
 
 use obdcracker_core::isotp::{Addressing, FlowControl, FlowStatus, Segmenter, Step};
-use obdcracker_safety::Approved;
+use obdcracker_safety::{Approved, Protocol};
 
 use crate::{Error, Response, Transport, hex};
 
@@ -14,7 +14,7 @@ const ASSUMED_FLOW_CONTROL: FlowControl = FlowControl {
 
 /// Writes the CAN frames each request would put on the bus, one per line, and never opens a device.
 /// A multi-frame request is printed as if the ECU answered with continue-to-send and no block
-/// limit. Every receive times out.
+/// limit, and a VW TP2.0 channel frame as it is. Every receive times out.
 #[derive(Debug)]
 pub struct DryRun<W> {
     out: W,
@@ -34,6 +34,15 @@ impl<W: Write> DryRun<W> {
 
 impl<W: Write> Transport for DryRun<W> {
     fn send(&mut self, request: &Approved) -> Result<(), Error> {
+        if request.protocol() == Protocol::Tp20Channel {
+            return writeln!(
+                self.out,
+                "{:03X} {}",
+                request.target().can_id(),
+                hex(request.payload())
+            )
+            .map_err(|e| Error::Adapter(format!("dry run output: {e}")));
+        }
         let mut segmenter = Segmenter::new(request.payload(), Addressing::Normal)
             .map_err(|e| Error::Adapter(e.to_string()))?;
         loop {
