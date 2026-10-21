@@ -213,6 +213,9 @@ Each entry names the class, what to check, and where it bit us.
 - **A new protocol reaches past the allowlist.** Approving KWP2000 requests wasn't enough: `exchange` still matched
   their replies as UDS, so KWP2000's bare `7E` answer to `3E 01` was dropped as not answering it (#137, Codex). Follow
   a request through everything that reads its reply: matching, response-pending, decoding.
+- **After dropping a message, skip to its end.** TP2.0 marks only a message's last frame, so a reassembler that
+  forgot a bad message at once read its next frame as a new message: `31 00 02 AA BB` became a 2-byte reply. On an
+  error mid-message, drop frames through the next one marked last (PR #149).
 - **Don't confuse a transport limit with a protocol limit.** 4095 bytes is ISO-TP's short first-frame length, not a
   UDS maximum; the 32-bit escape carries more.
 

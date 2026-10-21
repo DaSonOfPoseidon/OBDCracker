@@ -251,18 +251,17 @@ fn reassembles_a_reply_and_acks_where_the_module_asks() {
 
 #[test]
 fn a_reply_that_breaks_the_framing_is_dropped_and_the_next_one_still_reads() {
+    // Each ends on a bad frame marked last, so the next frame starts a new message.
     for frames in [
         // A sequence number out of order.
         &[
             &[0x20, 0x00, 0x0C, 1, 2, 3, 4, 5][..],
             &[0x12, 6, 7, 8, 9, 10, 11, 12],
         ][..],
-        // "Last" before the length is reached, and more after it.
+        // "Last" before the length is reached.
         &[&[0x30, 0x00, 0x0C, 1, 2, 3, 4, 5]],
-        &[&[0x20, 0x00, 0x02, 1, 2, 3]],
-        // A length of 0, and one longer than the buffer.
+        // A length of 0.
         &[&[0x30, 0x00, 0x00]],
-        &[&[0x20, 0x01, 0x00, 1, 2, 3, 4, 5]],
         // A first frame too short for its length field.
         &[&[0x30, 0x00]],
     ] {
@@ -288,6 +287,70 @@ fn a_reply_that_breaks_the_framing_is_dropped_and_the_next_one_still_reads() {
             "{frames:02X?}"
         );
     }
+}
+
+#[test]
+fn the_rest_of_a_dropped_message_never_reads_as_a_new_one() {
+    // TP2.0 marks only a message's last frame, so after a bad frame that isn't last, every
+    // frame up to and including the next last one is the dropped message's, whatever its bytes.
+    for bad in [
+        // More data than the length.
+        &[0x20, 0x00, 0x02, 1, 2, 3][..],
+        // A length longer than the buffer.
+        &[0x20, 0x01, 0x00, 1, 2, 3, 4, 5],
+    ] {
+        let mut buf = [0u8; 64];
+        let mut reply = Reassembler::new(&mut buf[..]);
+        assert!(reply.feed(bad).is_err(), "{bad:02X?}");
+        // These look like a two-byte message of their own.
+        assert_eq!(
+            reply.feed(&[0x21, 0x00, 0x02, 0xAA, 0xBB]),
+            Ok(Progress::Pending)
+        );
+        assert_eq!(
+            reply.feed(&[0x12, 0x00, 0x02, 0xAA, 0xBB]),
+            Ok(Progress::Ack(3)),
+            "{bad:02X?}"
+        );
+        assert_eq!(
+            reply.feed(&[0x33, 0x00, 0x01, 0x7E]),
+            Ok(Progress::Complete {
+                payload: &[0x7E],
+                ack: None,
+            }),
+            "{bad:02X?}"
+        );
+    }
+    // A frame that isn't a data frame, in the middle of a message, drops it the same way.
+    let mut buf = [0u8; 64];
+    let mut reply = Reassembler::new(&mut buf[..]);
+    assert_eq!(
+        reply.feed(&[0x20, 0x00, 0x0C, 1, 2, 3, 4, 5]),
+        Ok(Progress::Pending)
+    );
+    assert!(reply.feed(&[0xA3]).is_err());
+    assert_eq!(
+        reply.feed(&[0x32, 0x00, 0x02, 0xAA, 0xBB]),
+        Ok(Progress::Pending)
+    );
+    assert_eq!(
+        reply.feed(&[0x33, 0x00, 0x01, 0x7E]),
+        Ok(Progress::Complete {
+            payload: &[0x7E],
+            ack: None,
+        })
+    );
+    // Between messages it drops nothing.
+    let mut buf = [0u8; 64];
+    let mut reply = Reassembler::new(&mut buf[..]);
+    assert!(reply.feed(&[0xA3]).is_err());
+    assert_eq!(
+        reply.feed(&[0x30, 0x00, 0x01, 0x7E]),
+        Ok(Progress::Complete {
+            payload: &[0x7E],
+            ack: None,
+        })
+    );
 }
 
 #[test]

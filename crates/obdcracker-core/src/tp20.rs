@@ -338,8 +338,9 @@ pub enum Progress<'b> {
 }
 
 /// Puts a module's messages back together from its data frames, checking each sequence number
-/// and length exactly. A frame that breaks the framing drops the message it was part of, and the
-/// next message is taken from whatever sequence number it starts at.
+/// and length exactly. A frame that breaks the framing drops the message it was part of, through
+/// that message's last frame, and the next message is taken from whatever sequence number it
+/// starts at.
 #[derive(Debug)]
 pub struct Reassembler<B> {
     buf: B,
@@ -347,6 +348,8 @@ pub struct Reassembler<B> {
     expected: Option<u8>,
     // The message being received: its length, and how many of its bytes have arrived.
     message: Option<(usize, usize)>,
+    // Whether the frames until the next last one belong to a dropped message.
+    dropping: bool,
 }
 
 impl<B: AsMut<[u8]>> Reassembler<B> {
@@ -356,6 +359,7 @@ impl<B: AsMut<[u8]>> Reassembler<B> {
             buf,
             expected: None,
             message: None,
+            dropping: false,
         }
     }
 
@@ -365,8 +369,12 @@ impl<B: AsMut<[u8]>> Reassembler<B> {
     ///
     /// The frame isn't a well-formed data frame, its sequence number is out of order, its length
     /// field is 0 or doesn't fit the buffer ([`Error::Overflow`]), or the data goes past the
-    /// length or a last frame ends before it.
+    /// length or a last frame ends before it. The frames of a dropped message that follow are
+    /// [`Progress::Pending`] or [`Progress::Ack`], however they read.
     pub fn feed(&mut self, bytes: &[u8]) -> Result<Progress<'_>, Error> {
+        if self.dropping {
+            return self.drop_frame(bytes);
+        }
         match self.take(bytes) {
             Ok(Some((len, ack))) => Ok(Progress::Complete {
                 payload: &self.buf.as_mut()[..len],
@@ -381,11 +389,36 @@ impl<B: AsMut<[u8]>> Reassembler<B> {
                 _ => Progress::Pending,
             }),
             Err(e) => {
+                // Only a message's last frame is marked, so its later frames would otherwise
+                // read as the start of the next one.
+                self.dropping = match Frame::parse(bytes) {
+                    Ok(Frame::Data { last, .. }) => !last,
+                    _ => self.message.is_some(),
+                };
                 self.expected = None;
                 self.message = None;
                 Err(e)
             }
         }
+    }
+
+    // Takes one frame of a dropped message.
+    fn drop_frame(&mut self, bytes: &[u8]) -> Result<Progress<'_>, Error> {
+        let Frame::Data {
+            sequence,
+            last,
+            wants_ack,
+            ..
+        } = Frame::parse(bytes)?
+        else {
+            return Err(Error::Malformed);
+        };
+        self.dropping = !last;
+        Ok(if wants_ack {
+            Progress::Ack((sequence + 1) & 0x0F)
+        } else {
+            Progress::Pending
+        })
     }
 
     // Takes one frame; returns the message's length and its ACK once it's complete.
