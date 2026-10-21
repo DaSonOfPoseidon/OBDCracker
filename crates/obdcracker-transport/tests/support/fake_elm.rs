@@ -17,7 +17,6 @@ pub type Responder = Box<dyn FnMut(u32, &[u8]) -> Vec<(u32, Vec<u8>)> + Send>;
 
 pub const BANNER: &str = "ELM327 v2.0";
 
-/// The fake adapter's state, as the datasheet describes it after a reset.
 #[allow(clippy::struct_excessive_bools)]
 pub struct FakeElm {
     responder: Responder,
@@ -29,24 +28,19 @@ pub struct FakeElm {
     // of characters as they're typed doesn't.
     printing: bool,
     last: Option<String>,
-    /// The settings an `ATZ` resets.
     pub settings: Settings,
     /// Every line the host sent, after removing spaces, in order.
     pub commands: Vec<String>,
-    /// Every request put on the bus: the header and payload.
     pub sent: Vec<(u32, Vec<u8>)>,
     /// The module each flow control frame the adapter sent was for: every sender of a
     /// multi-frame reply that passed the receive filter.
     pub flow_control_for: Vec<u32>,
-    /// The CAN ID each of those flow control frames went to.
     pub flow_control_ids: Vec<u32>,
     /// Commands this adapter doesn't support (it answers `?`), as a clone might.
     pub unsupported: Vec<String>,
-    /// What `STI` answers; `None` for a plain ELM327.
     pub sti: Option<String>,
     /// Times the host wrote while the adapter was still printing, which interrupts it.
     pub interrupted: usize,
-    /// Times the host sent a bare carriage return, which repeats the last command.
     pub repeats: usize,
     /// Leave the prompt off after a bus request, as an adapter that hangs would.
     pub hang_after_request: bool,
@@ -59,9 +53,8 @@ pub struct FakeElm {
     pub after_echo: Vec<u8>,
     /// Bytes printed right after the next prompt, as an adapter that resets while idle would.
     pub after_prompt: Vec<u8>,
-    /// Echo a line only once its carriage return arrives, as some clones may. The STN in an
-    /// `OBDLink EX` (and the ELM327) echoes each character as it arrives, and holds the line
-    /// until the carriage return, however long that takes (#54).
+    /// Echo a line only once its carriage return arrives, as some clones may
+    /// (docs/elm327.md#safety).
     pub echo_at_line_end: bool,
     /// How many bytes a second the link to the host drains from the adapter's 512-byte output
     /// buffer (ELM327DS v2.0, p. 80), or `None` to print without a limit. Frames that arrive
@@ -103,9 +96,7 @@ pub struct Settings {
     pub spaces: bool,
     pub linefeeds: bool,
     pub protocol: Option<String>,
-    /// The 11-bit header (`AT SH` with 3 digits).
     pub header: u32,
-    /// The 29-bit header's priority bits (`AT CP`) and the rest (`AT SH` with 6 digits).
     pub priority: u8,
     pub header29: u32,
     pub fc_header: Option<u32>,
@@ -125,12 +116,10 @@ pub struct Settings {
 }
 
 impl Settings {
-    // Whether the adapter is on 29-bit CAN (protocol 7).
     pub fn bits29(&self) -> bool {
         self.protocol.as_deref() == Some("7")
     }
 
-    // The CAN ID requests go to.
     pub fn request_id(&self) -> u32 {
         if self.bits29() {
             u32::from(self.priority) << 24 | self.header29
@@ -139,7 +128,6 @@ impl Settings {
         }
     }
 
-    // Whether the receive filter shows frames from `id`.
     fn shows(&self, id: u32) -> bool {
         self.cra.as_ref().is_none_or(|pattern| {
             let id = if pattern.len() == 8 {
@@ -212,12 +200,10 @@ impl FakeElm {
         }
     }
 
-    /// An adapter on a bus where nothing answers.
     pub fn silent() -> Self {
         Self::new(Box::new(|_, _| Vec::new()))
     }
 
-    /// Takes bytes from the host.
     pub fn write(&mut self, bytes: &[u8]) {
         for &byte in bytes {
             if self.printing && !self.output.is_empty() {
@@ -256,7 +242,6 @@ impl FakeElm {
         }
     }
 
-    /// Takes up to `max` bytes the adapter has printed.
     pub fn read(&mut self, max: usize) -> Vec<u8> {
         let n = max.min(self.output.len());
         let bytes = self.output.drain(..n).collect();
@@ -703,14 +688,11 @@ pub fn frames(payload: &[u8]) -> Vec<Vec<u8>> {
 pub struct FakeLink {
     pub elm: FakeElm,
     pub chunk: usize,
-    /// Every byte the host wrote.
     pub written: Vec<u8>,
-    /// Each write the host made, in order.
     pub writes: Vec<Vec<u8>>,
     /// When set, every read returns these bytes instead of the adapter's output, forever, once
     /// `inject` is used up.
     pub flood: Option<Vec<u8>>,
-    /// How many reads the flood answered.
     pub flooded: usize,
     /// When set, the link is gone: every write and read fails.
     pub closed: bool,
