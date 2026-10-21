@@ -289,3 +289,27 @@ fn a_reply_that_breaks_the_framing_is_dropped_and_the_next_one_still_reads() {
         );
     }
 }
+
+#[test]
+fn channel_replies_answer_only_their_own_request() {
+    let setup = channel_setup(0x5F);
+    assert!(tp20::answers(
+        &setup,
+        &[0x00, 0xD0, 0x00, 0x03, 0x40, 0x07, 0x01]
+    ));
+    assert!(tp20::answers(
+        &setup,
+        &[0x00, 0xD6, 0x00, 0x03, 0x40, 0x07, 0x01]
+    ));
+    // Not to the tester, not a setup reply, or a disconnect's.
+    assert!(!tp20::answers(
+        &setup,
+        &[0x01, 0xD0, 0x00, 0x03, 0x40, 0x07, 0x01]
+    ));
+    assert!(!tp20::answers(&setup, &[0x00, 0xA8]));
+    assert!(!tp20::answers(&setup, &[0xA8]));
+    assert!(tp20::answers(&tp20::DISCONNECT, &[0xA8]));
+    assert!(!tp20::answers(&tp20::DISCONNECT, &[0xA8, 0x00]));
+    assert!(!tp20::answers(&tp20::DISCONNECT, &[0xB1]));
+    assert!(!tp20::answers(&[0x1A, 0x9B], &[0x5A, 0x9B]));
+}

@@ -196,7 +196,9 @@ mod setup {
                 "{expected}: {commands:?}"
             );
         }
-        for command in &commands {
+        // `ATCAF0`/`ATCAF1` are written guarded, their echo checked before the carriage return
+        // (`a_misheard_caf0_never_reaches_the_bus`), so a flip in them never gets that far.
+        for command in commands.iter().filter(|c| !c.starts_with("ATCAF")) {
             let line = format!("{command}\r");
             for index in 0..line.len() {
                 for bit in 0..8 {
@@ -605,6 +607,116 @@ mod requests {
         }
         // And the other way round.
         fails_closed(Target::Physical(0x710), b"17 FE 00 10 03 62 F1 87\r");
+    }
+
+    // A car whose module 0x5F speaks TP2.0: it gives channel 0x740/0x300 and closes it again.
+    fn tp20_car() -> FakeElm {
+        FakeElm::new(Box::new(|header, request| match (header, request) {
+            (0x200, [0x5F, 0xC0, ..]) => {
+                vec![(0x25F, vec![0x00, 0xD0, 0x00, 0x03, 0x40, 0x07, 0x01])]
+            }
+            (0x740, [0xA8]) => vec![(0x300, vec![0xA8])],
+            (0x7E0, [0x09, 0x02]) => vec![(0x7E8, VIN.to_vec())],
+            _ => Vec::new(),
+        }))
+    }
+
+    #[test]
+    fn a_tp20_channel_setup_goes_out_raw_and_its_reply_comes_back_whole() {
+        let mut elm = connect(tp20_car());
+        // An ISO-TP request first shows the adapter echoes each character as it reads it.
+        elm.send(&approve(Target::Physical(0x7E0), &[0x09, 0x02]))
+            .unwrap();
+        while elm.recv(Duration::from_secs(1)).is_ok() {}
+        let before = commands(&elm).len();
+        let policy = Policy::read_only();
+        elm.send(&policy.approve_tp20_setup(0x5F).unwrap()).unwrap();
+        assert_eq!(
+            elm.recv(Duration::from_secs(1)).unwrap(),
+            Response {
+                source: 0x25F,
+                payload: vec![0x00, 0xD0, 0x00, 0x03, 0x40, 0x07, 0x01],
+            }
+        );
+        while elm.recv(Duration::from_secs(1)).is_ok() {}
+        elm.send(&policy.approve_tp20_disconnect(0x740, 0x300).unwrap())
+            .unwrap();
+        assert_eq!(
+            elm.recv(Duration::from_secs(1)).unwrap(),
+            Response {
+                source: 0x300,
+                payload: vec![0xA8],
+            }
+        );
+        while elm.recv(Duration::from_secs(1)).is_ok() {}
+        // Back to ISO-TP for the next request.
+        elm.send(&approve(Target::Physical(0x7E0), &[0x09, 0x02]))
+            .unwrap();
+        while elm.recv(Duration::from_secs(1)).is_ok() {}
+        assert_eq!(
+            commands(&elm)[before..],
+            [
+                "ATCAF0",
+                "ATSH200",
+                "ATCRA25F",
+                "5FC00010000301",
+                "ATSH740",
+                "ATCRA300",
+                "A8",
+                "ATCAF1",
+                "ATSH7E0",
+                "ATCRA7E8",
+                "0902",
+            ]
+        );
+        assert_eq!(
+            elm.link().elm.sent[1..3],
+            [
+                (0x200, vec![0x5F, 0xC0, 0x00, 0x10, 0x00, 0x03, 0x01]),
+                (0x740, vec![0xA8]),
+            ]
+        );
+    }
+
+    #[test]
+    fn raw_mode_needs_an_adapter_that_echoes_characters_as_it_reads_them() {
+        // Before any request has shown it, `ATCAF0` isn't written: one flipped bit could make it
+        // a bus request, and only an early echo stops that before its carriage return.
+        let mut elm = connect(tp20_car());
+        let written = elm.link().written.len();
+        let err = elm
+            .send(&Policy::read_only().approve_tp20_setup(0x5F).unwrap())
+            .unwrap_err();
+        assert!(err.to_string().contains("ATCAF0"), "{err}");
+        assert_eq!(elm.link().written.len(), written);
+        assert_eq!(elm.link().elm.sent, []);
+    }
+
+    #[test]
+    fn a_misheard_caf0_never_reaches_the_bus() {
+        // Every bit of every character: the echo shows the flip before the carriage return, so
+        // the line is ended with `XX` and the adapter refuses it, and nothing reaches the bus.
+        for index in 0.."ATCAF0".len() {
+            for bit in 0..8 {
+                let mut elm = connect(tp20_car());
+                elm.send(&approve(Target::Physical(0x7E0), &[0x09, 0x02]))
+                    .unwrap();
+                while elm.recv(Duration::from_secs(1)).is_ok() {}
+                let sent = elm.link().elm.sent.len();
+                elm.link_mut().corrupt_next_write = Some((index, 1 << bit));
+                let setup = Policy::read_only().approve_tp20_setup(0x5F).unwrap();
+                let result = elm.send(&setup);
+                let on_bus = &elm.link().elm.sent[sent..];
+                // A flip of a letter's case is the same command to the adapter: then only the
+                // setup itself goes out. Any other flip is caught before its carriage return.
+                if result.is_ok() {
+                    assert_eq!(bit, 5, "{index}");
+                    assert_eq!(on_bus, [(0x200, setup.payload().to_vec())], "{index} {bit}");
+                } else {
+                    assert_eq!(on_bus, [], "{index} {bit}");
+                }
+            }
+        }
     }
 
     // A busy bus: while the gateway answers, the instruments send a long reply of their own.

@@ -114,6 +114,8 @@ pub struct Settings {
     /// The `AT CRA` receive filter: three hex digits (eight for 29-bit IDs), each of which may
     /// be `X` (any). `None` shows every ID.
     pub cra: Option<String>,
+    /// CAN auto formatting (`AT CAF1`, the default): ISO-TP framing of requests and replies.
+    pub caf: bool,
 }
 
 impl Settings {
@@ -164,6 +166,7 @@ impl Default for Settings {
             fc_data: None,
             fc_mode: 0,
             cra: None,
+            caf: true,
         }
     }
 }
@@ -369,6 +372,10 @@ impl FakeElm {
                 self.settings.echo = cmd == "E1";
                 true
             }
+            "CAF0" | "CAF1" => {
+                self.settings.caf = cmd == "CAF1";
+                true
+            }
             "L0" | "L1" => {
                 self.settings.linefeeds = cmd == "L1";
                 true
@@ -489,8 +496,10 @@ impl FakeElm {
 
     fn request(&mut self, hex_text: &str) {
         let bytes = match parse_hex(hex_text) {
-            // With CAN auto formatting on, a request is one single frame: 1 to 7 bytes.
+            // With CAN auto formatting on, a request is one single frame: 1 to 7 bytes. Off, it's
+            // the frame's data as it is: 1 to 8.
             Some(bytes) if (1..=7).contains(&bytes.len()) => bytes,
+            Some(bytes) if !self.settings.caf && bytes.len() == 8 => bytes,
             _ => {
                 self.print("?");
                 self.prompt();
@@ -526,7 +535,12 @@ impl FakeElm {
         // asked for; otherwise each reply is printed whole, in turn.
         let mut lines = Vec::new();
         for (index, (source, payload)) in replies.into_iter().enumerate() {
-            let mut frames = frames(&payload);
+            // Off, each reply is one frame's data as it is.
+            let mut frames = if self.settings.caf {
+                frames(&payload)
+            } else {
+                vec![payload.iter().copied().take(8).collect()]
+            };
             if frames.len() > 1 {
                 self.flow_control_for.push(source);
                 let to = self.flow_control_to(source);

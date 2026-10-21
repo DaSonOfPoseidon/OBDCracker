@@ -200,6 +200,20 @@ fn time(byte: u8) -> Option<Duration> {
     Some(Duration::from_micros(unit_us * u64::from(byte & 0x3F)))
 }
 
+/// Whether `reply` answers the channel management frame `request`: a channel setup is answered
+/// by a setup reply to the tester (positive or a refusal), a disconnect by a disconnect.
+#[must_use]
+pub fn answers(request: &[u8], reply: &[u8]) -> bool {
+    match request {
+        [_, SETUP_REQUEST, ..] => matches!(
+            reply,
+            [TESTER_ADDRESS, op, ..] if *op == SETUP_POSITIVE || SETUP_REFUSALS.contains(op)
+        ),
+        [DISCONNECT_BYTE] => reply == DISCONNECT,
+        _ => false,
+    }
+}
+
 /// One frame's data bytes, unpadded.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Outgoing {

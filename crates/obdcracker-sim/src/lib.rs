@@ -231,6 +231,8 @@ impl Transport for SimBus {
                 Target::ObdFunctional => ecu.has_obd(),
                 // A profile's IDs say their width, so a module's 29-bit ID is never 11-bit.
                 Target::Physical(id) | Target::Physical29(id) => ecu.request_id == id,
+                // No simulated module speaks TP2.0 yet: none is known on the A7 (#124).
+                Target::Tp20Setup(_) | Target::Tp20Channel(_) => false,
             };
             if !listens {
                 continue;

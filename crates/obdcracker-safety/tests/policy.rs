@@ -782,3 +782,120 @@ fn narrowing_refuses_29_bit_pairs_of_mixed_width_or_on_the_wrong_ranges() {
             .is_ok()
     );
 }
+
+#[test]
+fn a_tp20_channel_setup_is_built_by_the_policy_for_one_address() {
+    let approved = Policy::read_only().approve_tp20_setup(0x5F).unwrap();
+    assert_eq!(approved.protocol(), Protocol::Tp20Channel);
+    assert_eq!(approved.target(), Target::Tp20Setup(0x5F));
+    assert_eq!(approved.target().can_id(), 0x200);
+    assert_eq!(
+        approved.payload(),
+        [0x5F, 0xC0, 0x00, 0x10, 0x00, 0x03, 0x01]
+    );
+    assert_eq!(approved.reply_id(), Some(0x25F));
+    assert_eq!(approved.tier(), Tier::Read);
+    // Address 0 is the tester's own.
+    assert_eq!(
+        Policy::read_only().approve_tp20_setup(0x00),
+        Err(Rejection::WrongTarget)
+    );
+}
+
+#[test]
+fn a_tp20_disconnect_goes_only_on_a_channel_a_module_could_give() {
+    let approved = Policy::read_only()
+        .approve_tp20_disconnect(0x740, 0x300)
+        .unwrap();
+    assert_eq!(approved.protocol(), Protocol::Tp20Channel);
+    assert_eq!(approved.target(), Target::Tp20Channel(0x740));
+    assert_eq!(approved.target().can_id(), 0x740);
+    assert_eq!(approved.payload(), [0xA8]);
+    assert_eq!(approved.reply_id(), Some(0x300));
+    for (send, receive) in [
+        // The setup range, the OBD-II IDs, more than 11 bits, and one ID for both.
+        (0x200, 0x300),
+        (0x740, 0x25F),
+        (0x7DF, 0x300),
+        (0x7E0, 0x300),
+        (0x740, 0x7E8),
+        (0x800, 0x300),
+        (0x740, 0x1_0300),
+        (0x740, 0x740),
+    ] {
+        assert_eq!(
+            Policy::read_only().approve_tp20_disconnect(send, receive),
+            Err(Rejection::WrongTarget),
+            "{send:X} {receive:X}"
+        );
+    }
+    // A narrowed policy refuses a channel on a module's own IDs: A8 there would reach it.
+    for (send, receive) in [(0x710, 0x300), (0x740, 0x77A), (0x77A, 0x300)] {
+        assert_eq!(
+            a7().approve_tp20_disconnect(send, receive),
+            Err(Rejection::WrongTarget),
+            "{send:X} {receive:X}"
+        );
+    }
+    assert!(a7().approve_tp20_disconnect(0x740, 0x300).is_ok());
+}
+
+#[test]
+fn tp20_channel_frames_are_never_approved_from_caller_bytes() {
+    for target in [Target::Tp20Setup(0x5F), Target::Tp20Channel(0x740), ENGINE] {
+        for payload in [
+            &[0x5F, 0xC0, 0x00, 0x10, 0x00, 0x03, 0x01][..],
+            &[0xA8],
+            &[0x1A, 0x9B],
+        ] {
+            assert_eq!(
+                Policy::read_only().approve(Protocol::Tp20Channel, target, payload),
+                Err(Rejection::NotAllowed),
+                "{target:?} {payload:02X?}"
+            );
+        }
+    }
+    // Nor does a service request go to a TP2.0 target.
+    for protocol in [Protocol::Uds, Protocol::Kwp2000] {
+        for target in [Target::Tp20Setup(0x5F), Target::Tp20Channel(0x740)] {
+            assert_eq!(
+                Policy::read_only().approve(protocol, target, &[0x1A, 0x9B]),
+                Err(Rejection::WrongTarget),
+                "{protocol:?} {target:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_policy_narrowed_to_tp20_addresses_sets_up_channels_only_there() {
+    let narrowed = Policy::read_only().narrowed_to_tp20(&[0x5F, 0x09]);
+    assert!(narrowed.approve_tp20_setup(0x5F).is_ok());
+    assert_eq!(
+        narrowed.approve_tp20_setup(0x01),
+        Err(Rejection::WrongTarget)
+    );
+    // Narrowing again narrows further.
+    let again = narrowed.narrowed_to_tp20(&[0x09, 0x01]);
+    assert!(again.approve_tp20_setup(0x09).is_ok());
+    assert_eq!(again.approve_tp20_setup(0x5F), Err(Rejection::WrongTarget));
+    assert_eq!(again.approve_tp20_setup(0x01), Err(Rejection::WrongTarget));
+    // Narrowing to CAN modules leaves the addresses as they were, and the other way round.
+    assert!(a7().approve_tp20_setup(0x5F).is_ok());
+    let both = a7().narrowed_to_tp20(&[0x5F]);
+    assert_eq!(
+        both.approve(Protocol::Uds, Target::Physical(0x7A0), &[0x22, 0xF1, 0x87]),
+        Err(Rejection::WrongTarget)
+    );
+}
+
+proptest! {
+    #[test]
+    fn tp20_narrowing_never_widens(addresses in prop::collection::vec(any::<u8>(), 0..6), address in any::<u8>()) {
+        let narrowed = Policy::read_only().narrowed_to_tp20(&addresses);
+        if narrowed.approve_tp20_setup(address).is_ok() {
+            prop_assert!(Policy::read_only().approve_tp20_setup(address).is_ok());
+            prop_assert!(addresses.contains(&address));
+        }
+    }
+}

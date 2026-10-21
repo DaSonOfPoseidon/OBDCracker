@@ -1,6 +1,7 @@
 use std::time::{Duration, Instant};
 
 use obdcracker_core::response::{self, Error as ReplyError};
+use obdcracker_core::tp20;
 use obdcracker_safety::{Approved, Protocol};
 
 use crate::{Error, Response, Transport};
@@ -113,6 +114,7 @@ pub fn exchange<T: Transport + ?Sized>(
                 response::answers_after_pending
             }
             Protocol::Uds => response::answers,
+            Protocol::Tp20Channel => tp20::answers,
         };
         if !answers(asked, &reply.payload) {
             continue;
