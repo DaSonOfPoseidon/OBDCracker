@@ -232,7 +232,8 @@ impl SimBus {
     /// # Errors
     ///
     /// [`FixtureError::Value`] for address 0 (the tester's), one already taken, or a channel a
-    /// setup reply can't carry or whose IDs another module already uses.
+    /// setup reply can't carry or whose IDs another module already uses (all may answer on the
+    /// same receive ID).
     pub fn add_tp20(&mut self, address: u8, channel: Channel) -> Result<(), FixtureError> {
         let reply = setup_reply(channel);
         if address == 0 || tp20::decode_channel_setup(&reply) != Ok(channel) {
@@ -241,10 +242,11 @@ impl SimBus {
             )));
         }
         let ids = [channel.send_id, channel.receive_id];
+        // Every setup asks to be answered on the same ID, so modules share their receive IDs.
         let taken = self.tp20.iter().any(|module| {
             module.address == address
                 || ids.contains(&module.channel.send_id)
-                || ids.contains(&module.channel.receive_id)
+                || channel.send_id == module.channel.receive_id
         }) || self
             .ecus
             .iter()

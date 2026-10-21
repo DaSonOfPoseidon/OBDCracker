@@ -1145,7 +1145,8 @@ fn a_tp20_module_must_have_a_channel_a_module_could_give() {
         (0x09, channel(0x7E0, 0x301)),
         (0x09, channel(0x741, 0x7E8)),
         (0x09, channel(0x740, 0x301)),
-        (0x09, channel(0x741, 0x300)),
+        (0x09, channel(0x300, 0x301)),
+        (0x09, channel(0x741, 0x740)),
         (0x09, channel(0x710, 0x301)),
     ] {
         assert!(
@@ -1153,4 +1154,6 @@ fn a_tp20_module_must_have_a_channel_a_module_could_give() {
             "{address:02X} {bad:?}"
         );
     }
+    // Every module answers the tester on the receive ID its setup asked for.
+    bus.add_tp20(0x09, channel(0x741, 0x300)).unwrap();
 }
