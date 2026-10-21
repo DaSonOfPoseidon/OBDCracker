@@ -1051,3 +1051,64 @@ fn scan_discover_29bit_needs_a_profile() {
     assert_eq!(out.status.code(), Some(2), "{out:?}");
     assert_eq!(String::from_utf8_lossy(&out.stdout), "", "nothing sent");
 }
+
+#[test]
+fn sim_scan_discover_tp20_sets_up_a_channel_to_each_profile_address_after_the_scan() {
+    // The sim's A7 has no TP2.0 module (none is confirmed yet), so no address answers.
+    let log = temp_log("scan-tp20");
+    let out = obdcracker(&[
+        "--sim",
+        "a7",
+        "--audit-log",
+        log.to_str().unwrap(),
+        "scan",
+        "--discover-tp20",
+    ]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("TP2.0 discovery: 0 of 13 addresses answered"),
+        "{stdout}"
+    );
+    let scanned = stdout.find("77A gateway F197 J533--Gateway").unwrap();
+    assert!(
+        scanned < stdout.find("TP2.0 discovery").unwrap(),
+        "{stdout}"
+    );
+    let audit = std::fs::read_to_string(&log).unwrap();
+    let setups: Vec<&str> = audit
+        .lines()
+        .filter(|l| l.contains(r#""dir":"tx","id":"200""#))
+        .collect();
+    assert_eq!(setups.len(), 13, "{audit}");
+    assert!(
+        setups[10].contains(r#""payload":"5F C0 00 10 00 03 01""#),
+        "{}",
+        setups[10]
+    );
+}
+
+#[test]
+fn dry_run_scan_discover_tp20_lists_the_channel_setups() {
+    let out = obdcracker(&["--dry-run", "--profile", "a7", "scan", "--discover-tp20"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("200 05 C0 00 10 00 03 01"), "{stdout}");
+    assert!(stdout.contains("200 72 C0 00 10 00 03 01"), "{stdout}");
+    assert!(stdout.contains("A8 (disconnect)"), "{stdout}");
+}
+
+#[test]
+fn scan_discover_tp20_needs_a_profile() {
+    let out = obdcracker(&["--dry-run", "scan", "--discover-tp20"]);
+    assert_eq!(out.status.code(), Some(2), "{out:?}");
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "", "nothing sent");
+}

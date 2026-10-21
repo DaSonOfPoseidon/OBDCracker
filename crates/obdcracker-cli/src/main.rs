@@ -21,6 +21,7 @@ use obdcracker_transport::scan::{
     self, DidFormat, ExtraDid, PidValue, Scan, ScanModule, ScanOptions,
 };
 use obdcracker_transport::sweep::{self, SweepOptions};
+use obdcracker_transport::tp20::{self, Answer, Disconnect};
 use obdcracker_transport::{
     Audited, DryRun, Expect, S3, Timing, Transport, exchange, hex, log_failure,
 };
@@ -105,6 +106,12 @@ enum Command {
         /// 29-bit CAN for them and back
         #[arg(long)]
         discover_29bit: bool,
+        /// After the scan, look for VW TP2.0 modules: send a channel setup to each address in the
+        /// profile's TP2.0 list (on the A7, the modules silent on ISO-TP), show the channel each
+        /// one gives, and close it again (A8). Nothing is read over a channel yet. Needs an
+        /// adapter that echoes each character as it reads it, such as an `OBDLink` EX
+        #[arg(long)]
+        discover_tp20: bool,
     },
     /// Look for the DIDs a module has: read each DID in a range (UDS 0x22), one request each, and
     /// list those it answers. Reads only. Needs a profile (--profile or --sim) that lists the
@@ -260,12 +267,14 @@ fn run<T: Transport>(cli: &Cli, transport: T, link: &str, timing: Timing) -> Exi
         wide,
         extended,
         discover_29bit,
+        discover_tp20,
     } = cli.command
     {
         let passes = Discovery {
             discover,
             wide,
             discover_29bit,
+            discover_tp20,
         };
         return run_scan(cli, &mut transport, timing, passes, extended);
     }
@@ -771,6 +780,7 @@ struct Discovery {
     discover: bool,
     wide: bool,
     discover_29bit: bool,
+    discover_tp20: bool,
 }
 
 fn run_scan<T: Transport>(
@@ -786,6 +796,17 @@ fn run_scan<T: Transport>(
             eprintln!("{e}");
             return ExitCode::from(2);
         }
+    };
+    let tp20_addresses = if passes.discover_tp20 {
+        match tp20_addresses(cli) {
+            Ok(addresses) => Some(addresses),
+            Err(e) => {
+                eprintln!("{e}");
+                return ExitCode::from(2);
+            }
+        }
+    } else {
+        None
     };
     if passes.discover {
         match discover_modules(cli, transport, timing, passes.wide) {
@@ -813,7 +834,9 @@ fn run_scan<T: Transport>(
         );
         options.extended = Some(S3::default());
     }
-    match scan::scan_with(transport, &policy, &modules, timing, &options) {
+    // A TP2.0 pass goes after the scan, whose ISO-TP requests show whether the adapter echoes
+    // each character as it reads it, which the ELM driver's raw mode needs.
+    let code = match scan::scan_with(transport, &policy, &modules, timing, &options) {
         Ok(_) if cli.dry_run => {
             println!("dry run: nothing was sent");
             // Nothing answers a dry run, so the reads that depend on the answers aren't shown.
@@ -838,14 +861,89 @@ fn run_scan<T: Transport>(
                 ExitCode::SUCCESS
             } else {
                 eprintln!("nothing answered: check the ignition and the adapter's connection");
-                ExitCode::FAILURE
+                return ExitCode::FAILURE;
             }
         }
         Err(e) => {
             eprintln!("{e}");
-            ExitCode::FAILURE
+            return ExitCode::FAILURE;
+        }
+    };
+    if let Some(addresses) = tp20_addresses {
+        if let Err(code) = discover_tp20_modules(transport, &policy, &addresses, timing) {
+            return code;
+        }
+        if cli.dry_run {
+            println!(
+                "a live TP2.0 pass also sends, on each channel a module gives: A8 (disconnect)"
+            );
         }
     }
+    code
+}
+
+// The profile's TP2.0 discovery addresses, for `scan --discover-tp20`.
+fn tp20_addresses(cli: &Cli) -> Result<Vec<u8>, String> {
+    let Some(name) = cli.profile.as_ref().or(cli.sim.as_ref()) else {
+        return Err(
+            "--discover-tp20 needs a profile with TP2.0 addresses (--profile or --sim)".to_owned(),
+        );
+    };
+    let profile = Profile::builtin(name).map_err(|e| format!("profile {name}: {e}"))?;
+    let addresses = profile.tp20_addresses();
+    if addresses.is_empty() {
+        return Err(format!(
+            "--discover-tp20 needs a profile with TP2.0 addresses, and {name} has none"
+        ));
+    }
+    Ok(addresses)
+}
+
+// Sends a TP2.0 channel setup to each address and closes each channel a module gives, printing
+// what each module that answered did.
+fn discover_tp20_modules<T: Transport>(
+    transport: &mut T,
+    policy: &Policy,
+    addresses: &[u8],
+    timing: Timing,
+) -> Result<(), ExitCode> {
+    let found = tp20::probe(transport, policy, addresses, timing).map_err(|e| {
+        eprintln!("{e}");
+        ExitCode::FAILURE
+    })?;
+    for module in &found {
+        let answer = match &module.answer {
+            Answer::Channel(channel) => format!(
+                "gave channel {:03X} (it answers on {:03X})",
+                channel.send_id, channel.receive_id
+            ),
+            Answer::Refused(op) => format!("refused a channel ({op:02X})"),
+            Answer::Undecodable(bytes) => format!("sent an unreadable answer [{}]", hex(bytes)),
+        };
+        let disconnect = match &module.disconnect {
+            None => String::new(),
+            Some(Disconnect::Closed) => ", closed".to_owned(),
+            Some(Disconnect::NoReply) => {
+                ", no answer to A8 (the module closes an idle channel by itself)".to_owned()
+            }
+            Some(Disconnect::NotSent(rejection)) => {
+                format!(", A8 not sent ({rejection}); the module closes an idle channel by itself")
+            }
+        };
+        println!("TP2.0 {:02X} {answer}{disconnect}", module.address);
+    }
+    println!(
+        "TP2.0 discovery: {} of {} addresses answered",
+        found.len(),
+        addresses.len()
+    );
+    if found
+        .iter()
+        .any(|module| matches!(module.answer, Answer::Channel(_)))
+    {
+        println!("TP2.0 modules aren't scanned: nothing reads over a TP2.0 channel yet");
+    }
+    Ok(())
 }
 
 // The command that ran, with its `--range` starting at `from`, for a shell to run again: a
