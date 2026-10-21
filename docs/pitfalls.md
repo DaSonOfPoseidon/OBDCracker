@@ -222,12 +222,20 @@ Each entry names the class, what to check, and where it bit us.
   the request asked for (PR #149).
 - **Don't confuse a transport limit with a protocol limit.** 4095 bytes is ISO-TP's short first-frame length, not a
   UDS maximum; the 32-bit escape carries more.
+- **A policy widened for one pass mustn't outlive it.** Discovery returned the policy that allowed its whole candidate
+  range, and the TP2.0 pass reused it, so every channel ID in that range counted as a module's and its disconnect was
+  refused. Hand later passes a policy narrowed to what was actually found (PR #149).
+- **An early exit skips what else was asked for.** `scan` returned "nothing answered" before the TP2.0 pass when no
+  ISO-TP module replied, which is when TP2.0 matters most. Run every requested pass, then decide the exit code
+  (PR #149).
 
 ## Links and adapters
 
 - **An audit log that sees only what the code reads misses the evidence.** The ELM driver dropped reply lines nobody
   read before the next request, and adapter commands never reached the log, so a late reply or a changed setting left
-  no trace. Log what the adapter did, not just what the caller used.
+  no trace. Log what the adapter did, not just what the caller used, and log a command that failed too: the raw-mode
+  switch skipped its log entry when an echo check failed, the case where the adapter may have heard something else
+  (PR #149).
 - **An adapter's learned timeout can hide a slow module.** The ELM327's adaptive timing (`AT AT1`) shortens its wait
   to fit the modules that answered fast, so a module that wakes slowly reads as absent. Before acting on "nothing is
   there", as discovery's wide pass does, look again with the adapter's longest wait.
