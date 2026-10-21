@@ -10,8 +10,15 @@
 //!
 //! ```compile_fail
 //! // Approved can't be built outside this crate, so nothing can skip the policy.
-//! let forged = obdcracker_safety::Approved { protocol: obdcracker_safety::Protocol::Uds, target: obdcracker_safety::Target::Physical(0x7E0), payload: vec![0x34], tier: obdcracker_safety::Tier::Read };
+//! let forged = obdcracker_safety::Approved { protocol: obdcracker_safety::Protocol::Uds, target: obdcracker_safety::Target::Physical(0x7E0), payload: vec![0x34], tier: obdcracker_safety::Tier::Read, reply: None };
 //! ```
+//!
+//! ```compile_fail
+//! // Nor can a TP2.0 channel, so a disconnect goes only on a channel a module opened.
+//! let forged = obdcracker_safety::OpenTp20Channel { send_id: 0x000, receive_id: 0x300 };
+//! ```
+
+use obdcracker_core::tp20;
 
 /// What a request could do to the car, from harmless to dangerous.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -35,6 +42,10 @@ pub enum Protocol {
     /// KWP2000 (ISO 14230-3). It has no suppress-positive-response bit, and its session and reset
     /// parameters mean other things than UDS's.
     Kwp2000,
+    /// VW TP2.0 channel management: a channel setup or a disconnect. The policy builds these
+    /// frames itself ([`Policy::approve_tp20_setup`], [`Policy::approve_tp20_disconnect`]), so
+    /// [`Policy::approve`] refuses them.
+    Tp20Channel,
 }
 
 /// Where a request goes on the bus.
@@ -47,6 +58,10 @@ pub enum Target {
     /// One module's 29-bit request ID: ISO 15765-4 normal fixed addressing (`0x18DA<module>F1`,
     /// from the tester at 0xF1) or VAG's (`0x17FC00xx`). An 11-bit ID is never one of these.
     Physical29(u32),
+    /// A VW TP2.0 channel setup for the module at this address, sent on 0x200.
+    Tp20Setup(u8),
+    /// An open VW TP2.0 channel: the 11-bit ID the module gave the tester to send on.
+    Tp20Channel(u32),
 }
 
 impl Target {
@@ -66,7 +81,8 @@ impl Target {
     pub fn can_id(self) -> u32 {
         match self {
             Self::ObdFunctional => OBD_FUNCTIONAL_ID,
-            Self::Physical(id) | Self::Physical29(id) => id,
+            Self::Tp20Setup(_) => tp20::SETUP_ID,
+            Self::Physical(id) | Self::Physical29(id) | Self::Tp20Channel(id) => id,
         }
     }
 
@@ -166,6 +182,28 @@ pub struct Approved {
     reply: Option<u32>,
 }
 
+/// A VW TP2.0 channel a module opened in answer to an approved setup ([`Policy::tp20_channel`]).
+/// Only this crate can create one, so a disconnect goes only on a channel a module gave.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OpenTp20Channel {
+    send_id: u32,
+    receive_id: u32,
+}
+
+impl OpenTp20Channel {
+    /// The ID the tester sends on, which the module listens on.
+    #[must_use]
+    pub fn send_id(self) -> u32 {
+        self.send_id
+    }
+
+    /// The ID the module answers on.
+    #[must_use]
+    pub fn receive_id(self) -> u32 {
+        self.receive_id
+    }
+}
+
 impl Approved {
     /// The protocol the request was approved as.
     #[must_use]
@@ -207,6 +245,8 @@ pub struct Policy {
     unlocked: Tier,
     // With a vehicle profile, the only modules physical requests may go to.
     modules: Option<Vec<ModuleIds>>,
+    // With a vehicle profile, the only addresses a TP2.0 channel may be set up to.
+    tp20: Option<Vec<u8>>,
 }
 
 impl Policy {
@@ -216,6 +256,7 @@ impl Policy {
         Self {
             unlocked: Tier::Read,
             modules: None,
+            tp20: None,
         }
     }
 
@@ -267,6 +308,114 @@ impl Policy {
         })
     }
 
+    /// Narrows the TP2.0 channel setups to these module addresses, as a vehicle profile lists
+    /// them. Narrowing again narrows further; physical requests are unaffected.
+    #[must_use]
+    pub fn narrowed_to_tp20(self, addresses: &[u8]) -> Self {
+        let tp20 = match self.tp20 {
+            None => addresses.to_vec(),
+            Some(earlier) => addresses
+                .iter()
+                .filter(|address| earlier.contains(address))
+                .copied()
+                .collect(),
+        };
+        Self {
+            tp20: Some(tp20),
+            ..self
+        }
+    }
+
+    /// A VW TP2.0 channel setup for the module at `address`: `<address> C0 00 10 00 03 01` on
+    /// 0x200 (the module picks the ID it listens on, the tester asks to be answered on 0x300,
+    /// for KWP2000), answered on 0x200 + `address`. It opens a channel and changes nothing.
+    ///
+    /// # Errors
+    ///
+    /// [`Rejection::WrongTarget`] for address 0 (the tester's), or one the policy was narrowed
+    /// away from ([`Policy::narrowed_to_tp20`]).
+    pub fn approve_tp20_setup(&self, address: u8) -> Result<Approved, Rejection> {
+        if address == TP20_TESTER
+            || self
+                .tp20
+                .as_ref()
+                .is_some_and(|addresses| !addresses.contains(&address))
+        {
+            return Err(Rejection::WrongTarget);
+        }
+        Ok(Approved {
+            protocol: Protocol::Tp20Channel,
+            target: Target::Tp20Setup(address),
+            payload: tp20::channel_setup(address).to_vec(),
+            tier: Tier::Read,
+            reply: Some(tp20::setup_reply_id(address)),
+        })
+    }
+
+    /// The channel a module opened: `reply` is what came from `source` in answer to `setup`.
+    ///
+    /// # Errors
+    ///
+    /// [`Rejection::NotAllowed`] unless `setup` is a channel setup ([`Policy::approve_tp20_setup`])
+    /// and `reply` a positive answer to it with two valid IDs ([`tp20::decode_channel_setup`]);
+    /// [`Rejection::WrongTarget`] unless `source` is the ID that setup is answered on.
+    pub fn tp20_channel(
+        &self,
+        setup: &Approved,
+        source: u32,
+        reply: &[u8],
+    ) -> Result<OpenTp20Channel, Rejection> {
+        if !matches!(setup.target, Target::Tp20Setup(_)) {
+            return Err(Rejection::NotAllowed);
+        }
+        if setup.reply != Some(source) {
+            return Err(Rejection::WrongTarget);
+        }
+        let channel = tp20::decode_channel_setup(reply).map_err(|_| Rejection::NotAllowed)?;
+        Ok(OpenTp20Channel {
+            send_id: channel.send_id,
+            receive_id: channel.receive_id,
+        })
+    }
+
+    /// A VW TP2.0 disconnect (`A8`) on a channel a module opened: sent on its send ID, answered
+    /// on its receive ID. It closes the channel and changes nothing.
+    ///
+    /// # Errors
+    ///
+    /// [`Rejection::WrongTarget`] unless the receive ID is 0x300, the one the setup asked for,
+    /// and the send ID is in 0x300..=0x7FF (below it are the car's own frames and the setup
+    /// range), not an OBD-II ID (0x7DF..=0x7EF), and, once the policy is narrowed to a car's
+    /// modules, none of their IDs: `A8` there would reach that module.
+    pub fn approve_tp20_disconnect(
+        &self,
+        channel: &OpenTp20Channel,
+    ) -> Result<Approved, Rejection> {
+        let OpenTp20Channel {
+            send_id,
+            receive_id,
+        } = *channel;
+        let module_id = self.modules.as_ref().is_some_and(|modules| {
+            modules
+                .iter()
+                .any(|module| module.request == send_id || module.reply == send_id)
+        });
+        if receive_id != TP20_TESTER_RECEIVE_ID
+            || !(TP20_TESTER_RECEIVE_ID..=MAX_11_BIT).contains(&send_id)
+            || (OBD_FUNCTIONAL_ID..=*OBD_RESPONSE_IDS.end()).contains(&send_id)
+            || module_id
+        {
+            return Err(Rejection::WrongTarget);
+        }
+        Ok(Approved {
+            protocol: Protocol::Tp20Channel,
+            target: Target::Tp20Channel(send_id),
+            payload: tp20::DISCONNECT.to_vec(),
+            tier: Tier::Read,
+            reply: Some(receive_id),
+        })
+    }
+
     /// Checks a request in `protocol` against that protocol's allowlist and returns it as
     /// [`Approved`] if it may be sent.
     ///
@@ -277,9 +426,17 @@ impl Policy {
         target: Target,
         payload: &[u8],
     ) -> Result<Approved, Rejection> {
+        // Channel frames come only from the policy's own builders, and no service goes on them.
+        if protocol == Protocol::Tp20Channel {
+            return Err(Rejection::NotAllowed);
+        }
+        if matches!(target, Target::Tp20Setup(_) | Target::Tp20Channel(_)) {
+            return Err(Rejection::WrongTarget);
+        }
         let (tier, kind) = match protocol {
             Protocol::Uds => classify_uds(payload),
             Protocol::Kwp2000 => classify_kwp2000(payload).map(|tier| (tier, Kind::Physical)),
+            Protocol::Tp20Channel => None,
         }
         .ok_or(Rejection::NotAllowed)?;
         if tier == Tier::Flash {
@@ -290,7 +447,7 @@ impl Policy {
         }
         check_target(target, kind)?;
         let reply = match (target, &self.modules) {
-            (Target::ObdFunctional, _) => None,
+            (Target::ObdFunctional | Target::Tp20Setup(_) | Target::Tp20Channel(_), _) => None,
             (Target::Physical(id) | Target::Physical29(id), Some(modules)) => Some(
                 modules
                     .iter()
@@ -325,6 +482,9 @@ enum Kind {
 
 const OBD_FUNCTIONAL_ID: u32 = 0x7DF;
 const MAX_11_BIT: u32 = 0x7FF;
+// VW TP2.0: the tester is address 0, and a channel setup asks the module to answer on 0x300.
+const TP20_TESTER: u8 = 0x00;
+const TP20_TESTER_RECEIVE_ID: u32 = 0x300;
 // ISO 15765-4 normal fixed addressing with the tester at 0xF1: requests 0x18DA<ta>F1, replies
 // 0x18DAF1<sa>. VAG: requests 0x17FC00xx, replies 0x17FE00xx.
 const ISO_29_BIT_REQUEST: u32 = 0x18DA_00F1;

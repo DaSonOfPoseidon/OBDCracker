@@ -114,6 +114,14 @@ pub struct Settings {
     /// The `AT CRA` receive filter: three hex digits (eight for 29-bit IDs), each of which may
     /// be `X` (any). `None` shows every ID.
     pub cra: Option<String>,
+    /// CAN auto formatting (`AT CAF1`, the default): ISO-TP framing of requests and replies.
+    pub caf: bool,
+    /// Automatic flow control (`AT CFC1`, the default): a flow control frame for every First
+    /// Frame the receive filter shows, whatever `CAF` is (datasheet p. 14).
+    pub cfc: bool,
+    /// Variable DLC (`AT V1`); off, the default, every request is padded to 8 bytes, even with
+    /// `CAF0` (datasheet pp. 27, 46).
+    pub variable_dlc: bool,
 }
 
 impl Settings {
@@ -164,6 +172,9 @@ impl Default for Settings {
             fc_data: None,
             fc_mode: 0,
             cra: None,
+            caf: true,
+            cfc: true,
+            variable_dlc: false,
         }
     }
 }
@@ -369,6 +380,18 @@ impl FakeElm {
                 self.settings.echo = cmd == "E1";
                 true
             }
+            "CAF0" | "CAF1" => {
+                self.settings.caf = cmd == "CAF1";
+                true
+            }
+            "CFC0" | "CFC1" => {
+                self.settings.cfc = cmd == "CFC1";
+                true
+            }
+            "V0" | "V1" => {
+                self.settings.variable_dlc = cmd == "V1";
+                true
+            }
             "L0" | "L1" => {
                 self.settings.linefeeds = cmd == "L1";
                 true
@@ -488,15 +511,20 @@ impl FakeElm {
     }
 
     fn request(&mut self, hex_text: &str) {
-        let bytes = match parse_hex(hex_text) {
-            // With CAN auto formatting on, a request is one single frame: 1 to 7 bytes.
+        let mut bytes = match parse_hex(hex_text) {
+            // With CAN auto formatting on, a request is one single frame: 1 to 7 bytes. Off, it's
+            // the frame's data as it is: 1 to 8.
             Some(bytes) if (1..=7).contains(&bytes.len()) => bytes,
+            Some(bytes) if !self.settings.caf && bytes.len() == 8 => bytes,
             _ => {
                 self.print("?");
                 self.prompt();
                 return;
             }
         };
+        if !self.settings.caf && !self.settings.variable_dlc {
+            bytes.resize(8, 0x00);
+        }
         // Recorded even without a protocol: a real adapter would then search for one, sending
         // probe frames.
         let header = self.settings.request_id();
@@ -526,7 +554,20 @@ impl FakeElm {
         // asked for; otherwise each reply is printed whole, in turn.
         let mut lines = Vec::new();
         for (index, (source, payload)) in replies.into_iter().enumerate() {
-            let mut frames = frames(&payload);
+            // Off, each reply is one frame's data as it is.
+            let mut frames = if self.settings.caf {
+                frames(&payload)
+            } else {
+                vec![payload.iter().copied().take(8).collect()]
+            };
+            if !self.settings.caf
+                && self.settings.cfc
+                && payload.first().is_some_and(|b| b >> 4 == 1)
+            {
+                self.flow_control_for.push(source);
+                let to = self.flow_control_to(source);
+                self.flow_control_ids.push(to);
+            }
             if frames.len() > 1 {
                 self.flow_control_for.push(source);
                 let to = self.flow_control_to(source);
@@ -677,6 +718,8 @@ pub struct FakeLink {
     pub inject: Vec<u8>,
     /// Flips these bits of this byte of the next write, as a noisy serial line would.
     pub corrupt_next_write: Option<(usize, u8)>,
+    /// Flips these bits of this byte of the next write of exactly these bytes.
+    pub corrupt_write_of: Option<(Vec<u8>, usize, u8)>,
     /// Bytes that arrive at these times, whatever the adapter prints. A read waits for the next
     /// one, up to its timeout.
     pub scheduled: VecDeque<(std::time::Instant, Vec<u8>)>,
@@ -698,6 +741,7 @@ impl FakeLink {
             closed: false,
             inject: Vec::new(),
             corrupt_next_write: None,
+            corrupt_write_of: None,
             scheduled: VecDeque::new(),
             byte_rate: Some(115_200 / 10),
             fail_writes: false,
@@ -722,6 +766,14 @@ impl Link for FakeLink {
         self.writes.push(bytes.to_vec());
         let mut bytes = bytes.to_vec();
         if let Some((index, bits)) = self.corrupt_next_write.take() {
+            bytes[index] ^= bits;
+        }
+        if self
+            .corrupt_write_of
+            .as_ref()
+            .is_some_and(|(of, _, _)| *of == bytes)
+            && let Some((_, index, bits)) = self.corrupt_write_of.take()
+        {
             bytes[index] ^= bits;
         }
         self.elm.write(&bytes);

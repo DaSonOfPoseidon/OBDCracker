@@ -15,7 +15,7 @@ use std::collections::VecDeque;
 use std::time::{Duration, Instant, SystemTime};
 
 use obdcracker_core::isotp::{Addressing, MAX_SHORT_PAYLOAD, Progress, Reassembler};
-use obdcracker_safety::{Approved, Target};
+use obdcracker_safety::{Approved, Protocol, Target};
 
 use crate::link::{Driver, Link, LinkKind};
 use crate::{Error, LinkEvent, Response, Timing, Transport, hex};
@@ -49,6 +49,13 @@ const KEPT_DEFAULTS: &[(u8, u8, &str)] = &[
     // Off, or every frame line has its data length between the CAN ID and the data
     (0x29, 0xFF, "CAN data length display"),
 ];
+
+// Raw frames for VW TP2.0: automatic flow control off first, since the adapter answers anything
+// that looks like a First Frame whatever `CAF` is (datasheet p. 14); variable DLC on, or even with
+// `CAF0` every frame is padded to 8 bytes (pp. 27, 46); then no ISO-TP formatting (p. 13).
+const RAW_ON: [&str; 3] = ["ATCFC0", "ATV1", "ATCAF0"];
+// And back to the defaults, flow control last.
+const RAW_OFF: [&str; 3] = ["ATCAF1", "ATV0", "ATCFC1"];
 
 // `AT CRA` patterns: three hex digits, each of which may be `X` (any). Every diagnostic reply ID,
 // and every OBD-II emissions ECU's.
@@ -198,6 +205,8 @@ pub struct Elm<L> {
     header: Option<u32>,
     // Whether the adapter is on 29-bit CAN (`ATSP7`) rather than 11-bit (`ATSP6`, the setup's).
     bits29: bool,
+    // Whether the adapter sends raw frames ([`RAW_ON`]), for VW TP2.0.
+    raw: bool,
     flow: Option<Flow>,
     // The `AT CRA` pattern in effect.
     filter: String,
@@ -303,6 +312,7 @@ impl<L: Link> Elm<L> {
             event_at: SystemTime::UNIX_EPOCH,
             header: None,
             bits29: false,
+            raw: false,
             flow: None,
             filter: WIDE_FILTER.to_owned(),
             busy: false,
@@ -548,6 +558,46 @@ impl<L: Link> Elm<L> {
     // Writes `command` and reads its answer's lines into `lines`.
     fn command_answer(&mut self, command: &str, lines: &mut Vec<String>) -> Result<(), Error> {
         self.write(format!("{command}\r").as_bytes())?;
+        self.read_answer(command, lines)
+    }
+
+    // A command whose only non-hex letter may be its `T` (`ATCAF0`, `ATCFC1`), so one flipped
+    // bit could make it a bus request: written as a request is, its characters first and its
+    // carriage return only once they've echoed correctly, else ended with `XX` so the adapter
+    // refuses it. So only on an adapter that has shown it echoes characters as it reads them.
+    fn guarded_command(&mut self, command: &str) -> Result<(), Error> {
+        if self.early_echo != Some(true) {
+            return Err(Error::Adapter(format!(
+                "{command} needs an adapter that echoes each character as it reads it (such as \
+                 an OBDLink), and this one hasn't shown it does; send an ISO-TP request first"
+            )));
+        }
+        self.ready()?;
+        self.check_idle()?;
+        let at = SystemTime::now();
+        let mut lines = Vec::new();
+        // Noted however it ends, like every command: a misheard one may still have done
+        // something.
+        let answered = self
+            .write(command.as_bytes())
+            .and_then(|()| self.check_early_echo(command))
+            .and_then(|()| self.write(b"\r"))
+            .and_then(|()| self.read_answer(command, &mut lines));
+        self.note(LinkEvent::Command {
+            at,
+            command: command.to_owned(),
+            answer: lines.clone(),
+        });
+        answered?;
+        if lines.iter().map(String::as_str).eq(["OK"]) {
+            Ok(())
+        } else {
+            Err(self.break_down(format!("{command} failed: {}", lines.join(" / "))))
+        }
+    }
+
+    // Reads the answer to `command`, already written, into `lines`.
+    fn read_answer(&mut self, command: &str, lines: &mut Vec<String>) -> Result<(), Error> {
         let deadline = Instant::now() + COMMAND_WAIT;
         let mut echoed = false;
         loop {
@@ -898,7 +948,10 @@ impl<L: Link> Elm<L> {
         // A 29-bit request's flow control always goes to its request ID: the adapter's own would
         // swap the reply ID's bytes, which is right for 0x18DAF1xx but not for VAG's 0x17FE00xx.
         let gap = st_min(self.pace, bits29);
-        let flow = if !bits29 && (id == 0x7DF || (gap == 0 && (0x7E0..=0x7E7).contains(&id))) {
+        let flow = if self.raw {
+            // Raw frames get no ISO-TP flow control; whatever was set stays.
+            self.flow.unwrap_or(Flow::Standard)
+        } else if !bits29 && (id == 0x7DF || (gap == 0 && (0x7E0..=0x7E7).contains(&id))) {
             Flow::Standard
         } else {
             Flow::To(id, gap)
@@ -921,7 +974,10 @@ impl<L: Link> Elm<L> {
         let filter = match (request.reply_id(), target) {
             (Some(reply), _) => can_id_text(reply, bits29),
             (None, Target::ObdFunctional) => OBD_FILTER.to_owned(),
-            (None, Target::Physical(_)) => WIDE_FILTER.to_owned(),
+            // A TP2.0 frame always knows its reply ID.
+            (None, Target::Physical(_) | Target::Tp20Setup(_) | Target::Tp20Channel(_)) => {
+                WIDE_FILTER.to_owned()
+            }
             (None, Target::Physical29(id)) if id >> 16 == 0x18DA => ISO_29_BIT_FILTER.to_owned(),
             (None, Target::Physical29(_)) => VAG_29_BIT_FILTER.to_owned(),
         };
@@ -1005,13 +1061,26 @@ fn hex_byte(text: &str) -> Option<u8> {
 impl<L: Link> Transport for Elm<L> {
     fn send(&mut self, request: &Approved) -> Result<(), Error> {
         let payload = request.payload();
-        if payload.is_empty() || payload.len() > Addressing::Normal.max_single_frame() {
+        // A TP2.0 channel frame goes out as it is, with CAN auto formatting off.
+        let raw = request.protocol() == Protocol::Tp20Channel;
+        let longest = if raw {
+            8
+        } else {
+            Addressing::Normal.max_single_frame()
+        };
+        if payload.is_empty() || payload.len() > longest {
             return Err(Error::Adapter(format!(
                 "a {}-byte request doesn't fit one CAN frame; this adapter driver only sends single frames",
                 payload.len()
             )));
         }
         self.ready()?;
+        if self.raw != raw {
+            for command in if raw { RAW_ON } else { RAW_OFF } {
+                self.guarded_command(command)?;
+            }
+            self.raw = raw;
+        }
         self.set_target(request)?;
         // A setting command's prompt may have been followed by a reset.
         self.check_idle()?;
@@ -1105,6 +1174,13 @@ impl<L: Link> Transport for Elm<L> {
                 }
                 // `None` is the echo.
                 Some(Event::Line(text)) => match self.reply_line(&text)? {
+                    // A raw frame is a reply of its own.
+                    Some(Line::Frame(frame)) if self.raw => {
+                        return Ok(Response {
+                            source: frame.id(),
+                            payload: frame.data().to_vec(),
+                        });
+                    }
                     Some(Line::Frame(frame)) => {
                         if let Some(reply) = self.feed(frame.id(), frame.data(), &text) {
                             return Ok(reply);

@@ -18,6 +18,7 @@ mod mock;
 pub mod scan;
 mod session;
 pub mod sweep;
+pub mod tp20;
 
 pub use audit::{Audited, log_failure};
 pub use dry_run::DryRun;

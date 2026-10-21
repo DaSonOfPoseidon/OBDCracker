@@ -213,14 +213,29 @@ Each entry names the class, what to check, and where it bit us.
 - **A new protocol reaches past the allowlist.** Approving KWP2000 requests wasn't enough: `exchange` still matched
   their replies as UDS, so KWP2000's bare `7E` answer to `3E 01` was dropped as not answering it (#137, Codex). Follow
   a request through everything that reads its reply: matching, response-pending, decoding.
+- **After dropping a message, skip to its end.** TP2.0 marks only a message's last frame, so a reassembler that
+  forgot a bad message at once read its next frame as a new message: `31 00 02 AA BB` became a 2-byte reply. On an
+  error mid-message, drop frames through the next one marked last (PR #149).
+- **A request built from a reply needs proof of that reply.** `approve_tp20_disconnect` took any two IDs, so a
+  caller could aim `A8` at CAN ID 0. When an approval follows from what a module answered, take a token only the
+  policy can build from that answer (`OpenTp20Channel`), and check its IDs against what
+  the request asked for (PR #149).
 - **Don't confuse a transport limit with a protocol limit.** 4095 bytes is ISO-TP's short first-frame length, not a
   UDS maximum; the 32-bit escape carries more.
+- **A policy widened for one pass mustn't outlive it.** Discovery returned the policy that allowed its whole candidate
+  range, and the TP2.0 pass reused it, so every channel ID in that range counted as a module's and its disconnect was
+  refused. Hand later passes a policy narrowed to what was actually found (PR #149).
+- **An early exit skips what else was asked for.** `scan` returned "nothing answered" before the TP2.0 pass when no
+  ISO-TP module replied, which is when TP2.0 matters most. Run every requested pass, then decide the exit code
+  (PR #149).
 
 ## Links and adapters
 
 - **An audit log that sees only what the code reads misses the evidence.** The ELM driver dropped reply lines nobody
   read before the next request, and adapter commands never reached the log, so a late reply or a changed setting left
-  no trace. Log what the adapter did, not just what the caller used.
+  no trace. Log what the adapter did, not just what the caller used, and log a command that failed too: the raw-mode
+  switch skipped its log entry when an echo check failed, the case where the adapter may have heard something else
+  (PR #149).
 - **An adapter's learned timeout can hide a slow module.** The ELM327's adaptive timing (`AT AT1`) shortens its wait
   to fit the modules that answered fast, so a module that wakes slowly reads as absent. Before acting on "nothing is
   there", as discovery's wide pass does, look again with the adapter's longest wait.
@@ -281,6 +296,11 @@ Each entry names the class, what to check, and where it bit us.
 - **Emulators have quirks too.** ELM327-emulator prints `SEARCHING...` on the first `01 00` even with a fixed
   protocol, which a real adapter doesn't; the test reads PID 20 instead. Note each workaround where it's made
   (M3 branch).
+- **A mode switch changes only what its command says.** `AT CAF0` turns off ISO-TP formatting, but the adapter
+  still pads every frame to 8 bytes (`AT V1` stops that) and still answers anything that looks like a First Frame
+  with flow control of its own (`AT CFC0`). When a new mode relies on the adapter not doing something, find every
+  datasheet feature that does it and turn each off, and make the fake adapter do what the real one does by default
+  (PR #149).
 
 ## Docs vs code
 

@@ -1088,3 +1088,72 @@ fn wide_discovery_finds_a_module_past_the_first_range() {
         assert!(!sent.contains(&never), "{never:03X}");
     }
 }
+
+#[test]
+fn a_tp20_module_opens_a_channel_and_closes_it_once() {
+    use obdcracker_core::tp20::Channel;
+    use obdcracker_transport::tp20::{Answer, Disconnect, Probed, probe};
+    let channel = Channel {
+        send_id: 0x740,
+        receive_id: 0x300,
+    };
+    let mut bus = a7();
+    bus.add_tp20(0x5F, channel).unwrap();
+    let policy = Profile::builtin("a7")
+        .unwrap()
+        .narrow(Policy::read_only())
+        .unwrap();
+    let found = probe(&mut bus, &policy, &[0x09, 0x5F], Timing::default()).unwrap();
+    assert_eq!(
+        found,
+        [Probed {
+            address: 0x5F,
+            answer: Answer::Channel(channel),
+            disconnect: Some(Disconnect::Closed),
+        }]
+    );
+    // A closed channel hears nothing more.
+    let setup = policy.approve_tp20_setup(0x5F).unwrap();
+    let channel = policy
+        .tp20_channel(&setup, 0x25F, &[0x00, 0xD0, 0x00, 0x03, 0x40, 0x07, 0x01])
+        .unwrap();
+    let disconnect = policy.approve_tp20_disconnect(&channel).unwrap();
+    bus.send(&disconnect).unwrap();
+    assert_eq!(bus.recv(TIMEOUT), Err(Error::Timeout));
+    // Nor does any CAN module hear a TP2.0 frame, or the TP2.0 module a CAN request.
+    assert_silent(&mut bus, Target::Physical(0x740), &[0x22, 0xF1, 0x87]);
+}
+
+#[test]
+fn a_tp20_module_must_have_a_channel_a_module_could_give() {
+    use obdcracker_core::tp20::Channel;
+    let channel = |send_id, receive_id| Channel {
+        send_id,
+        receive_id,
+    };
+    let mut bus = a7();
+    bus.add_tp20(0x5F, channel(0x740, 0x300)).unwrap();
+    for (address, bad) in [
+        // Taken, the tester's own address, IDs a setup reply can't carry, the OBD-II IDs, the first
+        // module's, and the gateway's.
+        (0x5F, channel(0x741, 0x301)),
+        (0x00, channel(0x741, 0x301)),
+        (0x09, channel(0x741, 0x741)),
+        (0x09, channel(0x250, 0x301)),
+        (0x09, channel(0x800, 0x301)),
+        (0x09, channel(0x1_0741, 0x301)),
+        (0x09, channel(0x7E0, 0x301)),
+        (0x09, channel(0x741, 0x7E8)),
+        (0x09, channel(0x740, 0x301)),
+        (0x09, channel(0x300, 0x301)),
+        (0x09, channel(0x741, 0x740)),
+        (0x09, channel(0x710, 0x301)),
+    ] {
+        assert!(
+            matches!(bus.add_tp20(address, bad), Err(FixtureError::Value(_))),
+            "{address:02X} {bad:?}"
+        );
+    }
+    // Every module answers the tester on the receive ID its setup asked for.
+    bus.add_tp20(0x09, channel(0x741, 0x300)).unwrap();
+}

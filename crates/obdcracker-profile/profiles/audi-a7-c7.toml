@@ -1544,3 +1544,10 @@ wide_last_request_id = 0x795
 first_request_id = 0x17FC0000
 last_request_id = 0x17FC00FF
 reply_offset = 0x20000
+
+# The modules that stayed silent on 11-bit ISO-TP in car session 5 (#92), though Ross-Tech's C7
+# scan lists them: comfort 05/46 (J393), 09 (J519), 16 (J527), 36 (seat) and 42/52/62/72
+# (doors), and infotainment/MOST 0E, 47, 56 and 5F (MMI). TP2.0 is the main guess for them; none
+# is confirmed (#124).
+[discovery_tp20]
+addresses = [0x05, 0x09, 0x0E, 0x16, 0x36, 0x42, 0x46, 0x47, 0x52, 0x56, 0x5F, 0x62, 0x72]

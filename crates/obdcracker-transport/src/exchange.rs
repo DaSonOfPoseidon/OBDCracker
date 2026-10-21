@@ -1,6 +1,7 @@
 use std::time::{Duration, Instant};
 
 use obdcracker_core::response::{self, Error as ReplyError};
+use obdcracker_core::tp20;
 use obdcracker_safety::{Approved, Protocol};
 
 use crate::{Error, Response, Transport};
@@ -56,7 +57,8 @@ impl Default for Timing {
 /// from its latest one to answer. A module that has answered, or let its P2* run out, is done.
 /// Replies that break these rules are dropped, and so are replies from CAN IDs that `expect`
 /// doesn't accept and replies that don't answer this request (see [`response::answers`], or
-/// [`response::kwp2000_answers`] for a KWP2000 request), such as a late reply to an earlier one. (An [`crate::Audited`] transport still logs them all.)
+/// [`response::kwp2000_answers`] for a KWP2000 request, [`tp20::answers`] for a TP2.0 channel
+/// frame), such as a late reply to an earlier one. (An [`crate::Audited`] transport still logs them all.)
 ///
 /// - [`Expect::ObdEcus`] returns each ECU's answer, which may be none, once every ECU has
 ///   answered or run out of time.
@@ -113,6 +115,7 @@ pub fn exchange<T: Transport + ?Sized>(
                 response::answers_after_pending
             }
             Protocol::Uds => response::answers,
+            Protocol::Tp20Channel => tp20::answers,
         };
         if !answers(asked, &reply.payload) {
             continue;

@@ -1,6 +1,8 @@
 //! The safety policy: allowlist cases and properties that must hold for any input.
 
-use obdcracker_safety::{ModuleIds, NarrowingError, Policy, Protocol, Rejection, Target, Tier};
+use obdcracker_safety::{
+    ModuleIds, NarrowingError, OpenTp20Channel, Policy, Protocol, Rejection, Target, Tier,
+};
 use proptest::prelude::*;
 
 const ENGINE: Target = Target::Physical(0x7E0);
@@ -781,4 +783,196 @@ fn narrowing_refuses_29_bit_pairs_of_mixed_width_or_on_the_wrong_ranges() {
             ])
             .is_ok()
     );
+}
+
+#[test]
+fn a_tp20_channel_setup_is_built_by_the_policy_for_one_address() {
+    let approved = Policy::read_only().approve_tp20_setup(0x5F).unwrap();
+    assert_eq!(approved.protocol(), Protocol::Tp20Channel);
+    assert_eq!(approved.target(), Target::Tp20Setup(0x5F));
+    assert_eq!(approved.target().can_id(), 0x200);
+    assert_eq!(
+        approved.payload(),
+        [0x5F, 0xC0, 0x00, 0x10, 0x00, 0x03, 0x01]
+    );
+    assert_eq!(approved.reply_id(), Some(0x25F));
+    assert_eq!(approved.tier(), Tier::Read);
+    // Address 0 is the tester's own.
+    assert_eq!(
+        Policy::read_only().approve_tp20_setup(0x00),
+        Err(Rejection::WrongTarget)
+    );
+}
+
+// A module's positive answer to a channel setup, giving these IDs: the tester's receive ID, then
+// the one it sends on.
+fn channel_reply(receive: u16, send: u16) -> [u8; 7] {
+    let [receive_low, receive_high] = receive.to_le_bytes();
+    let [send_low, send_high] = send.to_le_bytes();
+    [
+        0x00,
+        0xD0,
+        receive_low,
+        receive_high,
+        send_low,
+        send_high,
+        0x01,
+    ]
+}
+
+// The channel the module at 0x5F opens with these IDs, as `policy` sees it.
+fn opened(policy: &Policy, receive: u16, send: u16) -> Result<OpenTp20Channel, Rejection> {
+    let setup = policy.approve_tp20_setup(0x5F).unwrap();
+    policy.tp20_channel(&setup, 0x25F, &channel_reply(receive, send))
+}
+
+#[test]
+fn a_tp20_disconnect_goes_only_on_a_channel_a_module_opened() {
+    let policy = Policy::read_only();
+    let channel = opened(&policy, 0x300, 0x740).unwrap();
+    assert_eq!((channel.send_id(), channel.receive_id()), (0x740, 0x300));
+    let approved = policy.approve_tp20_disconnect(&channel).unwrap();
+    assert_eq!(approved.protocol(), Protocol::Tp20Channel);
+    assert_eq!(approved.target(), Target::Tp20Channel(0x740));
+    assert_eq!(approved.target().can_id(), 0x740);
+    assert_eq!(approved.payload(), [0xA8]);
+    assert_eq!(approved.reply_id(), Some(0x300));
+    // Only from an approved setup's answer, from the ID that setup is answered on.
+    let setup = policy.approve_tp20_setup(0x5F).unwrap();
+    let reply = channel_reply(0x300, 0x740);
+    assert_eq!(
+        policy.tp20_channel(&setup, 0x260, &reply),
+        Err(Rejection::WrongTarget)
+    );
+    let read = policy
+        .approve(Protocol::Uds, ENGINE, &[0x22, 0xF1, 0x90])
+        .unwrap();
+    assert_eq!(
+        policy.tp20_channel(&read, 0x25F, &reply),
+        Err(Rejection::NotAllowed)
+    );
+    let disconnect = policy.approve_tp20_disconnect(&channel).unwrap();
+    assert_eq!(
+        policy.tp20_channel(&disconnect, 0x300, &reply),
+        Err(Rejection::NotAllowed)
+    );
+    // A refusal, or an answer that isn't a channel, opens nothing.
+    for reply in [
+        &[0x00, 0xD6, 0x00, 0x03, 0x40, 0x07, 0x01][..],
+        &[0x00, 0xD0, 0x00, 0x03, 0x40, 0x07],
+        &[0x00, 0xD0, 0x00, 0x13, 0x40, 0x07, 0x01],
+    ] {
+        assert_eq!(
+            policy.tp20_channel(&setup, 0x25F, reply),
+            Err(Rejection::NotAllowed),
+            "{reply:02X?}"
+        );
+    }
+}
+
+#[test]
+fn a_tp20_disconnect_never_goes_to_ids_a_channel_shouldnt_have() {
+    for (receive, send) in [
+        // Not the receive ID the setup asked for.
+        (0x301, 0x740),
+        (0x740, 0x300),
+        // Below 0x300: the car's own frames, the most urgent first, and the setup range.
+        (0x300, 0x000),
+        (0x300, 0x1FF),
+        // The OBD-II IDs.
+        (0x300, 0x7DF),
+        (0x300, 0x7E0),
+        (0x300, 0x7EF),
+    ] {
+        let policy = Policy::read_only();
+        let rejected = opened(&policy, receive, send)
+            .and_then(|channel| policy.approve_tp20_disconnect(&channel));
+        assert_eq!(
+            rejected,
+            Err(Rejection::WrongTarget),
+            "{receive:X} {send:X}"
+        );
+    }
+    // A narrowed policy refuses a channel on a module's own IDs: A8 there would reach it.
+    for send in [0x710, 0x77A] {
+        let policy = a7();
+        let rejected = opened(&policy, 0x300, send)
+            .and_then(|channel| policy.approve_tp20_disconnect(&channel));
+        assert_eq!(rejected, Err(Rejection::WrongTarget), "{send:X}");
+    }
+    let policy = a7();
+    assert!(
+        policy
+            .approve_tp20_disconnect(&opened(&policy, 0x300, 0x740).unwrap())
+            .is_ok()
+    );
+    let policy = Policy::read_only();
+    for send in [0x301, 0x7DE, 0x7F0, 0x7FF] {
+        assert!(
+            policy
+                .approve_tp20_disconnect(&opened(&policy, 0x300, send).unwrap())
+                .is_ok(),
+            "{send:X}"
+        );
+    }
+}
+
+#[test]
+fn tp20_channel_frames_are_never_approved_from_caller_bytes() {
+    for target in [Target::Tp20Setup(0x5F), Target::Tp20Channel(0x740), ENGINE] {
+        for payload in [
+            &[0x5F, 0xC0, 0x00, 0x10, 0x00, 0x03, 0x01][..],
+            &[0xA8],
+            &[0x1A, 0x9B],
+        ] {
+            assert_eq!(
+                Policy::read_only().approve(Protocol::Tp20Channel, target, payload),
+                Err(Rejection::NotAllowed),
+                "{target:?} {payload:02X?}"
+            );
+        }
+    }
+    // Nor does a service request go to a TP2.0 target.
+    for protocol in [Protocol::Uds, Protocol::Kwp2000] {
+        for target in [Target::Tp20Setup(0x5F), Target::Tp20Channel(0x740)] {
+            assert_eq!(
+                Policy::read_only().approve(protocol, target, &[0x1A, 0x9B]),
+                Err(Rejection::WrongTarget),
+                "{protocol:?} {target:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_policy_narrowed_to_tp20_addresses_sets_up_channels_only_there() {
+    let narrowed = Policy::read_only().narrowed_to_tp20(&[0x5F, 0x09]);
+    assert!(narrowed.approve_tp20_setup(0x5F).is_ok());
+    assert_eq!(
+        narrowed.approve_tp20_setup(0x01),
+        Err(Rejection::WrongTarget)
+    );
+    // Narrowing again narrows further.
+    let again = narrowed.narrowed_to_tp20(&[0x09, 0x01]);
+    assert!(again.approve_tp20_setup(0x09).is_ok());
+    assert_eq!(again.approve_tp20_setup(0x5F), Err(Rejection::WrongTarget));
+    assert_eq!(again.approve_tp20_setup(0x01), Err(Rejection::WrongTarget));
+    // Narrowing to CAN modules leaves the addresses as they were, and the other way round.
+    assert!(a7().approve_tp20_setup(0x5F).is_ok());
+    let both = a7().narrowed_to_tp20(&[0x5F]);
+    assert_eq!(
+        both.approve(Protocol::Uds, Target::Physical(0x7A0), &[0x22, 0xF1, 0x87]),
+        Err(Rejection::WrongTarget)
+    );
+}
+
+proptest! {
+    #[test]
+    fn tp20_narrowing_never_widens(addresses in prop::collection::vec(any::<u8>(), 0..6), address in any::<u8>()) {
+        let narrowed = Policy::read_only().narrowed_to_tp20(&addresses);
+        if narrowed.approve_tp20_setup(address).is_ok() {
+            prop_assert!(Policy::read_only().approve_tp20_setup(address).is_ok());
+            prop_assert!(addresses.contains(&address));
+        }
+    }
 }
