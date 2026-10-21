@@ -164,7 +164,7 @@ pub struct Parameters {
 }
 
 /// Decodes `A1 <block size> <T1> <T2> <T3> <T4>`. Each time is a unit in its top two bits (0.1,
-/// 1, 10 or 100 ms) and a count in the rest; 0xFF means not given, which T1 and T3 must be.
+/// 1, 10 or 100 ms) and a count in the rest; 0xFF means not given, which T1 and T3 must not be.
 ///
 /// # Errors
 ///

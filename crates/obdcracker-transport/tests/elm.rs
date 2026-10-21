@@ -719,6 +719,35 @@ mod requests {
         }
     }
 
+    #[test]
+    fn a_misheard_caf1_never_reaches_the_bus() {
+        // The same for the switch back to ISO-TP, written before the next ISO-TP request.
+        let read = approve(Target::Physical(0x7E0), &[0x09, 0x02]);
+        for index in 0.."ATCAF1".len() {
+            for bit in 0..8 {
+                let mut elm = connect(tp20_car());
+                elm.send(&read).unwrap();
+                while elm.recv(Duration::from_secs(1)).is_ok() {}
+                let setup = Policy::read_only().approve_tp20_setup(0x5F).unwrap();
+                elm.send(&setup).unwrap();
+                while elm.recv(Duration::from_secs(1)).is_ok() {}
+                let sent = elm.link().elm.sent.len();
+                let writes = elm.link().writes.len();
+                elm.link_mut().corrupt_next_write = Some((index, 1 << bit));
+                let result = elm.send(&read);
+                // The flip landed on `ATCAF1`'s characters, written before their carriage return.
+                assert_eq!(elm.link().writes[writes], b"ATCAF1");
+                let on_bus = &elm.link().elm.sent[sent..];
+                if result.is_ok() {
+                    assert_eq!(bit, 5, "{index}");
+                    assert_eq!(on_bus, [(0x7E0, vec![0x09, 0x02])], "{index} {bit}");
+                } else {
+                    assert_eq!(on_bus, [], "{index} {bit}");
+                }
+            }
+        }
+    }
+
     // A busy bus: while the gateway answers, the instruments send a long reply of their own.
     fn busy_bus() -> FakeElm {
         FakeElm::new(Box::new(|header, request| {
