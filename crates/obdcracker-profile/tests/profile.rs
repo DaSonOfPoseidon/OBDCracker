@@ -978,3 +978,72 @@ fn the_a7_profile_has_a_29_bit_discovery_range_over_vags_ids() {
         }
     );
 }
+
+// MINIMAL with a TP2.0 discovery list.
+fn with_tp20_discovery(addresses: &str) -> String {
+    format!("{MINIMAL}\n[discovery_tp20]\naddresses = [{addresses}]\n")
+}
+
+#[test]
+fn a_profile_narrows_tp20_channel_setups_to_its_addresses() {
+    let profile = Profile::from_toml(&with_tp20_discovery("0x5F, 0x09")).unwrap();
+    assert_eq!(profile.tp20_addresses(), [0x5F, 0x09]);
+    let narrowed = [
+        profile.narrow(Policy::read_only()).unwrap(),
+        profile.narrow_for_discovery(Policy::read_only()).unwrap(),
+        profile.narrow_with(Policy::read_only(), &[]).unwrap(),
+    ];
+    for policy in narrowed {
+        assert!(policy.approve_tp20_setup(0x5F).is_ok());
+        assert!(policy.approve_tp20_setup(0x01).is_err());
+    }
+    // Without a list, a profile allows no channel setup at all.
+    let none = Profile::from_toml(MINIMAL).unwrap();
+    assert_eq!(none.tp20_addresses(), Vec::<u8>::new());
+    assert!(
+        none.narrow(Policy::read_only())
+            .unwrap()
+            .approve_tp20_setup(0x5F)
+            .is_err()
+    );
+}
+
+#[test]
+fn rejects_tp20_address_lists_that_are_empty_repeat_or_name_the_tester() {
+    for (addresses, error) in [
+        ("", ProfileError::EmptyTp20Discovery),
+        ("0x00", ProfileError::Tp20Address(0x00)),
+        ("0x5F, 0x09, 0x5F", ProfileError::Tp20Address(0x5F)),
+    ] {
+        assert_eq!(
+            Profile::from_toml(&with_tp20_discovery(addresses)),
+            Err(error),
+            "{addresses}"
+        );
+    }
+    // Not a byte.
+    assert!(matches!(
+        Profile::from_toml(&with_tp20_discovery("0x100")),
+        Err(ProfileError::Toml(_))
+    ));
+}
+
+#[test]
+fn the_a7_profile_lists_the_modules_silent_on_iso_tp_for_tp20() {
+    let profile = Profile::builtin("a7").unwrap();
+    assert_eq!(
+        profile.tp20_addresses(),
+        [
+            0x05, 0x09, 0x0E, 0x16, 0x36, 0x42, 0x46, 0x47, 0x52, 0x56, 0x5F, 0x62, 0x72
+        ]
+    );
+    // None of them is a module the profile already reaches on ISO-TP.
+    for module in &profile.modules {
+        if let Some(address) = module.vag_address {
+            assert!(
+                !profile.tp20_addresses().contains(&address),
+                "{address:02X}"
+            );
+        }
+    }
+}

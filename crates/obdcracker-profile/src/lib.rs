@@ -39,6 +39,18 @@ pub struct Profile {
     pub discovery: Option<Discovery>,
     /// Where to look on 29-bit IDs for modules the profile doesn't list, if anywhere.
     pub discovery_29bit: Option<Discovery29>,
+    /// The VAG addresses to try VW TP2.0 channel setups to, if any. Without it, the profile
+    /// allows no channel setup.
+    pub discovery_tp20: Option<DiscoveryTp20>,
+}
+
+/// The VAG addresses to try VW TP2.0 channel setups to ([`Profile::tp20_addresses`]): at least
+/// one, none of them 0 (the tester's), none twice.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DiscoveryTp20 {
+    /// The addresses, in the order to try them.
+    pub addresses: Vec<u8>,
 }
 
 /// A range of 29-bit request IDs to try for modules a profile doesn't list, each answering on its
@@ -136,9 +148,9 @@ impl Module {
 pub enum Protocol {
     /// UDS (ISO 14229) on ISO-TP.
     Uds,
-    /// KWP2000 (ISO 14230) on ISO-TP. Not supported until the policy is protocol-aware.
+    /// KWP2000 (ISO 14230) on ISO-TP. Nothing reads such a module yet.
     Kwp2000,
-    /// VW TP2.0 transport with KWP2000. Not supported until the policy is protocol-aware.
+    /// VW TP2.0 transport with KWP2000. Nothing reads such a module yet (#142).
     Tp20,
 }
 
@@ -243,6 +255,10 @@ pub enum ProfileError {
     /// The wide discovery range is empty, or isn't within the discovery range's reply IDs (the
     /// only IDs the first pass can show no module answers on), or goes past 0x7FF.
     WideDiscoveryRange,
+    /// The TP2.0 discovery list has no address.
+    EmptyTp20Discovery,
+    /// The TP2.0 discovery list has address 0 (the tester's), or has this address twice.
+    Tp20Address(u8),
 }
 
 impl fmt::Display for ProfileError {
@@ -285,6 +301,11 @@ impl fmt::Display for ProfileError {
             Self::Discovery(e) => write!(f, "discovery: {e}"),
             Self::WideDiscoveryRange => f.write_str(
                 "discovery: the wide range must lie within the discovery range's reply IDs",
+            ),
+            Self::EmptyTp20Discovery => f.write_str("TP2.0 discovery: no address is listed"),
+            Self::Tp20Address(address) => write!(
+                f,
+                "TP2.0 discovery: address {address:02X} is the tester's or is listed twice"
             ),
         }
     }
@@ -334,14 +355,15 @@ impl Profile {
 
     /// Narrows `policy` to this car's modules ([`Policy::narrowed_to`]): physical requests may
     /// then only go to a module's request ID, and each approved request carries its module's
-    /// reply ID. A profile can only narrow the policy, never widen it.
+    /// reply ID, and TP2.0 channel setups may only go to [`Profile::tp20_addresses`]. A profile
+    /// can only narrow the policy, never widen it.
     ///
     /// # Errors
     ///
     /// The modules' IDs are inconsistent, as a profile built or changed by hand can be: a request
     /// ID that is also a reply ID, for example.
     pub fn narrow(&self, policy: Policy) -> Result<Policy, NarrowingError> {
-        policy.narrowed_to(&self.module_ids())
+        self.narrow_with(policy, &[])
     }
 
     /// Like [`Profile::narrow`], but also allows each of [`Profile::candidates`], so modules the
@@ -351,9 +373,16 @@ impl Profile {
     ///
     /// As [`Profile::narrow`], counting the candidates as modules.
     pub fn narrow_for_discovery(&self, policy: Policy) -> Result<Policy, NarrowingError> {
-        let mut modules = self.module_ids();
-        modules.extend(self.candidates());
-        policy.narrowed_to(&modules)
+        self.narrow_with(policy, &self.candidates())
+    }
+
+    /// The addresses to try TP2.0 channel setups to, in order; none without a TP2.0 discovery
+    /// list.
+    #[must_use]
+    pub fn tp20_addresses(&self) -> Vec<u8> {
+        self.discovery_tp20
+            .as_ref()
+            .map_or_else(Vec::new, |discovery| discovery.addresses.clone())
     }
 
     /// Each request ID in the discovery range with its reply ID, in order; none without one.
@@ -469,7 +498,9 @@ impl Profile {
     ) -> Result<Policy, NarrowingError> {
         let mut modules = self.module_ids();
         modules.extend_from_slice(extra);
-        policy.narrowed_to(&modules)
+        Ok(policy
+            .narrowed_to(&modules)?
+            .narrowed_to_tp20(&self.tp20_addresses()))
     }
 
     fn module_ids(&self) -> Vec<ModuleIds> {
@@ -561,6 +592,17 @@ impl Profile {
             Self::validate_29_bit_discovery(discovery)?;
             self.narrow_with(Policy::read_only(), &self.candidates_29bit())
                 .map_err(ProfileError::Discovery)?;
+        }
+        if let Some(discovery) = &self.discovery_tp20 {
+            if discovery.addresses.is_empty() {
+                return Err(ProfileError::EmptyTp20Discovery);
+            }
+            let mut seen = HashSet::new();
+            for &address in &discovery.addresses {
+                if address == 0 || !seen.insert(address) {
+                    return Err(ProfileError::Tp20Address(address));
+                }
+            }
         }
         Ok(())
     }
