@@ -43,8 +43,12 @@ fn writes_a_tp20_channel_frame_as_it_is() {
     // TP2.0 channel frames have no ISO-TP length byte.
     let policy = Policy::read_only();
     let mut dry = DryRun::new(Vec::new());
-    dry.send(&policy.approve_tp20_setup(0x5F).unwrap()).unwrap();
-    dry.send(&policy.approve_tp20_disconnect(0x740, 0x300).unwrap())
+    let setup = policy.approve_tp20_setup(0x5F).unwrap();
+    dry.send(&setup).unwrap();
+    let channel = policy
+        .tp20_channel(&setup, 0x25F, &[0x00, 0xD0, 0x00, 0x03, 0x40, 0x07, 0x01])
+        .unwrap();
+    dry.send(&policy.approve_tp20_disconnect(&channel).unwrap())
         .unwrap();
     assert_eq!(
         String::from_utf8(dry.into_inner()).unwrap(),

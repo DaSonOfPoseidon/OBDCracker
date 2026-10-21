@@ -630,7 +630,8 @@ mod requests {
         while elm.recv(Duration::from_secs(1)).is_ok() {}
         let before = commands(&elm).len();
         let policy = Policy::read_only();
-        elm.send(&policy.approve_tp20_setup(0x5F).unwrap()).unwrap();
+        let setup = policy.approve_tp20_setup(0x5F).unwrap();
+        elm.send(&setup).unwrap();
         assert_eq!(
             elm.recv(Duration::from_secs(1)).unwrap(),
             Response {
@@ -639,7 +640,10 @@ mod requests {
             }
         );
         while elm.recv(Duration::from_secs(1)).is_ok() {}
-        elm.send(&policy.approve_tp20_disconnect(0x740, 0x300).unwrap())
+        let channel = policy
+            .tp20_channel(&setup, 0x25F, &[0x00, 0xD0, 0x00, 0x03, 0x40, 0x07, 0x01])
+            .unwrap();
+        elm.send(&policy.approve_tp20_disconnect(&channel).unwrap())
             .unwrap();
         assert_eq!(
             elm.recv(Duration::from_secs(1)).unwrap(),

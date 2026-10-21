@@ -288,6 +288,7 @@ dependencies = [
 name = "obdcracker-safety"
 version = "0.1.0"
 dependencies = [
+ "obdcracker-core",
  "proptest",
 ]
 

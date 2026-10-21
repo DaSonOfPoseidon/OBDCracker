@@ -106,8 +106,9 @@ obdcracker --serial <PORT> --profile a7 scan --discover-tp20  # then look for VW
 After the scan, sends a VW TP2.0 channel setup (`<address> C0 00 10 00 03 01` on 0x200) to each address in the
 profile's TP2.0 list. On the A7 these are the 13 modules that stayed silent on ISO-TP (#92). For each module that
 answers, it shows the channel it gave, a refusal or the bytes it sent. It then closes each channel with `A8`. It
-sends nothing else: no read goes over a channel yet (#142), and the modules it finds aren't scanned. A disconnect is
-never sent on an ID a profile module uses, or on the OBD-II IDs. If the policy refuses one, the output says so, and
+sends nothing else: no read goes over a channel yet (#142), and the modules it finds aren't scanned. A disconnect goes
+only on a channel a module gave in answer to its setup, answered on 0x300 as the setup asked, and never on an ID
+below 0x300, an ID a profile module uses, or the OBD-II IDs. If the policy refuses one, the output says so, and
 the module closes the idle channel by itself. It needs an adapter that echoes each character as it reads it, such as
 an OBDLink ([why](elm327.md#vw-tp20-channel-frames)).
 

@@ -16,9 +16,12 @@ from developers being careful.
   request in the other**: KWP2000's reads (`17`, `18`, `1A`, `21`, `3E`) aren't UDS services, or are UDS reads, and
   UDS's aren't KWP2000 services. Tests check every form of read both ways.
 - **VW TP2.0 channel frames** (`Protocol::Tp20Channel`) carry no service and take no caller bytes: the policy builds
-  them itself. `approve_tp20_setup` builds a channel setup to one module address (never 0, the tester's), and
-  `approve_tp20_disconnect` builds an `A8` on the channel a module gave. It refuses the setup range, the OBD-II IDs
-  and, once a profile narrows the policy, every ID of that profile's modules, since `A8` there would reach that module.
+  them itself. `approve_tp20_setup` builds a channel setup to one module address (never 0, the tester's).
+  `tp20_channel` turns a positive answer to that setup, from the ID it's answered on, into an `OpenTp20Channel`,
+  which nothing else can build, and `approve_tp20_disconnect` builds an `A8` only on one of those. It needs the
+  receive ID the setup asked for (0x300) and a send ID in 0x300..=0x7FF (below it are the car's own frames and the
+  setup range), not an OBD-II ID and, once a profile narrows the policy, no ID of that profile's modules, since `A8`
+  there would reach that module.
   `approve` refuses both, and refuses any service request to a TP2.0 target.
 - A [vehicle profile](profiles.md) can only narrow what the policy allows, never widen it. That includes the TP2.0
   addresses: a profile without a TP2.0 list allows no channel setup.

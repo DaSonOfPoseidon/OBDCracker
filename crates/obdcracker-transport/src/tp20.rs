@@ -3,10 +3,10 @@
 //! (#142).
 
 use obdcracker_core::tp20::{self, Channel};
-use obdcracker_safety::{Policy, Rejection};
+use obdcracker_safety::{Approved, Policy, Rejection};
 
 use crate::fingerprint::FingerprintError;
-use crate::{Error, Expect, Timing, Transport, exchange};
+use crate::{Error, Expect, Response, Timing, Transport, exchange};
 
 /// How a module answered a channel setup.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -27,7 +27,7 @@ pub enum Disconnect {
     /// It didn't answer in time; the module closes an idle channel by itself.
     NoReply,
     /// The policy refused the disconnect, so nothing was sent: the channel's IDs are another
-    /// module's, or ones a channel can't have.
+    /// module's, or ones the policy doesn't send a disconnect to.
     NotSent(Rejection),
 }
 
@@ -67,17 +67,17 @@ pub fn probe<T: Transport + ?Sized>(
         .collect::<Result<Vec<_>, _>>()?;
     let mut found = Vec::new();
     for (address, setup) in setups {
-        let reply_id = tp20::setup_reply_id(address);
-        let Some(reply) = first_reply(transport, &setup, reply_id, timing)? else {
+        let Some(reply) = first_reply(transport, &setup, tp20::setup_reply_id(address), timing)?
+        else {
             continue;
         };
-        let answer = match tp20::decode_channel_setup(&reply) {
+        let answer = match tp20::decode_channel_setup(&reply.payload) {
             Ok(channel) => Answer::Channel(channel),
             Err(tp20::Error::Refused(op)) => Answer::Refused(op),
-            Err(_) => Answer::Undecodable(reply),
+            Err(_) => Answer::Undecodable(reply.payload.clone()),
         };
         let disconnect = match &answer {
-            Answer::Channel(channel) => Some(close(transport, policy, *channel, timing)?),
+            Answer::Channel(_) => Some(close(transport, policy, &setup, &reply, timing)?),
             _ => None,
         };
         found.push(Probed {
@@ -92,15 +92,19 @@ pub fn probe<T: Transport + ?Sized>(
 fn close<T: Transport + ?Sized>(
     transport: &mut T,
     policy: &Policy,
-    channel: Channel,
+    setup: &Approved,
+    reply: &Response,
     timing: Timing,
 ) -> Result<Disconnect, FingerprintError> {
-    let request = match policy.approve_tp20_disconnect(channel.send_id, channel.receive_id) {
-        Ok(request) => request,
+    let approved = policy
+        .tp20_channel(setup, reply.source, &reply.payload)
+        .and_then(|channel| Ok((channel, policy.approve_tp20_disconnect(&channel)?)));
+    let (channel, request) = match approved {
+        Ok(approved) => approved,
         Err(rejection) => return Ok(Disconnect::NotSent(rejection)),
     };
     Ok(
-        match first_reply(transport, &request, channel.receive_id, timing)? {
+        match first_reply(transport, &request, channel.receive_id(), timing)? {
             Some(_) => Disconnect::Closed,
             None => Disconnect::NoReply,
         },
@@ -110,12 +114,12 @@ fn close<T: Transport + ?Sized>(
 // The first reply from `source` that answers `request`, or None if none came in time.
 fn first_reply<T: Transport + ?Sized>(
     transport: &mut T,
-    request: &obdcracker_safety::Approved,
+    request: &Approved,
     source: u32,
     timing: Timing,
-) -> Result<Option<Vec<u8>>, FingerprintError> {
+) -> Result<Option<Response>, FingerprintError> {
     match exchange(transport, request, Expect::Module(source), timing) {
-        Ok(replies) => Ok(replies.into_iter().next().map(|reply| reply.payload)),
+        Ok(replies) => Ok(replies.into_iter().next()),
         Err(Error::Timeout | Error::StillPending) => Ok(None),
         Err(e) => Err(FingerprintError::Transport(e)),
     }

@@ -63,9 +63,12 @@ fn the_policys_channel_frames_are_the_codecs() {
         assert_eq!(setup.target().can_id(), codec::SETUP_ID);
         assert_eq!(setup.reply_id(), Some(codec::setup_reply_id(address)));
     }
-    let disconnect = Policy::read_only()
-        .approve_tp20_disconnect(0x740, 0x300)
+    let policy = Policy::read_only();
+    let setup = policy.approve_tp20_setup(0x5F).unwrap();
+    let channel = policy
+        .tp20_channel(&setup, 0x25F, &[0x00, 0xD0, 0x00, 0x03, 0x40, 0x07, 0x01])
         .unwrap();
+    let disconnect = policy.approve_tp20_disconnect(&channel).unwrap();
     assert_eq!(disconnect.payload(), codec::DISCONNECT);
 }
 
@@ -128,7 +131,7 @@ fn a_disconnect_the_module_ignores_or_the_policy_refuses_is_reported() {
     // send A8 on; another answers no disconnect.
     let mut car = Car::new(|id, frame| match (id, frame) {
         (0x200, [0x5F, 0xC0, ..]) => reply(0x25F, &[0x00, 0xD0, 0x00, 0x03, 0x10, 0x07, 0x01]),
-        (0x200, [0x09, 0xC0, ..]) => reply(0x209, &[0x00, 0xD0, 0x01, 0x03, 0x40, 0x07, 0x01]),
+        (0x200, [0x09, 0xC0, ..]) => reply(0x209, &[0x00, 0xD0, 0x00, 0x03, 0x41, 0x07, 0x01]),
         _ => Vec::new(),
     });
     let policy = Policy::read_only()

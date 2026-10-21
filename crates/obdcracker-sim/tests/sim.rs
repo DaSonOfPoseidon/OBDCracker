@@ -1113,7 +1113,11 @@ fn a_tp20_module_opens_a_channel_and_closes_it_once() {
         }]
     );
     // A closed channel hears nothing more.
-    let disconnect = policy.approve_tp20_disconnect(0x740, 0x300).unwrap();
+    let setup = policy.approve_tp20_setup(0x5F).unwrap();
+    let channel = policy
+        .tp20_channel(&setup, 0x25F, &[0x00, 0xD0, 0x00, 0x03, 0x40, 0x07, 0x01])
+        .unwrap();
+    let disconnect = policy.approve_tp20_disconnect(&channel).unwrap();
     bus.send(&disconnect).unwrap();
     assert_eq!(bus.recv(TIMEOUT), Err(Error::Timeout));
     // Nor does any CAN module hear a TP2.0 frame, or the TP2.0 module a CAN request.
