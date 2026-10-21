@@ -745,6 +745,30 @@ mod requests {
     }
 
     #[test]
+    fn a_misheard_mode_switch_is_still_reported() {
+        // The audit log needs the command that may have reached the adapter, even when its echo
+        // shows the adapter heard something else.
+        use obdcracker_transport::LinkEvent;
+        let mut elm = connect(tp20_car());
+        elm.send(&approve(Target::Physical(0x7E0), &[0x09, 0x02]))
+            .unwrap();
+        while elm.recv(Duration::from_secs(1)).is_ok() {}
+        elm.take_events();
+        elm.link_mut().corrupt_write_of = Some((b"ATV1".to_vec(), 2, 0x01));
+        let setup = Policy::read_only().approve_tp20_setup(0x5F).unwrap();
+        assert!(elm.send(&setup).is_err());
+        let commands: Vec<String> = elm
+            .take_events()
+            .into_iter()
+            .filter_map(|e| match e {
+                LinkEvent::Command { command, .. } => Some(command),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(commands, ["ATCFC0", "ATV1"]);
+    }
+
+    #[test]
     fn a_raw_reply_like_a_first_frame_gets_no_flow_control() {
         // With `CAF0` alone the adapter would still answer a frame starting `1x` with flow
         // control of its own, which the policy never approved.

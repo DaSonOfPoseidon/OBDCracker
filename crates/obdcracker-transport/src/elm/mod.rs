@@ -575,11 +575,13 @@ impl<L: Link> Elm<L> {
         self.ready()?;
         self.check_idle()?;
         let at = SystemTime::now();
-        self.write(command.as_bytes())?;
-        self.check_early_echo(command)?;
         let mut lines = Vec::new();
+        // Noted however it ends, like every command: a misheard one may still have done
+        // something.
         let answered = self
-            .write(b"\r")
+            .write(command.as_bytes())
+            .and_then(|()| self.check_early_echo(command))
+            .and_then(|()| self.write(b"\r"))
             .and_then(|()| self.read_answer(command, &mut lines));
         self.note(LinkEvent::Command {
             at,
