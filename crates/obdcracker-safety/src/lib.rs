@@ -1,12 +1,8 @@
 //! The only place a request the car may receive can be created.
 //!
 //! Every transport's `send` takes an [`Approved`] request, and only [`Policy::approve`] can make one.
-//! Approval checks the payload against a closed allowlist. Anything that isn't on it is rejected,
-//! unknown services included.
-//!
-//! Service IDs mean different things per protocol, so each request names its [`Protocol`], and each
-//! protocol has its own allowlist: in UDS `85` is `ControlDTCSetting`, while in KWP2000 `10 85` is the
-//! programming session.
+//! Approval checks the payload against a closed allowlist, one per [`Protocol`]: anything not on it is
+//! rejected, unknown services included. See `docs/safety.md` for the model and the addressing rules.
 //!
 //! ```compile_fail
 //! // Approved can't be built outside this crate, so nothing can skip the policy.
@@ -55,8 +51,8 @@ pub enum Target {
     ObdFunctional,
     /// One module's 11-bit request ID.
     Physical(u32),
-    /// One module's 29-bit request ID: ISO 15765-4 normal fixed addressing (`0x18DA<module>F1`,
-    /// from the tester at 0xF1) or VAG's (`0x17FC00xx`). An 11-bit ID is never one of these.
+    /// One module's 29-bit request ID, in the ISO 15765-4 or VAG request range. See
+    /// `docs/safety.md#addressing`.
     Physical29(u32),
     /// A VW TP2.0 channel setup for the module at this address, sent on 0x200.
     Tp20Setup(u8),
@@ -102,10 +98,8 @@ pub enum Rejection {
     Banned,
     /// Not on the allowlist, malformed, or empty.
     NotAllowed,
-    /// UDS or KWP2000 sent to the broadcast address, an 11-bit ID outside 0x700..=0x7FF or one
-    /// OBD-II ECUs answer on (0x7E8..=0x7EF), a 29-bit ID outside the request ranges of
-    /// [`Target::Physical29`], or, once the policy is narrowed to a car's modules
-    /// ([`Policy::narrowed_to`]), any ID that isn't one of their request IDs.
+    /// The target isn't allowed for the request: see `docs/safety.md#addressing`. Once the policy is
+    /// narrowed ([`Policy::narrowed_to`]), any ID that isn't a module's request ID is one too.
     WrongTarget,
 }
 
@@ -145,9 +139,7 @@ pub struct ModuleIds {
 pub enum NarrowingError {
     /// A request ID the policy refuses anyway.
     Request(u32),
-    /// A reply ID of the wrong width for its request ID, outside 0x700..=0x7FF or the broadcast
-    /// ID 0x7DF for an 11-bit one, or outside the 29-bit reply ranges (`0x18DAF1xx`,
-    /// `0x17FE00xx`) for a 29-bit one.
+    /// A reply ID that isn't a valid reply of the request ID's width (`docs/safety.md#addressing`).
     Reply(u32),
     /// An ID that is one module's request ID and a module's reply ID.
     RequestIsReply(u32),
@@ -326,9 +318,8 @@ impl Policy {
         }
     }
 
-    /// A VW TP2.0 channel setup for the module at `address`: `<address> C0 00 10 00 03 01` on
-    /// 0x200 (the module picks the ID it listens on, the tester asks to be answered on 0x300,
-    /// for KWP2000), answered on 0x200 + `address`. It opens a channel and changes nothing.
+    /// A VW TP2.0 channel setup for the module at `address`, sent on 0x200 and answered on
+    /// 0x200 + `address`. It opens a channel and changes nothing.
     ///
     /// # Errors
     ///
@@ -383,10 +374,8 @@ impl Policy {
     ///
     /// # Errors
     ///
-    /// [`Rejection::WrongTarget`] unless the receive ID is 0x300, the one the setup asked for,
-    /// and the send ID is in 0x300..=0x7FF (below it are the car's own frames and the setup
-    /// range), not an OBD-II ID (0x7DF..=0x7EF), and, once the policy is narrowed to a car's
-    /// modules, none of their IDs: `A8` there would reach that module.
+    /// [`Rejection::WrongTarget`] unless the channel's IDs are ones the policy lets `A8` go on
+    /// (`docs/safety.md#addressing`).
     pub fn approve_tp20_disconnect(
         &self,
         channel: &OpenTp20Channel,
@@ -456,8 +445,7 @@ impl Policy {
                     .reply,
             ),
             (Target::Physical(id), None) => OBD_REQUEST_IDS.contains(&id).then(|| id + 8),
-            // ISO 15765-4: the module at `ta` answers the tester on 0x18DAF1<ta>. VAG's pairs come
-            // from a profile.
+            // VAG's reply IDs come from a profile.
             (Target::Physical29(id), None) => {
                 is_iso_29_bit_request(id).then_some(ISO_29_BIT_REPLY | ((id >> 8) & 0xFF))
             }
@@ -482,11 +470,10 @@ enum Kind {
 
 const OBD_FUNCTIONAL_ID: u32 = 0x7DF;
 const MAX_11_BIT: u32 = 0x7FF;
-// VW TP2.0: the tester is address 0, and a channel setup asks the module to answer on 0x300.
+// VW TP2.0: see docs/safety.md#addressing.
 const TP20_TESTER: u8 = 0x00;
 const TP20_TESTER_RECEIVE_ID: u32 = 0x300;
-// ISO 15765-4 normal fixed addressing with the tester at 0xF1: requests 0x18DA<ta>F1, replies
-// 0x18DAF1<sa>. VAG: requests 0x17FC00xx, replies 0x17FE00xx.
+// 29-bit request and reply ranges: see docs/safety.md#addressing.
 const ISO_29_BIT_REQUEST: u32 = 0x18DA_00F1;
 const ISO_29_BIT_REPLY: u32 = 0x18DA_F100;
 const TESTER: u32 = 0xF1;
@@ -505,7 +492,7 @@ fn is_29_bit_reply(id: u32) -> bool {
     (id & 0xFFFF_FF00 == ISO_29_BIT_REPLY && id & 0xFF != TESTER)
         || id & 0xFFFF_FF00 == VAG_29_BIT_REPLY
 }
-// ISO 15765-4: emissions ECUs answer on 0x7E8..=0x7EF (their request ID + 8).
+// ISO 15765-4: emissions ECUs listen on 0x7E0..=0x7E7 and answer on the ID + 8.
 const OBD_REQUEST_IDS: core::ops::RangeInclusive<u32> = 0x7E0..=0x7E7;
 const OBD_RESPONSE_IDS: core::ops::RangeInclusive<u32> = 0x7E8..=0x7EF;
 
@@ -531,34 +518,25 @@ fn classify_uds(payload: &[u8]) -> Option<(Tier, Kind)> {
     // UDS subfunctions use bit 7 to suppress the positive response; it doesn't change the meaning.
     let sub = data.first().map(|b| b & 0x7F);
     let class = match sid {
-        // OBD-II mode 01 current data: one to six PIDs
         0x01 if (1..=6).contains(&data.len()) => (Tier::Read, Kind::Obd),
-        // OBD-II mode 03 stored DTCs
         0x03 if data.is_empty() => (Tier::Read, Kind::Obd),
-        // OBD-II mode 04 clear DTCs
         0x04 if data.is_empty() => (Tier::ClearDtc, Kind::Obd),
-        // OBD-II mode 09 vehicle information: one PID
         0x09 if data.len() == 1 => (Tier::Read, Kind::Obd),
-        // DiagnosticSessionControl: default and extended are reads; programming is flashing
+        // Default and extended sessions are reads; programming is flashing.
         0x10 if data.len() == 1 => match sub? {
             0x01 | 0x03 => (Tier::Read, Kind::Physical),
             0x02 => (Tier::Flash, Kind::Physical),
             _ => return None,
         },
-        // ClearDiagnosticInformation: a 3-byte DTC group
         0x14 if data.len() == 3 => (Tier::ClearDtc, Kind::Physical),
-        // ReadDTCInformation: every subfunction is a read
         0x19 if !data.is_empty() => (Tier::Read, Kind::Physical),
-        // ReadDataByIdentifier: one or more 2-byte DIDs
         0x22 if !data.is_empty() && data.len() % 2 == 0 => (Tier::Read, Kind::Physical),
-        // SecurityAccess unlocks coding
+        // SecurityAccess unlocks coding, so it is as locked as coding.
         0x27 if !data.is_empty() => (Tier::Coding, Kind::Physical),
-        // WriteDataByIdentifier: a DID and at least one byte
         0x2E if data.len() >= 3 => (Tier::Coding, Kind::Physical),
-        // TesterPresent
         0x3E if data.len() == 1 && sub? == 0x00 => (Tier::Read, Kind::Physical),
         // ECUReset, RoutineControl, RequestDownload/Upload, TransferData, RequestTransferExit,
-        // WriteMemoryByAddress: banned whatever their length
+        // WriteMemoryByAddress: banned whatever their length.
         0x11 | 0x31 | 0x34 | 0x35 | 0x36 | 0x37 | 0x3D => (Tier::Flash, Kind::Physical),
         _ => return None,
     };
@@ -570,32 +548,27 @@ fn classify_uds(payload: &[u8]) -> Option<(Tier, Kind)> {
 fn classify_kwp2000(payload: &[u8]) -> Option<Tier> {
     let (&sid, data) = payload.split_first()?;
     let tier = match sid {
-        // StartDiagnosticSession: programming and development reprogram, and adjustment changes
-        // adaptations. No session is a read: what each value means is up to the manufacturer
-        // (ISO 14230-3 leaves 0x80..=0xFF to them), so a profile-specific one will need its own
-        // rule.
+        // Programming and development reprogram; adjustment changes adaptations. No session is a
+        // read: ISO 14230-3 leaves 0x80..=0xFF to the manufacturer, so each needs its own rule.
         0x10 if data.len() == 1 => match data[0] {
             0x85 | 0x86 => Tier::Flash,
             0x87 => Tier::Coding,
             _ => return None,
         },
-        // ClearDiagnosticInformation: its DTC group is optional, and its width the
-        // manufacturer's (ISO 14230-3)
+        // The DTC group is optional and its width the manufacturer's (ISO 14230-3).
         0x14 => Tier::ClearDtc,
-        // ReadStatusOfDiagnosticTroubleCodes and ReadDiagnosticTroubleCodesByStatus: the status
-        // and DTC group parameters' widths are up to the manufacturer (ISO 14230-3)
+        // Parameter widths are the manufacturer's (ISO 14230-3).
         0x17 | 0x18 if !data.is_empty() => Tier::Read,
-        // ReadEcuIdentification (one identification option) and ReadDataByLocalIdentifier (one
-        // local ID; a transmission mode after it would ask for periodic replies, not one read)
+        // Exactly one option or local ID: a transmission mode after it would ask for periodic
+        // replies, not one read.
         0x1A | 0x21 if data.len() == 1 => Tier::Read,
-        // SecurityAccess unlocks coding; WriteDataByCommonIdentifier and
-        // WriteDataByLocalIdentifier, whatever their record's length, change it
+        // SecurityAccess unlocks coding; the writes by common and local ID change it, whatever
+        // their record's length.
         0x27 | 0x2E | 0x3B if !data.is_empty() => Tier::Coding,
-        // TesterPresent, with or without responseRequired (01 yes, 02 no)
+        // responseRequired is 01 (yes) or 02 (no).
         0x3E if matches!(data, [] | [0x01 | 0x02]) => Tier::Read,
-        // ECUReset (0x80..=0xFF are manufacturers' resets), the routines by local ID and by
-        // address, RequestDownload/Upload, TransferData, RequestTransferExit and
-        // WriteMemoryByAddress: banned whatever their length
+        // ECUReset (0x80..=0xFF are manufacturers' resets), the routines, RequestDownload/Upload,
+        // TransferData, RequestTransferExit and WriteMemoryByAddress: banned whatever their length.
         0x11 | 0x31..=0x3A | 0x3D => Tier::Flash,
         _ => return None,
     };
