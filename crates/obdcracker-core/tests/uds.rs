@@ -270,11 +270,13 @@ mod read_dtc_information {
         for (after, result) in [
             (&[0x01][..], Err(Error::TooShort)),
             (&[0x01, 0xF1], Err(Error::TooShort)),
-            (&[0x02, 0xF1, 0x87, 0x00], Err(Error::TooShort)),
-            (&[0xFF, 0xF1, 0x87], Err(Error::TooShort)),
+            (&[0x01, 0xF1, 0x87], Err(Error::TooShort)),
+            (&[0x02, 0xF1, 0x87, 0x00, 0xF1, 0x88], Err(Error::TooShort)),
+            (&[0xFF, 0xF1, 0x87, 0x00], Err(Error::TooShort)),
+            // 0x00 leaves the number of identifiers unsaid (ISO 14229-1).
             (&[0x00], Ok(2)),
-            (&[0x01, 0xF1, 0x87], Ok(4)),
-            (&[0x02, 0xF1, 0x87, 0x00, 0x12], Ok(6)),
+            (&[0x01, 0xF1, 0x87, 0x00], Ok(5)),
+            (&[0x02, 0xF1, 0x87, 0x00, 0xF1, 0x88, 0x00], Ok(8)),
         ] {
             let reply = [&head[..], after].concat();
             assert_eq!(

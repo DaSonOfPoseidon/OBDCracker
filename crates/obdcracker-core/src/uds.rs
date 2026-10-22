@@ -530,8 +530,9 @@ pub struct DtcData<'a> {
 /// # Errors
 ///
 /// A refusal, a reply for another subfunction or DTC, one cut short before the status or inside
-/// its first record (a record number alone, or fewer bytes than the 2-byte DIDs its identifier
-/// count declares), or one whose first record isn't the one asked for (unless every record was).
+/// its first record (a record number alone, or fewer than 3 bytes, a DID and its data, for each
+/// identifier its count declares), or one whose first record isn't the one asked for (unless
+/// every record was).
 pub fn decode_dtc_snapshots(reply: &[u8], dtc: UdsDtc, record: u8) -> Result<DtcData<'_>, Error> {
     dtc_data(reply, REPORT_DTC_SNAPSHOT_BY_DTC, dtc, record)
 }
@@ -569,11 +570,11 @@ fn dtc_data(reply: &[u8], sub: u8, dtc: UdsDtc, record: u8) -> Result<DtcData<'_
     if records.len() == 1 {
         return Err(Error::TooShort);
     }
-    // Each identifier is at least its 2-byte DID; later records can't be checked without the
-    // DIDs' lengths.
+    // Each identifier is a 2-byte DID and at least a byte of data; later records can't be checked
+    // without the DIDs' lengths.
     if let [_, count, identifiers @ ..] = records
         && sub == REPORT_DTC_SNAPSHOT_BY_DTC
-        && identifiers.len() < 2 * usize::from(*count)
+        && identifiers.len() < 3 * usize::from(*count)
     {
         return Err(Error::TooShort);
     }

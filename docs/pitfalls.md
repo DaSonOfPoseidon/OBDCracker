@@ -131,7 +131,8 @@ Each entry names the class, what to check, and where it bit us.
 - **A count inside a reply must be backed by the bytes after it.** A UDS snapshot record holds its number, how many
   identifiers follow, then each identifier's 2-byte DID and data. `decode_dtc_snapshots` only refused a record number
   alone, so `59 04 00 16 A0 01 01 01` (one identifier, no DID) read as data (#143). Where a count's items have a
-  known least size, check the bytes left can hold that many before accepting the reply.
+  known least size, check the bytes left can hold that many before accepting the reply, and count every part of an
+  item: the first fix checked only the DID, so a DID with no data passed (PR #167, Codex).
 - **Match a reply to its request by what it echoes**, not only the service ID: the PID (mode 09), a requested PID
   (mode 01), a requested DID (0x22), the subfunction, and every field the reply repeats, such as the DTC of a
   `19 04`/`19 06` reply: matching those by subfunction alone took a late answer for another DTC (#141, Codex). A late

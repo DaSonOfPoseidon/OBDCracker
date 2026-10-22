@@ -87,7 +87,7 @@ proptest! {
         let _ = uds::decode_dtc_extended_data(&reply, dtc, record);
         // A well-formed reply for this DTC gives back its status and every byte after it. A
         // record number alone is cut short, and so is a first snapshot record with fewer bytes
-        // than the 2-byte DIDs its count declares.
+        // than the 3 bytes (a DID and data) each identifier its count declares takes.
         prop_assume!(records.len() != 1);
         let [_, high, mid, low] = code.to_be_bytes();
         for sub in [0x04, 0x06] {
@@ -99,7 +99,7 @@ proptest! {
                 uds::decode_dtc_extended_data(&reply, dtc, 0xFF)
             };
             let backed = match records[..] {
-                [_, count, ref identifiers @ ..] => identifiers.len() >= 2 * usize::from(count),
+                [_, count, ref identifiers @ ..] => identifiers.len() >= 3 * usize::from(count),
                 _ => true,
             };
             if sub == 0x04 && !backed {
