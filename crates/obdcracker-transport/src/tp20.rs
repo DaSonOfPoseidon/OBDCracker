@@ -111,7 +111,6 @@ fn close<T: Transport + ?Sized>(
     )
 }
 
-// The first reply from `source` that answers `request`, or None if none came in time.
 fn first_reply<T: Transport + ?Sized>(
     transport: &mut T,
     request: &Approved,
