@@ -46,7 +46,7 @@ pub struct Profile {
 }
 
 /// The VAG addresses to try VW TP2.0 channel setups to ([`Profile::tp20_addresses`]): at least
-/// one, none of them 0 (the tester's), none twice.
+/// one, none of them 0 (the tester's) or 0xF0 to 0xFF (broadcasts), none twice.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DiscoveryTp20 {
@@ -252,7 +252,8 @@ pub enum ProfileError {
     WideDiscoveryRange,
     /// The TP2.0 discovery list has no address.
     EmptyTp20Discovery,
-    /// The TP2.0 discovery list has address 0 (the tester's), or has this address twice.
+    /// The TP2.0 discovery list has an address no setup may go to (0, the tester's, or a broadcast
+    /// address from 0xF0), or has this address twice.
     Tp20Address(u8),
 }
 
@@ -300,7 +301,7 @@ impl fmt::Display for ProfileError {
             Self::EmptyTp20Discovery => f.write_str("TP2.0 discovery: no address is listed"),
             Self::Tp20Address(address) => write!(
                 f,
-                "TP2.0 discovery: address {address:02X} is the tester's or is listed twice"
+                "TP2.0 discovery: address {address:02X} is the tester's, a broadcast or listed twice"
             ),
         }
     }
@@ -585,7 +586,8 @@ impl Profile {
             }
             let mut seen = HashSet::new();
             for &address in &discovery.addresses {
-                if address == 0 || !seen.insert(address) {
+                if Policy::read_only().approve_tp20_setup(address).is_err() || !seen.insert(address)
+                {
                     return Err(ProfileError::Tp20Address(address));
                 }
             }

@@ -75,8 +75,8 @@ policy accepts (`Policy::narrowed_to`), and validation checks every ID in a rang
 cars, requests on 0x17FC00xx and replies on 0x17FE00xx: offset 0x20000). Every ID must be above 0x7FF, every candidate
 a 29-bit pair the safety policy accepts, and the range at most 256 IDs (one byte of address, as VAG's scheme has).
 
-`[discovery_tp20]` is `addresses`, the VAG addresses to try in order: at least one, none of them 0 (the tester's),
-none twice.
+`[discovery_tp20]` is `addresses`, the VAG addresses to try in order: at least one, none of them 0 (the tester's) or
+`0xF0` to `0xFF` (broadcasts), none twice.
 
 ## Narrowing the policy
 

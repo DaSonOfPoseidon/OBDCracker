@@ -1125,20 +1125,20 @@ fn a_tp20_module_must_have_a_channel_a_module_could_give() {
     let mut bus = a7();
     bus.add_tp20(0x5F, channel(0x740, 0x300)).unwrap();
     for (address, bad) in [
-        // Taken, the tester's own address, IDs a setup reply can't carry, the OBD-II IDs, the first
-        // module's, and the gateway's.
-        (0x5F, channel(0x741, 0x301)),
-        (0x00, channel(0x741, 0x301)),
-        (0x09, channel(0x741, 0x741)),
-        (0x09, channel(0x250, 0x301)),
-        (0x09, channel(0x800, 0x301)),
-        (0x09, channel(0x1_0741, 0x301)),
-        (0x09, channel(0x7E0, 0x301)),
-        (0x09, channel(0x741, 0x7E8)),
-        (0x09, channel(0x740, 0x301)),
-        (0x09, channel(0x300, 0x301)),
-        (0x09, channel(0x741, 0x740)),
-        (0x09, channel(0x710, 0x301)),
+        // Taken, the tester's own address, broadcasts, IDs a setup reply can't carry, a receive ID
+        // the setup didn't ask for, the OBD-II IDs, the first module's, and the gateway's.
+        (0x5F, channel(0x741, 0x300)),
+        (0x00, channel(0x741, 0x300)),
+        (0xF0, channel(0x741, 0x300)),
+        (0xFF, channel(0x741, 0x300)),
+        (0x09, channel(0x300, 0x300)),
+        (0x09, channel(0x250, 0x300)),
+        (0x09, channel(0x800, 0x300)),
+        (0x09, channel(0x1_0741, 0x300)),
+        (0x09, channel(0x741, 0x301)),
+        (0x09, channel(0x7E0, 0x300)),
+        (0x09, channel(0x740, 0x300)),
+        (0x09, channel(0x710, 0x300)),
     ] {
         assert!(
             matches!(bus.add_tp20(address, bad), Err(FixtureError::Value(_))),
@@ -1147,4 +1147,5 @@ fn a_tp20_module_must_have_a_channel_a_module_could_give() {
     }
     // Every module answers the tester on the receive ID its setup asked for.
     bus.add_tp20(0x09, channel(0x741, 0x300)).unwrap();
+    bus.add_tp20(0xEF, channel(0x742, 0x300)).unwrap();
 }

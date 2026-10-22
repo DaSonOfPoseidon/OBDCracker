@@ -775,10 +775,15 @@ fn a_tp20_channel_setup_is_built_by_the_policy_for_one_address() {
     );
     assert_eq!(approved.reply_id(), Some(0x25F));
     assert_eq!(approved.tier(), Tier::Read);
-    assert_eq!(
-        Policy::read_only().approve_tp20_setup(0x00),
-        Err(Rejection::WrongTarget)
-    );
+    // The tester's own address, and the broadcast addresses, which no one module answers alone.
+    for address in [0x00, 0xF0, 0xFF] {
+        assert_eq!(
+            Policy::read_only().approve_tp20_setup(address),
+            Err(Rejection::WrongTarget),
+            "{address:02X}"
+        );
+    }
+    assert!(Policy::read_only().approve_tp20_setup(0xEF).is_ok());
 }
 
 // A module's positive answer to a channel setup, giving these IDs: the tester's receive ID, then
@@ -848,9 +853,16 @@ fn a_tp20_disconnect_goes_only_on_a_channel_a_module_opened() {
 
 #[test]
 fn a_tp20_disconnect_never_goes_to_ids_a_channel_shouldnt_have() {
+    // A reply that doesn't answer on the 0x300 the setup asked for opens no channel.
+    for (receive, send) in [(0x301, 0x740), (0x740, 0x300)] {
+        let policy = Policy::read_only();
+        assert_eq!(
+            opened(&policy, receive, send).err(),
+            Some(Rejection::NotAllowed),
+            "{receive:X} {send:X}"
+        );
+    }
     for (receive, send) in [
-        (0x301, 0x740),
-        (0x740, 0x300),
         // Below 0x300: the car's own frames, the most urgent first, and the setup range.
         (0x300, 0x000),
         (0x300, 0x1FF),

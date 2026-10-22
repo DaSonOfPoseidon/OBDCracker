@@ -30,7 +30,7 @@ use obdcracker_core::isotp::Addressing;
 use obdcracker_core::tp20::{self, Channel};
 use obdcracker_core::{obd, uds};
 use obdcracker_profile::{Decode, Profile, ProfileError, Protocol, STANDARD_DIDS, standard_decode};
-use obdcracker_safety::{Approved, Target};
+use obdcracker_safety::{Approved, Policy, Target};
 use obdcracker_transport::{Error, Response, Transport};
 
 mod ecu;
@@ -230,27 +230,28 @@ impl SimBus {
     ///
     /// # Errors
     ///
-    /// [`FixtureError::Value`] for address 0 (the tester's), one already taken, or a channel a
-    /// setup reply can't carry or whose IDs another module already uses (all may answer on the
-    /// same receive ID).
+    /// [`FixtureError::Value`] for an address no setup may go to (0, the tester's, or a broadcast
+    /// address from 0xF0), one already taken, or a channel a setup reply can't carry (its receive
+    /// ID must be 0x300, the one the setup asks for) or whose send ID another module already uses.
     pub fn add_tp20(&mut self, address: u8, channel: Channel) -> Result<(), FixtureError> {
         let reply = setup_reply(channel);
-        if address == 0 || tp20::decode_channel_setup(&reply) != Ok(channel) {
+        if Policy::read_only().approve_tp20_setup(address).is_err()
+            || tp20::decode_channel_setup(&reply) != Ok(channel)
+        {
             return Err(FixtureError::Value(format!(
                 "TP2.0 module {address:02X}: no setup reply gives {channel:X?}"
             )));
         }
         let ids = [channel.send_id, channel.receive_id];
-        // Every setup asks to be answered on the same ID, so modules share their receive IDs.
-        let taken = self.tp20.iter().any(|module| {
-            module.address == address
-                || ids.contains(&module.channel.send_id)
-                || channel.send_id == module.channel.receive_id
-        }) || self
-            .ecus
-            .iter()
-            .any(|ecu| ids.contains(&ecu.request_id) || ids.contains(&ecu.response_id))
-            || ids.iter().any(|id| (0x7DF..=0x7EF).contains(id));
+        // Every module answers the tester on 0x300, so only the send IDs must differ.
+        let taken =
+            self.tp20.iter().any(|module| {
+                module.address == address || module.channel.send_id == channel.send_id
+            }) || self
+                .ecus
+                .iter()
+                .any(|ecu| ids.contains(&ecu.request_id) || ids.contains(&ecu.response_id))
+                || ids.iter().any(|id| (0x7DF..=0x7EF).contains(id));
         if taken {
             return Err(FixtureError::Value(format!(
                 "TP2.0 module {address:02X}: the address or {channel:X?} is taken"

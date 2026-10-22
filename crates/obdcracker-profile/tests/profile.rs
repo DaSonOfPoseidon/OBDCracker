@@ -1000,10 +1000,12 @@ fn a_profile_narrows_tp20_channel_setups_to_its_addresses() {
 }
 
 #[test]
-fn rejects_tp20_address_lists_that_are_empty_repeat_or_name_the_tester() {
+fn rejects_tp20_address_lists_that_are_empty_repeat_or_name_the_tester_or_a_broadcast() {
     for (addresses, error) in [
         ("", ProfileError::EmptyTp20Discovery),
         ("0x00", ProfileError::Tp20Address(0x00)),
+        ("0x5F, 0xF0", ProfileError::Tp20Address(0xF0)),
+        ("0xFF", ProfileError::Tp20Address(0xFF)),
         ("0x5F, 0x09, 0x5F", ProfileError::Tp20Address(0x5F)),
     ] {
         assert_eq!(
@@ -1012,6 +1014,7 @@ fn rejects_tp20_address_lists_that_are_empty_repeat_or_name_the_tester() {
             "{addresses}"
         );
     }
+    assert!(Profile::from_toml(&with_tp20_discovery("0x01, 0xEF")).is_ok());
     assert!(matches!(
         Profile::from_toml(&with_tp20_discovery("0x100")),
         Err(ProfileError::Toml(_))

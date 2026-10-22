@@ -48,8 +48,9 @@ pub struct Probed {
 ///
 /// # Errors
 ///
-/// [`FingerprintError::Rejected`] if the policy refuses an address (nothing is sent), or
-/// [`FingerprintError::Transport`] if the adapter fails.
+/// [`FingerprintError::Rejected`], with nothing sent, if the policy refuses an address or one is
+/// given twice ([`Rejection::WrongTarget`]), or [`FingerprintError::Transport`] if the adapter
+/// fails.
 pub fn probe<T: Transport + ?Sized>(
     transport: &mut T,
     policy: &Policy,
@@ -58,7 +59,11 @@ pub fn probe<T: Transport + ?Sized>(
 ) -> Result<Vec<Probed>, FingerprintError> {
     let setups = addresses
         .iter()
-        .map(|&address| {
+        .enumerate()
+        .map(|(i, &address)| {
+            if addresses[..i].contains(&address) {
+                return Err(FingerprintError::Rejected(Rejection::WrongTarget));
+            }
             policy
                 .approve_tp20_setup(address)
                 .map(|setup| (address, setup))

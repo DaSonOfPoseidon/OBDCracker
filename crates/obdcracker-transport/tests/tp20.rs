@@ -56,7 +56,7 @@ fn reply(source: u32, payload: &[u8]) -> Vec<Response> {
 
 #[test]
 fn the_policys_channel_frames_are_the_codecs() {
-    for address in [0x01, 0x5F, 0xFF] {
+    for address in [0x01, 0x5F, 0xEF] {
         let setup = Policy::read_only().approve_tp20_setup(address).unwrap();
         assert_eq!(setup.payload(), codec::channel_setup(address));
         assert_eq!(setup.target().can_id(), codec::SETUP_ID);
@@ -74,18 +74,19 @@ fn the_policys_channel_frames_are_the_codecs() {
 #[test]
 fn finds_the_modules_that_answer_and_closes_their_channels() {
     // 0x5F opens 0x740/0x300 and closes it, 0x09 refuses (no resources), 0x16 sends nonsense,
-    // and 0x46 isn't there.
+    // 0x17 would answer on 0x301 rather than the 0x300 asked for, and 0x46 isn't there.
     let mut car = Car::new(|id, frame| match (id, frame) {
         (0x200, [0x5F, 0xC0, ..]) => reply(0x25F, &[0x00, 0xD0, 0x00, 0x03, 0x40, 0x07, 0x01]),
         (0x200, [0x09, 0xC0, ..]) => reply(0x209, &[0x00, 0xD7, 0x00, 0x03, 0x40, 0x07, 0x01]),
         (0x200, [0x16, 0xC0, ..]) => reply(0x216, &[0x00, 0xD0, 0x00]),
+        (0x200, [0x17, 0xC0, ..]) => reply(0x217, &[0x00, 0xD0, 0x01, 0x03, 0x40, 0x07, 0x01]),
         (0x740, [0xA8]) => reply(0x300, &[0xA8]),
         _ => Vec::new(),
     });
     let found = probe(
         &mut car,
         &Policy::read_only(),
-        &[0x09, 0x16, 0x46, 0x5F],
+        &[0x09, 0x16, 0x17, 0x46, 0x5F],
         TIMING,
     )
     .unwrap();
@@ -103,6 +104,11 @@ fn finds_the_modules_that_answer_and_closes_their_channels() {
                 disconnect: None,
             },
             Probed {
+                address: 0x17,
+                answer: Answer::Undecodable(vec![0x00, 0xD0, 0x01, 0x03, 0x40, 0x07, 0x01]),
+                disconnect: None,
+            },
+            Probed {
                 address: 0x5F,
                 answer: Answer::Channel(Channel {
                     send_id: 0x740,
@@ -117,6 +123,7 @@ fn finds_the_modules_that_answer_and_closes_their_channels() {
         [
             "200 09 C0 00 10 00 03 01",
             "200 16 C0 00 10 00 03 01",
+            "200 17 C0 00 10 00 03 01",
             "200 46 C0 00 10 00 03 01",
             "200 5F C0 00 10 00 03 01",
             "740 A8",
@@ -154,6 +161,16 @@ fn every_setup_is_approved_before_anything_is_sent() {
     let policy = Policy::read_only().narrowed_to_tp20(&[0x5F]);
     assert_eq!(
         probe(&mut car, &policy, &[0x5F, 0x09], TIMING),
+        Err(FingerprintError::Rejected(Rejection::WrongTarget))
+    );
+    assert_eq!(car.sent, Vec::<String>::new());
+}
+
+#[test]
+fn an_address_given_twice_is_refused_before_anything_is_sent() {
+    let mut car = Car::new(|_, _| Vec::new());
+    assert_eq!(
+        probe(&mut car, &Policy::read_only(), &[0x5F, 0x09, 0x5F], TIMING),
         Err(FingerprintError::Rejected(Rejection::WrongTarget))
     );
     assert_eq!(car.sent, Vec::<String>::new());

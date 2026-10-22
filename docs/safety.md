@@ -16,10 +16,10 @@ from developers being careful.
   request in the other**: KWP2000's reads (`17`, `18`, `1A`, `21`, `3E`) aren't UDS services, or are UDS reads, and
   UDS's aren't KWP2000 services. Tests check every form of read both ways.
 - **VW TP2.0 channel frames** (`Protocol::Tp20Channel`) carry no service and take no caller bytes: the policy builds
-  them itself. `approve_tp20_setup` builds a channel setup to one module address (never 0, the tester's).
-  `tp20_channel` turns a positive answer to that setup, from the ID it's answered on, into an `OpenTp20Channel`,
-  which nothing else can build, and `approve_tp20_disconnect` builds an `A8` only on one of those. It needs the
-  receive ID the setup asked for (0x300) and a send ID in 0x300..=0x7FF (below it are the car's own frames and the
+  them itself. `approve_tp20_setup` builds a channel setup to one module address (never 0, the tester's, nor a
+  broadcast address from 0xF0). `tp20_channel` turns a positive answer to that setup, from the ID it's answered on
+  and with the receive ID the setup asked for (0x300), into an `OpenTp20Channel`, which nothing else can build, and
+  `approve_tp20_disconnect` builds an `A8` only on one of those. It needs that receive ID and a send ID in 0x300..=0x7FF (below it are the car's own frames and the
   setup range), not an OBD-II ID and, once a profile narrows the policy, no ID of that profile's modules, since `A8`
   there would reach that module.
   `approve` refuses both, and refuses any service request to a TP2.0 target.
@@ -61,12 +61,13 @@ rule of its own.
   reply ID must have its request ID's width: for 11-bit, `0x700..=0x7FF` but not `0x7DF`; for 29-bit, `0x18DAF1xx`
   (`xx` not `0xF1`) or `0x17FE00xx`. An ID can't be both one module's request and a module's reply, and a request ID
   has one reply ID. A profile only narrows, so it can't make a refused ID allowed.
-- **VW TP2.0:** the tester is address 0, never a channel setup's target. A setup is `<address> C0 00 10 00 03 01` on
-  `0x200`: the module picks the ID it listens on, and the tester asks to be answered on `0x300` (for KWP2000). The
-  module answers on `0x200 + address`. A disconnect (`A8`) is approved only on a channel whose receive ID is `0x300`
-  and whose send ID is in `0x300..=0x7FF` (below it are the car's own frames and the setup range), not in
-  `0x7DF..=0x7EF` (OBD-II) and, once the policy is narrowed to modules, not one of their IDs, since `A8` there would
-  reach that module.
+- **VW TP2.0:** the tester is address 0, never a channel setup's target, and neither is `0xF0..=0xFF`, the
+  broadcast addresses, which more than one module may answer. A setup is `<address> C0 00 10 00 03 01` on `0x200`:
+  the module picks the ID it listens on, and the tester asks to be answered on `0x300` (for KWP2000). The module
+  answers on `0x200 + address`, and a reply that gives any receive ID but `0x300` opens no channel. A disconnect
+  (`A8`) is approved only on a channel whose receive ID is `0x300` and whose send ID is in `0x300..=0x7FF` (below it
+  are the car's own frames and the setup range), not in `0x7DF..=0x7EF` (OBD-II) and, once the policy is narrowed to
+  modules, not one of their IDs, since `A8` there would reach that module.
 
 ## Back up before every change
 
