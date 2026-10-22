@@ -1,4 +1,4 @@
-//! Pure codecs for CAN, ISO-TP, OBD-II and UDS. No IO, `no_std`.
+//! Pure codecs for CAN, ISO-TP, VW TP2.0, OBD-II and UDS. No IO, `no_std`.
 #![no_std]
 
 pub mod isotp;
