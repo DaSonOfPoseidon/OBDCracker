@@ -13,7 +13,6 @@ use obdcracker_transport::{Error, Response, Timing, Transport, hex};
 
 type Answer = Box<dyn FnMut(u32, &[u8]) -> Vec<Response>>;
 
-// Answers each request as it's sent, and records what was sent.
 struct Car {
     answer: Answer,
     replies: VecDeque<Response>,
@@ -62,7 +61,6 @@ const TIMING: Timing = Timing {
     max_pending: 20,
 };
 
-// A reply that couldn't be decoded, kept as it came.
 fn undecodable(error: ReplyError, reply: &[u8]) -> ReadError {
     ReadError::Undecodable {
         error,

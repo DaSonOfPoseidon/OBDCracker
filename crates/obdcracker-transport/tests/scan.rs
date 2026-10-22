@@ -16,7 +16,6 @@ use obdcracker_transport::{Error, Response, S3, SessionError, Timing, Transport,
 
 type Answer = Box<dyn FnMut(u32, &[u8]) -> Vec<Response>>;
 
-// Answers each request as it's sent, and records what was sent.
 struct Car {
     answer: Answer,
     replies: VecDeque<Response>,
@@ -106,7 +105,6 @@ const F187: &[u8] = b"\xF1\x874G0907401N ";
 const F189: &[u8] = b"\xF1\x890016";
 const F191: &[u8] = b"\xF1\x914G0907401E ";
 
-// A reply that couldn't be decoded, kept as it came.
 fn undecodable(error: ReplyError, reply: &[u8]) -> ReadError {
     ReadError::Undecodable {
         error,
@@ -114,7 +112,6 @@ fn undecodable(error: ReplyError, reply: &[u8]) -> ReadError {
     }
 }
 
-// A positive 0x22 reply carrying `values`, each a DID and its data.
 fn dids_reply(values: &[&[u8]]) -> Vec<Response> {
     let mut payload = vec![0x62];
     for value in values {
@@ -123,7 +120,6 @@ fn dids_reply(values: &[&[u8]]) -> Vec<Response> {
     vec![reply(0x7E8, &payload)]
 }
 
-// The engine's DID requests, in the order they were sent.
 fn did_requests(car: &Car) -> Vec<&str> {
     car.sent
         .iter()
@@ -132,7 +128,6 @@ fn did_requests(car: &Car) -> Vec<&str> {
         .collect()
 }
 
-// The text of each DID read, and whether every other one was refused.
 fn texts(scan: &Scan) -> Vec<(u16, String)> {
     scan.modules[0]
         .dids
@@ -178,7 +173,6 @@ fn reads_dids_with_known_lengths_three_at_a_time() {
     }
     assert_eq!(did_requests(&car), expected);
     assert_eq!(texts(&got), READ.map(|(did, text)| (did, text.to_owned())));
-    // Values stay in the order of SCAN_DIDS, then the extra DIDs.
     let order: Vec<u16> = got.modules[0].dids.iter().map(|(did, _)| *did).collect();
     let mut want = SCAN_DIDS.to_vec();
     want.push(0x0600);
@@ -309,10 +303,7 @@ fn a_late_batched_reply_isnt_taken_for_one_did() {
 
 #[test]
 fn after_any_failed_batch_a_did_must_have_its_length() {
-    // Even a refusal can be late: an earlier read's, taken for the multi-DID read's answer
-    // (refusals echo no DID), with the real reply still to come. So a DID read alone after a
-    // batch must be the profile's length; a value of another length (another ECU variant, say)
-    // is malformed, and the profile needs fixing.
+    // A late refusal can pass for the multi-DID answer, so a lone read must be the profile's length.
     let mut car = Car::new(|id, request| match (id, request) {
         (0x7E0, [0x22, 0xF1, 0x87, 0xF1, 0x89, 0xF1, 0x91]) => {
             vec![reply(0x7E8, &[0x7F, 0x22, 0x13])]
@@ -687,7 +678,6 @@ fn a_hex_did_keeps_its_bytes_even_when_they_look_like_text() {
     assert_eq!(value(0xF187), Some(Ok(DidValue::Text("ab".into()))));
 }
 
-// The value of `want` from the only module scanned.
 fn did_value(got: &Scan, want: u16) -> Option<Result<DidValue, ReadError>> {
     got.modules[0]
         .dids
@@ -734,7 +724,6 @@ fn a_profile_format_replaces_the_default_for_a_standard_did_with_no_fixed_format
         did_value(&got, 0xF18C),
         Some(Ok(DidValue::Bytes(vec![0x00, 0x00, 0x00])))
     );
-    // Still read once each, in SCAN_DIDS order.
     let dids: Vec<u16> = got.modules[0].dids.iter().map(|(did, _)| *did).collect();
     assert_eq!(dids, SCAN_DIDS);
 }
@@ -1124,7 +1113,6 @@ fn extended_dids_are_read_in_the_extended_session_after_everything_else() {
         .map(String::as_str)
         .filter(|sent| sent.starts_with("7E0"))
         .collect();
-    // The default session's reads and the DTCs first, then the session, then back.
     let enter = engine.iter().position(|s| *s == "7E0 10 03").unwrap();
     assert_eq!(
         engine[enter..],

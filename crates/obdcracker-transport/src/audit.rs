@@ -69,7 +69,6 @@ impl<T: Transport> Audited<T> {
         error
     }
 
-    // Logs what the transport did besides carrying requests and replies.
     fn record_events(&mut self) -> Result<(), Error> {
         for event in self.inner.take_events() {
             match event {
@@ -204,7 +203,6 @@ pub fn log_failure(
     audited.write(&fields).map_err(io::Error::other)
 }
 
-// Hands out the events it was given, and carries nothing.
 struct Replay(Vec<LinkEvent>);
 
 impl Transport for Replay {

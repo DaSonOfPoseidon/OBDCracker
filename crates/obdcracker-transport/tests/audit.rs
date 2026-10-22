@@ -97,7 +97,6 @@ fn every_line_is_valid_json_whatever_the_link_name() {
     }
 }
 
-// Fails every send and receive with the error it was built with.
 struct Failing(Error);
 
 impl Transport for Failing {
@@ -270,7 +269,6 @@ fn a_transport_that_failed_before_it_could_be_wrapped_is_logged() {
     );
 }
 
-// Fails while finishing its last request.
 struct FailsToSettle;
 
 impl Transport for FailsToSettle {

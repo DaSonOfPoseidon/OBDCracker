@@ -191,7 +191,6 @@ impl fmt::Display for ReadError {
 
 impl std::error::Error for ReadError {}
 
-// Bytes as hex, each after a space.
 struct Spaced<'a>(&'a [u8]);
 
 impl fmt::Display for Spaced<'_> {
@@ -318,7 +317,6 @@ pub fn fingerprint<T: Transport + ?Sized>(
     })
 }
 
-// A DID's data as text, or as bytes if it isn't printable.
 pub(crate) fn decode_did_value(payload: &[u8], did: u16) -> Result<DidValue, response::Error> {
     uds::decode_did(payload, did).map(|data| match uds::decode_text(data) {
         Ok(text) => DidValue::Text(text.to_owned()),
@@ -344,7 +342,6 @@ pub(crate) fn ask<T: Transport + ?Sized, V>(
     }
 }
 
-// Every emissions ECU's answer to a broadcast.
 pub(crate) fn broadcast<T: Transport + ?Sized>(
     transport: &mut T,
     request: &Approved,
@@ -353,7 +350,6 @@ pub(crate) fn broadcast<T: Transport + ?Sized>(
     exchange(transport, request, Expect::ObdEcus, timing).map_err(FingerprintError::Transport)
 }
 
-// Decodes `source`'s reply among `replies`, or NoReply if it didn't answer.
 pub(crate) fn from<V>(
     replies: &[Response],
     source: u32,
@@ -366,7 +362,6 @@ pub(crate) fn from<V>(
     decoded(&reply.payload, decode)
 }
 
-// `reply` decoded: a refusal as such, any other failure with the reply's bytes.
 pub(crate) fn decoded<V>(
     reply: &[u8],
     decode: impl FnOnce(&[u8]) -> Result<V, response::Error>,

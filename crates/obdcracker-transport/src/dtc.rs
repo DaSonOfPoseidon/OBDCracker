@@ -9,7 +9,6 @@ use obdcracker_safety::{Policy, Protocol, Target};
 use crate::fingerprint::{FingerprintError, ReadError, UdsModule, ask};
 use crate::{Timing, Transport};
 
-// The record number that asks for every record.
 const ALL_RECORDS: u8 = 0xFF;
 
 /// A DTC's snapshot or extended data, as one module sent it.
