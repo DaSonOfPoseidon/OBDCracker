@@ -363,7 +363,8 @@ impl<B: AsMut<[u8]>> Reassembler<B> {
     /// field is 0 or doesn't fit the buffer ([`Error::Overflow`]), or the data goes past the
     /// length or a last frame ends before it. The data frames of a dropped message that follow are
     /// [`Progress::Pending`] or [`Progress::Ack`] whatever their sequence numbers and contents;
-    /// a frame that isn't a data frame is still [`Error::Malformed`].
+    /// any other frame is still an error, as from [`Frame::parse`] ([`Error::Malformed`] if it
+    /// parses as something else).
     pub fn feed(&mut self, bytes: &[u8]) -> Result<Progress<'_>, Error> {
         if self.dropping {
             return self.drop_frame(bytes);
