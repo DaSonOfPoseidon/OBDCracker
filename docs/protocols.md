@@ -28,7 +28,7 @@ one payload byte less.
   payload are padding and are ignored. A length of 0 is invalid on classic CAN: `00 <len>` is CAN FD's single frame
   escape, which isn't supported.
 - **First frame** (`1x`): the 12-bit length is longer than a single frame holds, up to 4095. A length of 0 there is the escape (ISO 15765-2:2016): a 32-bit
-  length follows and leaves 2 data bytes in the frame, and only lengths over 4095 may use it. A length that would fit a
+  length follows and leaves 2 data bytes in the frame (1 with extended addressing), and only lengths over 4095 may use it. A length that would fit a
   single frame is invalid, and so is a first frame that isn't full (8 bytes on the wire).
 - **Consecutive frame** (`2x`): a sequence number 0 to 15, wrapping, then at least one data byte. Every consecutive
   frame but the last must be full. The last may carry padding past the payload's end, which the reassembler drops.
@@ -69,7 +69,7 @@ this one's. A positive reply must start with the request's service ID + 0x40 and
 | mode 09 | the PID |
 | `0x22` | one of the requested DIDs |
 | `0x10`, `0x19`, `0x3E` | the subfunction, without the suppress-positive-response bit (bit 7) |
-| `0x19` `0x04`/`0x06` | also the DTC, and the record unless every record was asked for (`0xFF`, or `0xFE` for `0x06`) |
+| `0x19` `0x04`/`0x06` | also the DTC, and the first record unless every record was asked for (`0xFF`, or `0xFE` for `0x06`); a reply with no record has none to compare and is accepted |
 | everything else | the service ID alone |
 
 A request with the suppress bit set gets no positive reply unless the module first sent response-pending (`7F <service>
@@ -86,5 +86,5 @@ check what it reads.
   zero-padded groups of three, so their replies aren't decoded.
 - Mode 01 leaves out unsupported PIDs. A PID the decoder doesn't know ends the readings, as its length is unknown.
 - Mode 09 text fields (VIN, CALID, ECU name) are printable ASCII after trimming 0x00 padding, and a field of nothing
-  but padding is malformed. A VIN uses digits and upper case letters except I, O and Q. An ECU name has no blanks
+  but padding is malformed, except a CALID slot, which is empty (the 2014 A7's engine sends one). A VIN uses digits and upper case letters except I, O and Q. An ECU name has no blanks
   between words (SAE J1979-DA), such as `EngineControl`.
