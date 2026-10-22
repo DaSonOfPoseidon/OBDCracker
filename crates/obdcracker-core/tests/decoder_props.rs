@@ -109,7 +109,6 @@ proptest! {
         prop_assert_eq!(text.len(), 5);
         prop_assert!("PCBU".contains(&text[..1]));
         let digits = u16::from_str_radix(&text[1..], 16).unwrap();
-        // The system letter and the digits together give back the code.
         let system = u16::try_from("PCBU".find(&text[..1]).unwrap()).unwrap();
         prop_assert_eq!(system << 14 | digits, code);
     }
