@@ -20,7 +20,6 @@ mod parse {
 
     #[test]
     fn first_frame_carries_the_total_length() {
-        // First frame of a mode 09 PID 02 VIN reply: 20 bytes in total
         assert_eq!(
             parse(&[0x10, 0x14, 0x49, 0x02, 0x01, 0x31, 0x44, 0x34]),
             Ok(Frame::First {
@@ -61,7 +60,6 @@ mod parse {
                 data: &[0xAA]
             })
         );
-        // The escape is only for lengths over 4095
         assert_eq!(
             parse(&[0x10, 0x00, 0x00, 0x00, 0x0F, 0xFF, 0, 0]),
             Err(Error::BadLength)
@@ -128,7 +126,6 @@ mod parse {
 
     #[test]
     fn extended_addressing_checks_and_skips_the_address_byte() {
-        // Toyota-style body module behind 0x750 with sub-address 0x40
         let toyota = Addressing::Extended(0x40);
         assert_eq!(
             Frame::parse(&[0x40, 0x03, 0x61, 0x01, 0xAA, 0, 0, 0], toyota),
@@ -145,7 +142,6 @@ mod parse {
             Frame::parse(&[0x41, 0x03, 0x61, 0x01, 0xAA], toyota),
             Err(Error::WrongAddress(0x41))
         );
-        // Six payload bytes at most fit a single frame with extended addressing
         assert_eq!(
             Frame::parse(&[0x40, 0x07, 1, 2, 3, 4, 5, 6], toyota),
             Err(Error::BadLength)
@@ -194,7 +190,6 @@ mod segment {
         }
     }
 
-    // 0x22 with four DIDs: F187, F189, F190, F191
     const FOUR_DIDS: [u8; 9] = [0x22, 0xF1, 0x87, 0xF1, 0x89, 0xF1, 0x90, 0xF1, 0x91];
 
     #[test]
@@ -345,7 +340,6 @@ mod segment {
                 .as_bytes(),
             [0x30, 0x00, 0x7F]
         );
-        // Between 900 µs and 1 ms rounds up to 1 ms, never down
         assert_eq!(
             fc(Duration::from_micros(950))
                 .encode(Addressing::Normal)
@@ -353,7 +347,6 @@ mod segment {
                 .as_bytes(),
             [0x30, 0x00, 0x01]
         );
-        // Sub-microsecond remainders round up too
         assert_eq!(
             fc(Duration::from_nanos(100_001))
                 .encode(Addressing::Normal)
@@ -534,7 +527,6 @@ mod reassemble {
         let mut buf = [0; 64];
         let mut rx = Reassembler::new(&mut buf, Addressing::Normal);
         rx.feed(&VIN_FRAMES[0]).unwrap();
-        // 5 payload bytes where 7 are required, and the transfer isn't finished
         assert_eq!(
             rx.feed(&[0x21, 0x47, 0x50, 0x30, 0x30, 0x52]),
             Err(Error::BadLength)
@@ -593,7 +585,6 @@ mod reassemble {
 
     #[test]
     fn round_trips_a_payload_longer_than_a_12_bit_length() {
-        // Over 700 consecutive frames in one block of unlimited size
         let payload: Vec<u8> = (0..5000u16).map(|i| (i % 251).to_le_bytes()[0]).collect();
         assert_eq!(round_trip(&payload, Addressing::Normal), payload);
     }
