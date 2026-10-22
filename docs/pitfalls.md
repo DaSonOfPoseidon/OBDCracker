@@ -181,6 +181,11 @@ Each entry names the class, what to check, and where it bit us.
 - **Output the driver could never have caused is evidence its assumptions broke.** `STOPPED` when the driver never
   interrupts, or a frame from an ID the receive filter excludes, means something else wrote to the adapter or it lost
   a setting. Stop, don't ignore it as noise (M3 branch, Codex).
+- **Widening a parser reclassifies lines other code diagnoses.** Once the ELM codec read four header bytes as a
+  29-bit ID, a headers-off data line after a reset (`03 62 F1 87 34`) parsed as a frame from 0x0362F187, and the
+  driver's "unexpected output" diagnosis became a misleading receive-filter one (#146). When a parser accepts more,
+  check what used to fall through to the other branches, and check the result against the state the driver set
+  (here the ID width).
 - **Check which chip version a command needs.** `AT CRA` with `X` digits is ELM327 v2.0+; most adapters say v1.4b
   or v1.5. Look it up in the datasheet's version history before relying on a command (M3 branch).
 - **One flipped bit on a serial line can turn a command into a bus frame.** An ELM327 sends any line of hex digits to

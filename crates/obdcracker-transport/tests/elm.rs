@@ -564,11 +564,11 @@ mod requests {
     }
 
     #[test]
-    fn a_frame_of_the_wrong_width_or_range_fails_closed_on_a_29_bit_request() {
+    fn a_frame_of_the_wrong_width_or_range_fails_closed() {
         // An 11-bit frame can't pass a 29-bit filter, nor an ISO reply VAG's: the adapter lost
         // its settings.
         // Each target is set up by a first request, so the frame follows the second's echo.
-        let fails_closed = |target: Target, frame: &[u8]| {
+        let fails_closed = |target: Target, frame: &[u8], why: &str| {
             let request = approve(target, &[0x22, 0xF1, 0x87]);
             let mut elm = connect(FakeElm::silent());
             elm.send(&request).unwrap();
@@ -576,20 +576,17 @@ mod requests {
             elm.link_mut().elm.after_echo = frame.to_vec();
             elm.send(&request).unwrap();
             let err = elm.recv(Duration::from_secs(1)).unwrap_err();
-            assert!(
-                err.to_string().contains("receive filter"),
-                "{frame:?}: {err}"
-            );
+            assert!(err.to_string().contains(why), "{frame:?}: {err}");
         };
-        for frame in [
-            &b"77A 03 62 F1 87\r"[..],
-            b"18 DA F1 10 03 62 F1 87\r",
-            b"17 FE 01 10 03 62 F1 87\r",
-        ] {
-            fails_closed(Target::Physical29(0x17FC_0010), frame);
-        }
+        let vag = Target::Physical29(0x17FC_0010);
+        fails_closed(vag, b"77A 03 62 F1 87\r", "not a 29-bit frame");
+        fails_closed(vag, b"18 DA F1 10 03 62 F1 87\r", "receive filter");
+        fails_closed(vag, b"17 FE 01 10 03 62 F1 87\r", "receive filter");
         // And the other way round.
-        fails_closed(Target::Physical(0x710), b"17 FE 00 10 03 62 F1 87\r");
+        let gateway = Target::Physical(0x710);
+        fails_closed(gateway, b"17 FE 00 10 03 62 F1 87\r", "not an 11-bit frame");
+        // Headers off after a reset: the data alone reads like a 29-bit frame (#146).
+        fails_closed(gateway, b"03 62 F1 87 34\r", "not an 11-bit frame");
     }
 
     // A car whose module 0x5F speaks TP2.0: it gives channel 0x740/0x300 and closes it again.
