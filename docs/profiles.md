@@ -34,7 +34,7 @@ the visible text finds them. Module names are unique ignoring case.
 |---|---|
 | `name` | A short name, unique within the profile, such as `engine`. |
 | `vag_address` | The VAG diagnostic address (`01` engine, `19` gateway), on VAG cars only. Unique. |
-| `request_id`, `response_id` | The 11-bit CAN IDs requests go to and the module answers on. Both in 0x700..=0x7FF and not the OBD-II broadcast 0x7DF. A CAN ID may be shared only by modules that each have their own `extended_address`. |
+| `request_id`, `response_id` | The 11-bit CAN IDs requests go to and the module answers on. Both in 0x700..=0x7FF and not the OBD-II broadcast 0x7DF. A CAN ID may be shared only by modules that each have an `extended_address`, all different. |
 | `protocol` | `uds` (ISO 14229 on ISO-TP), `kwp2000` (ISO 14230 on ISO-TP) or `tp20` (VW TP2.0 transport with KWP2000). Nothing reads a `kwp2000` or `tp20` module yet (#142 for TP2.0), and the simulator only simulates `uds` modules. |
 | `extended_address` | The sub-address byte for ISO-TP extended addressing, if the module uses it. |
 | `[[module.did]]` | The data identifiers the module can read beyond the standard ones. |
@@ -62,9 +62,10 @@ policy accepts (`Policy::narrowed_to`), and validation checks every ID in a rang
   `Profile::candidates`, by design: it is a module found past the range, then listed.
 - `wide_last_request_id` (optional) ends a second, wider pass. It starts right after `last_request_id`, with the same
   reply offset, and must lie within the first pass's reply IDs (the only IDs the first pass can show no module answers
-  on), up to 0x7FF. The wide pass skips IDs a known module (listed, or found by the first pass) uses, and any OBD-II
-  ID (0x7DF..=0x7EF). A module that exists and stayed silent in the first pass may still own one of its IDs, so the wide
-  pass can send on that module's reply ID. It is opt-in: a stray read there is a frame no module receives, since modules
+  on), up to 0x7FF. The wide pass skips any OBD-II ID (0x7DF..=0x7EF) and any ID a known module (listed, or found by
+  the first pass) uses, except a candidate that is exactly a known module's request and reply pair. A module that
+  exists and stayed silent in the first pass may still own one of its IDs, so the wide pass can send on that module's
+  reply ID. It is opt-in: a stray read there is a frame no module receives, since modules
   only send on their reply IDs.
 - Before the wide pass, `Profile::recheck_candidates` looks again, more patiently, at first-pass candidates that
   didn't answer and whose reply ID the wide pass would use. That finds a module that was only slow or asleep. One that
@@ -81,5 +82,6 @@ none twice.
 
 `Profile::narrow` narrows a safety policy to the car's modules. Physical requests may then only go to a module's
 request ID, each approved request carries its module's reply ID, and TP2.0 channel setups may only go to the
-`discovery_tp20` addresses. `narrow_for_discovery` also allows the candidates. A profile can only narrow the policy,
+`discovery_tp20` addresses. `narrow_for_discovery` also allows the 11-bit candidates (`Profile::candidates`). For 29-bit or wide discovery, pass
+`candidates_29bit` or `wide_candidates` to `narrow_with` instead. A profile can only narrow the policy,
 never widen it.

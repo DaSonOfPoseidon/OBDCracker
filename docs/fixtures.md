@@ -43,7 +43,7 @@ groups", ISO 14229-1) are refused, as are repeats and more than 65535 (the count
 | `cvns` | Mode 09 PID 06: one per calibration ID, each 4 hex bytes. |
 | `ecu_name` | Mode 09 PID 0A: `acronym` (up to 4 characters) and `name` (up to 15), printable and without blanks. |
 | `dtcs` | Mode 03 codes such as `P0299`, up to 255. `P0000` is refused (it is the padding mode 03 replies use, SAE J1979), and so are repeats. |
-| `pids` | Mode 01 PIDs: 2 hex digits mapped to the data bytes as hex, such as `"0C" = "0C 80"`. Bitmap PIDs (0x00, 0x20, ...) are computed, so they are refused. The data must be exactly one reading of the PID (SAE J1979). |
+| `pids` | Mode 01 PIDs: 2 hex digits mapped to the data bytes as hex, such as `"0C" = "0C 80"`. Bitmap PIDs (0x00, 0x20, ...) are computed, so they are refused. For a PID the decoder knows, the data must be exactly one reading of it (SAE J1979); a PID it doesn't know takes any non-empty data. |
 
 ### `[[ecu.did]]`
 
