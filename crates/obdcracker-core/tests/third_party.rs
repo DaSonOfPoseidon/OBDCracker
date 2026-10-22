@@ -5,8 +5,8 @@
 //! - python-udsoncan, `test/client/test_read_data_by_identifier.py`,
 //!   `test/client/test_read_dtc_information.py` and `test/test_response.py`
 //!
-//! Only read-only (T0) services are ported. Where the sources accept something ISO 14229-1 or
-//! ISO 15765-2 doesn't allow on classic CAN, the test pins our stricter answer and says why.
+//! Only read-only (T0) services are ported. Where a source accepts something the standards don't
+//! allow on classic CAN, the test pins our stricter answer: see docs/protocols.md#where-were-stricter.
 //! Whether to tolerate non-compliant ECUs' zero padding anyway is #36.
 
 // Bytes counting up from `start`, wrapping at 0x100: the sources' `make_payload`.
@@ -44,9 +44,7 @@ mod isotp_frames {
         }
     }
 
-    // test_decode_single_frame_escape_sequence: `00 <len>` is CAN FD's single frame escape. On
-    // classic CAN a single frame length of 0 is invalid (ISO 15765-2), which the source agrees
-    // with for `00 00`.
+    // test_decode_single_frame_escape_sequence
     #[test]
     fn single_frame_escape_is_can_fd_only() {
         assert_eq!(parse(&[0x00]), Err(Error::BadLength));
@@ -76,8 +74,6 @@ mod isotp_frames {
         }
     }
 
-    // The source accepts first frames that ISO 15765-2 rules out: a length that fits a single
-    // frame, or a frame shorter than 8 bytes. Receivers must ignore both.
     #[test]
     fn first_frames_the_standard_rules_out() {
         assert_eq!(parse(&[0x10, 0x02]), Err(Error::BadLength));
@@ -111,8 +107,6 @@ mod isotp_frames {
                 data: &[0x11, 0x22]
             })
         );
-        // The source also takes an escaped length of 4095 or less; ISO 15765-2 keeps the escape
-        // for longer payloads.
         assert_eq!(
             parse(&[0x10, 0x00, 0x00, 0x00, 0x00, 33, 0, 1]),
             Err(Error::BadLength)
@@ -136,8 +130,6 @@ mod isotp_frames {
                 data: &[0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77]
             })
         );
-        // The source accepts a consecutive frame with no data, which carries nothing to
-        // reassemble.
         assert_eq!(parse(&[0x20]), Err(Error::BadLength));
     }
 
@@ -187,8 +179,7 @@ mod isotp_frames {
         );
     }
 
-    // test_decode_flow_control: STmin in milliseconds, hundreds of microseconds, and reserved
-    // values read as 127 ms
+    // test_decode_flow_control
     #[test]
     fn separation_times() {
         let st_min = |byte| match parse(&[0x30, 0xA5, byte]) {
@@ -443,9 +434,7 @@ mod uds_read_data_by_identifier {
             .collect()
     }
 
-    // test_rdbi_multiple_zero_padding_*: the source tolerates trailing 0x00 by default. ISO-TP
-    // padding sits outside the payload length (ISO 15765-2), so bytes past the last DID are a
-    // malformed reply here.
+    // test_rdbi_multiple_zero_padding_*
     #[test]
     fn zero_padding_after_the_last_did_is_malformed() {
         let reply = b"\x62\x00\x01\x12\x34\x00\x02\x56\x78\x00\x03\x11";
@@ -547,8 +536,7 @@ mod uds_read_dtc_information {
         }
     }
 
-    // test_normal_behaviour_harmless_extra_byte: the source ignores bytes after the count.
-    // ISO 14229-1 gives this reply a fixed length, so extra bytes make it malformed here.
+    // test_normal_behaviour_harmless_extra_byte
     #[test]
     fn dtc_count_with_extra_bytes_is_malformed() {
         assert_eq!(
@@ -592,7 +580,7 @@ mod uds_read_dtc_information {
                 Ok((0xFB, vec![(0x12_3456, 0x20), (0x12_3457, 0x60)])),
                 "{sub:02X}"
             );
-            // test_dtc_duplicate: both are kept; avoiding duplicates is the server's job.
+            // test_dtc_duplicate
             let duplicate = reply(sub, b"\xFB\x12\x34\x56\x20\x12\x34\x56\x60");
             assert_eq!(
                 records(decode, &duplicate),
@@ -615,10 +603,7 @@ mod uds_read_dtc_information {
         }
     }
 
-    // test_normal_behaviour_zeropadding_*: by default the source drops trailing 0x00 bytes, and
-    // an all-zero record with them. Neither is padding by ISO 15765-2, which keeps padding
-    // outside the payload length, so here a partial record is malformed and a whole one is a
-    // record. Telling DTC 000000 apart from a real code is left to the caller.
+    // test_normal_behaviour_zeropadding_*
     #[test]
     fn zero_padding_after_the_records() {
         for (sub, decode) in RECORD_REPLIES {
@@ -666,8 +651,7 @@ mod responses {
         );
     }
 
-    // test_from_payload_custom_data_negative: the source keeps bytes after the code. ISO 14229-1's
-    // negative response is exactly three bytes, so here that's malformed.
+    // test_from_payload_custom_data_negative
     #[test]
     fn negative_reply_with_extra_bytes_is_malformed() {
         assert_eq!(
