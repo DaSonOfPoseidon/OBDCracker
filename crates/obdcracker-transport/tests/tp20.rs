@@ -165,3 +165,13 @@ fn every_setup_is_approved_before_anything_is_sent() {
     );
     assert_eq!(car.sent, Vec::<String>::new());
 }
+
+#[test]
+fn an_address_given_twice_is_refused_before_anything_is_sent() {
+    let mut car = Car::new(|_, _| Vec::new());
+    assert_eq!(
+        probe(&mut car, &Policy::read_only(), &[0x5F, 0x09, 0x5F], TIMING),
+        Err(FingerprintError::Rejected(Rejection::WrongTarget))
+    );
+    assert_eq!(car.sent, Vec::<String>::new());
+}
