@@ -371,7 +371,6 @@ fn the_largest_pending_limit_still_ends_the_wait() {
     assert_eq!(ecu.1, usize::from(u16::MAX) + 1);
 }
 
-// Counts the replies another transport hands out.
 #[derive(Debug)]
 struct Counted<T>(T, usize);
 
@@ -440,7 +439,6 @@ fn a_repeating_ecu_cannot_keep_a_broadcast_open() {
     );
 }
 
-// Replies that arrive after a delay, then silence until the wait ends.
 #[derive(Debug)]
 struct Timed(Vec<(Duration, Response)>);
 
