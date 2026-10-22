@@ -142,6 +142,15 @@ proptest! {
     }
 
     #[test]
+    fn tp20_block_sizes_past_15_are_malformed(block_size in 16u8..) {
+        let reply = [0xA1, block_size, 0x8A, 0xFF, 0x4A, 0xFF];
+        prop_assert_eq!(
+            obdcracker_core::tp20::decode_channel_parameters(&reply),
+            Err(obdcracker_core::tp20::Error::Malformed)
+        );
+    }
+
+    #[test]
     fn every_tp20_request_frame_reads_back(sequence in 0u8..=0x0F, payload in prop::collection::vec(any::<u8>(), 1..=5)) {
         use obdcracker_core::tp20;
         let frame = tp20::data_frame(sequence, &payload).unwrap();

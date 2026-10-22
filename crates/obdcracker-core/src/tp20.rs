@@ -161,7 +161,7 @@ pub struct Parameters {
 ///
 /// # Errors
 ///
-/// [`Error::TooShort`] or [`Error::Malformed`], a block size of 0 included.
+/// [`Error::TooShort`] or [`Error::Malformed`], a block size outside 1 to 15 included.
 pub fn decode_channel_parameters(reply: &[u8]) -> Result<Parameters, Error> {
     let &[op, block_size, t1, _t2, t3, _t4] = reply else {
         return Err(if reply.len() < 6 {
@@ -170,7 +170,7 @@ pub fn decode_channel_parameters(reply: &[u8]) -> Result<Parameters, Error> {
             Error::Malformed
         });
     };
-    if op != PARAMETERS_REPLY || block_size == 0 {
+    if op != PARAMETERS_REPLY || !(1..=15).contains(&block_size) {
         return Err(Error::Malformed);
     }
     Ok(Parameters {
