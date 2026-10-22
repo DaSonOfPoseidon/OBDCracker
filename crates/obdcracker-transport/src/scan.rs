@@ -421,7 +421,7 @@ pub(crate) fn session_error(e: SessionError) -> Result<ReadError, ScanError> {
 const BATCH: usize = 3;
 const READ_DIDS_REPLY: u8 = uds::READ_DATA_BY_IDENTIFIER + 0x40;
 
-// The longest reply ISO-TP carries.
+// The most a short ISO-TP first frame declares.
 const MAX_REPLY: usize = 4095;
 
 // Groups the DIDs with a length, in order, up to BATCH a request and as many as one reply can

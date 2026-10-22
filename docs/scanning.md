@@ -1,8 +1,8 @@
 # Scanning
 
 How `scan`, `scan_with` and `sweep_dids` (in `crates/obdcracker-transport`) read a car. Everything here is read-only:
-every request is approved by the policy before the first is sent, and the audit log records each one before it goes
-out.
+every request is approved by the policy before the first is sent. The audit log (the `Audited` wrapper, which the CLI
+uses; a library caller must wrap the transport itself) records each one before it goes out.
 
 ## Module discovery
 
@@ -23,7 +23,7 @@ takes its first extra entry's length and session, and its format unless ISO 1422
 F190 must be a VIN or the placeholder for none.
 
 DIDs with a known length are read up to three in one `22` request (7 bytes, one CAN frame, which every adapter driver
-can send), and as many as one ISO-TP reply (4095 bytes) can carry. A multi-DID reply doesn't say where each value
+can send), and as many as fit in `MAX_REPLY` (4095 bytes, the most a short ISO-TP first frame declares) of reply. A multi-DID reply doesn't say where each value
 ends, so the layout comes from the profile's lengths. The module may leave out DIDs it doesn't support, but those it
 sends must come in the order asked, each at its length, with nothing left over; anything else is malformed.
 
@@ -45,11 +45,12 @@ ignores the mask can't list untested DTCs.
 
 ## Extended session and TesterPresent
 
-DIDs whose profile session is extended are read only with `ScanOptions::extended` (or `SweepOptions::extended`).
-Without it they are `ReadError::NeedsExtendedSession`. With it, a module that has such DIDs and answered something in
+`scan` reads DIDs whose profile session is extended only with `ScanOptions::extended`. Without it they are
+`ReadError::NeedsExtendedSession`. With it, a module that has such DIDs and answered something in
 the default session is put in the extended session after its other reads (`10 03`), kept there with `TesterPresent`
 (`3E 00`) and returned to the default session (`10 01`). A module that answered nothing isn't there, so no session is
-entered for it.
+entered for it. `sweep_dids` doesn't consult profile sessions: without `SweepOptions::extended` every DID is read in the
+default session, and with it the whole range is read in the extended one.
 
 The session's own requests are approved before anything is sent, and the policy must know the module's reply ID
 (narrow it with the vehicle profile), or `FingerprintError::Session` is returned with nothing sent.
@@ -91,7 +92,8 @@ extended session until S3 runs out.
 
 ## When a session fails
 
-A failure to enter, keep or use the session loses only the values it was for; values already read stay.
+A failure to enter, keep or use the session loses only the values it was for; values already read stay. The exception
+is an adapter failure, which makes `scan_with` return an error with no `Scan`.
 
 | Failure | Effect |
 |---|---|
@@ -110,7 +112,8 @@ A module that doesn't confirm `10 01` at the end is left to return after S3.
 
 - A DID refused as out of range (NRC 0x31) isn't there and isn't listed.
 - A DID with no final answer (no reply, or response-pending past `Timing::max_pending`) is listed as `NoReply` or
-  `StillPending`. `QUIET_LIMIT` (3) in a row means the module is gone or stuck, and the sweep stops.
+  `StillPending`. `QUIET_LIMIT` (3) in a row means the module is gone or stuck: the sweep stops with those reads not
+  listed, and `Stop::at` is the first of them.
 - UDS refusals don't name the DID. After an unanswered read, a later refusal or undecodable reply may be the late
   answer to it, even past answers that were plainly this connection's own, so the sweep stops (`Why::Unmatched`) with
   `Stop::at` on that DID. `Sweep::out_of_step` says a read went unanswered, so connect again before reading from the
@@ -122,4 +125,5 @@ A module that doesn't confirm `10 01` at the end is left to return after S3.
 - With `SweepOptions::extended`, the extended session's keepalive or re-entry may fail before a read goes out. That DID
   isn't reported to `progress` and the sweep stops there, since a caller checkpointing on progress would otherwise
   skip it. Resume from `Stop::at`.
-- If leaving the session fails, `Sweep::still_extended` says why the module may still be in it.
+- If leaving the session fails, `Sweep::still_extended` says why the module may still be in it. When the adapter fails
+  on `10 01`, `still_extended` stays `None` and `Sweep::stop` is `Why::Adapter`; the module may still be in the session.
