@@ -11,7 +11,6 @@ use obdcracker_transport::{Error, Response, Timing, Transport, hex};
 
 type Answer = Box<dyn FnMut(u32, &[u8]) -> Vec<Response>>;
 
-// Answers each request as it's sent, and records what was sent.
 struct Car {
     answer: Answer,
     replies: VecDeque<Response>,
