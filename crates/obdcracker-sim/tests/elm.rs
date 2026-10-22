@@ -41,14 +41,12 @@ fn a7_behind_an_elm() -> Elm<FakeLink> {
 }
 
 const READS: &[(u32, &[u8], Expect)] = &[
-    // OBD-II broadcasts: VIN, CALID, CVN, ECU name, stored DTCs, current data
     (0x7DF, &[0x09, 0x02], Expect::ObdEcus),
     (0x7DF, &[0x09, 0x04], Expect::ObdEcus),
     (0x7DF, &[0x09, 0x06], Expect::ObdEcus),
     (0x7DF, &[0x09, 0x0A], Expect::ObdEcus),
     (0x7DF, &[0x03], Expect::ObdEcus),
     (0x7DF, &[0x01, 0x05, 0x0C, 0x0D, 0x42], Expect::ObdEcus),
-    // UDS on the engine (OBD-II IDs) and the gateway (a VAG module ID)
     (0x7E0, &[0x22, 0xF1, 0x90], Expect::Module(0x7E8)),
     (
         0x7E0,
@@ -61,7 +59,6 @@ const READS: &[(u32, &[u8], Expect)] = &[
     (0x7E1, &[0x22, 0xF1, 0x87], Expect::Module(0x7E9)),
     (0x710, &[0x22, 0xF1, 0x87], Expect::Module(0x77A)),
     (0x710, &[0x22, 0xF1, 0x9E], Expect::Module(0x77A)),
-    // A DID nobody has: a refusal
     (0x710, &[0x22, 0x12, 0x34], Expect::Module(0x77A)),
 ];
 

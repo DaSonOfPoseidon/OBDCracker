@@ -43,7 +43,6 @@ fn session(bus: &SimBus) -> Session {
     bus.ecu("engine").unwrap().session()
 }
 
-// Every request sent to the engine so far, as bytes.
 fn sent(bus: &SimBus) -> Vec<Vec<u8>> {
     bus.sent().iter().map(|r| r.payload().to_vec()).collect()
 }

@@ -478,7 +478,6 @@ fn a_did_can_need_the_extended_session() {
     );
     let profile = Profile::from_toml(&toml).unwrap();
     assert_eq!(profile.modules[0].dids[0].session, DidSession::Extended);
-    // Without one, the default session reads it.
     assert_eq!(
         Profile::from_toml(MINIMAL).unwrap().modules[0].dids[0].session,
         DidSession::Default
@@ -499,7 +498,6 @@ fn a_did_can_give_its_length() {
     let toml = MINIMAL.replace("decode = \"text\"", "decode = \"text\"\nlength = 17");
     let profile = Profile::from_toml(&toml).unwrap();
     assert_eq!(profile.modules[0].dids[0].length, Some(17));
-    // Without one, the length is unknown.
     assert_eq!(
         Profile::from_toml(MINIMAL).unwrap().modules[0].dids[0].length,
         None
@@ -711,7 +709,6 @@ fn wide_candidates_skip_every_known_request_and_reply_id() {
     }
     // 0x773 is pass 1's reply ID for 0x709, but nothing answered there.
     assert!(requests.contains(&0x773));
-    // No wide range, no wide candidates.
     let narrow = Profile::from_toml(&with_discovery(0x700, 0x769, 0x6A)).unwrap();
     assert_eq!(narrow.wide_candidates(&[]), []);
 }
@@ -787,7 +784,6 @@ fn recheck_candidates_are_the_silent_first_pass_ids_whose_reply_the_wide_pass_wo
     assert!(!recheck.iter().any(|c| c.request == 0x710));
     // Replies past 0x795 aren't sent to.
     assert!(recheck.iter().all(|c| c.reply <= 0x795), "{recheck:?}");
-    // No wide range, nothing to recheck.
     let narrow = Profile::from_toml(&with_discovery(0x700, 0x769, 0x6A)).unwrap();
     assert_eq!(narrow.recheck_candidates(&[]), []);
 }
@@ -889,7 +885,6 @@ fn a7_did_lengths_match_the_cars_replies() {
     }
 }
 
-// MINIMAL with a 29-bit discovery range.
 fn with_29_bit_discovery(first: u32, last: u32, offset: u32) -> String {
     format!(
         "{MINIMAL}\n[discovery_29bit]\nfirst_request_id = {first}\nlast_request_id = {last}\n\
@@ -908,7 +903,6 @@ fn a_29_bit_discovery_range_lists_each_candidate_and_its_reply_id() {
             reply: request + 0x2_0000,
         })
     );
-    // The 11-bit discovery range is a separate one.
     assert_eq!(profile.candidates(), Vec::<ModuleIds>::new());
     let policy = profile
         .narrow_with(Policy::read_only(), &profile.candidates_29bit())
@@ -930,7 +924,6 @@ fn a_29_bit_discovery_range_lists_each_candidate_and_its_reply_id() {
 #[test]
 fn rejects_29_bit_discovery_ranges_the_policy_refuses_or_that_are_too_long() {
     for (first, last, offset) in [
-        // 11-bit IDs.
         (0x700, 0x710, 0x6A),
         // Past VAG's request range, or onto a request ID.
         (0x17FC_00FF, 0x17FC_0100, 0x2_0000),
@@ -961,7 +954,6 @@ fn rejects_29_bit_discovery_ranges_the_policy_refuses_or_that_are_too_long() {
             "discovery_29bit: the range holds more than 256 request IDs"
         );
     }
-    // 256 is allowed.
     assert!(Profile::from_toml(&with_29_bit_discovery(0x17FC_0000, 0x17FC_00FF, 0x2_0000)).is_ok());
 }
 
@@ -979,7 +971,6 @@ fn the_a7_profile_has_a_29_bit_discovery_range_over_vags_ids() {
     );
 }
 
-// MINIMAL with a TP2.0 discovery list.
 fn with_tp20_discovery(addresses: &str) -> String {
     format!("{MINIMAL}\n[discovery_tp20]\naddresses = [{addresses}]\n")
 }
@@ -1021,7 +1012,6 @@ fn rejects_tp20_address_lists_that_are_empty_repeat_or_name_the_tester() {
             "{addresses}"
         );
     }
-    // Not a byte.
     assert!(matches!(
         Profile::from_toml(&with_tp20_discovery("0x100")),
         Err(ProfileError::Toml(_))

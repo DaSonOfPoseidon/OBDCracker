@@ -9,7 +9,7 @@
 | `obdcracker-safety` | Tiered policy and `Approved` |
 | `obdcracker-transport` | `Transport` trait and adapter backends; scan and sweep ([scanning](scanning.md)), VW TP2.0 channels ([tp20](tp20.md)) |
 | `obdcracker-profile` | Vehicle profiles: module addresses, addressing, protocol and DIDs, as TOML data |
-| `obdcracker-sim` | Simulated ECUs for tests: a profile plus a fixture of what each module answers (built in: `a7`) |
+| `obdcracker-sim` | Simulated ECUs for tests: a profile plus a fixture of what each module answers (built in: `a7`); the fixture format is in [`fixtures.md`](fixtures.md) |
 | `obdcracker-cli` | The `obdcracker` command-line tool |
 
 ## Checks

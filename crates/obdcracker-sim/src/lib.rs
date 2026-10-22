@@ -2,7 +2,7 @@
 //!
 //! A [`SimBus`] is a [`Transport`] whose modules come from a vehicle profile (where each module
 //! sits) and a fixture file (what each module answers). Requests reach it the same way they reach
-//! a real adapter: only as [`Approved`] requests.
+//! a real adapter: only as [`Approved`] requests. See docs/fixtures.md for the fixture format.
 //!
 //! ```
 //! use std::time::Duration;
@@ -148,7 +148,6 @@ impl SimBus {
                         did: did.id,
                     });
                 }
-                // A refused DID has no value to check.
                 let Ok(data) = &did.data else {
                     continue;
                 };
@@ -308,7 +307,7 @@ impl Transport for SimBus {
         for ecu in &mut self.ecus {
             let listens = match request.target() {
                 Target::ObdFunctional => ecu.has_obd(),
-                // A profile's IDs say their width, so a module's 29-bit ID is never 11-bit.
+                // A profile's IDs say their width, so an 11-bit ID never matches a 29-bit one.
                 Target::Physical(id) | Target::Physical29(id) => ecu.request_id == id,
                 Target::Tp20Setup(_) | Target::Tp20Channel(_) => false,
             };

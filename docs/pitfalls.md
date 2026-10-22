@@ -306,6 +306,10 @@ Each entry names the class, what to check, and where it bit us.
 
 - **After every fix, re-read the doc comments on what changed** ("returns every reply", "capped at", "fixture
   order") and the PR description. Fixes silently make them false.
+- **A comment moved into `docs/` loses the item it sat on.** Next to one function, "reads them with
+  `ScanOptions::extended`" or "also allows the candidates" was clear; in a reference page it reads as true of every
+  entry point, ID width and PID. Name the function (`scan_with`, not `scan`), the case (11-bit vs 29-bit, known vs
+  unknown PID) and every exception the code makes (PRs #157, #158, Codex).
 
 ## Tests
 

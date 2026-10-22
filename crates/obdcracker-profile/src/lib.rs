@@ -7,6 +7,8 @@
 //! names a service, so every request to a profile's module still goes through
 //! `obdcracker_safety::Policy::approve`.
 //!
+//! See docs/profiles.md#file-format for the file format.
+//!
 //! ```
 //! use obdcracker_profile::Profile;
 //!
@@ -29,8 +31,7 @@ use serde::Deserialize;
 pub struct Profile {
     /// What car this is, e.g. `2014 Audi A7 3.0 TDI (C7)`.
     pub name: String,
-    /// The diagnostic CAN bus's bitrate in bit/s. It is fixed per car, since a wrong bitrate can
-    /// flood the bus with error frames.
+    /// The diagnostic CAN bus's bitrate in bit/s: 250000 or 500000.
     pub bitrate: u32,
     /// The modules on the bus.
     #[serde(rename = "module", default)]
@@ -54,9 +55,10 @@ pub struct DiscoveryTp20 {
 }
 
 /// A range of 29-bit request IDs to try for modules a profile doesn't list, each answering on its
-/// request ID plus a fixed offset: on VAG cars, requests on 0x17FC00xx and replies on 0x17FE00xx
-/// (offset 0x20000). Every candidate must be a 29-bit pair the safety policy accepts, and the
-/// range at most [`Discovery29::MAX_IDS`] long.
+/// request ID plus a fixed offset. Every candidate must be a 29-bit pair the safety policy
+/// accepts, and the range at most [`Discovery29::MAX_IDS`] long.
+///
+/// See docs/profiles.md#discovery-ranges.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Discovery29 {
@@ -74,10 +76,10 @@ impl Discovery29 {
 }
 
 /// A range of request IDs to try for modules a profile doesn't list, each answering on its
-/// request ID plus a fixed offset (0x6A on VAG cars).
+/// request ID plus a fixed offset. No candidate's request ID may be any module's or candidate's
+/// reply ID.
 ///
-/// No candidate's request ID may be any module's or candidate's reply ID: a request sent there
-/// would look like that module's reply to everything listening.
+/// See docs/profiles.md#discovery-ranges.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Discovery {
@@ -87,14 +89,8 @@ pub struct Discovery {
     pub last_request_id: u32,
     /// What to add to a request ID for its reply ID.
     pub reply_offset: u32,
-    /// Where a second, wider pass ends, if there is one ([`Profile::wide_candidates`]). It starts
-    /// right after [`Discovery::last_request_id`], with the same reply offset, and must lie
-    /// within the first pass's reply IDs. The wider pass skips those a known module (listed, or
-    /// found by the first pass) answers on, but a module that exists and stayed silent in the
-    /// first pass may still own one, so it can send on that module's reply ID. Looking again,
-    /// more patiently, first ([`Profile::recheck_candidates`]) finds one that was only slow; one
-    /// that doesn't answer `22 F187` at all stays unseen. It's opt-in: a
-    /// stray read there is a frame no module receives, as modules only send on their reply IDs.
+    /// Where a second, wider pass ends, if there is one ([`Profile::wide_candidates`]). It is
+    /// opt-in, and can send on the reply ID of a module that stayed silent in the first pass.
     #[serde(default)]
     pub wide_last_request_id: Option<u32>,
 }
@@ -164,9 +160,8 @@ pub struct DidDef {
     pub name: String,
     /// How to show the value.
     pub decode: Decode,
-    /// The value's length in bytes, if the module always sends this many. It's fixed per ECU
-    /// variant, not per DID, and lets several DIDs be read in one request: a multi-DID reply
-    /// doesn't say where each value ends.
+    /// The value's length in bytes, if the module always sends this many. It lets several DIDs
+    /// be read in one request.
     #[serde(default)]
     pub length: Option<u16>,
     /// The diagnostic session the module reads it in: the default one unless the profile says
@@ -353,10 +348,8 @@ impl Profile {
         self.modules.iter().find(|m| m.name == name)
     }
 
-    /// Narrows `policy` to this car's modules ([`Policy::narrowed_to`]): physical requests may
-    /// then only go to a module's request ID, and each approved request carries its module's
-    /// reply ID, and TP2.0 channel setups may only go to [`Profile::tp20_addresses`]. A profile
-    /// can only narrow the policy, never widen it.
+    /// Narrows `policy` to this car's modules ([`Policy::narrowed_to`]) and TP2.0 channel setups
+    /// to [`Profile::tp20_addresses`]. A profile can only narrow the policy, never widen it.
     ///
     /// # Errors
     ///
@@ -386,9 +379,7 @@ impl Profile {
     }
 
     /// Each request ID in the discovery range with its reply ID, in order; none without one.
-    /// One whose reply ID is a listed module's request ID is left out, as no module answers
-    /// there (such as one the wide pass found, [`Profile::wide_candidates`]). An ID past 0x7FF
-    /// is left out too, which [`Profile::validate`] refuses anyway.
+    /// One whose reply ID is a listed module's request ID is left out, and so is one past 0x7FF.
     #[must_use]
     pub fn candidates(&self) -> Vec<ModuleIds> {
         let Some(discovery) = self.discovery else {
@@ -410,11 +401,9 @@ impl Profile {
 
     /// The second, wider pass's candidates ([`Discovery::wide_last_request_id`]): each request ID
     /// after the discovery range with its reply ID, in order, leaving out any whose request or
-    /// reply ID a known module uses another way, or that is an OBD-II ID (0x7DF..=0x7EF), or
-    /// whose reply is past 0x7FF. Known modules are the profile's and `found`, which should be
-    /// everything the first pass found. The wide request IDs are the first pass's reply IDs, and
-    /// a module that didn't answer the first pass (asleep, too slow, or not speaking UDS) may
-    /// still reply on one: see [`Discovery::wide_last_request_id`].
+    /// reply ID a known module uses another way, any OBD-II ID (0x7DF..=0x7EF), and any whose
+    /// reply is past 0x7FF. Known modules are the profile's and `found`, which should be
+    /// everything the first pass found.
     #[must_use]
     pub fn wide_candidates(&self, found: &[ModuleIds]) -> Vec<ModuleIds> {
         let Some(Discovery {
@@ -442,7 +431,6 @@ impl Profile {
                     && !obd.contains(&candidate.request)
                     && !obd.contains(&candidate.reply)
                     && known.iter().all(|module| {
-                        // The same module, or IDs it doesn't use.
                         *module == *candidate
                             || (module.reply != candidate.request
                                 && module.request != candidate.reply
@@ -455,9 +443,7 @@ impl Profile {
 
     /// The first pass's candidates to look for again, more patiently, before the wide pass:
     /// those not in `found` whose reply ID one of [`Profile::wide_candidates`]`(found)` would be
-    /// sent to. A module the first pass missed (asleep, or slow to answer) still answers there,
-    /// so finding it first keeps the wide pass off its reply ID. It can't help with a module that
-    /// doesn't answer `22 F187` at all.
+    /// sent to. Finding such a module first keeps the wide pass off its reply ID.
     #[must_use]
     pub fn recheck_candidates(&self, found: &[ModuleIds]) -> Vec<ModuleIds> {
         let wide = self.wide_candidates(found);
@@ -607,8 +593,6 @@ impl Profile {
         Ok(())
     }
 
-    // The 29-bit discovery range's own checks, for `validate`: every ID in it a 29-bit pair
-    // the policy accepts.
     fn validate_29_bit_discovery(discovery: Discovery29) -> Result<(), ProfileError> {
         let Discovery29 {
             first_request_id: first,
@@ -637,7 +621,6 @@ impl Profile {
         Ok(())
     }
 
-    // The discovery ranges' checks, for `validate`.
     fn validate_discovery(&self, discovery: Discovery) -> Result<(), ProfileError> {
         if discovery.first_request_id > discovery.last_request_id {
             return Err(ProfileError::DiscoveryRange);
@@ -648,10 +631,8 @@ impl Profile {
                 discovery.last_request_id,
             )));
         }
-        // Each ID in the range must be one the policy accepts, whether or not `candidates`
-        // leaves it out, and never a listed module's reply ID. `candidates` leaves out one whose
-        // reply is a listed module's request ID by design (a module found past the range, then
-        // listed), so that alone isn't refused.
+        // Check every ID, not only what `candidates` keeps. A reply ID that is a listed module's
+        // request ID is allowed: that is a module found past the range, then listed.
         for request in discovery.first_request_id..=discovery.last_request_id {
             let candidate = ModuleIds {
                 request,
@@ -670,8 +651,6 @@ impl Profile {
                 )));
             }
         }
-        // The safety policy's own checks: every request ID one it accepts, and no ID both a
-        // request and a reply.
         self.narrow_for_discovery(Policy::read_only())
             .map_err(ProfileError::Discovery)?;
         if let Some(wide_last) = discovery.wide_last_request_id {
