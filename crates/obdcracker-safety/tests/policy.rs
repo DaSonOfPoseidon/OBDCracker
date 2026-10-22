@@ -853,9 +853,16 @@ fn a_tp20_disconnect_goes_only_on_a_channel_a_module_opened() {
 
 #[test]
 fn a_tp20_disconnect_never_goes_to_ids_a_channel_shouldnt_have() {
+    // A reply that doesn't answer on the 0x300 the setup asked for opens no channel.
+    for (receive, send) in [(0x301, 0x740), (0x740, 0x300)] {
+        let policy = Policy::read_only();
+        assert_eq!(
+            opened(&policy, receive, send).err(),
+            Some(Rejection::NotAllowed),
+            "{receive:X} {send:X}"
+        );
+    }
     for (receive, send) in [
-        (0x301, 0x740),
-        (0x740, 0x300),
         // Below 0x300: the car's own frames, the most urgent first, and the setup range.
         (0x300, 0x000),
         (0x300, 0x1FF),

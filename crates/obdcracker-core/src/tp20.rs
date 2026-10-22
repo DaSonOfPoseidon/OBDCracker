@@ -23,6 +23,7 @@ const SETUP_REQUEST: u8 = 0xC0;
 const SETUP_POSITIVE: u8 = 0xD0;
 const SETUP_REFUSALS: [u8; 3] = [0xD6, 0xD7, 0xD8];
 const TESTER_ADDRESS: u8 = 0x00;
+const TESTER_RECEIVE_ID: u32 = 0x300;
 const KWP2000_APPLICATION: u8 = 0x01;
 const ID_INVALID: u8 = 0x10;
 const PARAMETERS_REQUEST: u8 = 0xA0;
@@ -67,13 +68,14 @@ impl core::error::Error for Error {}
 /// A channel setup request for the module at `address`, sent on [`SETUP_ID`], for KWP2000.
 #[must_use]
 pub fn channel_setup(address: u8) -> [u8; 7] {
+    let [receive_low, receive_high, ..] = TESTER_RECEIVE_ID.to_le_bytes();
     [
         address,
         SETUP_REQUEST,
         0x00,
         ID_INVALID,
-        0x00,
-        0x03,
+        receive_low,
+        receive_high,
         KWP2000_APPLICATION,
     ]
 }
@@ -94,7 +96,8 @@ pub struct Channel {
 }
 
 /// Decodes a module's answer to [`channel_setup`]. Only a positive KWP2000 answer to the tester
-/// with two different, valid 11-bit IDs outside the setup range is accepted.
+/// is accepted, with the receive ID the setup asked for (0x300) and a different, valid 11-bit
+/// send ID outside the setup range.
 ///
 /// # Errors
 ///
@@ -118,7 +121,7 @@ pub fn decode_channel_setup(reply: &[u8]) -> Result<Channel, Error> {
     }
     let receive_id = setup_id(rx_low, rx_high)?;
     let send_id = setup_id(tx_low, tx_high)?;
-    if send_id == receive_id {
+    if receive_id != TESTER_RECEIVE_ID || send_id == receive_id {
         return Err(Error::Malformed);
     }
     Ok(Channel {
