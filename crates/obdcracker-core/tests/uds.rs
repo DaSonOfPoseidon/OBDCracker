@@ -104,7 +104,6 @@ mod read_data_by_identifier {
 
     #[test]
     fn multi_identifier_layout_needs_a_length_for_every_did() {
-        // Every DID carries at least one data byte, as for a single-DID read
         let layout = [(did::VIN, 0)];
         assert_eq!(
             decode_dids(&reply(did::VIN, b""), &layout).err(),
@@ -182,7 +181,6 @@ mod read_dtc_information {
     #[test]
     fn decodes_a_dtcs_snapshots_and_extended_data_as_raw_records() {
         let dtc = UdsDtc::new(GATEWAY_DTC);
-        // Record 01, two identifiers: their lengths aren't known, so the records stay raw.
         let snapshots = [
             0x59, 0x04, 0x00, 0x16, 0xA0, 0x01, 0x01, 0x02, 0x02, 0x00, 0x12, 0x02, 0x03, 0x34,
         ];
@@ -205,7 +203,6 @@ mod read_dtc_information {
                 records: &[0x01, 0x05],
             })
         );
-        // No records stored: just the DTC and its status.
         assert_eq!(
             decode_dtc_snapshots(&[0x59, 0x04, 0x00, 0x16, 0xA0, 0x01], dtc, 0xFF),
             Ok(DtcData {
@@ -219,25 +216,21 @@ mod read_dtc_information {
     fn a_dtc_detail_reply_must_echo_the_dtc_and_record_asked_for() {
         let dtc = UdsDtc::new(GATEWAY_DTC);
         for (reply, record, error) in [
-            // Another DTC's answer, such as a late one.
             (
                 &[0x59, 0x04, 0x00, 0x16, 0xA1, 0x01][..],
                 0xFF,
                 Error::Malformed,
             ),
-            // Another subfunction: the extended data answers no snapshot request.
             (
                 &[0x59, 0x06, 0x00, 0x16, 0xA0, 0x01],
                 0xFF,
                 Error::Malformed,
             ),
-            // Another record than the one asked for.
             (
                 &[0x59, 0x04, 0x00, 0x16, 0xA0, 0x01, 0x02, 0x00],
                 0x01,
                 Error::Malformed,
             ),
-            // Cut short before the status, or after a record number.
             (&[0x59, 0x04, 0x00, 0x16, 0xA0], 0xFF, Error::TooShort),
             (
                 &[0x59, 0x04, 0x00, 0x16, 0xA0, 0x01, 0x01],
@@ -288,7 +281,6 @@ mod read_dtc_information {
 
     #[test]
     fn decodes_dtcs_by_status_mask() {
-        // P0401-00 confirmed with the warning lamp on; U0100-00 pending
         let reply = [
             0x59, 0x02, 0xFF, 0x04, 0x01, 0x00, 0x88, 0xC1, 0x00, 0x00, 0x24,
         ];
@@ -428,7 +420,6 @@ mod session {
     #[test]
     fn rejects_a_session_timing_reply_that_does_not_fit() {
         let extended = DiagnosticSession::Extended;
-        // Another session's echo.
         assert_eq!(
             decode_session_timing(&[0x50, 0x01, 0x00, 0x32, 0x01, 0xF4], extended),
             Err(Error::Malformed)
