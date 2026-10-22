@@ -269,6 +269,19 @@ fn a_reply_that_breaks_the_framing_is_dropped_and_the_next_one_still_reads() {
 }
 
 #[test]
+fn a_non_data_frame_in_a_dropped_message_is_malformed() {
+    let mut buf = [0u8; 64];
+    let mut reply = Reassembler::new(&mut buf[..]);
+    assert!(reply.feed(&[0x20, 0x00, 0x02, 1, 2, 3]).is_err());
+    assert_eq!(reply.feed(&[0xA3]), Err(Error::Malformed));
+    // Still dropping: the rest of the message doesn't start a new one.
+    assert_eq!(
+        reply.feed(&[0x21, 0x00, 0x02, 0xAA, 0xBB]),
+        Ok(Progress::Pending)
+    );
+}
+
+#[test]
 fn the_rest_of_a_dropped_message_never_reads_as_a_new_one() {
     // Only a last frame is marked (docs/tp20.md#frames): later frames must not start a message.
     for bad in [
