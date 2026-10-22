@@ -1,4 +1,5 @@
-// The fixture file format: what each simulated module answers. Addresses come from the profile.
+//! The fixture file format: what each simulated module answers. Addresses come from the profile.
+//! See docs/fixtures.md.
 
 use std::collections::{BTreeMap, HashSet};
 
@@ -19,17 +20,11 @@ pub(crate) struct FixtureFile {
 #[serde(deny_unknown_fields)]
 pub(crate) struct EcuFixture {
     pub(crate) module: String,
-    // ISO 14229-1 D.4, sent in the count report (0x01); 0x01 (ISO 14229-1's own format) unless
-    // the fixture says otherwise.
     dtc_format: Option<u8>,
-    // The status bits the module supports (ISO 14229-1 D.2); every one unless the fixture says
-    // otherwise.
     #[serde(default = "every_status_bit")]
     status_availability: u8,
-    // The ReadDTCInformation reports it answers; the others get NRC 0x12.
     #[serde(default = "every_dtc_report")]
     dtc_reports: Vec<u8>,
-    // How many response-pending replies come before each positive DTC report.
     #[serde(default)]
     dtc_pending: u8,
     obd: Option<ObdFixture>,
@@ -41,9 +36,6 @@ pub(crate) struct EcuFixture {
     raw: Vec<RawFixture>,
 }
 
-// A reply the car sent that the sim can't build, such as one too short to decode: sent as is
-// to exactly this request, after `pending` response-pending replies. Not for session control,
-// which changes the module's state.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawFixture {
@@ -53,8 +45,7 @@ struct RawFixture {
     pending: u8,
 }
 
-// The ReadDTCInformation reports the sim implements: count by status mask, DTCs by status mask,
-// one DTC's snapshots and extended data (with no records), and supported DTCs.
+// The ReadDTCInformation sub-functions the sim implements.
 const DTC_REPORTS: [u8; 5] = [0x01, 0x02, 0x04, 0x06, 0x0A];
 
 fn every_status_bit() -> u8 {
@@ -65,14 +56,12 @@ fn every_dtc_report() -> Vec<u8> {
     DTC_REPORTS.to_vec()
 }
 
-// How a module answers `ReadDTCInformation`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct DtcService {
     pub(crate) format: u8,
     pub(crate) availability: u8,
     pub(crate) reports: Vec<u8>,
     pub(crate) dtcs: Vec<(u32, u8)>,
-    // Response-pending replies before each positive report.
     pub(crate) pending: u8,
 }
 
@@ -87,7 +76,6 @@ struct ObdFixture {
     ecu_name: Option<EcuNameFixture>,
     #[serde(default)]
     dtcs: Vec<String>,
-    // Mode 01 PID (2 hex digits) → data bytes as hex
     #[serde(default)]
     pids: BTreeMap<String, String>,
 }
@@ -107,10 +95,8 @@ struct DidFixture {
     hex: Option<String>,
     #[serde(default)]
     session: SessionFixture,
-    // Response-pending replies before the answer or refusal.
     #[serde(default)]
     pending: u8,
-    // Refused with this NRC instead of answered.
     nrc: Option<u8>,
 }
 
@@ -139,7 +125,7 @@ fn value_error(what: &str, value: &str) -> FixtureError {
     FixtureError::Value(format!("{what}: {value:?}"))
 }
 
-// Only hex digits: from_str_radix also takes a leading `+`.
+// `from_str_radix` also takes a leading `+`, so check every character first.
 fn is_hex(text: &str) -> bool {
     text.bytes().all(|b| b.is_ascii_hexdigit())
 }
@@ -158,7 +144,6 @@ fn is_printable(text: &str) -> bool {
     text.bytes().all(|b| (0x20..0x7F).contains(&b))
 }
 
-// Space-separated hex bytes, such as `0C 80`.
 fn hex_bytes(text: &str) -> Result<Vec<u8>, FixtureError> {
     let bytes = text
         .split_whitespace()
@@ -177,7 +162,6 @@ fn hex_bytes(text: &str) -> Result<Vec<u8>, FixtureError> {
     Ok(bytes)
 }
 
-// `text` as bytes, 0x00-padded to `len`. Must be printable ASCII, not blank, and fit.
 fn padded(text: &str, len: usize, what: &str) -> Result<Vec<u8>, FixtureError> {
     if text.trim().is_empty() || text.len() > len || !is_printable(text) {
         return Err(value_error(what, text));
@@ -187,7 +171,6 @@ fn padded(text: &str, len: usize, what: &str) -> Result<Vec<u8>, FixtureError> {
     Ok(bytes)
 }
 
-// An SAE J2012 code such as `P0299` as its two bytes. P0000 is refused.
 fn dtc_code(text: &str) -> Result<u16, FixtureError> {
     let bad = || value_error("bad DTC", text);
     let mut chars = text.chars();

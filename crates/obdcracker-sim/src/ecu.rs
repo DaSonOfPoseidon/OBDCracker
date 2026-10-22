@@ -1,4 +1,4 @@
-// One simulated module: answers requests the way a UDS ECU with optional OBD-II support does.
+//! One simulated module: answers requests the way a UDS ECU with optional OBD-II support does.
 
 use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
@@ -29,9 +29,9 @@ pub enum Fault {
 
 #[derive(Debug, Default)]
 pub(crate) struct Obd {
-    // Mode 01 PID → data bytes. Bitmap PIDs are computed from these.
+    // Bitmap PIDs are computed from these.
     pub(crate) pids: BTreeMap<u8, Vec<u8>>,
-    // Mode 09 PID → item count and data bytes.
+    // Item count and data bytes.
     pub(crate) info: BTreeMap<u8, (u8, Vec<u8>)>,
     pub(crate) dtcs: Vec<u16>,
 }
@@ -39,14 +39,11 @@ pub(crate) struct Obd {
 #[derive(Debug)]
 pub(crate) struct Did {
     pub(crate) id: u16,
-    // Its value, or the NRC the module refuses it with.
     pub(crate) data: Result<Vec<u8>, u8>,
     pub(crate) extended_only: bool,
-    // How many response-pending replies come before the answer.
     pub(crate) pending: u8,
 }
 
-// A reply the car sent that the sim can't build, to exactly this request.
 #[derive(Debug)]
 pub(crate) struct RawReply {
     pub(crate) request: Vec<u8>,
@@ -66,7 +63,6 @@ pub struct Ecu {
     pub(crate) raw: Vec<RawReply>,
     pub(crate) session: Session,
     pub(crate) fault: Option<Fault>,
-    // How long a non-default session lasts without a request (S3server), and when the last one came.
     pub(crate) s3: Duration,
     pub(crate) last_request: Instant,
 }
@@ -76,7 +72,7 @@ pub(crate) const S3_DEFAULT: Duration = Duration::from_secs(5);
 
 const NEGATIVE: u8 = 0x7F;
 const POSITIVE_OFFSET: u8 = 0x40;
-// P2 50 ms, P2* 5000 ms (in 10 ms units), as ISO 14229-2 defaults.
+// P2 50 ms, P2* 5000 ms in 10 ms units (ISO 14229-2 defaults).
 const SESSION_TIMING: [u8; 4] = [0x00, 0x32, 0x01, 0xF4];
 const SUPPRESS_POSITIVE: u8 = 0x80;
 
@@ -123,9 +119,8 @@ impl Ecu {
         self.obd.is_some()
     }
 
-    // Every reply to `request`, in order, after any fault is applied.
     pub(crate) fn answer(&mut self, request: &[u8], functional: bool) -> Vec<Vec<u8>> {
-        // Every request restarts S3, after a session that ran out has fallen back.
+        // Fall back first if S3 ran out, then restart it.
         self.session = self.session();
         self.last_request = Instant::now();
         let mut replies = self.handle(request, functional);
@@ -225,7 +220,7 @@ impl Ecu {
             .filter(|&&(_, status)| sub == 0x0A || status & availability & mask != 0);
         let mut reply = vec![0x59, sub, availability];
         if sub == 0x01 {
-            // The fixture holds at most u16::MAX DTCs
+            // The fixture refuses more than u16::MAX DTCs, so this never saturates.
             let count = u16::try_from(matching.count()).unwrap_or(u16::MAX);
             reply.push(self.dtc.format);
             reply.extend(count.to_be_bytes());
@@ -329,7 +324,7 @@ impl Obd {
                 }
             }
             (0x03, []) => {
-                // build() caps the list at 255 codes
+                // The fixture refuses more than 255 codes, so this never saturates.
                 reply.push(u8::try_from(self.dtcs.len()).unwrap_or(u8::MAX));
                 for dtc in &self.dtcs {
                     reply.extend(dtc.to_be_bytes());
@@ -367,7 +362,7 @@ impl Obd {
     }
 }
 
-// Bit 31 is PID base+1 and bit 0 is base+0x20; `next` sets bit 0 for the next bitmap PID.
+// Bit 31 is PID base+1 and bit 0 is base+0x20 (set by `next`), as SAE J1979 gives it.
 fn bitmap(base: u8, pids: impl Iterator<Item = u8>, next: bool) -> u32 {
     let mut bits = u32::from(next);
     for pid in pids {

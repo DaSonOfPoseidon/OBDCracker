@@ -57,7 +57,6 @@ fn features() -> SimBus {
     SimBus::new(&Profile::builtin("a7").unwrap(), FEATURES).unwrap()
 }
 
-// Sends one read and returns every reply it produced.
 fn ask(bus: &mut SimBus, target: Target, payload: &[u8]) -> Vec<Response> {
     let request = Policy::read_only()
         .approve(Protocol::Uds, target, payload)
@@ -391,7 +390,6 @@ fn suppress_bit_silences_positive_replies_only() {
     assert_eq!(bus.ecu("engine").unwrap().session(), Session::Extended);
     assert_silent(&mut bus, ENGINE, &[0x3E, 0x80]);
     assert_silent(&mut bus, ENGINE, &[0x19, 0x82, 0x08]);
-    // A refusal is sent even with the bit set.
     let reply = ask_one(&mut bus, ENGINE, &[0x19, 0x84, 0x08]);
     assert_eq!(nrc(&reply, 0x19), Nrc::SubFunctionNotSupported);
     assert_eq!(ask_one(&mut bus, ENGINE, &[0x3E, 0x00]), [0x7E, 0x00]);
@@ -471,7 +469,6 @@ fn a_dtcs_detail_is_its_status_with_no_records() {
     assert_eq!(nrc(&reply, 0x19), Nrc::RequestOutOfRange);
     let reply = ask_one(&mut bus, ENGINE, &[0x19, 0x04, 0x02, 0x99, 0x00]);
     assert_eq!(nrc(&reply, 0x19), Nrc::IncorrectMessageLength);
-    // A module that doesn't list the reports refuses them, as the A7's do.
     let mut bus = a7();
     let reply = ask_one(&mut bus, GATEWAY, &uds::dtc_snapshots(missing, 0xFF));
     assert_eq!(nrc(&reply, 0x19), Nrc::SubFunctionNotSupported);
@@ -645,25 +642,21 @@ fn fixture_errors_are_reported() {
         "[[ecu]]\nmodule = \"engine\"\n[[ecu.did]]\nid = 1\nhex = \"+F\"\n",
         "[[ecu]]\nmodule = \"engine\"\n[[ecu.did]]\nid = 1\ntext = \"a\\u0001\"\n",
         "[[ecu]]\nmodule = \"engine\"\n[ecu.obd]\ndtcs = [\"P+299\"]\n",
-        // 0000 is mode 03's padding (SAE J1979), not a code.
         "[[ecu]]\nmodule = \"engine\"\n[ecu.obd]\ndtcs = [\"P0000\"]\n",
         "[[ecu]]\nmodule = \"engine\"\n[ecu.obd.pids]\n\"+5\" = \"00\"\n",
         // I, O and Q aren't VIN characters, and neither are lower case letters.
         "[[ecu]]\nmodule = \"engine\"\n[ecu.obd]\nvin = \"WAUZZZ4G1EN00000O\"\n",
         "[[ecu]]\nmodule = \"engine\"\n[ecu.obd]\nvin = \"wauzzz4g1en000000\"\n",
         "[[ecu]]\nmodule = \"engine\"\n[[ecu.did]]\nid = 1\nhex = \"00\"\n[[ecu.did]]\nid = 1\nhex = \"01\"\n",
-        // The same code twice, in mode 03 or UDS, would be reported twice.
         "[[ecu]]\nmodule = \"engine\"\n[ecu.obd]\ndtcs = [\"P0299\", \"P0299\"]\n",
         "[[ecu]]\nmodule = \"engine\"\n[[ecu.dtc]]\ncode = 0x029900\nstatus = 0x08\n[[ecu.dtc]]\ncode = 0x029900\nstatus = 0x00\n",
         // 0x000000 is no code, and 0xFFFFFF means every group (ISO 14229-1), not one DTC.
         "[[ecu]]\nmodule = \"engine\"\n[[ecu.dtc]]\ncode = 0\nstatus = 0x08\n",
         "[[ecu]]\nmodule = \"engine\"\n[[ecu.dtc]]\ncode = 0xFFFFFF\nstatus = 0x08\n",
-        // Values that are only spaces or padding are empty.
         "[[ecu]]\nmodule = \"engine\"\n[[ecu.did]]\nid = 1\ntext = \"   \"\n",
         "[[ecu]]\nmodule = \"engine\"\n[[ecu.did]]\nid = 0xF187\nhex = \"20 20\"\n",
         "[[ecu]]\nmodule = \"engine\"\n[[ecu.did]]\nid = 0xF197\nhex = \"00\"\n",
         "[[ecu]]\nmodule = \"engine\"\n[ecu.obd]\ncalids = [\"   \"]\ncvns = [\"00 00 00 00\"]\n",
-        // PID keys that differ only in case name the same PID.
         "[[ecu]]\nmodule = \"engine\"\n[ecu.obd.pids]\n\"0c\" = \"0C 80\"\n\"0C\" = \"0C 80\"\n",
         // PID 0C is two bytes (SAE J1979), not one or three.
         "[[ecu]]\nmodule = \"engine\"\n[ecu.obd.pids]\n\"0C\" = \"00\"\n",
@@ -682,7 +675,6 @@ fn fixture_errors_are_reported() {
 
 #[test]
 fn pids_the_decoder_doesnt_know_take_any_length() {
-    // SAE J1979 doesn't define PID 0xE1.
     let fixture = "[[ecu]]\nmodule = \"engine\"\n[ecu.obd.pids]\n\"E1\" = \"01 02 03\"\n";
     let mut bus = SimBus::new(&Profile::builtin("a7").unwrap(), fixture).unwrap();
     assert_eq!(
@@ -1112,7 +1104,6 @@ fn a_tp20_module_opens_a_channel_and_closes_it_once() {
             disconnect: Some(Disconnect::Closed),
         }]
     );
-    // A closed channel hears nothing more.
     let setup = policy.approve_tp20_setup(0x5F).unwrap();
     let channel = policy
         .tp20_channel(&setup, 0x25F, &[0x00, 0xD0, 0x00, 0x03, 0x40, 0x07, 0x01])

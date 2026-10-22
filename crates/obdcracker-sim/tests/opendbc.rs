@@ -43,7 +43,6 @@ struct Reply {
 }
 
 impl Reply {
-    // The whole reply, service ID included.
     fn payload(&self) -> Vec<u8> {
         let mut payload = vec![0x62];
         payload.extend(
