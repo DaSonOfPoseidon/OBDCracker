@@ -65,7 +65,6 @@ fn approve_kwp2000(target: Target, payload: &[u8]) -> Result<Tier, Rejection> {
 
 #[test]
 fn approves_obd_reads_on_the_functional_address() {
-    // Mode 01 PID 0C (RPM), mode 03 (stored DTCs), mode 09 PID 02 (VIN)
     for payload in [&[0x01, 0x0C][..], &[0x03], &[0x09, 0x02]] {
         assert_eq!(approve(Target::ObdFunctional, payload), Ok(Tier::Read));
     }
@@ -112,11 +111,9 @@ fn locks_clear_dtc_and_coding_in_read_only() {
     ] {
         assert_eq!(approve(ENGINE, payload), Err(Rejection::Locked(tier)));
     }
-    // KWP2000: ClearDiagnosticInformation takes a 2-byte group; the adjustment session,
-    // SecurityAccess and the writes by common and by local ID change coding.
+    // KWP2000: ClearDiagnosticInformation's group is optional and any width (ISO 14230-3).
     for (payload, tier) in [
         (&[0x14, 0xFF, 0x00][..], Tier::ClearDtc),
-        // The group is optional, and its width the manufacturer's.
         (&[0x14], Tier::ClearDtc),
         (&[0x14, 0xFF], Tier::ClearDtc),
         (&[0x2E, 0xF1], Tier::Coding),
@@ -174,7 +171,6 @@ fn kwp2000_parameters_are_read_unmasked() {
         (&[0x10, 0x03], Err(Rejection::NotAllowed)),
         (&[0x10, 0x83], Err(Rejection::NotAllowed)),
         (&[0x10, 0x82], Err(Rejection::NotAllowed)), // periodic transmissions
-        // Manufacturer sessions mean different things per make.
         (&[0x10, 0x89], Err(Rejection::NotAllowed)),
         (&[0x10, 0xC0], Err(Rejection::NotAllowed)),
         (&[0x3E, 0x80], Err(Rejection::NotAllowed)),
@@ -184,7 +180,6 @@ fn kwp2000_parameters_are_read_unmasked() {
     // The same bytes in UDS, where bit 7 suppresses the reply.
     assert_eq!(approve(ENGINE, &[0x10, 0x83]), Ok(Tier::Read));
     assert_eq!(approve(ENGINE, &[0x3E, 0x80]), Ok(Tier::Read));
-    // ECUReset, manufacturer resets (0x80..=0xFF) included.
     for sub in 0..=0xFF {
         assert_eq!(
             approve_kwp2000(ENGINE, &[0x11, sub]),
@@ -281,7 +276,6 @@ fn kwp2000_follows_the_same_target_rules() {
 fn bans_programming_session_and_every_flash_service() {
     assert_eq!(approve(ENGINE, &[0x10, 0x02]), Err(Rejection::Banned));
     assert_eq!(approve(ENGINE, &[0x10, 0x82]), Err(Rejection::Banned));
-    // RequestDownload of 0x100 bytes at 0x0
     assert_eq!(
         approve(ENGINE, &[0x34, 0x00, 0x44, 0, 0, 0, 0, 0, 0, 1, 0]),
         Err(Rejection::Banned)
@@ -465,7 +459,6 @@ proptest! {
         sid in prop::sample::select([&READ_SERVICES[..], &KWP2000_READ_SERVICES[..]].concat()),
         data in prop::collection::vec(any::<u8>(), 0..8),
     ) {
-        // A module doesn't know which protocol the tester meant.
         let mut payload = vec![sid];
         payload.extend(data);
         for (from, to) in [(Protocol::Uds, Protocol::Kwp2000), (Protocol::Kwp2000, Protocol::Uds)] {
@@ -487,7 +480,6 @@ proptest! {
     }
 }
 
-// The A7's modules (#49): engine, transmission, gateway, instruments.
 const A7: [ModuleIds; 4] = [
     ModuleIds {
         request: 0x7E0,
@@ -525,7 +517,6 @@ fn a_narrowed_policy_accepts_only_its_modules_request_ids() {
             Err(Rejection::WrongTarget)
         );
     }
-    // In the bare policy's range, but not a module of this car.
     for id in [0x700, 0x711, 0x7E2, 0x7A0] {
         assert_eq!(
             a7().approve(Protocol::Uds, Target::Physical(id), &read),
@@ -533,7 +524,6 @@ fn a_narrowed_policy_accepts_only_its_modules_request_ids() {
             "{id:03X}"
         );
     }
-    // The OBD-II broadcast isn't a module, and is unaffected.
     let vin = a7()
         .approve(Protocol::Uds, Target::ObdFunctional, &[0x09, 0x02])
         .unwrap();
@@ -550,7 +540,6 @@ fn reply_ids_are_known_for_obd_ids_or_from_a_profile() {
             .unwrap();
         assert_eq!(approved.reply_id(), Some(reply));
     }
-    // Without a profile, any other module's reply ID is unknown.
     let approved = Policy::read_only()
         .approve(Protocol::Uds, Target::Physical(0x710), &read)
         .unwrap();
@@ -561,14 +550,11 @@ fn reply_ids_are_known_for_obd_ids_or_from_a_profile() {
 fn narrowing_refuses_inconsistent_modules() {
     let ids = |request, reply| ModuleIds { request, reply };
     for (modules, error) in [
-        // A request ID the bare policy refuses.
         (vec![ids(0x7E8, 0x7F0)], NarrowingError::Request(0x7E8)),
         (vec![ids(0x6FF, 0x769)], NarrowingError::Request(0x6FF)),
         (vec![ids(0x7DF, 0x7E7)], NarrowingError::Request(0x7DF)),
-        // A reply ID outside 0x700..=0x7FF, or the broadcast ID.
         (vec![ids(0x710, 0x800)], NarrowingError::Reply(0x800)),
         (vec![ids(0x710, 0x7DF)], NarrowingError::Reply(0x7DF)),
-        // One module's request ID is another's reply ID.
         (
             vec![ids(0x710, 0x77A), ids(0x77A, 0x7E4)],
             NarrowingError::RequestIsReply(0x77A),
@@ -577,7 +563,6 @@ fn narrowing_refuses_inconsistent_modules() {
             vec![ids(0x710, 0x710)],
             NarrowingError::RequestIsReply(0x710),
         ),
-        // One request ID, two reply IDs.
         (
             vec![ids(0x710, 0x77A), ids(0x710, 0x77B)],
             NarrowingError::AmbiguousReply(0x710),
@@ -693,12 +678,10 @@ fn rejects_29_bit_ids_outside_the_diagnostic_ranges_and_reply_ids() {
             "{id:08X}"
         );
     }
-    // Nor can a 29-bit ID be sent as 11-bit.
     assert_eq!(
         approve(Target::Physical(VAG29_REQUEST), &[0x22, 0xF1, 0x87]),
         Err(Rejection::WrongTarget)
     );
-    // OBD-II modes go to the 11-bit broadcast or emissions ECUs only.
     assert_eq!(
         approve(Target::Physical29(0x18DA_10F1), &[0x09, 0x02]),
         Ok(Tier::Read)
@@ -726,8 +709,6 @@ fn iso_29_bit_reply_ids_are_known_and_vag_ones_come_from_a_profile() {
         .approve(Protocol::Uds, Target::Physical29(VAG29_REQUEST), &read)
         .unwrap();
     assert_eq!(approved.reply_id(), Some(VAG29_REPLY));
-    // The narrowed policy refuses the 11-bit IDs it wasn't narrowed to, and the 29-bit request ID
-    // as 11-bit.
     for target in [Target::Physical(0x710), Target::Physical(VAG29_REQUEST)] {
         assert_eq!(
             narrowed.approve(Protocol::Uds, target, &read),
@@ -740,12 +721,10 @@ fn iso_29_bit_reply_ids_are_known_and_vag_ones_come_from_a_profile() {
 fn narrowing_refuses_29_bit_pairs_of_mixed_width_or_on_the_wrong_ranges() {
     let ids = |request, reply| ModuleIds { request, reply };
     for (modules, error) in [
-        // A request on a reply range.
         (
             vec![ids(VAG29_REPLY, VAG29_REQUEST)],
             NarrowingError::Request(VAG29_REPLY),
         ),
-        // A 29-bit request with an 11-bit reply, and the other way round.
         (
             vec![ids(VAG29_REQUEST, 0x77A)],
             NarrowingError::Reply(0x77A),
@@ -754,7 +733,6 @@ fn narrowing_refuses_29_bit_pairs_of_mixed_width_or_on_the_wrong_ranges() {
             vec![ids(0x710, VAG29_REPLY)],
             NarrowingError::Reply(VAG29_REPLY),
         ),
-        // A 29-bit reply that's no reply ID: a request ID, the broadcast, more than 29 bits.
         (
             vec![ids(VAG29_REQUEST, 0x17FC_0077)],
             NarrowingError::Reply(0x17FC_0077),
@@ -797,7 +775,6 @@ fn a_tp20_channel_setup_is_built_by_the_policy_for_one_address() {
     );
     assert_eq!(approved.reply_id(), Some(0x25F));
     assert_eq!(approved.tier(), Tier::Read);
-    // Address 0 is the tester's own.
     assert_eq!(
         Policy::read_only().approve_tp20_setup(0x00),
         Err(Rejection::WrongTarget)
@@ -856,7 +833,6 @@ fn a_tp20_disconnect_goes_only_on_a_channel_a_module_opened() {
         policy.tp20_channel(&disconnect, 0x300, &reply),
         Err(Rejection::NotAllowed)
     );
-    // A refusal, or an answer that isn't a channel, opens nothing.
     for reply in [
         &[0x00, 0xD6, 0x00, 0x03, 0x40, 0x07, 0x01][..],
         &[0x00, 0xD0, 0x00, 0x03, 0x40, 0x07],
@@ -873,13 +849,11 @@ fn a_tp20_disconnect_goes_only_on_a_channel_a_module_opened() {
 #[test]
 fn a_tp20_disconnect_never_goes_to_ids_a_channel_shouldnt_have() {
     for (receive, send) in [
-        // Not the receive ID the setup asked for.
         (0x301, 0x740),
         (0x740, 0x300),
         // Below 0x300: the car's own frames, the most urgent first, and the setup range.
         (0x300, 0x000),
         (0x300, 0x1FF),
-        // The OBD-II IDs.
         (0x300, 0x7DF),
         (0x300, 0x7E0),
         (0x300, 0x7EF),
@@ -932,7 +906,6 @@ fn tp20_channel_frames_are_never_approved_from_caller_bytes() {
             );
         }
     }
-    // Nor does a service request go to a TP2.0 target.
     for protocol in [Protocol::Uds, Protocol::Kwp2000] {
         for target in [Target::Tp20Setup(0x5F), Target::Tp20Channel(0x740)] {
             assert_eq!(
@@ -952,7 +925,6 @@ fn a_policy_narrowed_to_tp20_addresses_sets_up_channels_only_there() {
         narrowed.approve_tp20_setup(0x01),
         Err(Rejection::WrongTarget)
     );
-    // Narrowing again narrows further.
     let again = narrowed.narrowed_to_tp20(&[0x09, 0x01]);
     assert!(again.approve_tp20_setup(0x09).is_ok());
     assert_eq!(again.approve_tp20_setup(0x5F), Err(Rejection::WrongTarget));
