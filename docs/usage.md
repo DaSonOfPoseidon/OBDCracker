@@ -137,7 +137,7 @@ Reads one DTC from one profile module: every snapshot record (`19 04 <DTC> FF`),
 happened, then every extended data record (`19 06 <DTC> FF`), such as how often it happened. The code is the six hex
 digits `scan` lists. Records print as hex, each a record number and its data: their lengths depend on the module's data
 identifiers, so they aren't split up. A snapshot reply whose first record is shorter than the identifiers its count
-declares (each a 2-byte DID and data) is shown as undecodable, with its bytes. A refusal of one read doesn't stop the other. If the snapshot read goes
-unanswered, the extended data isn't asked, because a late refusal doesn't say which read it answers; nor if the module
-says it's busy (NRC 0x21), since it's still on the first. The code can't be 000000 (no code) or FFFFFF (every group).
-If the module answers nothing, the command fails.
+declares (each a 2-byte DID and data), or that declares none, is shown as undecodable, with its bytes. A refusal of
+one read doesn't stop the other. If the snapshot read goes unanswered, the extended data isn't asked, because a late
+refusal doesn't say which read it answers; nor if the module says it's busy (NRC 0x21), since it's still on the first.
+The code can't be 000000 (no code) or FFFFFF (every group). If the module answers nothing, the command fails.

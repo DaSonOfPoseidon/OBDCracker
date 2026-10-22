@@ -531,8 +531,8 @@ pub struct DtcData<'a> {
 ///
 /// A refusal, a reply for another subfunction or DTC, one cut short before the status or inside
 /// its first record (a record number alone, or fewer than 3 bytes, a DID and its data, for each
-/// identifier its count declares), or one whose first record isn't the one asked for (unless
-/// every record was).
+/// identifier its count declares), one whose first record declares no identifiers, or one whose
+/// first record isn't the one asked for (unless every record was).
 pub fn decode_dtc_snapshots(reply: &[u8], dtc: UdsDtc, record: u8) -> Result<DtcData<'_>, Error> {
     dtc_data(reply, REPORT_DTC_SNAPSHOT_BY_DTC, dtc, record)
 }
@@ -571,13 +571,16 @@ fn dtc_data(reply: &[u8], sub: u8, dtc: UdsDtc, record: u8) -> Result<DtcData<'_
         return Err(Error::TooShort);
     }
     // Each identifier is a 2-byte DID and at least a byte of data; later records can't be checked
-    // without the DIDs' lengths. A count of 0x00 is valid: it leaves the number unsaid, for a
-    // record of more than 255 identifiers (ISO 14229-1).
+    // without the DIDs' lengths.
     if let [_, count, identifiers @ ..] = records
         && sub == REPORT_DTC_SNAPSHOT_BY_DTC
-        && identifiers.len() < 3 * usize::from(*count)
     {
-        return Err(Error::TooShort);
+        if *count == 0 {
+            return Err(Error::Malformed);
+        }
+        if identifiers.len() < 3 * usize::from(*count) {
+            return Err(Error::TooShort);
+        }
     }
     Ok(DtcData {
         status: DtcStatus(*status),
