@@ -13,7 +13,6 @@ use support::fake_elm::{BANNER, FakeElm, FakeLink, frames};
 
 const VIN: &[u8] = b"\x49\x02\x01WAUZZZ4G1EN000000";
 
-// The A7's gateway and instruments, as its profile gives them.
 const GATEWAY: ModuleIds = ModuleIds {
     request: 0x710,
     reply: 0x77A,
@@ -22,7 +21,6 @@ const INSTRUMENTS: ModuleIds = ModuleIds {
     request: 0x714,
     reply: 0x77E,
 };
-// A module on VAG's 29-bit IDs.
 const VAG29: ModuleIds = ModuleIds {
     request: 0x17FC_0076,
     reply: 0x17FE_0076,
@@ -89,9 +87,6 @@ mod setup {
         );
     }
 
-    // Every line the driver writes other than a request: the reset, the setup, `info`, and the
-    // header and flow control settings for each kind of target, on a plain ELM327 (paced) and
-    // on an STN (not).
     fn every_command() -> Vec<String> {
         let mut stn = car();
         stn.sti = Some("STN2232 v5.12.4".into());
@@ -112,7 +107,6 @@ mod setup {
             elm.send(&approve(target, &[0x09, 0x02])).unwrap();
             while elm.recv(Duration::from_secs(1)).is_ok() {}
         }
-        // A module whose reply ID a profile gives
         let narrowed = Policy::read_only().narrowed_to(&[INSTRUMENTS]).unwrap();
         elm.send(
             &narrowed
@@ -121,8 +115,6 @@ mod setup {
         )
         .unwrap();
         while elm.recv(Duration::from_secs(1)).is_ok() {}
-        // 29-bit IDs: ISO 15765-4's, whose reply ID is known, and VAG's from a profile, then back
-        // to 11-bit.
         elm.send(&approve(
             Target::Physical29(0x18DA_10F1),
             &[0x22, 0xF1, 0x87],
@@ -238,9 +230,6 @@ mod setup {
 
     #[test]
     fn fails_closed_when_a_programmable_parameter_changes_a_default_it_relies_on() {
-        // CAN auto formatting and flow control are on, and the data length isn't shown, after a
-        // reset unless PP 24, 25 or 29 says otherwise; the setup doesn't send the commands for
-        // them.
         // PP 29 would put the data length between the CAN ID and the data of every frame.
         for (pp, value) in [(0x24, 0xFF), (0x25, 0xFF), (0x29, 0x00)] {
             let mut elm = FakeElm::silent();
@@ -262,7 +251,6 @@ mod setup {
             (0x29, 0xFF),
         ];
         connect(elm);
-        // A clone without programmable parameters is at the factory defaults.
         let mut clone = FakeElm::silent();
         clone.unsupported.push("ATPPS".into());
         connect(clone);
@@ -326,8 +314,6 @@ mod setup {
         let info = connect(stn).info().unwrap();
         assert_eq!(info.stn.as_deref(), Some("STN1155 v5.6.19"));
 
-        // A clone that answers STI with nothing at all, or with anything but an STN's name,
-        // isn't an STN.
         for answer in ["", "OK", "v1.5"] {
             let mut clone = FakeElm::silent();
             clone.sti = Some(answer.into());
@@ -477,7 +463,6 @@ mod requests {
         );
     }
 
-    // A VAG module on 29-bit IDs whose part number takes several frames, and an ISO one.
     fn bits29_car() -> FakeElm {
         FakeElm::new(Box::new(|header, request| match (header, request) {
             (0x17FC_0076, [0x22, 0xF1, 0x87]) => {
@@ -509,7 +494,6 @@ mod requests {
             }
         );
         while elm.recv(Duration::from_secs(1)).is_ok() {}
-        // Back to an 11-bit module: the protocol, header, flow control and filter are set again.
         elm.send(&read(Target::Physical(0x710))).unwrap();
         assert_eq!(elm.recv(Duration::from_secs(1)).unwrap().source, 0x77A);
         while elm.recv(Duration::from_secs(1)).is_ok() {}
@@ -536,7 +520,6 @@ mod requests {
                 "22F187",
             ]
         );
-        // The module acknowledged on its own request ID went on past its first frame.
         assert_eq!(elm.link().elm.flow_control_ids, [0x17FC_0076]);
         assert_eq!(
             elm.link().elm.sent,
@@ -653,7 +636,6 @@ mod requests {
             }
         );
         while elm.recv(Duration::from_secs(1)).is_ok() {}
-        // Back to ISO-TP for the next request.
         elm.send(&approve(Target::Physical(0x7E0), &[0x09, 0x02]))
             .unwrap();
         while elm.recv(Duration::from_secs(1)).is_ok() {}
@@ -700,7 +682,6 @@ mod requests {
         assert_eq!(elm.link().elm.sent, []);
     }
 
-    // The commands that switch the adapter to raw frames and back, in the order they're written.
     const RAW_ON: [&str; 3] = ["ATCFC0", "ATV1", "ATCAF0"];
     const RAW_OFF: [&str; 3] = ["ATCAF1", "ATV0", "ATCFC1"];
 
@@ -790,14 +771,12 @@ mod requests {
             [0x10, 0x00, 0x02, 0xAA, 0xBB]
         );
         assert_eq!(elm.link().elm.flow_control_for[before..], [0u32; 0]);
-        // And back on for ISO-TP, whose multi-frame replies need it.
         elm.send(&approve(Target::Physical(0x7E0), &[0x09, 0x02]))
             .unwrap();
         while elm.recv(Duration::from_secs(1)).is_ok() {}
         assert_eq!(elm.link().elm.flow_control_for[before..], [0x7E8]);
     }
 
-    // A busy bus: while the gateway answers, the instruments send a long reply of their own.
     fn busy_bus() -> FakeElm {
         FakeElm::new(Box::new(|header, request| {
             if header != 0x710 || request != [0x22, 0xF1, 0x87] {
@@ -823,7 +802,6 @@ mod requests {
             sources.push(reply.source);
         }
         assert_eq!(sources, [0x77A]);
-        // The adapter acknowledged only the gateway's reply, never the instruments'.
         assert_eq!(elm.link().elm.flow_control_for, [0x77A]);
         assert_eq!(commands(&elm).last().map(String::as_str), Some("22F187"));
         assert!(commands(&elm).iter().any(|c| c == "ATCRA77A"));
@@ -896,7 +874,6 @@ mod requests {
         elm.send(&approve(Target::Physical(0x7E0), &[0x09, 0x02]))
             .unwrap();
         while elm.recv(Duration::from_secs(1)).is_ok() {}
-        // 0902 arrives as 0912; the driver kills the line before its carriage return.
         elm.link_mut().corrupt_next_write = Some((2, 0x01));
         let mut elm = Audited::open(&log, elm, "fake").unwrap();
         let err = elm
@@ -1072,7 +1049,6 @@ mod requests {
     #[test]
     fn a_bus_error_is_an_adapter_error() {
         let mut elm = connect(FakeElm::new(Box::new(|_, _| Vec::new())));
-        // Setting a protocol other than CAN makes the fake answer CAN ERROR.
         elm.link_mut().elm.settings.protocol = Some("3".into());
         elm.send(&approve(Target::ObdFunctional, &[0x09, 0x02]))
             .unwrap();
@@ -1085,12 +1061,10 @@ mod requests {
         let mut elm = connect(car());
         elm.send(&approve(Target::ObdFunctional, &[0x09, 0x02]))
             .unwrap();
-        // Take only the first ECU's reply; the second is still in the adapter's output.
         assert_eq!(elm.recv(Duration::from_secs(1)).unwrap().source, 0x7E8);
         elm.send(&approve(Target::Physical(0x7E0), &[0x09, 0x02]))
             .unwrap();
         assert_eq!(elm.link().elm.interrupted, 0);
-        // The leftover reply from 7E9 belongs to the old request and is gone.
         let reply = elm.recv(Duration::from_secs(1)).unwrap();
         assert_eq!((reply.source, reply.payload.as_slice()), (0x7E8, VIN));
         assert_eq!(elm.recv(Duration::from_secs(1)), Err(Error::Timeout));
@@ -1100,7 +1074,6 @@ mod requests {
 mod response_pending {
     use super::*;
 
-    // A module at 0x7E0 that answers 22 F1 87 with response-pending only.
     fn busy_module() -> FakeElm {
         FakeElm::new(Box::new(|header, request| {
             if header == 0x7E0 && request == [0x22, 0xF1, 0x87] {
@@ -1150,7 +1123,6 @@ mod response_pending {
         );
         assert_eq!(got, Err(Error::StillPending));
         assert!(got.unwrap_err().to_string().contains("busy"));
-        // The adapter is fine: the next request goes out.
         assert!(
             elm.send(&approve(Target::Physical(0x7E0), &[0x09, 0x02]))
                 .is_ok()
@@ -1271,8 +1243,6 @@ mod misbehaving {
         let mut elm = connect(car());
         elm.send(&approve(Target::ObdFunctional, &[0x09, 0x02]))
             .unwrap();
-        // After the echo (its digits were read before the carriage return), replace the
-        // adapter's output with an endless stream of first frames.
         elm.link_mut().inject = b"\r".to_vec();
         elm.link_mut().flood = Some(b"7E8 10 14 49 02 01 57 41 55\r".to_vec());
         let start = Instant::now();
@@ -1451,7 +1421,6 @@ mod misbehaving {
 
     #[test]
     fn output_after_the_header_prompt_fails_closed() {
-        // Changing to 0x7E0 from broadcasts takes one command, ATSH7E0, and then the request.
         let mut elm = broadcasting();
         elm.link_mut().elm.after_prompt = b"LV RESET\r".to_vec();
         let err = elm
@@ -1472,7 +1441,6 @@ mod misbehaving {
         elm.send(&approve(Target::ObdFunctional, &[0x09, 0x02]))
             .unwrap();
         while elm.recv(Duration::from_secs(1)).is_ok() {}
-        // Two reads inside the 1 ms check: the NUL alone, then the whole banner.
         elm.link_mut().chunk = 64;
         elm.link_mut().inject = vec![0];
         let written = elm.link().written.len();
@@ -1546,7 +1514,6 @@ mod misbehaving {
     // send flow control for frames it shouldn't see.
     #[test]
     fn a_frame_from_outside_the_receive_filter_fails_closed() {
-        // A broadcast narrows the filter to 0x7E0..=0x7EF, so 0x77A is outside it too.
         for frame in [
             &b"6FF 02 01 00\r"[..],
             b"123 03 41 00 00\r",
@@ -1631,7 +1598,6 @@ mod misbehaving {
 
     #[test]
     fn retries_the_reset_when_the_adapter_was_busy() {
-        // The first ATZ only interrupts what the adapter was doing.
         let mut link = Scripted::new(b"STOPPED\r\r>");
         link.then = Some(FakeLink::new(FakeElm::silent()));
         let elm = Elm::connect(link).unwrap();
@@ -1662,7 +1628,6 @@ impl Scripted {
 impl Link for Scripted {
     fn write_all(&mut self, bytes: &[u8], driver: Driver) -> io::Result<()> {
         self.writes += 1;
-        // Everything after the first write goes to the fake adapter.
         if self.writes > 1
             && let Some(then) = &mut self.then
         {
@@ -1708,8 +1673,6 @@ impl std::fmt::Debug for Scripted {
 mod pacing {
     use super::*;
 
-    // The engine (7E0/7E8) and the instruments (714/77E) each answer 22 F1 87 with the longest
-    // reply ISO-TP's short first frame allows.
     fn long_replies() -> FakeElm {
         FakeElm::new(Box::new(|header, request| {
             if request != [0x22, 0xF1, 0x87] {
@@ -1745,7 +1708,6 @@ mod pacing {
 
     #[test]
     fn the_fake_adapter_overflows_without_pacing() {
-        // The fake's buffer model, checked on its own: every frame back to back at 9600 baud.
         let mut elm = FakeElm::new(Box::new(|_, _| {
             let mut payload = vec![0x62, 0xF1, 0x87];
             payload.resize(4095, 0x41);
@@ -1788,7 +1750,6 @@ mod pacing {
         }
     }
 
-    // Every emissions ECU answers a broadcast 09 02 with the longest reply, all at once.
     fn eight_long_replies() -> FakeElm {
         FakeElm::new(Box::new(|header, request| {
             if header != 0x7DF || request != [0x09, 0x02] {
@@ -1855,7 +1816,6 @@ mod pacing {
         );
     }
 
-    // The flow control data each target gets on a plain ELM327.
     fn flow_commands(link: FakeLink) -> Vec<String> {
         let mut elm = Elm::connect(link).unwrap();
         let setup = commands(&elm).len();
@@ -1885,7 +1845,6 @@ mod pacing {
             assert_eq!(
                 flow_commands(link),
                 [
-                    // To each module's own request ID
                     "ATFCSH7E0".to_owned(),
                     format!("ATFCSD3000{st_min}"),
                     "ATFCSM1".to_owned(),
@@ -1927,7 +1886,6 @@ mod pacing {
         let before = commands(&elm).len();
         assert_eq!(elm.patient(None).unwrap(), None);
         assert_eq!(new_commands(&elm, before), ["ATSTFF", "ATAT1"]);
-        // Capped at the most STPTO takes.
         assert_eq!(
             elm.patient(Some(Duration::from_secs(100))).unwrap(),
             Some(Duration::from_millis(65_535))
@@ -1937,7 +1895,6 @@ mod pacing {
             Some("STPTO65535")
         );
         elm.patient(None).unwrap();
-        // A wait no longer than its usual timeout leaves the timeout alone.
         let before = commands(&elm).len();
         assert_eq!(
             elm.patient(Some(Duration::from_millis(500))).unwrap(),
@@ -1951,7 +1908,6 @@ mod pacing {
 
     #[test]
     fn patience_sets_the_wait_each_call_asks_for() {
-        // A second call sets its own wait, shorter or longer, rather than keeping the first.
         let mut stn = car();
         stn.sti = Some("STN2232 v5.12.4".into());
         let mut elm = connect(stn);
@@ -1966,7 +1922,6 @@ mod pacing {
             Some(ADAPTER_TIMEOUT)
         );
         assert_eq!(commands(&elm).last().map(String::as_str), Some("ATSTFF"));
-        // Already the usual timeout: nothing more to restore.
         let before = commands(&elm).len();
         elm.patient(None).unwrap();
         assert_eq!(commands(&elm)[before..], ["ATAT1"]);
@@ -2022,7 +1977,6 @@ mod pacing {
         elm.link_mut().scheduled = [(start + Duration::from_secs(8), b"\r>".to_vec())].into();
         assert_eq!(elm.recv(Duration::from_secs(60)), Err(Error::Timeout));
         assert!(start.elapsed() >= Duration::from_secs(8));
-        // Once patience ends, the usual limit is back.
         elm.patient(None).unwrap();
         elm.send(&approve(Target::Physical(0x7E5), &[0x09, 0x02]))
             .unwrap();
@@ -2047,7 +2001,6 @@ mod pacing {
             flow_commands(FakeLink::new(stn)),
             ["ATFCSM0", "ATFCSH714", "ATFCSD300000", "ATFCSM1"]
         );
-        // A clone that answers STI with something else isn't an STN.
         let mut clone = long_replies();
         clone.sti = Some("OK".into());
         assert_eq!(
@@ -2187,7 +2140,6 @@ mod events {
             )),
             "{events:?}"
         );
-        // Taken once.
         assert_eq!(elm.take_events(), []);
         elm.send(&approve(Target::Physical(0x7E0), &[0x09, 0x02]))
             .unwrap();
@@ -2197,7 +2149,6 @@ mod events {
 
     #[test]
     fn reply_lines_nobody_read_are_reported_not_lost() {
-        // Two ECUs answer the broadcast; only the first reply is read before the next request.
         let mut elm = connect(car());
         elm.send(&approve(Target::ObdFunctional, &[0x09, 0x02]))
             .unwrap();
@@ -2259,7 +2210,6 @@ mod events {
             .collect()
     }
 
-    // Three ECUs answer a broadcast with a 20-byte reply, each in three frames.
     fn three_ecus() -> FakeElm {
         FakeElm::new(Box::new(|header, request| {
             if header == 0x7DF && request == [0x09, 0x02] {
@@ -2293,7 +2243,6 @@ mod events {
 
     #[test]
     fn a_broken_adapter_still_reports_what_it_had_heard() {
-        // The second ECU's reply is longer, so it's still unfinished when the first's completes.
         let mut elm = Elm::connect(FakeLink::at_baud(
             FakeElm::new(Box::new(|header, _| {
                 if header == 0x7DF {
@@ -2347,7 +2296,6 @@ mod events {
 
     #[test]
     fn a_status_line_nobody_waited_for_is_still_a_status() {
-        // The caller never asks for the reply; the next request drains the NO DATA.
         let mut elm = connect(car());
         elm.send(&approve(Target::Physical(0x7E0), &[0x01, 0x00]))
             .unwrap();
@@ -2380,7 +2328,6 @@ mod events {
         assert_eq!(answer.len(), 32);
         assert_eq!(answer[0], "ATZ");
         assert!(answer[1..].iter().all(|line| line == "NOISE"), "{answer:?}");
-        // Right after the reset, not after the setup that followed it.
         let reset = events
             .iter()
             .position(|e| matches!(e, LinkEvent::Command { command, .. } if command == "ATZ"))
@@ -2409,7 +2356,6 @@ mod events {
                 Vec::new()
             }
         }));
-        // Interleaved, but never overflowing the adapter's buffer.
         fake.drain_rate = Some(u32::MAX);
         let mut elm = connect(fake);
         elm.send(&approve(Target::ObdFunctional, &[0x09, 0x02]))
@@ -2429,7 +2375,6 @@ mod events {
 
     #[test]
     fn lines_past_the_cap_that_end_up_in_replies_are_not_lost() {
-        // #84: every reply completes, so nothing was lost.
         let (mut elm, _) = eight_long_replies();
         for _ in 0..8 {
             assert_eq!(
@@ -2451,7 +2396,6 @@ mod events {
         elm.recv(Duration::from_secs(5)).unwrap();
         elm.take_events();
         elm.settle().unwrap();
-        // The next request's setup comes after the count, which is where the lines went.
         elm.send(&approve(Target::Physical(0x7E0), &[0x09, 0x02]))
             .unwrap();
         let events = elm.take_events();
@@ -2497,7 +2441,6 @@ mod events {
 
     #[test]
     fn settling_reports_what_is_left_of_the_last_request() {
-        // The session ends after the first reply: what's left is still reported.
         let mut elm = connect(car());
         elm.send(&approve(Target::ObdFunctional, &[0x09, 0x02]))
             .unwrap();
@@ -2515,7 +2458,6 @@ mod events {
             .collect();
         assert_ne!(unread, Vec::<String>::new());
         assert!(unread.iter().all(|l| l.starts_with(other)), "{unread:?}");
-        // Nothing is left, and nothing more is sent.
         let written = elm.link().elm.commands.len();
         elm.settle().unwrap();
         assert_eq!(elm.take_events(), []);
@@ -2563,7 +2505,6 @@ mod events {
 
     #[test]
     fn an_untaken_report_is_bounded() {
-        // Nobody takes the events: they stop growing, and say how many were lost.
         let mut elm = connect(car());
         for _ in 0..1500 {
             elm.send(&approve(Target::Physical(0x7E0), &[0x09, 0x02]))
