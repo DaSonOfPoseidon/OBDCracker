@@ -1102,6 +1102,12 @@ fn dry_run_scan_discover_tp20_lists_the_channel_setups() {
     assert!(stdout.contains("200 05 C0 00 10 00 03 01"), "{stdout}");
     assert!(stdout.contains("200 72 C0 00 10 00 03 01"), "{stdout}");
     assert!(stdout.contains("A8 (disconnect)"), "{stdout}");
+    // Nothing was sent, so nothing could answer.
+    assert!(!stdout.contains("addresses answered"), "{stdout}");
+    assert!(
+        stdout.contains("TP2.0 discovery: dry run, no channel setup was sent"),
+        "{stdout}"
+    );
 }
 
 #[test]
