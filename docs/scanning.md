@@ -112,8 +112,9 @@ A module that doesn't confirm `10 01` at the end is left to return after S3.
 
 - A DID refused as out of range (NRC 0x31) isn't there and isn't listed.
 - A DID with no final answer (no reply, or response-pending past `Timing::max_pending`) is listed as `NoReply` or
-  `StillPending`. `QUIET_LIMIT` (3) in a row means the module is gone or stuck: the sweep stops with those reads not
-  listed, and `Stop::at` is the first of them.
+  `StillPending` once the module answers a later read or the range ends. If the sweep stops first, those reads aren't
+  listed and `Stop::at` is the first of them: at `QUIET_LIMIT` (3) in a row, which means the module is gone or stuck,
+  when the adapter fails, or when the extended session's keepalive or re-entry fails.
 - UDS refusals don't name the DID. After an unanswered read, a later refusal or undecodable reply may be the late
   answer to it, even past answers that were plainly this connection's own, so the sweep stops (`Why::Unmatched`) with
   `Stop::at` on that DID. `Sweep::out_of_step` says a read went unanswered, so connect again before reading from the
