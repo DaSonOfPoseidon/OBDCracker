@@ -26,9 +26,7 @@ use obdcracker_transport::{
     Audited, DryRun, Expect, S3, Timing, Transport, exchange, hex, log_failure,
 };
 
-// OBDLink USB adapters' rate.
 const DEFAULT_BAUD: u32 = 115_200;
-// How long to wait for a Wi-Fi adapter to accept the connection.
 const TCP_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Debug, Parser)]
@@ -354,7 +352,6 @@ fn policy(cli: &Cli) -> Result<Policy, String> {
         .map_err(|e| format!("profile {name}: {e}"))
 }
 
-// The engine and transmission modules from the profile, or their OBD-II IDs without one.
 fn fingerprint_modules(cli: &Cli) -> Result<Vec<UdsModule>, String> {
     let Some(name) = cli.profile.as_ref().or(cli.sim.as_ref()) else {
         return Ok(vec![UdsModule::obd_engine(), UdsModule::obd_transmission()]);
@@ -438,11 +435,14 @@ fn print_fingerprint(found: &Fingerprint) {
     }
 }
 
-// `FIRST-LAST`, each up to four hex digits, FIRST no later than LAST.
+// `from_str_radix` also takes a leading `+`, so check every character first.
+fn is_hex(text: &str) -> bool {
+    text.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
 fn parse_did_range(text: &str) -> Result<(u16, u16), String> {
     let did = |part: &str| {
-        // Only hex digits: from_str_radix also takes a leading `+`.
-        if (1..=4).contains(&part.len()) && part.bytes().all(|b| b.is_ascii_hexdigit()) {
+        if (1..=4).contains(&part.len()) && is_hex(part) {
             u16::from_str_radix(part, 16).map_err(|e| e.to_string())
         } else {
             Err(format!("{part:?} isn't a DID: up to four hex digits"))
@@ -460,7 +460,6 @@ fn parse_did_range(text: &str) -> Result<(u16, u16), String> {
     Ok((first, last))
 }
 
-// The plain UDS module `name` from the profile, and the policy narrowed to it, for `command`.
 fn profile_module(cli: &Cli, name: &str, command: &str) -> Result<(UdsModule, Policy), String> {
     let Some(profile_name) = cli.profile.as_ref().or(cli.sim.as_ref()) else {
         return Err(format!(
@@ -485,8 +484,7 @@ fn profile_module(cli: &Cli, name: &str, command: &str) -> Result<(UdsModule, Po
 
 // Six hex digits, and not 000000 (no code) or FFFFFF (every group).
 fn parse_dtc(text: &str) -> Result<UdsDtc, String> {
-    // Only hex digits: from_str_radix also takes a leading `+`.
-    if text.len() != 6 || !text.bytes().all(|b| b.is_ascii_hexdigit()) {
+    if text.len() != 6 || !is_hex(text) {
         return Err(format!(
             "{text:?} isn't a DTC: give six hex digits, such as 0016A0"
         ));
@@ -499,7 +497,6 @@ fn parse_dtc(text: &str) -> Result<UdsDtc, String> {
     }
 }
 
-// Reads one DTC's snapshots and extended data from one profile module.
 fn run_dtc<T: Transport>(
     cli: &Cli,
     transport: &mut T,
@@ -577,7 +574,6 @@ fn run_dtc<T: Transport>(
     }
 }
 
-// Reads each DID in the range from one profile module and lists those it has.
 fn run_sweep<T: Transport>(
     cli: &Cli,
     transport: &mut T,
@@ -594,7 +590,6 @@ fn run_sweep<T: Transport>(
         }
     };
     let count = u32::from(last) - u32::from(first) + 1;
-    // About what an ELM adapter takes per refused read.
     eprintln!(
         "sweep: {count} reads of {} ({:03X}), about {} min",
         module.name,
@@ -637,7 +632,6 @@ fn run_sweep<T: Transport>(
     print_sweep(&module, &found, last)
 }
 
-// Lists what a sweep found, and how to resume one that stopped.
 fn print_sweep(module: &UdsModule, found: &sweep::Sweep, last: u16) -> ExitCode {
     for (did, value) in &found.found {
         match value {
@@ -723,8 +717,6 @@ fn print_dids(id: u32, name: &str, dids: &[(u16, Result<DidValue, ReadError>)]) 
     }
 }
 
-// Every plain-UDS module in the profile with its profile DIDs, or the OBD-II engine and
-// transmission without a profile.
 fn scan_modules(cli: &Cli) -> Result<Vec<ScanModule>, String> {
     let Some(name) = cli.profile.as_ref().or(cli.sim.as_ref()) else {
         return Ok([UdsModule::obd_engine(), UdsModule::obd_transmission()]
@@ -773,7 +765,6 @@ fn scan_modules(cli: &Cli) -> Result<Vec<ScanModule>, String> {
     Ok(modules)
 }
 
-// Which discovery passes `scan` runs before scanning.
 #[allow(clippy::struct_excessive_bools)]
 #[derive(Debug, Clone, Copy)]
 struct Discovery {
@@ -885,7 +876,6 @@ fn run_scan<T: Transport>(
     }
 }
 
-// The profile's TP2.0 discovery addresses, for `scan --discover-tp20`.
 fn tp20_addresses(cli: &Cli) -> Result<Vec<u8>, String> {
     let Some(name) = cli.profile.as_ref().or(cli.sim.as_ref()) else {
         return Err(
@@ -1098,8 +1088,6 @@ fn discover_modules<T: Transport>(
     Ok((unlisted(&profile, &found), narrow(&known)?))
 }
 
-// The 29-bit discovery pass, then the policy narrowed to `known` (the modules to scan so far)
-// and the modules it found.
 fn discover_29_bit_modules<T: Transport>(
     cli: &Cli,
     transport: &mut T,
@@ -1222,7 +1210,6 @@ fn discover_pass<T: Transport>(
     Ok(found)
 }
 
-// The modules found that the profile doesn't list, to scan.
 fn unlisted(profile: &Profile, found: &[discover::Found]) -> Vec<ScanModule> {
     found
         .iter()
@@ -1343,7 +1330,6 @@ mod tests {
 
     use super::{Cli, Discovery, resume_command, run_scan};
 
-    // The A7 with a TP2.0 module at 0x5F that gives channel 0x740/0x300.
     fn a7_with_tp20() -> SimBus {
         let mut bus = SimBus::builtin("a7").unwrap();
         bus.add_tp20(
@@ -1357,7 +1343,6 @@ mod tests {
         bus
     }
 
-    // `scan` on the sim's A7 with these passes.
     fn scan(bus: &mut impl Transport, discover: bool) -> ExitCode {
         let cli = Cli::try_parse_from(["obdcracker", "--sim", "a7", "scan"]).unwrap();
         let passes = Discovery {

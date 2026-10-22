@@ -779,7 +779,6 @@ fn sim_sweep_lists_the_dids_a_module_has() {
             .any(|l| l == "785 head-up display F187 [34 47 38 39 31 39 36 30 34 4B 20]"),
         "{stdout}"
     );
-    // DIDs out of range aren't listed.
     assert!(!stdout.contains("F180"), "{stdout}");
     let listed = stdout
         .lines()
@@ -794,7 +793,6 @@ fn sim_sweep_lists_the_dids_a_module_has() {
         stderr.contains("sweep: 16 reads of head-up display (71B)"),
         "{stderr}"
     );
-    // One read per DID, each to the HUD.
     let audit = std::fs::read_to_string(&log).unwrap();
     let sent: Vec<&str> = audit
         .lines()
