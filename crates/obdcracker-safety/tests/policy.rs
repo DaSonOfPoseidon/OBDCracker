@@ -775,10 +775,15 @@ fn a_tp20_channel_setup_is_built_by_the_policy_for_one_address() {
     );
     assert_eq!(approved.reply_id(), Some(0x25F));
     assert_eq!(approved.tier(), Tier::Read);
-    assert_eq!(
-        Policy::read_only().approve_tp20_setup(0x00),
-        Err(Rejection::WrongTarget)
-    );
+    // The tester's own address, and the broadcast addresses, which no one module answers alone.
+    for address in [0x00, 0xF0, 0xFF] {
+        assert_eq!(
+            Policy::read_only().approve_tp20_setup(address),
+            Err(Rejection::WrongTarget),
+            "{address:02X}"
+        );
+    }
+    assert!(Policy::read_only().approve_tp20_setup(0xEF).is_ok());
 }
 
 // A module's positive answer to a channel setup, giving these IDs: the tester's receive ID, then

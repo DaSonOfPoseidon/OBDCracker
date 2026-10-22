@@ -323,10 +323,11 @@ impl Policy {
     ///
     /// # Errors
     ///
-    /// [`Rejection::WrongTarget`] for address 0 (the tester's), or one the policy was narrowed
-    /// away from ([`Policy::narrowed_to_tp20`]).
+    /// [`Rejection::WrongTarget`] for address 0 (the tester's), a broadcast address (0xF0 to
+    /// 0xFF), or one the policy was narrowed away from ([`Policy::narrowed_to_tp20`]).
     pub fn approve_tp20_setup(&self, address: u8) -> Result<Approved, Rejection> {
         if address == TP20_TESTER
+            || address >= TP20_FIRST_BROADCAST
             || self
                 .tp20
                 .as_ref()
@@ -472,6 +473,7 @@ const OBD_FUNCTIONAL_ID: u32 = 0x7DF;
 const MAX_11_BIT: u32 = 0x7FF;
 // VW TP2.0: see docs/safety.md#addressing.
 const TP20_TESTER: u8 = 0x00;
+const TP20_FIRST_BROADCAST: u8 = 0xF0;
 const TP20_TESTER_RECEIVE_ID: u32 = 0x300;
 // 29-bit request and reply ranges: see docs/safety.md#addressing.
 const ISO_29_BIT_REQUEST: u32 = 0x18DA_00F1;

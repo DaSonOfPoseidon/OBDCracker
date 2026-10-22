@@ -56,7 +56,7 @@ fn reply(source: u32, payload: &[u8]) -> Vec<Response> {
 
 #[test]
 fn the_policys_channel_frames_are_the_codecs() {
-    for address in [0x01, 0x5F, 0xFF] {
+    for address in [0x01, 0x5F, 0xEF] {
         let setup = Policy::read_only().approve_tp20_setup(address).unwrap();
         assert_eq!(setup.payload(), codec::channel_setup(address));
         assert_eq!(setup.target().can_id(), codec::SETUP_ID);
