@@ -86,7 +86,9 @@ proptest! {
         let _ = uds::decode_dtc_snapshots(&reply, dtc, record);
         let _ = uds::decode_dtc_extended_data(&reply, dtc, record);
         // A well-formed reply for this DTC gives back its status and every byte after it. A
-        // record number alone is cut short.
+        // record number alone is cut short, and so is a first snapshot record with fewer bytes
+        // than the 3 bytes (a DID and data) each identifier its count declares takes. One that
+        // declares no identifiers is malformed.
         prop_assume!(records.len() != 1);
         let [_, high, mid, low] = code.to_be_bytes();
         for sub in [0x04, 0x06] {
@@ -96,10 +98,21 @@ proptest! {
                 uds::decode_dtc_snapshots(&reply, dtc, 0xFF)
             } else {
                 uds::decode_dtc_extended_data(&reply, dtc, 0xFF)
+            };
+            let refused = match records[..] {
+                [_, 0, ..] => Some(response::Error::Malformed),
+                [_, count, ref identifiers @ ..] if identifiers.len() < 3 * usize::from(count) => {
+                    Some(response::Error::TooShort)
+                }
+                _ => None,
+            };
+            if let (0x04, Some(error)) = (sub, refused) {
+                prop_assert_eq!(got, Err(error));
+            } else {
+                let got = got.unwrap();
+                prop_assert_eq!(got.status, uds::DtcStatus(status));
+                prop_assert_eq!(got.records, &records[..]);
             }
-            .unwrap();
-            prop_assert_eq!(got.status, uds::DtcStatus(status));
-            prop_assert_eq!(got.records, &records[..]);
         }
     }
 

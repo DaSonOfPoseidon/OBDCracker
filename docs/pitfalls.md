@@ -128,6 +128,12 @@ Each entry names the class, what to check, and where it bit us.
   `decode_channel_setup` took any valid receive ID, so a reply giving 0x301 read as an open channel the policy then
   wouldn't close (#153). When the request names a value the reply repeats, check it equals the request's, not just
   that it's well formed.
+- **A count inside a reply must be backed by the bytes after it.** A UDS snapshot record holds its number, how many
+  identifiers follow, then each identifier's 2-byte DID and data. `decode_dtc_snapshots` only refused a record number
+  alone, so `59 04 00 16 A0 01 01 01` (one identifier, no DID) read as data (#143). Where a count's items have a
+  known least size, check the bytes left can hold that many before accepting the reply, and count every part of an
+  item: the first fix checked only the DID, so a DID with no data passed (PR #167, Codex). A count of 0 is an edge
+  value too: a snapshot record of no identifiers is malformed (python-udsoncan refuses it as well).
 - **Match a reply to its request by what it echoes**, not only the service ID: the PID (mode 09), a requested PID
   (mode 01), a requested DID (0x22), the subfunction, and every field the reply repeats, such as the DTC of a
   `19 04`/`19 06` reply: matching those by subfunction alone took a late answer for another DTC (#141, Codex). A late

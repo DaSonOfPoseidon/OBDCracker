@@ -264,6 +264,36 @@ mod read_dtc_information {
     }
 
     #[test]
+    fn a_first_snapshot_record_must_hold_the_identifiers_it_declares() {
+        let dtc = UdsDtc::new(GATEWAY_DTC);
+        let head = [0x59, 0x04, 0x00, 0x16, 0xA0, 0x01, 0x01];
+        for (after, result) in [
+            (&[0x01][..], Err(Error::TooShort)),
+            (&[0x01, 0xF1], Err(Error::TooShort)),
+            (&[0x01, 0xF1, 0x87], Err(Error::TooShort)),
+            (&[0x02, 0xF1, 0x87, 0x00, 0xF1, 0x88], Err(Error::TooShort)),
+            (&[0xFF, 0xF1, 0x87, 0x00], Err(Error::TooShort)),
+            (&[0x00], Err(Error::Malformed)),
+            (&[0x00, 0xF1, 0x87, 0x00], Err(Error::Malformed)),
+            (&[0x01, 0xF1, 0x87, 0x00], Ok(5)),
+            (&[0x02, 0xF1, 0x87, 0x00, 0xF1, 0x88, 0x00], Ok(8)),
+        ] {
+            let reply = [&head[..], after].concat();
+            assert_eq!(
+                decode_dtc_snapshots(&reply, dtc, 0xFF).map(|data| data.records.len()),
+                result,
+                "{reply:02X?}"
+            );
+        }
+        // An extended data record is its number and data: its second byte isn't a count.
+        assert_eq!(
+            decode_dtc_extended_data(&[0x59, 0x06, 0x00, 0x16, 0xA0, 0x01, 0x01, 0x01], dtc, 0xFF)
+                .map(|data| data.records),
+            Ok(&[0x01, 0x01][..])
+        );
+    }
+
+    #[test]
     fn decodes_the_dtc_count() {
         assert_eq!(
             decode_dtc_count(&[0x59, 0x01, 0xFF, 0x01, 0x00, 0x03]),

@@ -83,7 +83,9 @@ fn read(car: &mut Car) -> DtcDetail {
 #[test]
 fn reads_every_snapshot_then_every_extended_data_record() {
     let mut car = Car::new(|_, request| match request {
-        [0x19, 0x04, ..] => reply(&[0x59, 0x04, 0x00, 0x16, 0xA0, 0x01, 0x01, 0x01, 0x02]),
+        [0x19, 0x04, ..] => reply(&[
+            0x59, 0x04, 0x00, 0x16, 0xA0, 0x01, 0x01, 0x01, 0x02, 0x00, 0x12,
+        ]),
         // Busy first, as the A7's transmission is before DTC reads.
         [0x19, 0x06, ..] => [
             reply(&[0x7F, 0x19, 0x78]),
@@ -98,7 +100,7 @@ fn reads_every_snapshot_then_every_extended_data_record() {
         DtcDetail {
             snapshots: Ok(RecordData {
                 status: DtcStatus(0x01),
-                records: vec![0x01, 0x01, 0x02],
+                records: vec![0x01, 0x01, 0x02, 0x00, 0x12],
             }),
             extended_data: Some(Ok(RecordData {
                 status: DtcStatus(0x01),
@@ -175,6 +177,24 @@ fn a_reply_cut_short_after_its_dtc_is_kept_as_undecodable() {
         Err(ReadError::Undecodable {
             error: ReplyError::TooShort,
             reply: vec![0x59, 0x04, 0x00, 0x16, 0xA0],
+        })
+    );
+}
+
+#[test]
+fn a_snapshot_missing_the_identifiers_it_declares_is_kept_as_undecodable() {
+    let snapshot = [0x59, 0x04, 0x00, 0x16, 0xA0, 0x01, 0x01, 0x01];
+    let mut car = Car::new(move |_, request| match request {
+        [0x19, 0x04, ..] => reply(&snapshot),
+        [0x19, 0x06, ..] => reply(&[0x59, 0x06, 0x00, 0x16, 0xA0, 0x01]),
+        _ => Vec::new(),
+    });
+    let got = read(&mut car);
+    assert_eq!(
+        got.snapshots,
+        Err(ReadError::Undecodable {
+            error: ReplyError::TooShort,
+            reply: snapshot.to_vec(),
         })
     );
 }
