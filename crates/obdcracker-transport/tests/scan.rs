@@ -1180,6 +1180,23 @@ fn an_undecodable_answer_to_10_03_is_kept_with_its_bytes() {
 }
 
 #[test]
+fn an_empty_reply_says_so() {
+    let refused = ReadError::SessionRefused {
+        error: ReplyError::Malformed,
+        reply: vec![],
+    };
+    assert_eq!(
+        refused.to_string(),
+        "not read: extended session: reply is malformed: (empty)"
+    );
+    let undecodable = ReadError::Undecodable {
+        error: ReplyError::Malformed,
+        reply: vec![],
+    };
+    assert_eq!(undecodable.to_string(), "reply is malformed: (empty)");
+}
+
+#[test]
 fn a_module_that_doesnt_answer_10_03_is_returned_to_the_default_session() {
     // No answer doesn't mean the module didn't switch.
     let mut car = session_car(ENTERED);

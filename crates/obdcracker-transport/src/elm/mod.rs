@@ -1148,11 +1148,19 @@ impl<L: Link> Elm<L> {
             Line::Status(status) if leaves_unknown_state(status) => {
                 Err(self.break_down(format!("the adapter said {status}")))
             }
+            // Such as a line printed with headers off after a reset, whose data reads as a
+            // 29-bit ID.
+            Line::Frame(frame) if frame.is_29_bit() != self.bits29 => {
+                Err(self.break_down(format!(
+                    "unexpected output from the adapter: {text} (not {} frame)",
+                    if self.bits29 { "a 29-bit" } else { "an 11-bit" }
+                )))
+            }
             // The adapter lost the filter, and may be sending flow control for frames it
             // shouldn't see.
             Line::Frame(frame) if !filter_shows(&self.filter, frame.id()) => {
                 Err(self.break_down(format!(
-                    "a frame from {:03X} got past the receive filter",
+                    "a frame from {:03X} got past the receive filter: {text}",
                     frame.id()
                 )))
             }

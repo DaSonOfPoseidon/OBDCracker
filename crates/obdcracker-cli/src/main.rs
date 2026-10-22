@@ -558,10 +558,7 @@ fn run_dtc<T: Transport>(
         ),
     }
     if found.out_of_step {
-        eprintln!(
-            "note: a read went unanswered, so a late answer may still arrive; connect again              before reading from {} again",
-            module.name
-        );
+        eprintln!("{}", unanswered_note("a read", &module.name));
     }
     if found.answered() {
         ExitCode::SUCCESS
@@ -664,11 +661,7 @@ fn print_sweep(module: &UdsModule, found: &sweep::Sweep, last: u16) -> ExitCode 
     match &found.stop {
         None => {
             if found.out_of_step {
-                eprintln!(
-                    "note: some reads went unanswered, so a late answer may still arrive; connect \
-                     again before reading from {} again",
-                    module.name
-                );
+                eprintln!("{}", unanswered_note("some reads", &module.name));
             }
             ExitCode::SUCCESS
         }
@@ -858,7 +851,7 @@ fn run_scan<T: Transport>(
     // A module that's silent on ISO-TP may still answer on TP2.0.
     let mut answered = answered;
     if let Some(addresses) = tp20_addresses {
-        match discover_tp20_modules(transport, &policy, &addresses, timing) {
+        match discover_tp20_modules(transport, &policy, &addresses, timing, cli.dry_run) {
             Ok(found) => answered |= found,
             Err(code) => return code,
         }
@@ -899,6 +892,7 @@ fn discover_tp20_modules<T: Transport>(
     policy: &Policy,
     addresses: &[u8],
     timing: Timing,
+    dry_run: bool,
 ) -> Result<bool, ExitCode> {
     let found = tp20::probe(transport, policy, addresses, timing).map_err(|e| {
         eprintln!("{e}");
@@ -925,11 +919,15 @@ fn discover_tp20_modules<T: Transport>(
         };
         println!("TP2.0 {:02X} {answer}{disconnect}", module.address);
     }
-    println!(
-        "TP2.0 discovery: {} of {} addresses answered",
-        found.len(),
-        addresses.len()
-    );
+    if dry_run {
+        println!("TP2.0 discovery: dry run, no channel setup was sent");
+    } else {
+        println!(
+            "TP2.0 discovery: {} of {} addresses answered",
+            found.len(),
+            addresses.len()
+        );
+    }
     if found
         .iter()
         .any(|module| matches!(module.answer, Answer::Channel(_)))
@@ -1317,6 +1315,13 @@ fn print_scan(found: &Scan) {
     }
 }
 
+fn unanswered_note(reads: &str, module: &str) -> String {
+    format!(
+        "note: {reads} went unanswered, so a late answer may still arrive; connect again before \
+         reading from {module} again"
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use std::process::ExitCode;
@@ -1328,7 +1333,7 @@ mod tests {
     use obdcracker_sim::SimBus;
     use obdcracker_transport::{Error, Response, Timing, Transport};
 
-    use super::{Cli, Discovery, resume_command, run_scan};
+    use super::{Cli, Discovery, resume_command, run_scan, unanswered_note};
 
     fn a7_with_tp20() -> SimBus {
         let mut bus = SimBus::builtin("a7").unwrap();
@@ -1476,6 +1481,15 @@ mod tests {
         assert_eq!(
             resume_command(ran, 0x0123, 0x0FFF, true).unwrap(),
             r#"obdcracker --serial \\.\COM10 --audit-log "C:\car 4\hud.jsonl" sweep --module "head-up display" --range 0123-0FFF"#
+        );
+    }
+
+    #[test]
+    fn unanswered_note_reads_as_one_sentence() {
+        assert_eq!(
+            unanswered_note("a read", "gateway"),
+            "note: a read went unanswered, so a late answer may still arrive; connect again \
+             before reading from gateway again"
         );
     }
 }

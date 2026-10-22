@@ -158,7 +158,7 @@ pub enum Status {
 impl Status {
     /// Whether the adapter has lost the settings a driver gave it: it has reset or is about to
     /// (`LV RESET`, `LP ALERT`, any `ERRxx`) or is searching for a protocol (`SEARCHING...`,
-    /// `UNABLE TO CONNECT`). See docs/elm327.md#failure-states.
+    /// `UNABLE TO CONNECT`). See docs/elm327.md#safety for why each counts.
     #[must_use]
     pub fn loses_settings(self) -> bool {
         matches!(
