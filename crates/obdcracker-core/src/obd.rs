@@ -168,7 +168,6 @@ fn decode_pid(pid: u8, data: &[u8]) -> Option<(usize, Value<'static>)> {
 }
 
 fn is_known(pid: u8) -> bool {
-    // A long enough buffer decodes every known PID.
     decode_pid(pid, &[0; 4]).is_some()
 }
 
@@ -248,10 +247,7 @@ impl fmt::Display for Dtc {
 }
 
 /// Decodes a mode 03 reply in the CAN format (ISO 15765-4): a count byte, then that many
-/// two-byte codes, such as `43 02 04 01 01 13` for P0401 and P0113.
-///
-/// Pre-CAN protocols (SAE J1850, ISO 9141-2, ISO 14230-4) use another layout, with no count byte
-/// and codes in zero-padded groups of three, so their replies aren't decoded here.
+/// two-byte codes. Pre-CAN layouts aren't decoded; see docs/protocols.md#obd-ii-decoding.
 pub fn decode_stored_dtcs(reply: &[u8]) -> Result<Dtcs<'_>, Error> {
     let (&count, codes) = positive(STORED_DTCS, reply)?
         .split_first()
@@ -285,7 +281,6 @@ const CVN_LEN: usize = 4;
 const VIN_LEN: usize = 17;
 const ECU_NAME_LEN: usize = 20;
 
-// A mode 09 reply for `pid`: the item count and the data after it.
 fn info(reply: &[u8], pid: u8) -> Result<(usize, &[u8]), Error> {
     let rest = positive(VEHICLE_INFO, reply)?;
     let [got, count, data @ ..] = rest else {
@@ -435,8 +430,7 @@ pub fn decode_ecu_name(reply: &[u8]) -> Result<EcuName<'_>, Error> {
     })
 }
 
-// An ECU name field: required text with no blanks between words (SAE J1979-DA), such as
-// `EngineControl`.
+// An ECU name field: required text with no blanks between words (SAE J1979-DA).
 fn name_text(bytes: &[u8]) -> Result<&str, Error> {
     let name = text(bytes)?;
     if name.contains(' ') {
