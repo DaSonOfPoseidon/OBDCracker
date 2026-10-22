@@ -21,7 +21,6 @@ const REPORT_DTC_BY_STATUS_MASK: u8 = 0x02;
 const REPORT_SUPPORTED_DTC: u8 = 0x0A;
 const REPORT_DTC_SNAPSHOT_BY_DTC: u8 = 0x04;
 const REPORT_DTC_EXTENDED_DATA_BY_DTC: u8 = 0x06;
-// The record number that asks for every record.
 const ALL_RECORDS: u8 = 0xFF;
 // The extended data record number that asks for every OBD record (ISO 14229-1).
 const ALL_OBD_RECORDS: u8 = 0xFE;

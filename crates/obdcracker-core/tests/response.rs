@@ -6,12 +6,10 @@ use obdcracker_core::response::{
 
 #[test]
 fn positive_reply_returns_the_bytes_after_the_service_id() {
-    // 0x22 F190 answered with 0x62 F190 and data
     assert_eq!(
         positive(0x22, &[0x62, 0xF1, 0x90, 0x57]),
         Ok(&[0xF1, 0x90, 0x57][..])
     );
-    // OBD-II mode 09 answered with 0x49
     assert_eq!(positive(0x09, &[0x49, 0x02]), Ok(&[0x02][..]));
 }
 
@@ -98,13 +96,11 @@ fn codec_errors_work_with_the_question_mark_operator() {
 fn answers_matches_the_echoed_obd_pid() {
     let vin = [0x09, 0x02];
     assert!(answers(&vin, b"\x49\x02\x01WAUZZZ4G1EN000000"));
-    // A late reply to a PID 04 request uses the same service.
     assert!(!answers(&vin, &[0x49, 0x04, 0x01, 0x41]));
     assert!(!answers(&vin, &[0x49]));
     // Mode 01 leaves out unsupported PIDs, so the first echoed PID is any requested one.
     assert!(answers(&[0x01, 0x0C, 0x0D], &[0x41, 0x0D, 0x00]));
     assert!(!answers(&[0x01, 0x0C, 0x0D], &[0x41, 0x05, 0x82]));
-    // Mode 03 echoes nothing.
     assert!(answers(&[0x03], &[0x43, 0x00]));
 }
 
@@ -168,7 +164,6 @@ fn after_response_pending_a_suppressed_request_gets_its_positive_reply() {
             "{request:02X?}"
         );
     }
-    // Everything else matches as `answers` does.
     assert!(answers_after_pending(
         &[0x22, 0xF1, 0x90],
         &[0x62, 0xF1, 0x90, 0x57]
@@ -208,13 +203,10 @@ fn kwp2000_replies_match_by_their_own_rules() {
     assert!(kwp2000_answers(&[0x1A, 0x9B], &[0x5A, 0x34]));
     assert!(kwp2000_answers(&[0x21, 0x01], &[0x61, 0x01, 0x00]));
     assert!(!kwp2000_answers(&[0x21, 0x01], &[0x61, 0x02, 0x00]));
-    // DTC reads: by service.
     assert!(kwp2000_answers(&[0x18, 0x02, 0xFF, 0x00], &[0x58, 0x00]));
-    // A refusal names the service; a pending one too.
     assert!(kwp2000_answers(&[0x1A, 0x9B], &[0x7F, 0x1A, 0x78]));
     assert!(!kwp2000_answers(&[0x1A, 0x9B], &[0x7F, 0x21, 0x31]));
     assert!(!kwp2000_answers(&[0x1A, 0x9B], &[0x7F, 0x1A]));
-    // Another service's reply, and nothing.
     assert!(!kwp2000_answers(&[0x1A, 0x9B], &[0x61, 0x9B]));
     assert!(!kwp2000_answers(&[0x1A, 0x9B], &[]));
     assert!(!kwp2000_answers(&[], &[0x7E]));
@@ -258,11 +250,9 @@ fn a_dtc_detail_reply_must_echo_the_dtc_asked_for() {
         &snapshot_fe,
         &[0x59, 0x04, 0x00, 0x16, 0xA0, 0x01, 0x01, 0x00]
     ));
-    // A request cut short of its record answers nothing.
     assert!(!answers(
         &[0x19, 0x04, 0x00, 0x16, 0xA0],
         &[0x59, 0x04, 0x00, 0x16, 0xA0, 0x01]
     ));
-    // Other reports echo no DTC.
     assert!(answers(&[0x19, 0x02, 0xAF], &[0x59, 0x02, 0xFF]));
 }

@@ -1,10 +1,8 @@
-//! VW TP2.0, the transport VAG's older modules use for KWP2000 on CAN. A tester opens a channel
-//! to a module by its address on [`SETUP_ID`], agrees timing with it, then sends and receives
-//! data frames that carry a sequence number and ask for ACKs, keeping the channel open with
-//! [`KEEP_ALIVE`] and closing it with [`DISCONNECT`].
+//! VW TP2.0, the transport VAG's older modules use for KWP2000 on CAN: channel setup, data
+//! frames with ACKs, keep-alive and disconnect. See docs/tp20.md#frames.
 //!
-//! There is no public standard. The layouts here are from hobbyist descriptions and traces of
-//! VAG modules; none is confirmed on the A7 yet (#124), so every reply is checked exactly.
+//! There is no public standard and no layout is confirmed on the A7 yet (#124), so every reply
+//! is checked exactly.
 
 use core::fmt;
 use core::time::Duration;
@@ -23,11 +21,9 @@ pub const MAX_SINGLE_FRAME: usize = 5;
 
 const SETUP_REQUEST: u8 = 0xC0;
 const SETUP_POSITIVE: u8 = 0xD0;
-// Refusals of a channel setup: application not supported, no resources, not ready.
 const SETUP_REFUSALS: [u8; 3] = [0xD6, 0xD7, 0xD8];
 const TESTER_ADDRESS: u8 = 0x00;
 const KWP2000_APPLICATION: u8 = 0x01;
-// In a channel setup's ID, the high byte's bit 4 marks the ID as not given.
 const ID_INVALID: u8 = 0x10;
 const PARAMETERS_REQUEST: u8 = 0xA0;
 const PARAMETERS_REPLY: u8 = 0xA1;
@@ -68,8 +64,7 @@ impl fmt::Display for Error {
 
 impl core::error::Error for Error {}
 
-/// A channel setup for the module at `address`, sent on [`SETUP_ID`]: the module chooses the ID
-/// it listens on, and the tester asks to be answered on 0x300, for KWP2000.
+/// A channel setup request for the module at `address`, sent on [`SETUP_ID`], for KWP2000.
 #[must_use]
 pub fn channel_setup(address: u8) -> [u8; 7] {
     [
@@ -98,8 +93,8 @@ pub struct Channel {
     pub receive_id: u32,
 }
 
-/// Decodes a module's answer to [`channel_setup`]: to the tester (address 0), positive, with two
-/// valid 11-bit IDs outside the setup range that differ, for KWP2000.
+/// Decodes a module's answer to [`channel_setup`]. Only a positive KWP2000 answer to the tester
+/// with two different, valid 11-bit IDs outside the setup range is accepted.
 ///
 /// # Errors
 ///
@@ -132,8 +127,8 @@ pub fn decode_channel_setup(reply: &[u8]) -> Result<Channel, Error> {
     })
 }
 
-// One of a channel setup's IDs: the low byte, then the high byte's low 3 bits. Any other bit,
-// the invalid flag included, or an ID in the setup range, is malformed.
+// Any high-byte bit past the low 3 (the invalid flag included), or an ID in the setup range, is
+// malformed. See docs/tp20.md#frames.
 fn setup_id(low: u8, high: u8) -> Result<u32, Error> {
     if high & !0x07 != 0 {
         return Err(Error::Malformed);
@@ -145,8 +140,7 @@ fn setup_id(low: u8, high: u8) -> Result<u32, Error> {
     Ok(id)
 }
 
-/// The tester's channel parameters: a block size of 15, an ACK timeout (T1) of 100 ms, and 5 ms
-/// between its frames (T3).
+/// The tester's channel parameters: block size 15, T1 100 ms, T3 5 ms.
 #[must_use]
 pub fn channel_parameters() -> [u8; 6] {
     [PARAMETERS_REQUEST, 0x0F, 0x8A, NOT_GIVEN, 0x32, NOT_GIVEN]
@@ -163,8 +157,7 @@ pub struct Parameters {
     pub t3: Duration,
 }
 
-/// Decodes `A1 <block size> <T1> <T2> <T3> <T4>`. Each time is a unit in its top two bits (0.1,
-/// 1, 10 or 100 ms) and a count in the rest; 0xFF means not given, which T1 and T3 must not be.
+/// Decodes a parameters reply (`A1`). T1 and T3 must be given.
 ///
 /// # Errors
 ///
@@ -200,8 +193,7 @@ fn time(byte: u8) -> Option<Duration> {
     Some(Duration::from_micros(unit_us * u64::from(byte & 0x3F)))
 }
 
-/// Whether `reply` answers the channel management frame `request`: a channel setup is answered
-/// by a setup reply to the tester (positive or a refusal), a disconnect by a disconnect.
+/// Whether `reply` answers the channel setup or disconnect `request`. A refusal answers a setup.
 #[must_use]
 pub fn answers(request: &[u8], reply: &[u8]) -> bool {
     match request {
@@ -230,7 +222,7 @@ impl Outgoing {
 }
 
 /// `payload` as one data frame with sequence number `sequence`: the last of its message, asking
-/// for an ACK, then the payload's 2-byte length and the payload.
+/// for an ACK.
 ///
 /// # Errors
 ///

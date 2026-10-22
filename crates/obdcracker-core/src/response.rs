@@ -1,6 +1,6 @@
 //! Positive and negative responses. OBD-II on CAN (ISO 15765-4) and UDS (ISO 14229-1) share the
 //! format: a positive reply starts with the request's service ID + 0x40, a negative one is
-//! `7F <service ID> <code>`.
+//! `7F <service ID> <code>`. Reply matching: docs/protocols.md#matching-replies-to-requests.
 
 use core::fmt;
 
@@ -173,14 +173,9 @@ pub(crate) fn printable(bytes: &[u8]) -> Result<&str, Error> {
 /// this one's.
 ///
 /// A positive reply must have the request's service ID + 0x40 and echo what the request asked
-/// for: the PID (mode 09), one of the requested PIDs (mode 01, which leaves out unsupported ones),
-/// one of the requested DIDs (`ReadDataByIdentifier`), or the subfunction
-/// (`DiagnosticSessionControl`, `ReadDTCInformation`, `TesterPresent`), and for one DTC's
-/// snapshots or extended data (`ReadDTCInformation` 0x04 and 0x06) the DTC too. A request with the
-/// suppress-positive-response bit set gets no positive reply unless the module first sent
-/// response-pending, so none answers it here (see [`answers_after_pending`]). A negative
-/// reply echoes only the service ID, so any `7F <service> <code>` for the request's service
-/// answers it. Other services are matched by service ID alone.
+/// for, and a request with the suppress-positive-response bit set is answered only after
+/// response-pending (see [`answers_after_pending`]). Any `7F <service> <code>` for the request's
+/// service answers it. See docs/protocols.md#matching-replies-to-requests.
 #[must_use]
 pub fn answers(request: &[u8], reply: &[u8]) -> bool {
     matches(request, reply, false)
@@ -190,22 +185,15 @@ pub fn answers(request: &[u8], reply: &[u8]) -> bool {
 /// (`7F <service> 78`) for it.
 ///
 /// The same as [`answers`], except that a request with the suppress-positive-response bit set
-/// is answered by its positive reply: ISO 14229-1 requires the final positive reply after
-/// response-pending even when the bit is set.
+/// is answered by its positive reply, as ISO 14229-1 requires after response-pending.
 #[must_use]
 pub fn answers_after_pending(request: &[u8], reply: &[u8]) -> bool {
     matches(request, reply, true)
 }
 
-/// Whether `reply` answers the KWP2000 (ISO 14230-3) `request`. [`answers`] reads UDS: KWP2000
-/// has no suppress-positive-response bit, and some of its positive replies echo nothing, such as
-/// `7E` for `TesterPresent`.
-///
-/// A positive reply must have the request's service ID + 0x40, and echo the local ID it asked
-/// for (`ReadDataByLocalIdentifier`, 0x21); other services are matched by service ID alone,
-/// since what follows is the manufacturer's record (ISO 14230-3), such as
-/// `ReadEcuIdentification`'s. A decoder must still check what it reads. A negative reply answers
-/// any request for its service, before or after response-pending.
+/// Whether `reply` answers the KWP2000 (ISO 14230-3) `request`. [`answers`] reads UDS, which
+/// differs here: see docs/protocols.md#matching-replies-to-requests. A decoder must still check
+/// what it reads.
 #[must_use]
 pub fn kwp2000_answers(request: &[u8], reply: &[u8]) -> bool {
     let Some((&sid, asked)) = request.split_first() else {
@@ -222,10 +210,8 @@ pub fn kwp2000_answers(request: &[u8], reply: &[u8]) -> bool {
     }
 }
 
-// Whether a `ReadDTCInformation` 0x04 or 0x06 reply (`echo`: subfunction, DTC, status,
-// records) is for the DTC `asked` for (subfunction, DTC, record), and starts with its record
-// unless every record (0xFF, or 0xFE for every OBD extended data record) was asked for. A reply
-// with no records has none to compare.
+// Whether a `ReadDTCInformation` 0x04 or 0x06 reply `echo` is for the DTC and record `asked`
+// for. A reply with no records has none to compare.
 fn dtc_detail_echoed(sub: u8, asked: &[u8], echo: &[u8]) -> bool {
     let (Some(dtc), Some(&record)) = (asked.get(1..4), asked.get(4)) else {
         return false;
@@ -234,7 +220,6 @@ fn dtc_detail_echoed(sub: u8, asked: &[u8], echo: &[u8]) -> bool {
     echo.get(1..4) == Some(dtc) && (every || echo.get(5).is_none_or(|&first| first == record))
 }
 
-// `answers`, with `pending` saying whether the module sent response-pending for this request.
 fn matches(request: &[u8], reply: &[u8], pending: bool) -> bool {
     let Some((&sid, asked)) = request.split_first() else {
         return false;
@@ -243,22 +228,16 @@ fn matches(request: &[u8], reply: &[u8], pending: bool) -> bool {
         [NEGATIVE, refused, _] => *refused == sid,
         [NEGATIVE, ..] => false,
         [first, echo @ ..] if *first == sid.wrapping_add(POSITIVE_OFFSET) => match sid {
-            // OBD-II mode 01: one or more PIDs
             0x01 => echo.first().is_some_and(|pid| asked.contains(pid)),
-            // OBD-II mode 09: one PID
             0x09 => echo.first().is_some_and(|pid| asked.first() == Some(pid)),
-            // ReadDataByIdentifier: the first supported DID
             0x22 => echo
                 .first_chunk::<2>()
                 .is_some_and(|did| asked.as_chunks::<2>().0.contains(did)),
-            // Subfunction services: bit 7 is the suppress-positive-response bit. It isn't echoed,
-            // and a request with it set gets a positive reply only after response-pending.
+            // Bit 7 is the suppress-positive-response bit; it isn't echoed.
             0x10 | 0x19 | 0x3E => match (echo.first(), asked.first()) {
                 (Some(&got), Some(&sub)) => {
                     (pending || sub & 0x80 == 0)
                         && got == sub & 0x7F
-                        // One DTC's snapshots or extended data: the DTC too, and the record
-                        // when one was asked for.
                         && (sid != 0x19
                             || !matches!(got, 0x04 | 0x06)
                             || dtc_detail_echoed(got, asked, echo))

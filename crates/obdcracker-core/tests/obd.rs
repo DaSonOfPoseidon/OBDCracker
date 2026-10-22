@@ -106,7 +106,6 @@ mod current_data {
 
     #[test]
     fn scalar_pids_need_their_full_length() {
-        // A known PID cut short is an error, not a reading of the bytes that are there.
         for reply in [
             &[0x41, 0x10, 0x00][..],
             &[0x41, 0x31, 0x1C],
@@ -206,7 +205,6 @@ mod stored_dtcs {
 
     #[test]
     fn decodes_each_code_after_the_count() {
-        // P0401: EGR flow insufficient; P0113: intake air temperature sensor high
         assert_eq!(
             codes(&[0x43, 0x02, 0x04, 0x01, 0x01, 0x13]),
             ["P0401", "P0113"]
@@ -264,7 +262,6 @@ mod vehicle_info {
 
     #[test]
     fn decodes_the_supported_bitmap() {
-        // PIDs 02, 04, 06 and 0A
         let supported = decode_supported_info(&[0x49, 0x00, 0x54, 0x40, 0x00, 0x00]).unwrap();
         assert_eq!(
             supported.iter().collect::<Vec<_>>(),
@@ -315,7 +312,6 @@ mod vehicle_info {
 
     #[test]
     fn checks_a_vin_from_any_source() {
-        // UDS F190 carries the VIN without mode 09's framing; the same rule applies.
         assert_eq!(check_vin(b"WAU2MBFC6EN093415"), Ok("WAU2MBFC6EN093415"));
         for bad in [
             &b""[..],
@@ -360,7 +356,6 @@ mod vehicle_info {
 
     #[test]
     fn rejects_characters_a_vin_never_contains() {
-        // SAE J1979: digits and upper case letters except I, O and Q
         for bad in [
             b"1D4GP00R55B12345I",
             b"1D4GP00R55B12345O",
@@ -492,7 +487,6 @@ mod vehicle_info {
 
     #[test]
     fn ecu_name_has_no_blanks() {
-        // SAE J1979-DA: no blanks between words ("EngineControl"); unused bytes are 0x00
         let mut data = padded("ECM", 4);
         data.push(b'-');
         data.extend(padded("Engine Control", 15));

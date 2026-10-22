@@ -1,4 +1,5 @@
-//! ISO 15765-2 (ISO-TP) framing of diagnostic payloads onto 8-byte classic CAN frames.
+//! ISO 15765-2 (ISO-TP) framing of diagnostic payloads onto 8-byte classic CAN frames. See
+//! docs/protocols.md#iso-tp-decoding.
 
 use core::fmt;
 use core::time::Duration;
@@ -202,7 +203,7 @@ impl<'a> Frame<'a> {
                 let (&len_low, data) = rest.split_first().ok_or(Error::BadLength)?;
                 let short = u16::from(low) << 8 | u16::from(len_low);
                 let (len, data, header) = if short == 0 {
-                    // The escape: a 32-bit length follows, for payloads over 4095 bytes
+                    // 32-bit length escape; see docs/protocols.md#iso-tp-decoding
                     let [a, b, c, d, data @ ..] = data else {
                         return Err(Error::BadLength);
                     };
@@ -247,8 +248,7 @@ impl<'a> Frame<'a> {
     }
 }
 
-// STmin: 0x00-0x7F milliseconds, 0xF1-0xF9 hundreds of microseconds. Reserved values are read as
-// the longest gap, 127 ms, as ISO 15765-2 requires.
+// Reserved values read as the longest gap, as ISO 15765-2 requires (docs/protocols.md#iso-tp-decoding).
 fn decode_st_min(byte: u8) -> Duration {
     match byte {
         0x00..=0x7F => Duration::from_millis(u64::from(byte)),
@@ -257,13 +257,11 @@ fn decode_st_min(byte: u8) -> Duration {
     }
 }
 
-// Rounds up to the next value STmin can express, so the gap is never shorter than asked.
+// Rounds up, so the gap is never shorter than asked.
 fn encode_st_min(st_min: Duration) -> Result<u8, Error> {
-    // Nanoseconds, so no remainder is dropped before rounding up.
     let nanos = st_min.as_nanos();
     match nanos {
         0 => Ok(0),
-        // Up to 900 µs: 1..=9 hundreds of microseconds
         1..=900_000 => Ok(0xF0 + u8::try_from(nanos.div_ceil(100_000)).unwrap_or(9)),
         _ => u8::try_from(nanos.div_ceil(1_000_000))
             .ok()
