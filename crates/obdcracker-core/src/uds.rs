@@ -571,7 +571,8 @@ fn dtc_data(reply: &[u8], sub: u8, dtc: UdsDtc, record: u8) -> Result<DtcData<'_
         return Err(Error::TooShort);
     }
     // Each identifier is a 2-byte DID and at least a byte of data; later records can't be checked
-    // without the DIDs' lengths.
+    // without the DIDs' lengths. A count of 0x00 is valid: it leaves the number unsaid, for a
+    // record of more than 255 identifiers (ISO 14229-1).
     if let [_, count, identifiers @ ..] = records
         && sub == REPORT_DTC_SNAPSHOT_BY_DTC
         && identifiers.len() < 3 * usize::from(*count)
