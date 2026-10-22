@@ -195,6 +195,9 @@ struct Spaced<'a>(&'a [u8]);
 
 impl fmt::Display for Spaced<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if self.0.is_empty() {
+            return f.write_str(" (empty)");
+        }
         self.0.iter().try_for_each(|byte| write!(f, " {byte:02X}"))
     }
 }
