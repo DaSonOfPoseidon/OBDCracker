@@ -9,6 +9,15 @@ third-party code ships in the crates.
 | [pylessard/python-udsoncan](https://github.com/pylessard/python-udsoncan) | `78e85f1b5dac968b6a2d478fce9c0cc5adba2b50` | MIT | `crates/obdcracker-core/tests/third_party.rs` (UDS 0x22, 0x19, negative responses) |
 | [commaai/opendbc](https://github.com/commaai/opendbc) | `229dc7062d8986b4f954c7c97875b4ffd0044d12` | MIT | `crates/obdcracker-sim/fixtures/opendbc-vag.toml` (VW/Audi identification replies, from `scripts/import-opendbc.sh`); the VW UDS module addresses in `opendbc/car/volkswagen/fingerprints.py` and `values.py` (request IDs 0x712, 0x715, 0x74F, 0x757, replies at +0x6A), which the A7 profile's discovery range covers |
 
+## Reference only
+
+The repo only takes data under a permissive license. These sources aren't, so we read them while developing but
+never copy them into the repo:
+
+| Source | License | Use |
+|---|---|---|
+| [OBDb](https://github.com/OBDb) | CC BY-SA 4.0 | Manufacturer DIDs, module addresses and signal scalings, one repo per model (`signalsets/v3/default.json`). A cross-check when writing a profile. Its entries are community-sourced, often for other model years, and many are still flagged for debugging (`dbg`), so a DID taken from it still goes through the sim, a dry run and a live read. An importer for files the user downloads is planned (#173). |
+
 ## pylessard/python-can-isotp and pylessard/python-udsoncan
 
 Both are MIT licensed:
