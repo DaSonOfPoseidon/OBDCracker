@@ -3,7 +3,8 @@
 A profile is data, not code: module addresses, addressing mode, protocol per module, the identifiers to read and how to
 decode them. Without a profile the tool falls back to generic OBD-II. Profiles are TOML files in
 [`crates/obdcracker-profile/profiles/`](../crates/obdcracker-profile/profiles/); a profile has no field that names a
-service, so it can't widen the [safety policy](safety.md).
+service, so it can't widen the [safety policy](safety.md). For outside sources to cross-check a profile against, and
+which of them may be copied, see [third-party.md](third-party.md#reference-only).
 
 | Profile | Expected setup (confirmed by a read-only module scan before use) |
 |---|---|
