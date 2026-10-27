@@ -550,12 +550,15 @@ fn a_module_that_never_stops_sending_cant_stall_a_request() {
         };
         let policy = Policy::read_only();
         let mut session = ChannelSession::open(&mut flood, &policy, 0x5F, TIMING).unwrap();
+        let started = std::time::Instant::now();
         let result = session.request(&[0x1A, 0x9B]);
         drop(session);
         assert!(result.is_err(), "{frame:02X?}");
+        // Bounded by time the frames can't extend, or by their count: well under a second.
         assert!(
-            flood.handed_out < 1_000_000,
-            "{frame:02X?}: {}",
+            started.elapsed() < Duration::from_secs(1),
+            "{frame:02X?}: {:?}, {} frames",
+            started.elapsed(),
             flood.handed_out
         );
     }

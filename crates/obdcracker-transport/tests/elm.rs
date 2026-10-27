@@ -774,6 +774,144 @@ mod requests {
         assert_eq!(elm.link().elm.flow_control_for[before..], [0x7E8]);
     }
 
+    // A TP2.0 module at 0x5F that answers `1A 9B` in three frames, the second asking for an
+    // ACK and the third sent only once it has one. The adapter listens after each raw frame
+    // until the host writes, as a real one does for its whole timeout.
+    fn tp20_reading_car() -> FakeElm {
+        let mut car = FakeElm::new(Box::new(|header, request| match (header, request) {
+            (0x200, [0x5F, 0xC0, ..]) => {
+                vec![(0x25F, vec![0x00, 0xD0, 0x00, 0x03, 0x40, 0x07, 0x01])]
+            }
+            (0x740, [0xA0, ..]) => vec![(0x300, vec![0xA1, 0x0F, 0x8A, 0xFF, 0x32, 0xFF])],
+            (0x740, [0x10, 0x00, 0x02, 0x1A, 0x9B]) => vec![
+                (0x300, vec![0xB1]),
+                (0x300, vec![0x20, 0x00, 0x0E, 0x5A, 0x9B, 0x41, 0x42, 0x43]),
+                (0x300, vec![0x01, 0x44, 0x45, 0x46, 0x47, 0x48, 0x49, 0x4A]),
+            ],
+            (0x740, [0xB2]) => vec![(0x300, vec![0x12, 0x4B, 0x4C])],
+            (0x740, [0xA8]) => vec![(0x300, vec![0xA8])],
+            (0x7E0, [0x09, 0x02]) => vec![(0x7E8, VIN.to_vec())],
+            _ => Vec::new(),
+        }));
+        car.listen_raw = true;
+        car
+    }
+
+    #[test]
+    fn an_ack_interrupts_the_adapter_instead_of_waiting_out_its_timeout() {
+        use obdcracker_transport::Timing;
+        use obdcracker_transport::tp20::{ChannelSession, Disconnect};
+        let mut elm = connect(tp20_reading_car());
+        elm.send(&approve(Target::Physical(0x7E0), &[0x09, 0x02]))
+            .unwrap();
+        while elm.recv(Duration::from_secs(1)).is_ok() {}
+        let policy = Policy::read_only();
+        let timing = Timing {
+            p2: Duration::from_millis(100),
+            ..Timing::default()
+        };
+        let started = Instant::now();
+        let mut session = ChannelSession::open(&mut elm, &policy, 0x5F, timing).unwrap();
+        assert_eq!(
+            session.request(&[0x1A, 0x9B]).unwrap(),
+            b"\x5A\x9BABCDEFGHIJKL"
+        );
+        assert_eq!(session.close(), Ok(Disconnect::Closed));
+        // Each frame after the first stopped the adapter's listening for the last.
+        assert!(
+            started.elapsed() < ADAPTER_TIMEOUT,
+            "{:?}",
+            started.elapsed()
+        );
+        assert_eq!(
+            elm.link().elm.sent[1..],
+            [
+                (0x200, vec![0x5F, 0xC0, 0x00, 0x10, 0x00, 0x03, 0x01]),
+                (0x740, vec![0xA0, 0x0F, 0x8A, 0xFF, 0x32, 0xFF]),
+                (0x740, vec![0x10, 0x00, 0x02, 0x1A, 0x9B]),
+                (0x740, vec![0xB2]),
+                (0x740, vec![0xB3]),
+                (0x740, vec![0xA8]),
+            ]
+        );
+        assert_eq!(elm.link().elm.interrupted, 5);
+    }
+
+    #[test]
+    fn an_interrupt_that_crosses_the_prompt_is_refused_not_run() {
+        // The adapter's timeout runs out just as `X` is written, so `X` starts a line: the
+        // driver ends it as `XX`, which the adapter refuses, and nothing more reaches the bus.
+        use obdcracker_transport::Timing;
+        use obdcracker_transport::tp20::ChannelSession;
+        let mut car = tp20_reading_car();
+        car.listen_ends_on_write = true;
+        let mut elm = connect(car);
+        elm.send(&approve(Target::Physical(0x7E0), &[0x09, 0x02]))
+            .unwrap();
+        while elm.recv(Duration::from_secs(1)).is_ok() {}
+        let policy = Policy::read_only();
+        let timing = Timing {
+            p2: Duration::from_millis(100),
+            ..Timing::default()
+        };
+        let mut session = ChannelSession::open(&mut elm, &policy, 0x5F, timing).unwrap();
+        assert_eq!(
+            session.request(&[0x1A, 0x9B]).unwrap(),
+            b"\x5A\x9BABCDEFGHIJKL"
+        );
+        drop(session);
+        assert_eq!(elm.link().elm.interrupted, 0);
+        assert_eq!(elm.link().elm.sent.len(), 7);
+        let refused = commands(&elm).iter().filter(|c| *c == "XX").count();
+        assert_eq!(refused, 5, "{:?}", commands(&elm));
+    }
+
+    #[test]
+    fn a_misheard_interrupt_never_reaches_the_bus() {
+        // Every bit of `X`, and of the `X\r` that ends it when the prompt came first: at worst
+        // the driver stops, and the bus gets only the frames the policy built.
+        use obdcracker_transport::Timing;
+        use obdcracker_transport::tp20::ChannelSession;
+        for (crossing, write) in [(false, &b"X"[..]), (true, b"X"), (true, b"X\r")] {
+            for index in 0..write.len() {
+                for bit in 0..8 {
+                    let mut car = tp20_reading_car();
+                    car.listen_ends_on_write = crossing;
+                    let mut elm = connect(car);
+                    elm.send(&approve(Target::Physical(0x7E0), &[0x09, 0x02]))
+                        .unwrap();
+                    while elm.recv(Duration::from_secs(1)).is_ok() {}
+                    elm.link_mut().corrupt_write_of = Some((write.to_vec(), index, 1 << bit));
+                    let policy = Policy::read_only();
+                    let timing = Timing {
+                        p2: Duration::from_millis(100),
+                        ..Timing::default()
+                    };
+                    if let Ok(mut session) = ChannelSession::open(&mut elm, &policy, 0x5F, timing) {
+                        let _ = session.request(&[0x1A, 0x9B]);
+                    }
+                    let built: Vec<Vec<u8>> = [
+                        &[0x5F, 0xC0, 0x00, 0x10, 0x00, 0x03, 0x01][..],
+                        &[0xA0, 0x0F, 0x8A, 0xFF, 0x32, 0xFF],
+                        &[0x10, 0x00, 0x02, 0x1A, 0x9B],
+                        &[0xB2],
+                        &[0xB3],
+                        &[0xA8],
+                    ]
+                    .iter()
+                    .map(|frame| frame.to_vec())
+                    .collect();
+                    for (_, frame) in &elm.link().elm.sent[1..] {
+                        assert!(
+                            built.contains(frame),
+                            "{crossing} {index} {bit}: {frame:02X?}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
     fn busy_bus() -> FakeElm {
         FakeElm::new(Box::new(|header, request| {
             if header != 0x710 || request != [0x22, 0xF1, 0x87] {
