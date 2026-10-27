@@ -107,8 +107,9 @@ After the scan, sends a VW TP2.0 channel setup (`<address> C0 00 10 00 03 01` on
 profile's TP2.0 list. On the A7 these are the 13 modules that stayed silent on ISO-TP (#92). For each module that
 answers, it shows the channel it gave, a refusal or the bytes it sent. It then closes each channel with `A8`. Then, for
 each module that gave a channel, it opens one again and reads the module's identification (KWP2000 `1A 9B`), showing
-the bytes and their printable text, and closes it ([how](tp20.md#data-transfer)). The modules aren't scanned
-otherwise. A disconnect goes
+the bytes and their printable text, and closes it ([how](tp20.md#data-transfer)). A record that doesn't start with
+the `9B` it answers is shown as not read, with its bytes. An adapter failure on a channel ends the scan with an error.
+The modules aren't scanned otherwise. A disconnect goes
 only on a channel a module gave in answer to its setup, answered on 0x300 as the setup asked, and never on an ID
 below 0x300, an ID a profile module uses, or the OBD-II IDs. If the policy refuses one, the output says so, and
 the module closes the idle channel by itself. It needs an adapter that echoes each character as it reads it, such as

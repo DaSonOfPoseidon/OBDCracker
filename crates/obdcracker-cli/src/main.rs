@@ -975,11 +975,18 @@ fn tp20_identification<T: Transport>(
         Ok(answer) => match response::positive(TP20_IDENTIFICATION[0], &answer) {
             Err(ReplyError::Negative(refusal)) => format!("refused ({})", refusal.nrc),
             Err(e) => format!("not read ({e}) [{}]", hex(&answer)),
-            // Its record is the manufacturer's: shown as bytes, and as text where printable.
-            Ok(record) => {
-                let text: String = record
+            // The generic KWP2000 match leaves the record to the manufacturer; VAG's starts with
+            // the option it answers.
+            Ok([]) => format!("not read (no option) [{}]", hex(&answer)),
+            Ok([option, ..]) if *option != TP20_IDENTIFICATION[1] => format!(
+                "not read (option {option:02X}, not {:02X}) [{}]",
+                TP20_IDENTIFICATION[1],
+                hex(&answer)
+            ),
+            // The rest of its record is VAG's: shown as bytes, and as text where printable.
+            Ok([_, rest @ ..]) => {
+                let text: String = rest
                     .iter()
-                    .skip(1)
                     .map(|&b| {
                         if b == b' ' || b.is_ascii_graphic() {
                             char::from(b)
@@ -1451,6 +1458,33 @@ mod tests {
         .unwrap();
         let shown = tp20_identification(&mut bus, &policy, 0x5F, Timing::default()).unwrap();
         assert!(shown.starts_with("refused ("), "{shown}");
+    }
+
+    #[test]
+    fn a_tp20_record_without_the_9b_echo_isnt_shown_as_the_identification() {
+        let policy = obdcracker_safety::Policy::read_only();
+        for (record, shown) in [
+            (
+                &b"\x5A\x904G0907401"[..],
+                "not read (option 90, not 9B) [5A 90 34 47 30 39 30 37 34 30 31]",
+            ),
+            (&b"\x5A"[..], "not read (no option) [5A]"),
+        ] {
+            let mut bus = SimBus::builtin("a7").unwrap();
+            bus.add_tp20(
+                0x5F,
+                Channel {
+                    send_id: 0x740,
+                    receive_id: 0x300,
+                },
+            )
+            .unwrap();
+            bus.add_tp20_answer(0x5F, &[0x1A, 0x9B], record).unwrap();
+            assert_eq!(
+                tp20_identification(&mut bus, &policy, 0x5F, Timing::default()).unwrap(),
+                shown
+            );
+        }
     }
 
     // Discovery works, then the adapter fails on the first frame on a channel.

@@ -229,6 +229,9 @@ Each entry names the class, what to check, and where it bit us.
   some make it could mean anything; and it fixed widths for `17`/`18` parameters the standard also leaves to them,
   refusing valid reads, and a 2-byte clear-DTC group the standard makes optional (#137, Codex). The same goes for
   replies: what follows `5A` is the manufacturer's record, so matching it on an echoed option would drop valid answers.
+  The other side of that: code that knows the make must check what the generic match left open. The VAG
+  identification display skipped `5A`'s first byte as the `9B` echo without checking it, so `5A 90 …` showed as
+  the `9B` identification (PR #183, Codex).
   Before relying on a parameter, find its row in the standard's table; if it's the manufacturer's, it needs a
   profile-specific rule.
 - **A new protocol reaches past the allowlist.** Approving KWP2000 requests wasn't enough: `exchange` still matched
