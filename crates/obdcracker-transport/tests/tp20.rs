@@ -512,9 +512,10 @@ fn frames_on_a_channel_keep_the_module_s_t3_apart() {
 }
 
 #[test]
-fn a_t3_longer_than_the_module_s_own_t1_isnt_waited_out() {
+fn only_an_ack_cuts_the_module_s_t3_short_and_no_wait_passes_a_second() {
     // T3 of 6.2 s (`FE`: 62 in 100 ms units), T1 of 2 ms (`14`): an ACK paced past T1 would be
-    // too late anyway.
+    // too late anyway, but the request and A8 have no such deadline, so they wait out T3, up
+    // to a second.
     let car = Car::new(|id, frame| match (id, frame) {
         (0x200, _) => reply(0x25F, &SETUP_REPLY),
         (0x740, [0xA0, ..]) => reply(0x300, &[0xA1, 0x0F, 0x14, 0xFF, 0xFE, 0xFF]),
@@ -536,16 +537,18 @@ fn a_t3_longer_than_the_module_s_own_t1_isnt_waited_out() {
         at: Vec::new(),
     };
     let policy = Policy::read_only();
-    let started = std::time::Instant::now();
     let mut session = ChannelSession::open(&mut timed, &policy, 0x5F, TIMING).unwrap();
     assert_eq!(session.parameters().t3, Duration::from_millis(6200));
     assert_eq!(session.request(&[0x1A, 0x9B]).unwrap(), [0x5A, 0x9B]);
     drop(session);
-    assert!(
-        started.elapsed() < Duration::from_secs(1),
-        "{:?}",
-        started.elapsed()
-    );
+    // The setup, A0, the request, its ACK and A8.
+    let gaps: Vec<Duration> = timed.at.windows(2).map(|pair| pair[1] - pair[0]).collect();
+    assert_eq!(gaps.len(), 4);
+    let (request, ack, close) = (gaps[1], gaps[2], gaps[3]);
+    let second = Duration::from_secs(1);
+    assert!(request >= second && request < 2 * second, "{request:?}");
+    assert!(ack < Duration::from_millis(500), "{ack:?}");
+    assert!(close >= second && close < 2 * second, "{close:?}");
 }
 
 #[test]

@@ -407,7 +407,7 @@ impl<'a, T: Transport + ?Sized> ChannelSession<'a, T> {
                         .approve_tp20_keep_alive(&self.channel)
                         .map_err(ChannelError::Rejected)?;
                     // The tester's own wait for T3 doesn't count against the module.
-                    let paced = self.paced_wait();
+                    let paced = self.paced_wait(LONGEST_PACE);
                     self.send(&keep_alive)?;
                     deadline += paced;
                     keep_alives += 1;
@@ -493,7 +493,9 @@ impl<'a, T: Transport + ?Sized> ChannelSession<'a, T> {
                 .policy
                 .approve_tp20_ack(&self.channel, next)
                 .map_err(ChannelError::Rejected)?;
-            self.send(&ack)?;
+            // An ACK later than the module's T1 would be too late anyway.
+            self.pace_within(self.parameters.t1);
+            self.transport.send(&ack).map_err(ChannelError::Transport)?;
         }
         Ok(message)
     }
@@ -504,18 +506,21 @@ impl<'a, T: Transport + ?Sized> ChannelSession<'a, T> {
     }
 
     // Waits out the gap the module wants between the tester's frames (its T3), then marks a
-    // frame as sent. No longer than its own T1, after which an ACK would be too late anyway,
-    // nor `LONGEST_PACE`.
+    // frame as sent.
     fn pace(&mut self) {
-        let wait = self.paced_wait();
+        self.pace_within(LONGEST_PACE);
+    }
+
+    fn pace_within(&mut self, limit: Duration) {
+        let wait = self.paced_wait(limit);
         if !wait.is_zero() {
             std::thread::sleep(wait);
         }
         self.last = Instant::now();
     }
 
-    fn paced_wait(&self) -> Duration {
-        let gap = self.parameters.t3.min(self.parameters.t1).min(LONGEST_PACE);
+    fn paced_wait(&self, limit: Duration) -> Duration {
+        let gap = self.parameters.t3.min(limit).min(LONGEST_PACE);
         gap.saturating_sub(self.last.elapsed())
     }
 
