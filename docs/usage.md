@@ -70,6 +70,17 @@ profile's discovery range, one at a time and through the policy narrowed to thos
 along with the profile's modules. On the A7 that's 0x700 to 0x769, replies at +0x6A: no ID it sends on is ever a reply
 ID. A module whose request ID is past 0x769 isn't found by that pass.
 
+### `--discover --patient-ids`
+
+```sh
+obdcracker --serial <PORT> --profile a7 scan --discover --patient-ids 71D,755  # and ask these again, patiently
+```
+
+After the first pass, asks each listed request ID that didn't answer again, waiting up to 5 s for each (about 1 s on
+a plain ELM327), for a module that answers slowly. The A7 gateway's tables list 71D and 755 as request IDs (#169).
+Each ID is three hex digits and must be in the profile's discovery range, listed once; anything else is refused before
+anything is sent. With `--wide`, the recheck before the wide pass skips the IDs already asked here.
+
 ### `--discover --wide`
 
 ```sh

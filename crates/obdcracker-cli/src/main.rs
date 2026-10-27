@@ -98,6 +98,12 @@ enum Command {
         /// These are the first range's reply IDs, so a module that stayed silent there may own one
         #[arg(long, requires = "discover")]
         wide: bool,
+        /// With --discover, then ask these request IDs again, waiting up to 5 s each (about 1 s on
+        /// a plain ELM327), unless they answered the first pass: for modules that answer slowly,
+        /// such as those the A7 gateway's tables list at 71D and 755. Three hex digits each,
+        /// comma-separated, all in the profile's discovery range
+        #[arg(long, requires = "discover", value_delimiter = ',', value_parser = parse_request_id)]
+        patient_ids: Vec<u32>,
         /// Also look on 29-bit CAN IDs: read the part number (UDS 0x22 F187) from each request ID
         /// in the profile's 29-bit discovery range (on the A7, VAG's 0x17FC0000 to 0x17FC00FF,
         /// answered on 0x17FE00xx), then scan those that answer too. The adapter switches to
@@ -273,6 +279,7 @@ fn run<T: Transport>(cli: &Cli, transport: T, link: &str, timing: Timing) -> Exi
     if let Command::Scan {
         discover,
         wide,
+        ref patient_ids,
         extended,
         discover_29bit,
         discover_tp20,
@@ -284,7 +291,7 @@ fn run<T: Transport>(cli: &Cli, transport: T, link: &str, timing: Timing) -> Exi
             discover_29bit,
             discover_tp20,
         };
-        return run_scan(cli, &mut transport, timing, passes, extended);
+        return run_scan(cli, &mut transport, timing, passes, patient_ids, extended);
     }
     if let Command::Sweep {
         module,
@@ -514,6 +521,17 @@ fn parse_record(text: &str) -> Result<u8, String> {
             Err("FE means every OBD record only for extended data; give FF for every record".into())
         }
         record => Ok(record),
+    }
+}
+
+// Exactly three hex digits. `from_str_radix` alone would also take `+1D`.
+fn parse_request_id(text: &str) -> Result<u32, String> {
+    if text.len() == 3 && text.bytes().all(|b| b.is_ascii_hexdigit()) {
+        u32::from_str_radix(text, 16).map_err(|e| e.to_string())
+    } else {
+        Err(format!(
+            "{text:?} isn't a request ID: give three hex digits, such as 71D"
+        ))
     }
 }
 
@@ -809,6 +827,7 @@ fn run_scan<T: Transport>(
     transport: &mut T,
     timing: Timing,
     passes: Discovery,
+    patient_ids: &[u32],
     extended: bool,
 ) -> ExitCode {
     let (mut modules, mut policy) = match scan_modules(cli).and_then(|m| Ok((m, policy(cli)?))) {
@@ -830,7 +849,7 @@ fn run_scan<T: Transport>(
         None
     };
     if passes.discover {
-        match discover_modules(cli, transport, timing, passes.wide) {
+        match discover_modules(cli, transport, timing, passes.wide, patient_ids) {
             Ok((found, discovery_policy)) => {
                 modules.extend(found);
                 policy = discovery_policy;
@@ -1095,14 +1114,15 @@ fn shell_word(word: &str, windows: bool) -> Option<String> {
     })
 }
 
-// Looks for modules in the profile's discovery range, and with `wide` its wide range too, and
-// prints each that answers. Returns those the profile doesn't list, to scan with the rest, and the
+// Looks for modules in the profile's discovery range, then patiently at each of `patient_ids` that
+// didn't answer, and with `wide` in its wide range too, and prints each that answers. Returns those the profile doesn't list, to scan with the rest, and the
 // policy narrowed to the profile's modules and the ones found.
 fn discover_modules<T: Transport>(
     cli: &Cli,
     transport: &mut T,
     timing: Timing,
     wide: bool,
+    patient_ids: &[u32],
 ) -> Result<(Vec<ScanModule>, Policy), ExitCode> {
     let usage = |e: String| {
         eprintln!("{e}");
@@ -1125,6 +1145,7 @@ fn discover_modules<T: Transport>(
             "--wide needs a profile with a wide discovery range, and {name} has none"
         )));
     }
+    let mut patient = patient_candidates(name, &candidates, patient_ids).map_err(usage)?;
     let policy = profile
         .narrow_for_discovery(Policy::read_only())
         .map_err(|e| usage(format!("profile {name}: {e}")))?;
@@ -1137,12 +1158,28 @@ fn discover_modules<T: Transport>(
         "discovery",
         None,
     )?;
+    let known: Vec<ModuleIds> = found.iter().map(module_ids).collect();
+    patient.retain(|candidate| !known.contains(candidate));
+    if !patient.is_empty() {
+        let again = discover_pass(
+            transport,
+            &policy,
+            &patient,
+            timing,
+            &profile,
+            "patient recheck",
+            Some(discover::PATIENT_WAIT),
+        )?;
+        found.extend(again);
+    }
     if wide {
         // Before sending on a first-pass reply ID, look again, more patiently, for a module
         // that may own it but was slow to answer. The first pass waited the adapter's usual
         // timeout; only a longer one can catch it (#87).
         let known: Vec<ModuleIds> = found.iter().map(module_ids).collect();
-        let recheck = profile.recheck_candidates(&known);
+        let mut recheck = profile.recheck_candidates(&known);
+        // Those --patient-ids named were asked just as patiently already.
+        recheck.retain(|candidate| !patient.contains(candidate));
         if !recheck.is_empty() {
             let again = discover_pass(
                 transport,
@@ -1236,6 +1273,27 @@ fn discover_29_bit_modules<T: Transport>(
         .collect();
     ids.extend(found.iter().map(module_ids));
     Ok((unlisted(&profile, &found), narrow(&ids)?))
+}
+
+// The discovery candidate for each of `ids`, in order: each must be one, and listed once.
+fn patient_candidates(
+    name: &str,
+    candidates: &[ModuleIds],
+    ids: &[u32],
+) -> Result<Vec<ModuleIds>, String> {
+    let mut patient = Vec::new();
+    for &id in ids {
+        let Some(&candidate) = candidates.iter().find(|c| c.request == id) else {
+            return Err(format!(
+                "--patient-ids: {id:03X} isn't in {name}'s discovery range"
+            ));
+        };
+        if patient.contains(&candidate) {
+            return Err(format!("--patient-ids: {id:03X} is listed twice"));
+        }
+        patient.push(candidate);
+    }
+    Ok(patient)
 }
 
 fn module_ids(found: &discover::Found) -> ModuleIds {
@@ -1459,7 +1517,7 @@ mod tests {
             discover_29bit: false,
             discover_tp20: true,
         };
-        run_scan(&cli, bus, Timing::default(), passes, false)
+        run_scan(&cli, bus, Timing::default(), passes, &[], false)
     }
 
     // On the module's channel: how many frames had this payload.
