@@ -1,8 +1,8 @@
 //! VW TP2.0, the transport VAG's older modules use for KWP2000 on CAN: channel setup, data
 //! frames with ACKs, keep-alive and disconnect. See docs/tp20.md#frames.
 //!
-//! There is no public standard and no layout is confirmed on the A7 yet (#124), so every reply
-//! is checked exactly.
+//! There is no public standard, and only the channel setup and disconnect are confirmed on the
+//! A7 (#124), so every reply is checked exactly.
 
 use core::fmt;
 use core::time::Duration;
@@ -196,7 +196,9 @@ fn time(byte: u8) -> Option<Duration> {
     Some(Duration::from_micros(unit_us * u64::from(byte & 0x3F)))
 }
 
-/// Whether `reply` answers the channel setup or disconnect `request`. A refusal answers a setup.
+/// Whether `reply` answers the channel setup, parameters, keep-alive or disconnect `request`. A
+/// refusal answers a setup; well-formed channel parameters answer the tester's parameters and a
+/// keep-alive. Data frames and ACKs are answered frame by frame (see [`Frame`]), never here.
 #[must_use]
 pub fn answers(request: &[u8], reply: &[u8]) -> bool {
     match request {
@@ -204,6 +206,7 @@ pub fn answers(request: &[u8], reply: &[u8]) -> bool {
             reply,
             [TESTER_ADDRESS, op, ..] if *op == SETUP_POSITIVE || SETUP_REFUSALS.contains(op)
         ),
+        [PARAMETERS_REQUEST, ..] | [TEST] => decode_channel_parameters(reply).is_ok(),
         [DISCONNECT_BYTE] => reply == DISCONNECT,
         _ => false,
     }
