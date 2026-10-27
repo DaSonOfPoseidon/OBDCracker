@@ -3,7 +3,8 @@
 # Fails if an issue this branch fixes (`fixes #N` in a commit subject) is blocked by an open issue
 # (GitHub's "blocked by" link) that the branch doesn't fix too; the blocker's labels don't matter.
 # Then lists, without failing, the issues not marked `status:blocked` that cite a file the branch
-# changes and are due by the PR's milestone (or have none), so related fixes can go in the same PR.
+# changes and are due by the PR's milestone (or have none), so related fixes can go in the same PR,
+# and the open issues whose `status:blocked` label and links disagree.
 set -e
 cd "$(dirname "$0")/.."
 repo=DaSonOfPoseidon/OBDCracker
@@ -62,6 +63,30 @@ fi
 if [ -n "$related" ]; then
 	echo "Related open issues you could fold in:"
 	echo "$related"
+fi
+
+# Open issues whose `status:blocked` label and open "blocked by" links disagree, which would make
+# the check above miss a blocker or fail on a stale one. `blockedBy` counts only open blockers.
+# shellcheck disable=SC2016 # the $ names are GraphQL and jq variables, not the shell's
+drift=$(gh api graphql --paginate -f query='
+	query($endCursor: String) {
+		repository(owner: "DaSonOfPoseidon", name: "OBDCracker") {
+			issues(first: 100, states: OPEN, after: $endCursor) {
+				nodes { number title labels(first: 50) { nodes { name } } issueDependenciesSummary { blockedBy } }
+				pageInfo { hasNextPage endCursor }
+			}
+		}
+	}' --jq '
+	.data.repository.issues.nodes[]
+	| ([.labels.nodes[].name] | index("status:blocked") != null) as $labelled
+	| .issueDependenciesSummary.blockedBy as $open
+	| if $labelled and $open == 0 then "#\(.number) is status:blocked with no open blocker linked: \(.title)"
+	elif ($labelled | not) and $open > 0 then "#\(.number) has \($open) open blocker(s) linked but isn'"'"'t status:blocked: \(.title)"
+	else empty end
+')
+if [ -n "$drift" ]; then
+	echo "Blocked labels and links that disagree (fix them on the issues):"
+	echo "$drift"
 fi
 
 if [ -n "$blocked" ]; then
