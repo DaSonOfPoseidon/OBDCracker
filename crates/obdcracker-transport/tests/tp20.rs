@@ -512,6 +512,43 @@ fn frames_on_a_channel_keep_the_module_s_t3_apart() {
 }
 
 #[test]
+fn a_t3_longer_than_the_module_s_own_t1_isnt_waited_out() {
+    // T3 of 6.2 s (`FE`: 62 in 100 ms units), T1 of 2 ms (`14`): an ACK paced past T1 would be
+    // too late anyway.
+    let car = Car::new(|id, frame| match (id, frame) {
+        (0x200, _) => reply(0x25F, &SETUP_REPLY),
+        (0x740, [0xA0, ..]) => reply(0x300, &[0xA1, 0x0F, 0x14, 0xFF, 0xFE, 0xFF]),
+        (0x740, [0x10, ..]) => vec![
+            Response {
+                source: 0x300,
+                payload: vec![0xB1],
+            },
+            Response {
+                source: 0x300,
+                payload: vec![0x10, 0x00, 0x02, 0x5A, 0x9B],
+            },
+        ],
+        (0x740, [0xA8]) => reply(0x300, &[0xA8]),
+        _ => Vec::new(),
+    });
+    let mut timed = Timed {
+        car,
+        at: Vec::new(),
+    };
+    let policy = Policy::read_only();
+    let started = std::time::Instant::now();
+    let mut session = ChannelSession::open(&mut timed, &policy, 0x5F, TIMING).unwrap();
+    assert_eq!(session.parameters().t3, Duration::from_millis(6200));
+    assert_eq!(session.request(&[0x1A, 0x9B]).unwrap(), [0x5A, 0x9B]);
+    drop(session);
+    assert!(
+        started.elapsed() < Duration::from_secs(1),
+        "{:?}",
+        started.elapsed()
+    );
+}
+
+#[test]
 fn an_answer_to_another_request_closes_the_channel() {
     // `61 02` answers a read of local ID 02, not 01: a late answer, so replies are out of step.
     let mut car = channel_car(|_| frames(&[&[0xB1], &[0x30, 0x00, 0x02, 0x61, 0x02]]));

@@ -14,6 +14,9 @@ use crate::{Error, Expect, Response, Timing, Transport, exchange};
 /// A channel the session hasn't sent on for this long gets a keep-alive before its next request.
 pub const KEEP_ALIVE_IDLE: Duration = Duration::from_millis(500);
 
+// The longest gap the session keeps between its frames, whatever T3 the module asks for.
+const LONGEST_PACE: Duration = Duration::from_secs(1);
+
 // The longest message a module can send (its 2-byte length field).
 const MAX_MESSAGE: usize = 0xFFFF;
 // The most frames the longest message takes, at 7 data bytes a frame.
@@ -404,7 +407,7 @@ impl<'a, T: Transport + ?Sized> ChannelSession<'a, T> {
                         .approve_tp20_keep_alive(&self.channel)
                         .map_err(ChannelError::Rejected)?;
                     // The tester's own wait for T3 doesn't count against the module.
-                    let paced = self.parameters.t3.saturating_sub(self.last.elapsed());
+                    let paced = self.paced_wait();
                     self.send(&keep_alive)?;
                     deadline += paced;
                     keep_alives += 1;
@@ -501,13 +504,19 @@ impl<'a, T: Transport + ?Sized> ChannelSession<'a, T> {
     }
 
     // Waits out the gap the module wants between the tester's frames (its T3), then marks a
-    // frame as sent.
+    // frame as sent. No longer than its own T1, after which an ACK would be too late anyway,
+    // nor `LONGEST_PACE`.
     fn pace(&mut self) {
-        let wait = self.parameters.t3.saturating_sub(self.last.elapsed());
+        let wait = self.paced_wait();
         if !wait.is_zero() {
             std::thread::sleep(wait);
         }
         self.last = Instant::now();
+    }
+
+    fn paced_wait(&self) -> Duration {
+        let gap = self.parameters.t3.min(self.parameters.t1).min(LONGEST_PACE);
+        gap.saturating_sub(self.last.elapsed())
     }
 
     // Closes the channel after `error`. An adapter failure while closing matters more: the
