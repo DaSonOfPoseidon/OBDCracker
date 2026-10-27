@@ -1,7 +1,8 @@
 #!/bin/sh
 # Run before opening a PR, with the PR's milestone if it has one: `scripts/pr-gate.sh M2`.
 # Fails if an issue this branch fixes (`fixes #N` in a commit subject) is blocked by an open issue
-# (GitHub's "blocked by" link) that the branch doesn't fix too; the blocker's labels don't matter.
+# (GitHub's "blocked by" link) that the branch doesn't fix too; the blocker's labels don't matter,
+# and one in another repository always blocks, since a commit here can't close it.
 # Then lists, without failing, the issues not marked `status:blocked` that cite a file the branch
 # changes and are due by the PR's milestone (or have none), so related fixes can go in the same PR,
 # and the open issues whose `status:blocked` label and links disagree.
@@ -32,8 +33,10 @@ blocked=$(for n in $(echo "$fixed" | tr ',' ' '); do
 		[${fixed}] as \$fixed
 		| .[]
 		| select(.state == \"open\")
-		| select(.number | IN(\$fixed[]) | not)
-		| \"#\\(.number) blocks #$n: \\(.title)\"
+		| (.repository_url | ltrimstr(\"https://api.github.com/repos/\")) as \$from
+		| select(\$from != \"$repo\" or (.number | IN(\$fixed[]) | not))
+		| (if \$from == \"$repo\" then \"#\\(.number)\" else \"\\(\$from)#\\(.number)\" end)
+			+ \" blocks #$n: \\(.title)\"
 	" || exit 1
 done)
 

@@ -82,7 +82,8 @@ issue. `scripts/pr-gate.sh` reads only the links, so keep both in step whenever 
 ## Before opening a pull request
 
 An issue the PR fixes (`fixes #N` in a commit subject) mustn't be blocked by an open issue (GitHub's "blocked by"
-link) that the PR doesn't fix too, whatever the blocker's labels. Run:
+link) that the PR doesn't fix too, whatever the blocker's labels. A blocker in another repository always counts,
+since this PR can't close it. Run:
 
 ```sh
 scripts/pr-gate.sh M2   # the PR's milestone; leave it out if none
