@@ -50,31 +50,28 @@ Label it `bug`, `documentation` or `enhancement`, and tag what it impacts:
   (the `obdcracker` crate), `area:docs` (any `*.md` or `docs/`), `area:ci` (workflows, `scripts/`, Cargo and tool
   config).
 - **The milestone it blocks,** if any: `milestone:M1` to `milestone:M13`. A planned feature that isn't scheduled yet gets
-  `milestone:later` instead: it blocks nothing until it's given a milestone. An issue with no milestone label at all
-  blocks every PR in its areas.
+  `milestone:later` instead.
 - **Its status:** `status:ready` if it can be picked up now, or `status:blocked` if it waits on something else
   (another issue, a car session, hardware or a decision). When you mark it blocked, comment saying what blocks it, with
-  issue numbers. When you close an issue, move the issues it blocked to `status:ready` if nothing else blocks them.
+  issue numbers, and link each blocking issue as GitHub's "blocked by" (the issue's sidebar, or
+  `gh api -X POST repos/DaSonOfPoseidon/OBDCracker/issues/<blocked>/dependencies/blocked_by -F issue_id=<blocker's id>`,
+  where the id comes from `gh api repos/DaSonOfPoseidon/OBDCracker/issues/<blocker> --jq .id`). When you close an
+  issue, move the issues it blocked to `status:ready` if nothing else blocks them.
 
 Only fix it in the same change if it blocks your task, and then reference it in the commit (`fixes #N`).
 
 ## Before opening a pull request
 
-No open issue may block it. An issue blocks a PR when either:
-
-- it's tagged with an area the PR touches, and its milestone is the PR's milestone, an earlier one, or none; or
-- it's tagged with the PR's milestone, whatever its area.
-
-Only ready issues count: `status:blocked` issues wait for their blocker, and an issue with no status label counts as
-ready. Issues for later milestones, and `milestone:later` issues, wait until then. Run:
+An issue the PR fixes (`fixes #N` in a commit subject) mustn't be blocked by an open issue (GitHub's "blocked by"
+link) that the PR doesn't fix too, whatever the blocker's labels. Run:
 
 ```sh
 scripts/pr-gate.sh M2   # the PR's milestone; leave it out if none
 ```
 
-It works out the areas from the files changed since `origin/main`, lists the blocking issues, and fails if there are
-any. Fix or close them first. An issue a commit on the branch fixes (`fixes #N` in the subject) doesn't count, since it
-closes when the PR merges.
+It fails on any such blocker: fix it in the same PR, or land it first. It also lists, without failing, the
+`status:ready` issues that cite a file the PR changes and are due by the PR's milestone or have none (not
+`milestone:later`). Fold those in when they're small and related; keep the PR to one feature.
 
 ## Reviews
 
@@ -102,8 +99,7 @@ Every finding gets one outcome, and its thread is resolved once it has one:
 
 - **Fix:** with a test first, in its own commit. Reply on the thread with the commit.
 - **Doesn't apply:** reply explaining why, with evidence.
-- **Defer:** file an issue tagged `milestone:later`, so `scripts/pr-gate.sh` doesn't block this or later PRs
-  on it. Reply with the link.
+- **Defer:** file an issue tagged `milestone:later`. Reply with the link.
 - **Out of scope:** a real problem outside the PR becomes a tagged issue, as in
   [Found a problem?](#found-a-problem-file-an-issue-and-keep-going). Reply with the link.
 
