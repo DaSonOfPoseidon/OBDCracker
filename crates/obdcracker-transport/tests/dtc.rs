@@ -77,7 +77,7 @@ fn reply(payload: &[u8]) -> Vec<Response> {
 }
 
 fn read(car: &mut Car) -> DtcDetail {
-    read_dtc_detail(car, &policy(), &gateway(), UdsDtc::new(DTC), TIMING).unwrap()
+    read_dtc_detail(car, &policy(), &gateway(), UdsDtc::new(DTC), 0xFF, TIMING).unwrap()
 }
 
 #[test]
@@ -110,6 +110,38 @@ fn reads_every_snapshot_then_every_extended_data_record() {
         }
     );
     assert_eq!(car.sent, ["710 19 04 00 16 A0 FF", "710 19 06 00 16 A0 FF"]);
+}
+
+#[test]
+fn reads_one_record_of_each_by_its_number() {
+    let mut car = Car::new(|_, request| match request {
+        [0x19, 0x04, .., 0x01] => reply(&[
+            0x59, 0x04, 0x00, 0x16, 0xA0, 0x01, 0x01, 0x01, 0x02, 0x00, 0x12,
+        ]),
+        // An answer for another record isn't this one's: it may be a late answer to an earlier
+        // request.
+        [0x19, 0x06, .., 0x01] => reply(&[0x59, 0x06, 0x00, 0x16, 0xA0, 0x01, 0x02, 0x05]),
+        _ => Vec::new(),
+    });
+    let got = read_dtc_detail(
+        &mut car,
+        &policy(),
+        &gateway(),
+        UdsDtc::new(DTC),
+        0x01,
+        TIMING,
+    )
+    .unwrap();
+    assert_eq!(
+        got.snapshots,
+        Ok(RecordData {
+            status: DtcStatus(0x01),
+            records: vec![0x01, 0x01, 0x02, 0x00, 0x12],
+        })
+    );
+    assert_eq!(got.extended_data, Some(Err(ReadError::NoReply)));
+    assert!(got.out_of_step);
+    assert_eq!(car.sent, ["710 19 04 00 16 A0 01", "710 19 06 00 16 A0 01"]);
 }
 
 #[test]
@@ -208,7 +240,7 @@ fn both_reads_are_approved_before_anything_is_sent() {
         request_id: 0x711,
         response_id: 0x77B,
     };
-    let got = read_dtc_detail(&mut car, &policy(), &other, UdsDtc::new(DTC), TIMING);
+    let got = read_dtc_detail(&mut car, &policy(), &other, UdsDtc::new(DTC), 0xFF, TIMING);
     assert_eq!(got, Err(FingerprintError::Rejected(Rejection::WrongTarget)));
     assert_eq!(car.sent, Vec::<String>::new());
 }

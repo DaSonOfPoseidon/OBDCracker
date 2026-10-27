@@ -9,8 +9,6 @@ use obdcracker_safety::{Policy, Protocol, Target};
 use crate::fingerprint::{FingerprintError, ReadError, UdsModule, ask};
 use crate::{Timing, Transport};
 
-const ALL_RECORDS: u8 = 0xFF;
-
 /// A DTC's snapshot or extended data, as one module sent it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RecordData {
@@ -44,21 +42,23 @@ impl From<uds::DtcData<'_>> for RecordData {
 /// What [`read_dtc_detail`] found.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DtcDetail {
-    /// Every snapshot record (`19 04 <DTC> FF`).
+    /// The snapshot records asked for (`19 04 <DTC> <record>`).
     pub snapshots: Result<RecordData, ReadError>,
-    /// Every extended data record (`19 06 <DTC> FF`). `None` if it wasn't asked: the snapshot
-    /// read went unanswered (a refusal doesn't name its DTC, so that read's late refusal could
-    /// have passed for this one's answer), or the module said it was busy (NRC 0x21), so it
-    /// isn't sent another request.
+    /// The extended data records asked for (`19 06 <DTC> <record>`). `None` if it wasn't asked:
+    /// the snapshot read went unanswered (a refusal doesn't name its DTC, so that read's late
+    /// refusal could have passed for this one's answer), or the module said it was busy (NRC
+    /// 0x21), so it isn't sent another request.
     pub extended_data: Option<Result<RecordData, ReadError>>,
     /// A read went unanswered, so its reply may still arrive as the answer to the connection's
     /// next request.
     pub out_of_step: bool,
 }
 
-/// Reads `dtc`'s snapshot records, then its extended data records, from `module`. Both requests
-/// are approved before anything is sent. The extended data isn't asked after an unanswered or
-/// busy snapshot read ([`DtcDetail::extended_data`]).
+/// Reads `dtc`'s snapshot records, then its extended data records, from `module`: the record
+/// numbered `record` of each, or every record for 0xFF (and every OBD extended data record for
+/// 0xFE). A reply for another record doesn't answer the read: it may be a late answer to an
+/// earlier request. Both requests are approved before anything is sent. The extended data isn't
+/// asked after an unanswered or busy snapshot read ([`DtcDetail::extended_data`]).
 ///
 /// # Errors
 ///
@@ -69,6 +69,7 @@ pub fn read_dtc_detail<T: Transport + ?Sized>(
     policy: &Policy,
     module: &UdsModule,
     dtc: UdsDtc,
+    record: u8,
     timing: Timing,
 ) -> Result<DtcDetail, FingerprintError> {
     let target = Target::physical(module.request_id);
@@ -77,8 +78,8 @@ pub fn read_dtc_detail<T: Transport + ?Sized>(
             .approve(Protocol::Uds, target, payload)
             .map_err(FingerprintError::Rejected)
     };
-    let snapshot_request = approve(&uds::dtc_snapshots(dtc, ALL_RECORDS))?;
-    let extended_request = approve(&uds::dtc_extended_data(dtc, ALL_RECORDS))?;
+    let snapshot_request = approve(&uds::dtc_snapshots(dtc, record))?;
+    let extended_request = approve(&uds::dtc_extended_data(dtc, record))?;
     let unanswered = |value: &Result<RecordData, ReadError>| {
         matches!(value, Err(ReadError::NoReply | ReadError::StillPending))
     };
@@ -87,7 +88,7 @@ pub fn read_dtc_detail<T: Transport + ?Sized>(
         &snapshot_request,
         module.response_id,
         timing,
-        |reply| uds::decode_dtc_snapshots(reply, dtc, ALL_RECORDS).map(RecordData::from),
+        |reply| uds::decode_dtc_snapshots(reply, dtc, record).map(RecordData::from),
     )?;
     if unanswered(&snapshots) {
         return Ok(DtcDetail {
@@ -111,7 +112,7 @@ pub fn read_dtc_detail<T: Transport + ?Sized>(
         &extended_request,
         module.response_id,
         timing,
-        |reply| uds::decode_dtc_extended_data(reply, dtc, ALL_RECORDS).map(RecordData::from),
+        |reply| uds::decode_dtc_extended_data(reply, dtc, record).map(RecordData::from),
     )?;
     Ok(DtcDetail {
         snapshots,

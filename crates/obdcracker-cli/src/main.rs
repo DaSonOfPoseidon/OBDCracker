@@ -128,8 +128,7 @@ enum Command {
         extended: bool,
     },
     /// Read one DTC's snapshot records and extended data records from a module (UDS 0x19 04
-    /// and 06, every record). Reads only. Needs a profile (--profile or --sim) that lists the
-    /// module
+    /// and 06). Reads only. Needs a profile (--profile or --sim) that lists the module
     Dtc {
         /// The module's name in the profile, such as "gateway"
         #[arg(long)]
@@ -137,6 +136,11 @@ enum Command {
         /// The DTC, as six hex digits, as scan lists it, such as 0016A0
         #[arg(long, value_parser = parse_dtc)]
         code: UdsDtc,
+        /// The record number to read of each, as two hex digits, such as 01; FF is every record.
+        /// FE isn't taken: it would mean one record to the snapshot read and every OBD record to
+        /// the extended data read
+        #[arg(long, value_parser = parse_record, default_value = "FF")]
+        record: u8,
     },
     /// List this computer's serial ports
     Ports,
@@ -285,8 +289,13 @@ fn run<T: Transport>(cli: &Cli, transport: T, link: &str, timing: Timing) -> Exi
     {
         return run_sweep(cli, &mut transport, timing, module, *range, *extended);
     }
-    if let Command::Dtc { module, code } = &cli.command {
-        return run_dtc(cli, &mut transport, timing, module, *code);
+    if let Command::Dtc {
+        module,
+        code,
+        record,
+    } = &cli.command
+    {
+        return run_dtc(cli, &mut transport, timing, module, *code, *record);
     }
     let (target, payload, expect) = match cli.command {
         Command::Vin => (
@@ -483,6 +492,22 @@ fn profile_module(cli: &Cli, name: &str, command: &str) -> Result<(UdsModule, Po
     Ok((module, policy(cli)?))
 }
 
+// Exactly two hex digits. `from_str_radix` alone would also take `+1`. FE means every OBD record
+// only to the extended data read; to the snapshot read it's one record, so the two would differ.
+fn parse_record(text: &str) -> Result<u8, String> {
+    if text.len() != 2 || !text.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Err(format!(
+            "{text:?} isn't a record number: give two hex digits, such as 01"
+        ));
+    }
+    match u8::from_str_radix(text, 16).map_err(|e| e.to_string())? {
+        0xFE => {
+            Err("FE means every OBD record only for extended data; give FF for every record".into())
+        }
+        record => Ok(record),
+    }
+}
+
 // Six hex digits, and not 000000 (no code) or FFFFFF (every group).
 fn parse_dtc(text: &str) -> Result<UdsDtc, String> {
     if text.len() != 6 || !is_hex(text) {
@@ -504,6 +529,7 @@ fn run_dtc<T: Transport>(
     timing: Timing,
     name: &str,
     code: UdsDtc,
+    record: u8,
 ) -> ExitCode {
     let (module, policy) = match profile_module(cli, name, "dtc") {
         Ok(found) => found,
@@ -512,7 +538,7 @@ fn run_dtc<T: Transport>(
             return ExitCode::from(2);
         }
     };
-    let found = match dtc::read_dtc_detail(transport, &policy, &module, code, timing) {
+    let found = match dtc::read_dtc_detail(transport, &policy, &module, code, record, timing) {
         Ok(found) => found,
         Err(e) => {
             eprintln!("{e}");
@@ -523,7 +549,8 @@ fn run_dtc<T: Transport>(
         println!("dry run: nothing was sent");
         // Nothing answers a dry run, so the second read was left out.
         println!(
-            "a live read also sends 19 06 {code} FF once 19 04 {code} FF is answered",
+            "a live read also sends 19 06 {code} {record:02X} once 19 04 {code} {record:02X} is \
+             answered",
             code = hex(&code.code().to_be_bytes()[1..])
         );
         return ExitCode::SUCCESS;

@@ -146,3 +146,8 @@ declares (each a 2-byte DID and data), or that declares none, is shown as undeco
 one read doesn't stop the other. If the snapshot read goes unanswered, the extended data isn't asked, because a late
 refusal doesn't say which read it answers; nor if the module says it's busy (NRC 0x21), since it's still on the first.
 The code can't be 000000 (no code) or FFFFFF (every group). If the module answers nothing, the command fails.
+
+`--record 01` reads only that record of each instead (`19 04 <DTC> 01`, then `19 06 <DTC> 01`), as two hex digits;
+the default is `FF`, every record. `FE` is refused: it means every OBD record only to the extended data read. It's
+for a module that refuses `FF` but may answer a single record (#169). A reply for another record isn't taken as the
+answer, since it may be a late answer to an earlier request.
