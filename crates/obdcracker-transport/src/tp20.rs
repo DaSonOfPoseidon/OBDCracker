@@ -202,6 +202,9 @@ pub struct ChannelSession<'a, T: Transport + ?Sized> {
     reassembler: Reassembler<Vec<u8>>,
     // When the tester last sent on the channel.
     last: Instant,
+    // Keep-alives sent while waiting for an answer that the module hasn't answered yet: their
+    // `A1` may come after the answer, during the next request.
+    unanswered: usize,
     open: bool,
 }
 
@@ -248,6 +251,7 @@ impl<'a, T: Transport + ?Sized> ChannelSession<'a, T> {
             sequence: 0,
             reassembler: Reassembler::new(vec![0; MAX_MESSAGE]),
             last: Instant::now(),
+            unanswered: 0,
             open: true,
         };
         let parameters = policy
@@ -369,8 +373,6 @@ impl<'a, T: Transport + ?Sized> ChannelSession<'a, T> {
         let mut pending: u16 = 0;
         let mut acked = false;
         let mut keep_alives = 0usize;
-        // Keep-alives sent that the module hasn't answered yet.
-        let mut unanswered = 0usize;
         // The longest answer and as many pending messages, with room for ACKs and keep-alives.
         let frame_limit =
             MAX_FRAMES_PER_MESSAGE.saturating_mul(usize::from(self.timing.max_pending) + 2);
@@ -399,7 +401,7 @@ impl<'a, T: Transport + ?Sized> ChannelSession<'a, T> {
                         .map_err(ChannelError::Rejected)?;
                     self.send(&keep_alive)?;
                     keep_alives += 1;
-                    unanswered += 1;
+                    self.unanswered += 1;
                     continue;
                 }
                 Err(Error::Timeout) if pending > 0 => return Err(ChannelError::StillPending),
@@ -430,8 +432,8 @@ impl<'a, T: Transport + ?Sized> ChannelSession<'a, T> {
                         deadline = after(self.timing.p2_star);
                     }
                 }
-                Frame::Parameters(parameters) if unanswered > 0 => {
-                    unanswered -= 1;
+                Frame::Parameters(parameters) if self.unanswered > 0 => {
+                    self.unanswered -= 1;
                     self.parameters = parameters;
                 }
                 Frame::Disconnect => {
