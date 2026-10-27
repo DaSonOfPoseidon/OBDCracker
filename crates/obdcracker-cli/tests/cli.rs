@@ -961,6 +961,55 @@ fn dry_run_dtc_says_what_a_live_one_reads() {
 }
 
 #[test]
+fn dry_run_dtc_reads_one_record_by_its_number() {
+    let out = obdcracker(&[
+        "--dry-run",
+        "--profile",
+        "a7",
+        "dtc",
+        "--module",
+        "gateway",
+        "--code",
+        "0016A0",
+        "--record",
+        "01",
+    ]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("710 06 19 04 00 16 A0 01"), "{stdout}");
+    assert!(
+        stdout.contains(
+            "a live read also sends 19 06 00 16 A0 01 once 19 04 00 16 A0 01 is answered"
+        ),
+        "{stdout}"
+    );
+}
+
+#[test]
+fn dtc_refuses_a_bad_record_number() {
+    for record in ["1", "001", "+1", "0G", ""] {
+        let out = obdcracker(&[
+            "--dry-run",
+            "--profile",
+            "a7",
+            "dtc",
+            "--module",
+            "gateway",
+            "--code",
+            "0016A0",
+            "--record",
+            record,
+        ]);
+        assert_eq!(out.status.code(), Some(2), "{record:?}: {out:?}");
+        assert!(out.stdout.is_empty(), "nothing sent: {out:?}");
+    }
+}
+
+#[test]
 fn dtc_refuses_bad_codes_modules_and_a_missing_profile() {
     let dtc = |profile: Option<&str>, module: &str, code: &str| {
         let mut args = vec!["--dry-run"];
