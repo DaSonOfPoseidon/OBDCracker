@@ -38,9 +38,10 @@ pub enum Protocol {
     /// KWP2000 (ISO 14230-3). It has no suppress-positive-response bit, and its session and reset
     /// parameters mean other things than UDS's.
     Kwp2000,
-    /// VW TP2.0 channel management: a channel setup or a disconnect. The policy builds these
-    /// frames itself ([`Policy::approve_tp20_setup`], [`Policy::approve_tp20_disconnect`]), so
-    /// [`Policy::approve`] refuses them.
+    /// A VW TP2.0 frame: a channel setup, and on a channel a module opened its parameters,
+    /// keep-alive, ACKs, disconnect, and data frames carrying a KWP2000 request. The policy
+    /// builds these frames itself (the `Policy::approve_tp20_*` functions), so [`Policy::approve`]
+    /// refuses them.
     Tp20Channel,
 }
 
@@ -381,10 +382,90 @@ impl Policy {
         &self,
         channel: &OpenTp20Channel,
     ) -> Result<Approved, Rejection> {
+        self.on_tp20_channel(*channel, &tp20::DISCONNECT, Tier::Read)
+    }
+
+    /// The tester's channel parameters (`A0`, [`tp20::channel_parameters`]) on a channel a module
+    /// opened. The module answers with its own (`A1`); nothing changes.
+    ///
+    /// # Errors
+    ///
+    /// As [`Policy::approve_tp20_disconnect`].
+    pub fn approve_tp20_parameters(
+        &self,
+        channel: &OpenTp20Channel,
+    ) -> Result<Approved, Rejection> {
+        self.on_tp20_channel(*channel, &tp20::channel_parameters(), Tier::Read)
+    }
+
+    /// A keep-alive (`A3`) on a channel a module opened. The module answers with its channel
+    /// parameters (`A1`), which keeps the channel open; nothing changes.
+    ///
+    /// # Errors
+    ///
+    /// As [`Policy::approve_tp20_disconnect`].
+    pub fn approve_tp20_keep_alive(
+        &self,
+        channel: &OpenTp20Channel,
+    ) -> Result<Approved, Rejection> {
+        self.on_tp20_channel(*channel, &tp20::KEEP_ALIVE, Tier::Read)
+    }
+
+    /// An ACK (`B<next>`, [`tp20::ack`]) on a channel a module opened: the tester is ready for
+    /// the module's frame with sequence number `next`. It only paces the module's frames.
+    ///
+    /// # Errors
+    ///
+    /// [`Rejection::NotAllowed`] for `next` over 15, else as [`Policy::approve_tp20_disconnect`].
+    pub fn approve_tp20_ack(
+        &self,
+        channel: &OpenTp20Channel,
+        next: u8,
+    ) -> Result<Approved, Rejection> {
+        if next > 0x0F {
+            return Err(Rejection::NotAllowed);
+        }
+        self.on_tp20_channel(*channel, &tp20::ack(next), Tier::Read)
+    }
+
+    /// A KWP2000 `request` on a channel a module opened, as one data frame with sequence number
+    /// `sequence` that asks for an ACK ([`tp20::data_frame`]). The request is checked against
+    /// the KWP2000 allowlist and tiers, as [`Policy::approve`] checks it.
+    ///
+    /// # Errors
+    ///
+    /// [`Rejection::NotAllowed`] for a request not on the allowlist, one longer than
+    /// [`tp20::MAX_SINGLE_FRAME`], or `sequence` over 15; [`Rejection::Banned`] or
+    /// [`Rejection::Locked`] by its tier; else as [`Policy::approve_tp20_disconnect`].
+    pub fn approve_tp20_request(
+        &self,
+        channel: &OpenTp20Channel,
+        sequence: u8,
+        request: &[u8],
+    ) -> Result<Approved, Rejection> {
+        let tier = classify_kwp2000(request).ok_or(Rejection::NotAllowed)?;
+        if tier == Tier::Flash {
+            return Err(Rejection::Banned);
+        }
+        if tier > self.unlocked {
+            return Err(Rejection::Locked(tier));
+        }
+        let frame = tp20::data_frame(sequence, request).map_err(|_| Rejection::NotAllowed)?;
+        self.on_tp20_channel(*channel, frame.data(), tier)
+    }
+
+    // A frame on `channel`: sent on its send ID, answered on its receive ID, which must be ones
+    // the policy lets a channel use (docs/safety.md#addressing).
+    fn on_tp20_channel(
+        &self,
+        channel: OpenTp20Channel,
+        payload: &[u8],
+        tier: Tier,
+    ) -> Result<Approved, Rejection> {
         let OpenTp20Channel {
             send_id,
             receive_id,
-        } = *channel;
+        } = channel;
         let module_id = self.modules.as_ref().is_some_and(|modules| {
             modules
                 .iter()
@@ -400,8 +481,8 @@ impl Policy {
         Ok(Approved {
             protocol: Protocol::Tp20Channel,
             target: Target::Tp20Channel(send_id),
-            payload: tp20::DISCONNECT.to_vec(),
-            tier: Tier::Read,
+            payload: payload.to_vec(),
+            tier,
             reply: Some(receive_id),
         })
     }

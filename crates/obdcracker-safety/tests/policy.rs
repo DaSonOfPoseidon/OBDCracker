@@ -111,18 +111,7 @@ fn locks_clear_dtc_and_coding_in_read_only() {
     ] {
         assert_eq!(approve(ENGINE, payload), Err(Rejection::Locked(tier)));
     }
-    // KWP2000: ClearDiagnosticInformation's group is optional and any width (ISO 14230-3).
-    for (payload, tier) in [
-        (&[0x14, 0xFF, 0x00][..], Tier::ClearDtc),
-        (&[0x14], Tier::ClearDtc),
-        (&[0x14, 0xFF], Tier::ClearDtc),
-        (&[0x2E, 0xF1], Tier::Coding),
-        (&[0x3B, 0x01], Tier::Coding),
-        (&[0x10, 0x87], Tier::Coding),
-        (&[0x27, 0x01], Tier::Coding),
-        (&[0x2E, 0xF1, 0x98, 0x00], Tier::Coding),
-        (&[0x3B, 0x01, 0x00], Tier::Coding),
-    ] {
+    for &(payload, tier) in KWP2000_LOCKED {
         assert_eq!(
             approve_kwp2000(ENGINE, payload),
             Err(Rejection::Locked(tier)),
@@ -130,6 +119,20 @@ fn locks_clear_dtc_and_coding_in_read_only() {
         );
     }
 }
+
+// KWP2000 clear-DTC and coding requests: ClearDiagnosticInformation's group is optional and any
+// width (ISO 14230-3).
+const KWP2000_LOCKED: &[(&[u8], Tier)] = &[
+    (&[0x14, 0xFF, 0x00], Tier::ClearDtc),
+    (&[0x14], Tier::ClearDtc),
+    (&[0x14, 0xFF], Tier::ClearDtc),
+    (&[0x2E, 0xF1], Tier::Coding),
+    (&[0x3B, 0x01], Tier::Coding),
+    (&[0x10, 0x87], Tier::Coding),
+    (&[0x27, 0x01], Tier::Coding),
+    (&[0x2E, 0xF1, 0x98, 0x00], Tier::Coding),
+    (&[0x3B, 0x01, 0x00], Tier::Coding),
+];
 
 #[test]
 fn approves_kwp2000_reads_on_a_physical_address() {
@@ -950,7 +953,154 @@ fn a_policy_narrowed_to_tp20_addresses_sets_up_channels_only_there() {
     );
 }
 
+#[test]
+fn kwp2000_reads_go_on_an_open_tp20_channel_as_one_data_frame() {
+    let policy = Policy::read_only();
+    let channel = opened(&policy, 0x300, 0x740).unwrap();
+    let approved = policy
+        .approve_tp20_request(&channel, 0x3, &[0x1A, 0x9B])
+        .unwrap();
+    assert_eq!(approved.protocol(), Protocol::Tp20Channel);
+    assert_eq!(approved.target(), Target::Tp20Channel(0x740));
+    assert_eq!(approved.payload(), [0x13, 0x00, 0x02, 0x1A, 0x9B]);
+    assert_eq!(approved.tier(), Tier::Read);
+    assert_eq!(approved.reply_id(), Some(0x300));
+    for read in KWP2000_READS {
+        assert_eq!(
+            policy
+                .approve_tp20_request(&channel, 0x0, read)
+                .map(|approved| approved.tier()),
+            Ok(Tier::Read),
+            "{read:02X?}"
+        );
+    }
+    // Five bytes fit one frame; six don't, and the sequence number is 4 bits.
+    let five = [0x18, 0x02, 0xFF, 0xFF, 0x00];
+    assert!(policy.approve_tp20_request(&channel, 0xF, &five).is_ok());
+    for (sequence, request) in [
+        (0x0, &[0x18, 0x02, 0xFF, 0xFF, 0x00, 0x00][..]),
+        (0x10, &[0x1A, 0x9B]),
+        (0x0, &[]),
+    ] {
+        assert_eq!(
+            policy.approve_tp20_request(&channel, sequence, request),
+            Err(Rejection::NotAllowed),
+            "{sequence:X} {request:02X?}"
+        );
+    }
+}
+
+#[test]
+fn a_tp20_channel_carries_only_what_the_kwp2000_policy_allows() {
+    let policy = Policy::read_only();
+    let channel = opened(&policy, 0x300, 0x740).unwrap();
+    for &(request, tier) in KWP2000_LOCKED {
+        // Only those that fit one frame can be tried at all.
+        if request.len() <= 5 {
+            assert_eq!(
+                policy.approve_tp20_request(&channel, 0, request),
+                Err(Rejection::Locked(tier)),
+                "{request:02X?}"
+            );
+        }
+    }
+    for sid in KWP2000_FLASH_SERVICES {
+        assert_eq!(
+            policy.approve_tp20_request(&channel, 0, &[sid, 0x01]),
+            Err(Rejection::Banned),
+            "{sid:02X}"
+        );
+    }
+    for session in [0x85, 0x86] {
+        assert_eq!(
+            policy.approve_tp20_request(&channel, 0, &[0x10, session]),
+            Err(Rejection::Banned),
+            "{session:02X}"
+        );
+    }
+    // UDS-only reads aren't KWP2000 reads.
+    for request in [&[0x22, 0xF1, 0x87][..], &[0x19, 0x02, 0xAF]] {
+        assert_eq!(
+            policy.approve_tp20_request(&channel, 0, request),
+            Err(Rejection::NotAllowed),
+            "{request:02X?}"
+        );
+    }
+}
+
+#[test]
+fn tp20_channel_control_frames_are_built_by_the_policy() {
+    let policy = Policy::read_only();
+    let channel = opened(&policy, 0x300, 0x740).unwrap();
+    let frames = [
+        (
+            policy.approve_tp20_parameters(&channel).unwrap(),
+            vec![0xA0, 0x0F, 0x8A, 0xFF, 0x32, 0xFF],
+        ),
+        (
+            policy.approve_tp20_keep_alive(&channel).unwrap(),
+            vec![0xA3],
+        ),
+        (policy.approve_tp20_ack(&channel, 0x0).unwrap(), vec![0xB0]),
+        (policy.approve_tp20_ack(&channel, 0xF).unwrap(), vec![0xBF]),
+    ];
+    for (approved, payload) in frames {
+        assert_eq!(approved.protocol(), Protocol::Tp20Channel);
+        assert_eq!(approved.target(), Target::Tp20Channel(0x740));
+        assert_eq!(approved.payload(), payload);
+        assert_eq!(approved.tier(), Tier::Read);
+        assert_eq!(approved.reply_id(), Some(0x300));
+    }
+    assert_eq!(
+        policy.approve_tp20_ack(&channel, 0x10),
+        Err(Rejection::NotAllowed)
+    );
+}
+
+#[test]
+fn every_tp20_channel_frame_needs_ids_a_channel_may_have() {
+    // The disconnect's rules hold for every frame on a channel.
+    let checks = |policy: &Policy, channel: &OpenTp20Channel| {
+        [
+            policy.approve_tp20_disconnect(channel),
+            policy.approve_tp20_parameters(channel),
+            policy.approve_tp20_keep_alive(channel),
+            policy.approve_tp20_ack(channel, 0),
+            policy.approve_tp20_request(channel, 0, &[0x1A, 0x9B]),
+        ]
+    };
+    for send in [0x000, 0x1FF, 0x7DF, 0x7E0, 0x7EF] {
+        let policy = Policy::read_only();
+        let channel = opened(&policy, 0x300, send).unwrap();
+        for result in checks(&policy, &channel) {
+            assert_eq!(result.err(), Some(Rejection::WrongTarget), "{send:X}");
+        }
+    }
+    for send in [0x710, 0x77A] {
+        let policy = a7();
+        let channel = opened(&policy, 0x300, send).unwrap();
+        for result in checks(&policy, &channel) {
+            assert_eq!(result.err(), Some(Rejection::WrongTarget), "{send:X}");
+        }
+    }
+}
+
 proptest! {
+    #[test]
+    fn tp20_channel_requests_are_kwp2000_approvals(sequence in 0u8..16, request in prop::collection::vec(any::<u8>(), 0..8)) {
+        // On a channel, a request passes only if KWP2000 would pass it, with the same tier.
+        let policy = Policy::read_only();
+        let channel = opened(&policy, 0x300, 0x740).unwrap();
+        let on_channel = policy.approve_tp20_request(&channel, sequence, &request);
+        match policy.approve(Protocol::Kwp2000, ENGINE, &request) {
+            Ok(direct) if request.len() <= 5 => {
+                prop_assert_eq!(on_channel.map(|approved| approved.tier()), Ok(direct.tier()));
+            }
+            Ok(_) => prop_assert_eq!(on_channel.err(), Some(Rejection::NotAllowed)),
+            Err(rejection) => prop_assert_eq!(on_channel.err(), Some(rejection)),
+        }
+    }
+
     #[test]
     fn tp20_narrowing_never_widens(addresses in prop::collection::vec(any::<u8>(), 0..6), address in any::<u8>()) {
         let narrowed = Policy::read_only().narrowed_to_tp20(&addresses);
