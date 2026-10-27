@@ -1049,7 +1049,7 @@ impl<L: Link> Transport for Elm<L> {
             )));
         }
         // A module on a TP2.0 channel waits only its T1 (about 100 ms) for an ACK, and the
-        // adapter listens for its whole timeout after a frame (docs/elm327.md#vw-tp20-channels).
+        // adapter listens for its whole timeout after a frame (docs/elm327.md#vw-tp20-channel-frames).
         if raw && self.raw && self.busy && matches!(request.target(), Target::Tp20Channel(_)) {
             self.interrupt()?;
         }

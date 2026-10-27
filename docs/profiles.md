@@ -8,7 +8,7 @@ which of them may be copied, see [third-party.md](third-party.md#reference-only)
 
 | Profile | Expected setup (confirmed by a read-only module scan before use) |
 |---|---|
-| 2014 Audi A7 3.0 TDI (C7) | CAN 500k behind the J533 gateway; UDS on ISO-TP with 11-bit IDs: all 24 modules found so far answer UDS (#54), engine 0x7E0/0x7E8, head-up display 0x71B/0x785. A TP2.0/KWP2000-only module wouldn't show up in discovery, which only sends UDS. A 29-bit discovery range covers VAG's 0x17FC00xx IDs, untried on this car. A TP2.0 list names the 13 modules silent on ISO-TP (#92), untried too |
+| 2014 Audi A7 3.0 TDI (C7) | CAN 500k behind the J533 gateway; UDS on ISO-TP with 11-bit IDs: all 24 modules found so far answer UDS (#54), engine 0x7E0/0x7E8, head-up display 0x71B/0x785. A TP2.0/KWP2000-only module wouldn't show up in discovery, which only sends UDS. A 29-bit discovery range covers VAG's 0x17FC00xx IDs, untried on this car. A TP2.0 list names the 13 modules silent on ISO-TP (#92); in session 6 one of them, the passenger door (52), opened a channel (#124) |
 | 2014 Toyota Camry (XV50) | CAN 500k; OBD-II on 0x7DF/0x7E0+; enhanced diagnostics are KWP2000-style (e.g. 0x21 read by local ID) on ISO-TP; body modules sit behind 0x750 with an extended-address byte |
 
 ## File format
@@ -36,7 +36,7 @@ the visible text finds them. Module names are unique ignoring case.
 | `name` | A short name, unique within the profile, such as `engine`. |
 | `vag_address` | The VAG diagnostic address (`01` engine, `19` gateway), on VAG cars only. Unique. |
 | `request_id`, `response_id` | The 11-bit CAN IDs requests go to and the module answers on. Both in 0x700..=0x7FF and not the OBD-II broadcast 0x7DF. A CAN ID may be shared only by modules that each have an `extended_address`, all different. |
-| `protocol` | `uds` (ISO 14229 on ISO-TP), `kwp2000` (ISO 14230 on ISO-TP) or `tp20` (VW TP2.0 transport with KWP2000). Nothing reads a `kwp2000` or `tp20` module yet (#142 for TP2.0), and the simulator only simulates `uds` modules. |
+| `protocol` | `uds` (ISO 14229 on ISO-TP), `kwp2000` (ISO 14230 on ISO-TP) or `tp20` (VW TP2.0 transport with KWP2000). Nothing reads a `kwp2000` module yet; a `tp20` module can be read through `tp20::ChannelSession` (#142), but scan doesn't read the profile's `tp20` modules yet (#170). The simulator only simulates `uds` modules from a fixture. |
 | `extended_address` | The sub-address byte for ISO-TP extended addressing, if the module uses it. |
 | `[[module.did]]` | The data identifiers the module can read beyond the standard ones. |
 

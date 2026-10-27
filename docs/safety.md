@@ -15,14 +15,16 @@ from developers being careful.
 - A module doesn't know which protocol the tester meant, so **a read in one protocol is never a locked or banned
   request in the other**: KWP2000's reads (`17`, `18`, `1A`, `21`, `3E`) aren't UDS services, or are UDS reads, and
   UDS's aren't KWP2000 services. Tests check every form of read both ways.
-- **VW TP2.0 channel frames** (`Protocol::Tp20Channel`) carry no service and take no caller bytes: the policy builds
-  them itself. `approve_tp20_setup` builds a channel setup to one module address (never 0, the tester's, nor a
-  broadcast address from 0xF0). `tp20_channel` turns a positive answer to that setup, from the ID it's answered on
-  and with the receive ID the setup asked for (0x300), into an `OpenTp20Channel`, which nothing else can build, and
-  `approve_tp20_disconnect` builds an `A8` only on one of those. It needs that receive ID and a send ID in 0x300..=0x7FF (below it are the car's own frames and the
-  setup range), not an OBD-II ID and, once a profile narrows the policy, no ID of that profile's modules, since `A8`
-  there would reach that module.
-  `approve` refuses both, and refuses any service request to a TP2.0 target.
+- **VW TP2.0 frames** (`Protocol::Tp20Channel`) take no caller bytes but a KWP2000 request: the policy builds them
+  itself. `approve_tp20_setup` builds a channel setup to one module address (never 0, the tester's, nor a broadcast
+  address from 0xF0). `tp20_channel` turns a positive answer to that setup, from the ID it's answered on and with
+  the receive ID the setup asked for (0x300), into an `OpenTp20Channel`, which nothing else can build. Every frame
+  on a channel needs one: `approve_tp20_parameters` (`A0`), `approve_tp20_keep_alive` (`A3`), `approve_tp20_ack`
+  (`B<n>`), `approve_tp20_disconnect` (`A8`), and `approve_tp20_request`, which checks a KWP2000 request against the
+  KWP2000 allowlist and tiers, as `approve` would, and wraps it in one data frame (at most 5 bytes). Each needs that
+  receive ID and a send ID in 0x300..=0x7FF (below it are the car's own frames and the setup range), not an OBD-II ID
+  and, once a profile narrows the policy, no ID of that profile's modules, since a frame there would reach that
+  module. `approve` refuses them all, and refuses any service request to a TP2.0 target.
 - A [vehicle profile](profiles.md) can only narrow what the policy allows, never widen it. That includes the TP2.0
   addresses: a profile without a TP2.0 list allows no channel setup.
 - The policy applies to programs that [import the crates](library.md) too. There is no raw-frame escape hatch.
