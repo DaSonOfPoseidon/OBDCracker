@@ -90,7 +90,9 @@ Each entry names the class, what to check, and where it bit us.
 
 - **Every wait on the bus must be bounded by something the ECU can't extend forever.** Count response-pending
   replies; accept one answer per ECU for a broadcast (J1979); ignore repeats without extending the wait. A test with a
-  transport that never stops sending proves it (PR #9: an ECU repeating its VIN reply hung `exchange` forever).
+  transport that never stops sending proves it (PR #9: an ECU repeating its VIN reply hung `exchange` forever). A
+  loop that skips input it doesn't use, such as another module's frames, must still check its deadline: the TP2.0
+  session's first draft only checked it inside `recv`, so a flood from another ID never ended (#142).
 - **Keep limits per source, too.** One shared `max_pending` counter let one stuck ECU throw away every other ECU's
   answer to a broadcast. Count per ECU, and drop only the one that goes over (PR #9).
 - **Keep timers per source.** Each pending ECU gets its own P2*. One global "latest deadline" lets a late ECU in:

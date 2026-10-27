@@ -7,7 +7,7 @@ use std::time::Duration;
 use clap::builder::PossibleValuesParser;
 use clap::{Parser, Subcommand};
 use obdcracker_core::obd;
-use obdcracker_core::response::{Error as ReplyError, Nrc};
+use obdcracker_core::response::{self, Error as ReplyError, Nrc};
 use obdcracker_core::uds::{DiagnosticSession, UdsDtc};
 use obdcracker_profile::{Decode, DidSession, Profile, Protocol};
 use obdcracker_safety::{ModuleIds, Policy, Target};
@@ -961,22 +961,26 @@ fn tp20_identification<T: Transport>(
     let read = session.request(&TP20_IDENTIFICATION);
     let closed = session.close();
     let shown = match read {
-        Ok(answer) => {
-            // Its record is the manufacturer's: shown as bytes, and as text where printable.
-            let text: String = answer
-                .iter()
-                .skip(2)
-                .map(|&b| {
-                    if b == b' ' || b.is_ascii_graphic() {
-                        char::from(b)
-                    } else {
-                        '.'
-                    }
-                })
-                .collect();
-            format!("[{}] \"{text}\"", hex(&answer))
-        }
         Err(e) => format!("not read ({e})"),
+        Ok(answer) => match response::positive(TP20_IDENTIFICATION[0], &answer) {
+            Err(ReplyError::Negative(refusal)) => format!("refused ({})", refusal.nrc),
+            Err(e) => format!("not read ({e}) [{}]", hex(&answer)),
+            // Its record is the manufacturer's: shown as bytes, and as text where printable.
+            Ok(record) => {
+                let text: String = record
+                    .iter()
+                    .skip(1)
+                    .map(|&b| {
+                        if b == b' ' || b.is_ascii_graphic() {
+                            char::from(b)
+                        } else {
+                            '.'
+                        }
+                    })
+                    .collect();
+                format!("[{}] \"{text}\"", hex(&answer))
+            }
+        },
     };
     match closed {
         Err(e @ tp20::ChannelError::Transport(_)) => {
@@ -1382,7 +1386,7 @@ mod tests {
     use obdcracker_sim::SimBus;
     use obdcracker_transport::{Error, Response, Timing, Transport};
 
-    use super::{Cli, Discovery, resume_command, run_scan, unanswered_note};
+    use super::{Cli, Discovery, resume_command, run_scan, tp20_identification, unanswered_note};
 
     fn a7_with_tp20() -> SimBus {
         let mut bus = SimBus::builtin("a7").unwrap();
@@ -1421,6 +1425,28 @@ mod tests {
 
     fn disconnects(sent: &[Approved]) -> usize {
         on_channel(sent, &[0xA8])
+    }
+
+    #[test]
+    fn a_tp20_identification_is_shown_as_bytes_and_text_and_a_refusal_as_one() {
+        let policy = obdcracker_safety::Policy::read_only();
+        let mut bus = a7_with_tp20();
+        assert_eq!(
+            tp20_identification(&mut bus, &policy, 0x5F, Timing::default()),
+            "[5A 9B 34 47 30 39 30 37 34 30 31] \"4G0907401\""
+        );
+        // A module with no identification refuses the read.
+        let mut bus = SimBus::builtin("a7").unwrap();
+        bus.add_tp20(
+            0x5F,
+            Channel {
+                send_id: 0x740,
+                receive_id: 0x300,
+            },
+        )
+        .unwrap();
+        let shown = tp20_identification(&mut bus, &policy, 0x5F, Timing::default());
+        assert!(shown.starts_with("refused ("), "{shown}");
     }
 
     #[test]

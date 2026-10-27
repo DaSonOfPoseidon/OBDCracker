@@ -369,6 +369,8 @@ impl<'a, T: Transport + ?Sized> ChannelSession<'a, T> {
         let mut pending: u16 = 0;
         let mut acked = false;
         let mut keep_alives = 0usize;
+        // Keep-alives sent that the module hasn't answered yet.
+        let mut unanswered = 0usize;
         // The longest answer and as many pending messages, with room for ACKs and keep-alives.
         let frame_limit =
             MAX_FRAMES_PER_MESSAGE.saturating_mul(usize::from(self.timing.max_pending) + 2);
@@ -397,6 +399,7 @@ impl<'a, T: Transport + ?Sized> ChannelSession<'a, T> {
                         .map_err(ChannelError::Rejected)?;
                     self.send(&keep_alive)?;
                     keep_alives += 1;
+                    unanswered += 1;
                     continue;
                 }
                 Err(Error::Timeout) if pending > 0 => return Err(ChannelError::StillPending),
@@ -427,7 +430,8 @@ impl<'a, T: Transport + ?Sized> ChannelSession<'a, T> {
                         deadline = after(self.timing.p2_star);
                     }
                 }
-                Frame::Parameters(parameters) if keep_alives > 0 => {
+                Frame::Parameters(parameters) if unanswered > 0 => {
+                    unanswered -= 1;
                     self.parameters = parameters;
                 }
                 Frame::Disconnect => {

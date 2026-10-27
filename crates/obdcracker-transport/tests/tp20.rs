@@ -325,6 +325,21 @@ fn an_adapter_that_stops_listening_while_pending_listens_again_after_a_keep_aliv
 }
 
 #[test]
+fn one_keep_alive_gets_one_answer() {
+    let mut car = channel_car(|frame| match frame {
+        [0x10, 0x00, 0x02, 0x1A, 0x9B] => frames(&[&[0xB1], &[0x10, 0x00, 0x03, 0x7F, 0x1A, 0x78]]),
+        [0xA3] => frames(&[&MODULE_PARAMETERS, &MODULE_PARAMETERS]),
+        _ => Vec::new(),
+    });
+    let policy = Policy::read_only();
+    let mut session = ChannelSession::open(&mut car, &policy, 0x5F, TIMING).unwrap();
+    assert!(matches!(
+        session.request(&[0x1A, 0x9B]),
+        Err(ChannelError::Framing(_))
+    ));
+}
+
+#[test]
 fn a_module_pending_too_often_or_too_long_is_given_up_on() {
     // Pending on every ACK: over `max_pending` (2).
     let mut car = channel_car(|frame| match frame {
