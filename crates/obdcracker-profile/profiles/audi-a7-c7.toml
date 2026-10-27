@@ -1548,8 +1548,10 @@ reply_offset = 0x20000
 # The modules that stayed silent on 11-bit ISO-TP in car session 5 (#92), though Ross-Tech's C7
 # scan lists them: comfort 05/46 (J393), 09 (J519), 16 (J527), 36 (seat) and 42/52/62/72
 # (doors), and infotainment/MOST 0E, 47, 56 and 5F (MMI). TP2.0 is the main guess for them; none
-# is confirmed (#124). Car session 6 found 52 on TP2.0; the second row is the other addresses that
-# the gateway's 2A29 table marks 02, as it does 52 (#169).
+# is confirmed (#124). Car session 6 found 52 on TP2.0. The second row is the other addresses that
+# the gateway's 2A29 table marks 02, as it does 52 (#169). Some of those may be modules that answer
+# on ISO-TP (10 is VAG's parking aid address): a setup to one is still a read, and its answer shows
+# what 02 means.
 [discovery_tp20]
 addresses = [
     0x05, 0x09, 0x0E, 0x16, 0x36, 0x42, 0x46, 0x47, 0x52, 0x56, 0x5F, 0x62, 0x72,

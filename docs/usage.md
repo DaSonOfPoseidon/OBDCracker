@@ -105,7 +105,8 @@ obdcracker --serial <PORT> --profile a7 scan --discover-tp20  # then look for VW
 
 After the scan, sends a VW TP2.0 channel setup (`<address> C0 00 10 00 03 01` on 0x200) to each address in the
 profile's TP2.0 list. On the A7 these are the 13 modules that stayed silent on ISO-TP (#92), and the 16 other
-addresses the gateway's `2A29` table marks like the passenger door's (52, #169). For each module that
+addresses the gateway's `2A29` table marks like the passenger door's (52, #169). Some of those may be modules that
+answer on ISO-TP; a setup to one is still a read. For each module that
 answers, it shows the channel it gave, a refusal or the bytes it sent. It then closes each channel with `A8`. Then, for
 each module that gave a channel, it opens one again and reads the module's identification (KWP2000 `1A 9B`), showing
 the bytes and their printable text, and closes it ([how](tp20.md#data-transfer)). A record that doesn't start with
