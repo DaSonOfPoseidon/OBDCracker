@@ -126,6 +126,11 @@ enum Command {
         /// keep it there with a tester-present request (0x3E 00), and switch it back (0x10 01)
         #[arg(long)]
         extended: bool,
+        /// Wait up to 5 s for each reply (about 1 s on a plain ELM327), for a module that
+        /// answers slowly, so its late answer isn't taken for the next read's. Each read then
+        /// takes up to that long, so give it a narrow range
+        #[arg(long)]
+        patient: bool,
     },
     /// Read one DTC's snapshot records and extended data records from a module (UDS 0x19 04
     /// and 06). Reads only. Needs a profile (--profile or --sim) that lists the module
@@ -285,9 +290,13 @@ fn run<T: Transport>(cli: &Cli, transport: T, link: &str, timing: Timing) -> Exi
         module,
         range,
         extended,
+        patient,
     } = &cli.command
     {
-        return run_sweep(cli, &mut transport, timing, module, *range, *extended);
+        let mut options = SweepOptions::default();
+        options.extended = extended.then(S3::default);
+        options.patient = patient.then_some(discover::PATIENT_WAIT);
+        return run_sweep(cli, &mut transport, timing, module, *range, &options);
     }
     if let Command::Dtc {
         module,
@@ -605,7 +614,7 @@ fn run_sweep<T: Transport>(
     timing: Timing,
     name: &str,
     (first, last): (u16, u16),
-    extended: bool,
+    options: &SweepOptions,
 ) -> ExitCode {
     let (module, policy) = match profile_module(cli, name, "sweep") {
         Ok(found) => found,
@@ -615,16 +624,16 @@ fn run_sweep<T: Transport>(
         }
     };
     let count = u32::from(last) - u32::from(first) + 1;
+    let (most, each) = match options.patient {
+        Some(wait) => ("up to", u32::try_from(wait.as_millis()).unwrap_or(u32::MAX)),
+        None => ("about", 50),
+    };
     eprintln!(
-        "sweep: {count} reads of {} ({:03X}), about {} min",
+        "sweep: {count} reads of {} ({:03X}), {most} {} min",
         module.name,
         module.request_id,
-        (count * 50).div_ceil(60_000)
+        count.saturating_mul(each).div_ceil(60_000)
     );
-    let mut options = SweepOptions::default();
-    if extended {
-        options.extended = Some(S3::default());
-    }
     let progress = |did: u16| {
         if did & 0xFF == 0xFF && did != last {
             eprintln!("sweep: read up to {did:04X}");
@@ -636,7 +645,7 @@ fn run_sweep<T: Transport>(
         &module,
         first..=last,
         timing,
-        &options,
+        options,
         progress,
     ) {
         Ok(found) => found,

@@ -3,6 +3,7 @@
 //! narrowest range that can hold what you're after. See docs/scanning.md#sweeps.
 
 use std::ops::RangeInclusive;
+use std::time::Duration;
 
 use obdcracker_core::response::{Error as ReplyError, Nrc};
 use obdcracker_core::uds::{self, DiagnosticSession};
@@ -19,6 +20,12 @@ pub struct SweepOptions {
     /// Read in the extended diagnostic session, with these S3 timings. `None`, the default,
     /// reads in the default session.
     pub extended: Option<S3>,
+    /// Wait up to this long for each reply, or as near to it as the transport can
+    /// ([`Transport::patient`], such as [`crate::discover::PATIENT_WAIT`]), so a module that
+    /// answers slowly isn't taken as silent and its late answer as the next read's. Each read
+    /// then takes longer. Patience ends afterwards whatever happens. `None`, the default, waits
+    /// as usual.
+    pub patient: Option<Duration>,
 }
 
 /// What a sweep found, and where it stopped if it didn't finish.
@@ -140,7 +147,7 @@ pub fn sweep_dids_reporting<T: Transport + ?Sized>(
     range: RangeInclusive<u16>,
     timing: Timing,
     options: &SweepOptions,
-    mut progress: impl FnMut(u16),
+    progress: impl FnMut(u16),
 ) -> Result<Sweep, FingerprintError> {
     let target = Target::physical(module.request_id);
     let approve = |payload: &[u8]| {
@@ -160,7 +167,7 @@ pub fn sweep_dids_reporting<T: Transport + ?Sized>(
             out_of_step: false,
         });
     };
-    if let Some(s3) = options.extended {
+    if options.extended.is_some() {
         // What `ExtendedSession` sends, approved now so nothing is sent if it can't be.
         let enter = approve(&uds::session_control(DiagnosticSession::Extended))?;
         approve(&uds::tester_present())?;
@@ -168,6 +175,45 @@ pub fn sweep_dids_reporting<T: Transport + ?Sized>(
         if enter.reply_id().is_none() {
             return Err(FingerprintError::Session(SessionError::UnknownReplyId));
         }
+    }
+    let Some(wait) = options.patient else {
+        return Ok(sweep_approved(
+            transport, policy, module, &requests, timing, options, progress,
+        ));
+    };
+    let timing = match transport.patient(Some(wait)) {
+        Ok(waits) => Timing {
+            p2: timing.p2.max(waits.unwrap_or(wait)),
+            ..timing
+        },
+        Err(e) => {
+            // It may have changed part of the adapter's timing before failing: undo what it can.
+            let _ = transport.patient(None);
+            return Ok(halt(Vec::new(), first, Why::Adapter(e), false));
+        }
+    };
+    let sweep = sweep_approved(
+        transport, policy, module, &requests, timing, options, progress,
+    );
+    Ok(match transport.patient(None) {
+        Ok(_) => sweep,
+        Err(e) => with_adapter_failure(sweep, e, *range.end()),
+    })
+}
+
+// The sweep once every request it may send is approved. `requests` isn't empty.
+fn sweep_approved<T: Transport + ?Sized>(
+    transport: &mut T,
+    policy: &Policy,
+    module: &UdsModule,
+    requests: &[(u16, obdcracker_safety::Approved)],
+    timing: Timing,
+    options: &SweepOptions,
+    mut progress: impl FnMut(u16),
+) -> Sweep {
+    let target = Target::physical(module.request_id);
+    let (first, last) = (requests[0].0, requests[requests.len() - 1].0);
+    if let Some(s3) = options.extended {
         let mut session = match ExtendedSession::enter(transport, policy, target, timing, s3) {
             Ok(session) => session,
             // `still_extended` reports why a session that may have been entered wasn't left.
@@ -178,7 +224,7 @@ pub fn sweep_dids_reporting<T: Transport + ?Sized>(
                     }
                     e => (e, None),
                 };
-                return Ok(Sweep {
+                return Sweep {
                     still_extended,
                     found: Vec::new(),
                     stop: Some(Stop {
@@ -187,50 +233,52 @@ pub fn sweep_dids_reporting<T: Transport + ?Sized>(
                     }),
                     // A session request's late answer isn't a read's.
                     out_of_step: false,
-                });
+                };
             }
         };
-        let sweep = read_each(&mut session, &requests, &mut progress);
-        // An adapter failure on `10 01` leaves it in an unknown state, so it outranks why the
-        // sweep stopped.
-        return Ok(match session.end().map_err(session_error) {
+        let sweep = read_each(&mut session, requests, &mut progress);
+        return match session.end().map_err(session_error) {
             Err(Ok(e)) => Sweep {
                 still_extended: Some(e),
                 ..sweep
             },
-            Err(Err(FingerprintError::Transport(e))) => {
-                let stop = match sweep.stop {
-                    Some(
-                        stop @ Stop {
-                            why: Why::Adapter(_),
-                            ..
-                        },
-                    ) => stop,
-                    Some(Stop { at, .. }) => Stop {
-                        at,
-                        why: Why::Adapter(e),
-                    },
-                    // Everything was read; sweeping again from the last DID repeats one read.
-                    None => Stop {
-                        at: *range.end(),
-                        why: Why::Adapter(e),
-                    },
-                };
-                Sweep {
-                    stop: Some(stop),
-                    ..sweep
-                }
-            }
+            Err(Err(FingerprintError::Transport(e))) => with_adapter_failure(sweep, e, last),
             // The other failures can't happen: the session's requests were approved up front.
             Ok(()) | Err(Err(_)) => sweep,
-        });
+        };
     }
     let mut direct = Direct {
         transport,
         response_id: module.response_id,
         timing,
     };
-    Ok(read_each(&mut direct, &requests, &mut progress))
+    read_each(&mut direct, requests, &mut progress)
+}
+
+// An adapter failure after the reads leaves it in an unknown state, so it outranks why the sweep
+// stopped.
+fn with_adapter_failure(sweep: Sweep, e: Error, last: u16) -> Sweep {
+    let stop = match sweep.stop {
+        Some(
+            stop @ Stop {
+                why: Why::Adapter(_),
+                ..
+            },
+        ) => stop,
+        Some(Stop { at, .. }) => Stop {
+            at,
+            why: Why::Adapter(e),
+        },
+        // Everything was read; sweeping again from the last DID repeats one read.
+        None => Stop {
+            at: last,
+            why: Why::Adapter(e),
+        },
+    };
+    Sweep {
+        stop: Some(stop),
+        ..sweep
+    }
 }
 
 fn stopped(failure: Result<ReadError, FingerprintError>) -> Why {
