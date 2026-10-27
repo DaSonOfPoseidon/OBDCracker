@@ -867,6 +867,36 @@ mod requests {
     }
 
     #[test]
+    fn a_broken_adapter_isnt_interrupted_before_a_channel_frame() {
+        let mut elm = connect(tp20_reading_car());
+        elm.send(&approve(Target::Physical(0x7E0), &[0x09, 0x02]))
+            .unwrap();
+        while elm.recv(Duration::from_secs(1)).is_ok() {}
+        let policy = Policy::read_only();
+        let setup = policy.approve_tp20_setup(0x5F).unwrap();
+        elm.send(&setup).unwrap();
+        let reply = elm.recv(Duration::from_secs(1)).unwrap();
+        let channel = policy
+            .tp20_channel(&setup, reply.source, &reply.payload)
+            .unwrap();
+        elm.send(&policy.approve_tp20_parameters(&channel).unwrap())
+            .unwrap();
+        assert_eq!(elm.recv(Duration::from_secs(1)).unwrap().payload[0], 0xA1);
+        // Broken while the adapter still listens after the channel's last frame.
+        let mut overlong = vec![b'7'; 200];
+        overlong.push(b'\r');
+        elm.link_mut().inject = overlong;
+        let err = elm.recv(Duration::from_secs(1)).unwrap_err();
+        assert!(err.to_string().contains("overlong"), "{err}");
+        let written = elm.link().written.len();
+        assert!(
+            elm.send(&policy.approve_tp20_disconnect(&channel).unwrap())
+                .is_err()
+        );
+        assert_eq!(elm.link().written.len(), written);
+    }
+
+    #[test]
     fn a_misheard_interrupt_never_reaches_the_bus() {
         // Every bit of `X`, and of the `X\r` that ends it when the prompt came first: at worst
         // the driver stops, and the bus gets only the frames the policy built.
