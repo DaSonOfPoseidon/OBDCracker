@@ -753,6 +753,31 @@ fn dry_run_scan_extended_lists_the_session_reads() {
 }
 
 #[test]
+fn sim_patient_sweep_says_how_long_it_may_take() {
+    let out = obdcracker(&[
+        "--sim",
+        "a7",
+        "sweep",
+        "--module",
+        "gateway",
+        "--range",
+        "00BE-00BF",
+        "--extended",
+        "--patient",
+    ]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("sweep: 2 reads of gateway (710), up to 1 min"),
+        "{stderr}"
+    );
+}
+
+#[test]
 fn sim_sweep_lists_the_dids_a_module_has() {
     let log = temp_log("sweep");
     let out = obdcracker(&[

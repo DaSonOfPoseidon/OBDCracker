@@ -132,6 +132,10 @@ that can help. `--extended` sweeps in the extended session, entered and left as 
 the module may not have left it. A sweep that finishes with reads still unanswered notes that a late answer may yet
 arrive, so connect again before reading from that module again.
 
+`--patient` waits up to 5 s for each reply (about 1 s on a plain ELM327), for a module that answers slowly: the A7's
+gateway refuses `22 00BE` after more than 1.1 s, so a usual sweep takes that refusal for the next read's answer and
+stops there (#171). Each read then takes up to the full wait, so give it a narrow range, such as `--range 00BE-00BE`.
+
 ## `dtc`
 
 ```sh

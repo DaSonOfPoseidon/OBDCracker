@@ -17,7 +17,13 @@ struct Car {
     replies: VecDeque<Response>,
     sent: Vec<String>,
     fail_at: Option<usize>,
+    // Replies to this DID take longer than `SLOW` to arrive.
+    slow: Option<u16>,
+    late: VecDeque<Response>,
+    refuse_patience: Option<bool>,
 }
+
+const SLOW: Duration = Duration::from_millis(1100);
 
 impl Car {
     fn new(answer: impl FnMut(u32, &[u8]) -> Vec<Response> + 'static) -> Self {
@@ -26,6 +32,9 @@ impl Car {
             replies: VecDeque::new(),
             sent: Vec::new(),
             fail_at: None,
+            slow: None,
+            late: VecDeque::new(),
+            refuse_patience: None,
         }
     }
 }
@@ -38,12 +47,32 @@ impl Transport for Car {
         let id = request.target().can_id();
         self.sent
             .push(format!("{id:03X} {}", hex(request.payload())));
-        self.replies.extend((self.answer)(id, request.payload()));
+        // What a slow read's reply hadn't delivered yet arrives before this request's.
+        self.replies.extend(self.late.drain(..));
+        let replies = (self.answer)(id, request.payload());
+        match (self.slow, request.payload()) {
+            (Some(slow), [0x22, high, low]) if u16::from_be_bytes([*high, *low]) == slow => {
+                self.late.extend(replies);
+            }
+            _ => self.replies.extend(replies),
+        }
         Ok(())
     }
 
-    fn recv(&mut self, _timeout: Duration) -> Result<Response, Error> {
+    fn recv(&mut self, timeout: Duration) -> Result<Response, Error> {
+        if timeout >= SLOW {
+            self.replies.extend(self.late.drain(..));
+        }
         self.replies.pop_front().ok_or(Error::Timeout)
+    }
+
+    // Waits as long as it's asked to, but no more than 2 s, like an STN.
+    fn patient(&mut self, wait: Option<Duration>) -> Result<Option<Duration>, Error> {
+        self.sent.push(format!("patient {wait:?}"));
+        if self.refuse_patience == Some(wait.is_some()) {
+            return Err(Error::Adapter("STPTO refused".to_owned()));
+        }
+        Ok(wait.map(|wait| wait.min(Duration::from_secs(2))))
     }
 }
 
@@ -843,4 +872,167 @@ fn a_sweep_with_every_read_answered_is_in_step() {
     )
     .unwrap();
     assert!(!got.out_of_step);
+}
+
+fn patient() -> SweepOptions {
+    let mut options = SweepOptions::default();
+    options.patient = Some(Duration::from_secs(5));
+    options
+}
+
+// The A7 gateway's 00BE: refused as out of range, but only after the usual wait (#171).
+fn slow_car() -> Car {
+    let mut car = car();
+    car.slow = Some(0x0601);
+    car
+}
+
+#[test]
+fn a_slow_refusal_is_taken_for_the_next_reads_answer_unless_the_sweep_is_patient() {
+    let sweep = |options: &SweepOptions| {
+        let mut car = slow_car();
+        let got = sweep_dids(
+            &mut car,
+            &Policy::read_only(),
+            &engine(),
+            0x0600..=0x0603,
+            TIMING,
+            options,
+        )
+        .unwrap();
+        (got, car.sent)
+    };
+    let (hasty, _) = sweep(&SweepOptions::default());
+    assert!(
+        matches!(
+            hasty.stop,
+            Some(Stop {
+                at: 0x0602,
+                why: Why::Unmatched(_)
+            })
+        ),
+        "{hasty:?}"
+    );
+    let (got, sent) = sweep(&patient());
+    assert_eq!(got.stop, None, "{got:?}");
+    assert!(!got.out_of_step);
+    assert_eq!(
+        got.found.iter().map(|(did, _)| *did).collect::<Vec<_>>(),
+        [0x0600, 0x0602]
+    );
+    assert_eq!(
+        sent,
+        [
+            "patient Some(5s)",
+            "7E0 22 06 00",
+            "7E0 22 06 01",
+            "7E0 22 06 02",
+            "7E0 22 06 03",
+            "patient None",
+        ]
+    );
+}
+
+#[test]
+fn a_patient_sweep_in_the_extended_session_ends_patience_after_leaving_it() {
+    let mut car = slow_car();
+    let mut options = patient();
+    options.extended = Some(S3::default());
+    let got = sweep_dids(
+        &mut car,
+        &Policy::read_only(),
+        &engine(),
+        0x0601..=0x0601,
+        TIMING,
+        &options,
+    )
+    .unwrap();
+    assert_eq!(got.stop, None, "{got:?}");
+    assert_eq!(got.found, [(0x0601, Ok(vec![0x34, 0x56]))]);
+    assert_eq!(car.sent.first().unwrap(), "patient Some(5s)");
+    assert_eq!(
+        &car.sent[car.sent.len() - 2..],
+        ["7E0 10 01", "patient None"]
+    );
+}
+
+#[test]
+fn a_sweep_that_cant_be_made_patient_sends_nothing() {
+    let mut car = slow_car();
+    car.refuse_patience = Some(true);
+    let got = sweep_dids(
+        &mut car,
+        &Policy::read_only(),
+        &engine(),
+        0x0600..=0x0603,
+        TIMING,
+        &patient(),
+    )
+    .unwrap();
+    assert!(
+        matches!(
+            got.stop,
+            Some(Stop {
+                at: 0x0600,
+                why: Why::Adapter(_)
+            })
+        ),
+        "{got:?}"
+    );
+    assert_eq!(got.found, []);
+    // It may have changed part of the adapter's timing before failing.
+    assert_eq!(car.sent, ["patient Some(5s)", "patient None"]);
+}
+
+#[test]
+fn patience_ends_after_an_adapter_failure() {
+    let mut car = slow_car();
+    car.fail_at = Some(2);
+    let got = sweep_dids(
+        &mut car,
+        &Policy::read_only(),
+        &engine(),
+        0x0600..=0x0603,
+        TIMING,
+        &patient(),
+    )
+    .unwrap();
+    assert!(
+        matches!(
+            got.stop,
+            Some(Stop {
+                at: 0x0601,
+                why: Why::Adapter(_)
+            })
+        ),
+        "{got:?}"
+    );
+    assert_eq!(car.sent.last().unwrap(), "patient None");
+}
+
+#[test]
+fn a_failure_to_end_patience_is_an_adapter_stop() {
+    let mut car = slow_car();
+    car.refuse_patience = Some(false);
+    let got = sweep_dids(
+        &mut car,
+        &Policy::read_only(),
+        &engine(),
+        0x0600..=0x0603,
+        TIMING,
+        &patient(),
+    )
+    .unwrap();
+    assert_eq!(got.found.len(), 2, "{got:?}");
+    // Everything was read; sweeping again from the last DID repeats one read.
+    assert!(
+        matches!(
+            got.stop,
+            Some(Stop {
+                at: 0x0603,
+                why: Why::Adapter(_)
+            })
+        ),
+        "{got:?}"
+    );
 }

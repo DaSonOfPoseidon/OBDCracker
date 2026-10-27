@@ -126,5 +126,10 @@ A module that doesn't confirm `10 01` at the end is left to return after S3.
 - With `SweepOptions::extended`, the extended session's keepalive or re-entry may fail before a read goes out. That DID
   isn't reported to `progress` and the sweep stops there, since a caller checkpointing on progress would otherwise
   skip it. Resume from `Stop::at`.
+- With `SweepOptions::patient`, the transport waits longer for each reply (`Transport::patient`), so a module's slow
+  answer lands on the read it answers instead of the next. Nothing extra is sent: asking the DID again after a
+  timeout would leave one of its two answers queued for the next read. Patience is set after every request is
+  approved and ends afterwards whatever happens. Failing to set it stops the sweep before anything is sent, and
+  failing to end it is a `Why::Adapter` stop.
 - If leaving the session fails, `Sweep::still_extended` says why the module may still be in it. When the adapter fails
   on `10 01`, `still_extended` stays `None` and `Sweep::stop` is `Why::Adapter`; the module may still be in the session.
