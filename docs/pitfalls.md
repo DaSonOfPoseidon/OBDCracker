@@ -149,7 +149,9 @@ Each entry names the class, what to check, and where it bit us.
   not a read sent into the default session (#68, three Codex rounds).
 - **Use the limits the other side declares.** A module's `50 03` gives its own P2 and P2*; ignoring them timed
   out a module that said it needs 100 ms. Extend the caller's timing by the excess over the standard defaults,
-  so an adapter's allowance stays on top (#68, Codex).
+  so an adapter's allowance stays on top (#68, Codex). The same holds for a gap it asks for: the TP2.0 session kept
+  the module's T3 but sent frames as fast as they came (PR #183, Codex). A value decoded and stored but never read
+  is a sign. And the tester's own wait for it mustn't eat into the time the module was given.
 - **Keep cleanup armed until it has worked.** `end()` marked the guard finished before sending `10 01`, so a
   failed send left nothing to retry it, and `end` had consumed the guard. Disarm only after a definite answer
   (#68, Codex).
@@ -230,6 +232,10 @@ Each entry names the class, what to check, and where it bit us.
 - **A new protocol reaches past the allowlist.** Approving KWP2000 requests wasn't enough: `exchange` still matched
   their replies as UDS, so KWP2000's bare `7E` answer to `3E 01` was dropped as not answering it (#137, Codex). Follow
   a request through everything that reads its reply: matching, response-pending, decoding.
+- **A fresh state machine takes any starting point, so give it the one the protocol fixes.** The TP2.0 reassembler
+  starts at whatever sequence number comes first, so with a channel's first frame lost, `11 00 02 5A 9B` (a later
+  frame that happens to look like a whole message) read as a complete, truncated answer (PR #183, Codex). Where the
+  protocol says where numbering starts (0 on a new channel), check the first one against it.
 - **After dropping a message, skip to its end.** TP2.0 marks only a message's last frame, so a reassembler that
   forgot a bad message at once read its next frame as a new message: `31 00 02 AA BB` became a 2-byte reply. On an
   error mid-message, drop frames through the next one marked last (PR #149).

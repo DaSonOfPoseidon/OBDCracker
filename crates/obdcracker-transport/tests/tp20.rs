@@ -443,6 +443,75 @@ fn a_frame_that_breaks_the_framing_closes_the_channel() {
 }
 
 #[test]
+fn a_lost_first_frame_isnt_read_as_a_short_answer() {
+    // A new channel's frames from the module start at sequence number 0: losing the first of
+    // `20 00 09 5A 9B 41 42 43`, `11 44 45 46 47` must not leave `11 ...` read as a whole answer.
+    let mut car = channel_car(|_| frames(&[&[0xB1], &[0x11, 0x00, 0x02, 0x5A, 0x9B]]));
+    let policy = Policy::read_only();
+    let mut session = ChannelSession::open(&mut car, &policy, 0x5F, TIMING).unwrap();
+    assert!(matches!(
+        session.request(&[0x1A, 0x9B]),
+        Err(ChannelError::Framing(_))
+    ));
+}
+
+// Records when each frame was sent.
+struct Timed {
+    car: Car,
+    at: Vec<std::time::Instant>,
+}
+
+impl Transport for Timed {
+    fn send(&mut self, request: &Approved) -> Result<(), Error> {
+        self.at.push(std::time::Instant::now());
+        self.car.send(request)
+    }
+
+    fn recv(&mut self, timeout: Duration) -> Result<Response, Error> {
+        self.car.recv(timeout)
+    }
+}
+
+#[test]
+fn frames_on_a_channel_keep_the_module_s_t3_apart() {
+    // T3 of 20 ms (`54`: 1 ms units, 20): every frame after the parameters waits for it.
+    let car = Car::new(|id, frame| match (id, frame) {
+        (0x200, _) => reply(0x25F, &SETUP_REPLY),
+        (0x740, [0xA0, ..]) => reply(0x300, &[0xA1, 0x0F, 0x8A, 0xFF, 0x54, 0xFF]),
+        (0x740, [0x10, ..]) => vec![
+            Response {
+                source: 0x300,
+                payload: vec![0xB1],
+            },
+            Response {
+                source: 0x300,
+                payload: vec![0x10, 0x00, 0x02, 0x5A, 0x9B],
+            },
+        ],
+        (0x740, [0xA8]) => reply(0x300, &[0xA8]),
+        _ => Vec::new(),
+    });
+    let mut timed = Timed {
+        car,
+        at: Vec::new(),
+    };
+    let policy = Policy::read_only();
+    let mut session = ChannelSession::open(&mut timed, &policy, 0x5F, TIMING).unwrap();
+    assert_eq!(session.parameters().t3, Duration::from_millis(20));
+    assert_eq!(session.request(&[0x1A, 0x9B]).unwrap(), [0x5A, 0x9B]);
+    assert_eq!(session.close(), Ok(Disconnect::Closed));
+    // The setup and A0 go before the module has said; then the request, its ACK and A8.
+    assert_eq!(timed.at.len(), 5);
+    for pair in timed.at[1..].windows(2) {
+        assert!(
+            pair[1] - pair[0] >= Duration::from_millis(20),
+            "{:?}",
+            pair[1] - pair[0]
+        );
+    }
+}
+
+#[test]
 fn an_answer_to_another_request_closes_the_channel() {
     // `61 02` answers a read of local ID 02, not 01: a late answer, so replies are out of step.
     let mut car = channel_car(|_| frames(&[&[0xB1], &[0x30, 0x00, 0x02, 0x61, 0x02]]));

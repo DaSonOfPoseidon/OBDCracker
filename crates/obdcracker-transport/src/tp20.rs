@@ -197,8 +197,10 @@ pub struct ChannelSession<'a, T: Transport + ?Sized> {
     channel: OpenTp20Channel,
     parameters: Parameters,
     timing: Timing,
-    // The sequence number of the tester's next data frame.
+    // The sequence numbers of the tester's next data frame and of the module's, which start at
+    // 0 on a new channel.
     sequence: u8,
+    module_sequence: u8,
     reassembler: Reassembler<Vec<u8>>,
     // When the tester last sent on the channel.
     last: Instant,
@@ -249,6 +251,7 @@ impl<'a, T: Transport + ?Sized> ChannelSession<'a, T> {
             },
             timing,
             sequence: 0,
+            module_sequence: 0,
             reassembler: Reassembler::new(vec![0; MAX_MESSAGE]),
             last: Instant::now(),
             unanswered: 0,
@@ -342,13 +345,14 @@ impl<'a, T: Transport + ?Sized> ChannelSession<'a, T> {
             return Err(ChannelError::Closed);
         }
         self.open = false;
+        self.pace();
         disconnect(self.transport, self.policy, self.channel, self.timing)
             .map_err(ChannelError::Transport)
     }
 
     // Sends a channel frame the module answers with its parameters, and reads them.
     fn control(&mut self, request: &Approved) -> Result<Parameters, ChannelError> {
-        self.last = Instant::now();
+        self.pace();
         let reply = answer(
             self.transport,
             request,
@@ -399,7 +403,10 @@ impl<'a, T: Transport + ?Sized> ChannelSession<'a, T> {
                         .policy
                         .approve_tp20_keep_alive(&self.channel)
                         .map_err(ChannelError::Rejected)?;
+                    // The tester's own wait for T3 doesn't count against the module.
+                    let paced = self.parameters.t3.saturating_sub(self.last.elapsed());
                     self.send(&keep_alive)?;
+                    deadline += paced;
                     keep_alives += 1;
                     self.unanswered += 1;
                     continue;
@@ -441,7 +448,13 @@ impl<'a, T: Transport + ?Sized> ChannelSession<'a, T> {
                     return Err(ChannelError::ClosedByModule);
                 }
                 Frame::Parameters(_) | Frame::Test => return Err(framing()),
-                Frame::Data { .. } => {
+                Frame::Data { sequence, .. } => {
+                    // A fresh reassembler takes any number, so a lost first frame would let a
+                    // later one start a message.
+                    if sequence != self.module_sequence {
+                        return Err(framing());
+                    }
+                    self.module_sequence = (sequence + 1) & 0x0F;
                     let message = self.take_data(&reply.payload)?;
                     deadline = after(gap);
                     let Some(message) = message else {
@@ -483,8 +496,18 @@ impl<'a, T: Transport + ?Sized> ChannelSession<'a, T> {
     }
 
     fn send(&mut self, frame: &Approved) -> Result<(), ChannelError> {
-        self.last = Instant::now();
+        self.pace();
         self.transport.send(frame).map_err(ChannelError::Transport)
+    }
+
+    // Waits out the gap the module wants between the tester's frames (its T3), then marks a
+    // frame as sent.
+    fn pace(&mut self) {
+        let wait = self.parameters.t3.saturating_sub(self.last.elapsed());
+        if !wait.is_zero() {
+            std::thread::sleep(wait);
+        }
+        self.last = Instant::now();
     }
 
     // Closes the channel after `error`. An adapter failure while closing matters more: the
@@ -495,6 +518,7 @@ impl<'a, T: Transport + ?Sized> ChannelSession<'a, T> {
             return error;
         }
         self.open = false;
+        self.pace();
         match disconnect(self.transport, self.policy, self.channel, self.timing) {
             Err(failure @ Error::Adapter(_)) => ChannelError::Transport(failure),
             _ => error,
@@ -506,6 +530,7 @@ impl<T: Transport + ?Sized> Drop for ChannelSession<'_, T> {
     fn drop(&mut self) {
         if self.open {
             self.open = false;
+            self.pace();
             // Nothing can report a failure from here; `close` does.
             let _ = disconnect(self.transport, self.policy, self.channel, self.timing);
         }
