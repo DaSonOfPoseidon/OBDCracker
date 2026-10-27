@@ -21,7 +21,7 @@ use obdcracker_transport::scan::{
     self, DidFormat, ExtraDid, PidValue, Scan, ScanModule, ScanOptions,
 };
 use obdcracker_transport::sweep::{self, SweepOptions};
-use obdcracker_transport::tp20::{self, Answer, Disconnect};
+use obdcracker_transport::tp20::{self, Answer, ChannelSession, Disconnect};
 use obdcracker_transport::{
     Audited, DryRun, Expect, S3, Timing, Transport, exchange, hex, log_failure,
 };
@@ -857,7 +857,9 @@ fn run_scan<T: Transport>(
         }
         if cli.dry_run {
             println!(
-                "a live TP2.0 pass also sends, on each channel a module gives: A8 (disconnect)"
+                "a live TP2.0 pass also sends, on each channel a module gives: A8 (disconnect); \
+                 then it opens the channel again to read the module's identification: A0 \
+                 (parameters), 1A 9B in one data frame, an ACK of each frame that asks, and A8"
             );
         }
     }
@@ -928,13 +930,60 @@ fn discover_tp20_modules<T: Transport>(
             addresses.len()
         );
     }
-    if found
-        .iter()
-        .any(|module| matches!(module.answer, Answer::Channel(_)))
-    {
-        println!("TP2.0 modules aren't scanned: nothing reads over a TP2.0 channel yet");
+    if !dry_run {
+        for module in &found {
+            if matches!(module.answer, Answer::Channel(_)) {
+                println!(
+                    "TP2.0 {:02X} identification: {}",
+                    module.address,
+                    tp20_identification(transport, policy, module.address, timing)
+                );
+            }
+        }
     }
     Ok(!found.is_empty())
+}
+
+// VAG's ECU identification (KWP2000 `ReadEcuIdentification`, option 0x9B).
+const TP20_IDENTIFICATION: [u8; 2] = [0x1A, 0x9B];
+
+// Reads a TP2.0 module's identification on a channel of its own, and says what came back.
+fn tp20_identification<T: Transport>(
+    transport: &mut T,
+    policy: &Policy,
+    address: u8,
+    timing: Timing,
+) -> String {
+    let mut session = match ChannelSession::open(transport, policy, address, timing) {
+        Ok(session) => session,
+        Err(e) => return format!("no channel ({e})"),
+    };
+    let read = session.request(&TP20_IDENTIFICATION);
+    let closed = session.close();
+    let shown = match read {
+        Ok(answer) => {
+            // Its record is the manufacturer's: shown as bytes, and as text where printable.
+            let text: String = answer
+                .iter()
+                .skip(2)
+                .map(|&b| {
+                    if b == b' ' || b.is_ascii_graphic() {
+                        char::from(b)
+                    } else {
+                        '.'
+                    }
+                })
+                .collect();
+            format!("[{}] \"{text}\"", hex(&answer))
+        }
+        Err(e) => format!("not read ({e})"),
+    };
+    match closed {
+        Err(e @ tp20::ChannelError::Transport(_)) => {
+            format!("{shown}; closing the channel failed: {e}")
+        }
+        _ => shown,
+    }
 }
 
 // The command that ran, with its `--range` starting at `from`, for a shell to run again: a
@@ -1345,6 +1394,8 @@ mod tests {
             },
         )
         .unwrap();
+        bus.add_tp20_answer(0x5F, &[0x1A, 0x9B], b"\x5A\x9B4G0907401")
+            .unwrap();
         bus
     }
 
@@ -1359,10 +1410,17 @@ mod tests {
         run_scan(&cli, bus, Timing::default(), passes, false)
     }
 
-    fn disconnects(sent: &[Approved]) -> usize {
+    // On the module's channel: how many frames had this payload.
+    fn on_channel(sent: &[Approved], payload: &[u8]) -> usize {
         sent.iter()
-            .filter(|request| request.target() == Target::Tp20Channel(0x740))
+            .filter(|request| {
+                request.target() == Target::Tp20Channel(0x740) && request.payload() == payload
+            })
             .count()
+    }
+
+    fn disconnects(sent: &[Approved]) -> usize {
+        on_channel(sent, &[0xA8])
     }
 
     #[test]
@@ -1370,7 +1428,8 @@ mod tests {
         // 0x740 is in the A7's discovery range, but no module answered there.
         let mut bus = a7_with_tp20();
         assert_eq!(scan(&mut bus, true), ExitCode::SUCCESS);
-        assert_eq!(disconnects(bus.sent()), 1);
+        // The probe's, and the identification read's.
+        assert_eq!(disconnects(bus.sent()), 2);
     }
 
     // The ISO-TP modules are asleep; only TP2.0 answers.
@@ -1395,7 +1454,9 @@ mod tests {
     fn tp20_discovery_runs_after_a_silent_iso_tp_scan() {
         let mut bus = Tp20Only(a7_with_tp20());
         assert_eq!(scan(&mut bus, false), ExitCode::SUCCESS);
-        assert_eq!(disconnects(bus.0.sent()), 1);
+        assert_eq!(disconnects(bus.0.sent()), 2);
+        // Each channel a module gives is read for its identification.
+        assert_eq!(on_channel(bus.0.sent(), &[0x10, 0x00, 0x02, 0x1A, 0x9B]), 1);
         // With nothing on TP2.0 either, nothing answered.
         let mut bus = Tp20Only(SimBus::builtin("a7").unwrap());
         assert_eq!(scan(&mut bus, false), ExitCode::FAILURE);

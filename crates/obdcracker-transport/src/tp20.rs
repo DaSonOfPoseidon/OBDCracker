@@ -331,8 +331,12 @@ impl<'a, T: Transport + ?Sized> ChannelSession<'a, T> {
     ///
     /// # Errors
     ///
-    /// The adapter failed.
+    /// [`ChannelError::Closed`], with nothing sent, if it's closed already (after an error, or
+    /// by the module); otherwise the adapter failed.
     pub fn close(mut self) -> Result<Disconnect, ChannelError> {
+        if !self.open {
+            return Err(ChannelError::Closed);
+        }
         self.open = false;
         disconnect(self.transport, self.policy, self.channel, self.timing)
             .map_err(ChannelError::Transport)

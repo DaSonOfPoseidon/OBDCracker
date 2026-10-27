@@ -423,6 +423,9 @@ fn an_answer_to_another_request_closes_the_channel() {
         Err(ChannelError::Unmatched(vec![0x61, 0x02]))
     );
     assert_eq!(session.request(&[0x21, 0x01]), Err(ChannelError::Closed));
+    // Closing it again sends nothing.
+    assert_eq!(session.close(), Err(ChannelError::Closed));
+    assert_eq!(car.sent.iter().filter(|s| *s == "740 A8").count(), 1);
 }
 
 #[test]
