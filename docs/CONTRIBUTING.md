@@ -50,31 +50,49 @@ Label it `bug`, `documentation` or `enhancement`, and tag what it impacts:
   (the `obdcracker` crate), `area:docs` (any `*.md` or `docs/`), `area:ci` (workflows, `scripts/`, Cargo and tool
   config).
 - **The milestone it blocks,** if any: `milestone:M1` to `milestone:M13`. A planned feature that isn't scheduled yet gets
-  `milestone:later` instead: it blocks nothing until it's given a milestone. An issue with no milestone label at all
-  blocks every PR in its areas.
+  `milestone:later` instead.
 - **Its status:** `status:ready` if it can be picked up now, or `status:blocked` if it waits on something else
-  (another issue, a car session, hardware or a decision). When you mark it blocked, comment saying what blocks it, with
-  issue numbers. When you close an issue, move the issues it blocked to `status:ready` if nothing else blocks them.
+  (another issue, a car session, hardware or a decision). See [Blocked issues](#blocked-issues).
 
 Only fix it in the same change if it blocks your task, and then reference it in the commit (`fixes #N`).
 
+### Blocked issues
+
+What blocks an issue is recorded twice: the `status:blocked` label, and a GitHub "blocked by" link to each blocking
+issue. `scripts/pr-gate.sh` reads only the links, so keep both in step whenever the issue list changes:
+
+- **Filing a blocked issue, or marking one blocked:** add `status:blocked`, comment naming what blocks it, and link
+  each blocking issue, from the issue's sidebar or with
+  `gh api -X POST repos/DaSonOfPoseidon/OBDCracker/issues/<blocked>/dependencies/blocked_by -F issue_id=<id>`
+  (the blocker's id is `gh api repos/DaSonOfPoseidon/OBDCracker/issues/<blocker> --jq .id`).
+- **Blocked by something that isn't an issue yet:** if it's work someone will do, such as a car session, file it as
+  an issue (like #169) and link that. A pure outside wait (hardware arriving, the maintainer's decision) stays
+  unlinked, and the gate lists it until it's resolved.
+- **No longer blocked, but the blocker is still open** (a plan changed, or the issue was re-scoped): remove the
+  link (`gh api -X DELETE repos/DaSonOfPoseidon/OBDCracker/issues/<blocked>/dependencies/blocked_by/<id>`), say why
+  in a comment, and move the issue to `status:ready` if nothing else blocks it. A stale link fails every PR that
+  fixes the issue.
+- **Closing an issue:** list what it blocked
+  (`gh api repos/DaSonOfPoseidon/OBDCracker/issues/<n>/dependencies/blocking --jq '.[].number'`) and move each
+  to `status:ready` unless it has another open blocker. A link to a closed issue stays but no longer blocks.
+- **Reviewing the issue list:** run `scripts/pr-gate.sh`. Its last list shows open issues whose label and links
+  disagree: `status:blocked` with no open blocker linked, or an open blocker linked without `status:blocked`. Fix
+  each one on the issue.
+
 ## Before opening a pull request
 
-No open issue may block it. An issue blocks a PR when either:
-
-- it's tagged with an area the PR touches, and its milestone is the PR's milestone, an earlier one, or none; or
-- it's tagged with the PR's milestone, whatever its area.
-
-Only ready issues count: `status:blocked` issues wait for their blocker, and an issue with no status label counts as
-ready. Issues for later milestones, and `milestone:later` issues, wait until then. Run:
+An issue the PR fixes (`fixes #N` in a commit subject) mustn't be blocked by an open issue (GitHub's "blocked by"
+link) that the PR doesn't fix too, whatever the blocker's labels. A blocker in another repository always counts,
+since this PR can't close it. Run:
 
 ```sh
 scripts/pr-gate.sh M2   # the PR's milestone; leave it out if none
 ```
 
-It works out the areas from the files changed since `origin/main`, lists the blocking issues, and fails if there are
-any. Fix or close them first. An issue a commit on the branch fixes (`fixes #N` in the subject) doesn't count, since it
-closes when the PR merges.
+It fails on any such blocker: fix it in the same PR, or land it first. It also lists, without failing, the open
+issues not marked `status:blocked` that cite a file the PR changes and are due by the PR's milestone or have none
+(not `milestone:later`). Fold those in when they're small and related; keep the PR to one feature. Last, it lists
+open issues whose `status:blocked` label and "blocked by" links disagree (see [Blocked issues](#blocked-issues)).
 
 ## Reviews
 
@@ -102,8 +120,7 @@ Every finding gets one outcome, and its thread is resolved once it has one:
 
 - **Fix:** with a test first, in its own commit. Reply on the thread with the commit.
 - **Doesn't apply:** reply explaining why, with evidence.
-- **Defer:** file an issue tagged `milestone:later`, so `scripts/pr-gate.sh` doesn't block this or later PRs
-  on it. Reply with the link.
+- **Defer:** file an issue tagged `milestone:later`. Reply with the link.
 - **Out of scope:** a real problem outside the PR becomes a tagged issue, as in
   [Found a problem?](#found-a-problem-file-an-issue-and-keep-going). Reply with the link.
 

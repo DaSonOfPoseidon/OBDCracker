@@ -377,7 +377,12 @@ Each entry names the class, what to check, and where it bit us.
   means rewriting shared history.
 - **Run clippy before committing.** Pedantic lints that caught us: `manual_is_multiple_of`, `assert!(x.is_empty())`,
   `cloned_ref_to_slice_refs`, and `format!` collected into a `String` (use `write!`).
-- **PR gate and milestones.** Any open issue tagged with the PR's milestone blocks it, whatever the area. Fold that
-  milestone's issues into the PR, or land them first.
+- **PR gate and blockers.** `scripts/pr-gate.sh` only knows about blockers through GitHub's "blocked by" links, not
+  `status:blocked` labels or comments. When you mark an issue blocked, add the link too, or a PR fixing it passes
+  while its blocker is still open; when a plan drops a blocker, remove its link, or every PR fixing the issue fails.
+  The gate's drift list catches both.
+- **An issue number alone doesn't name an issue.** Links, references and API results can point into another
+  repository, where `#42` is a different issue. Compare the repository too before treating two issues as the same
+  (PR #176, Codex: a claude-ship blocker numbered like a fixed OBDCracker issue was exempted).
 - **Codex threads re-anchor.** After a push, old resolved threads show up again at new line numbers. Pick new
   findings by comment ID or unresolved state, not by commit.
