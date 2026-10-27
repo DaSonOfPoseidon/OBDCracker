@@ -572,6 +572,104 @@ fn sim_scan_discover_finds_the_modules_that_answer_then_scans_them() {
 }
 
 #[test]
+fn sim_scan_discover_asks_listed_ids_again_patiently() {
+    let log = temp_log("discover-patient");
+    let out = obdcracker(&[
+        "--sim",
+        "a7",
+        "--audit-log",
+        log.to_str().unwrap(),
+        "scan",
+        "--discover",
+        "--patient-ids",
+        "71D,755,710",
+    ]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    // The gateway (710) answered the first pass, so only the other two are asked again.
+    assert!(
+        stdout.contains("patient recheck, waiting up to 5.0 s each: 0 of 2 request IDs answered"),
+        "{stdout}"
+    );
+    let audit = std::fs::read_to_string(&log).unwrap();
+    let reads_of = |id: &str| {
+        audit
+            .lines()
+            .filter(|l| l.contains(&format!(r#""dir":"tx","id":"{id}","payload":"22 F1 87""#)))
+            .count()
+    };
+    assert_eq!(reads_of("71D"), 2, "{audit}");
+    assert_eq!(reads_of("755"), 2, "{audit}");
+    // Only the first pass's: it answered, so it isn't asked again (the scan batches its reads).
+    assert_eq!(reads_of("710"), 1, "{audit}");
+}
+
+#[test]
+fn sim_scan_discover_wide_doesnt_ask_a_patient_id_twice() {
+    let log = temp_log("discover-patient-wide");
+    let out = obdcracker(&[
+        "--sim",
+        "a7",
+        "--audit-log",
+        log.to_str().unwrap(),
+        "scan",
+        "--discover",
+        "--wide",
+        "--patient-ids",
+        "71D",
+    ]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    // 71D answers on 787, a wide-pass request ID, so the recheck would otherwise ask it too.
+    assert!(
+        stdout.contains("recheck, waiting up to 5.0 s each: 0 of 20 request IDs answered"),
+        "{stdout}"
+    );
+    let audit = std::fs::read_to_string(&log).unwrap();
+    let asked = audit
+        .lines()
+        .filter(|l| l.contains(r#""dir":"tx","id":"71D","payload":"22 F1 87""#))
+        .count();
+    assert_eq!(asked, 2, "{audit}");
+}
+
+#[test]
+fn scan_refuses_patient_ids_outside_the_discovery_range_or_malformed() {
+    for ids in [
+        "7E0", "6FF", "76A", "71", "071D", "+1D", "71G", "71D,71D", "71d,71D", "",
+    ] {
+        let out = obdcracker(&[
+            "--dry-run",
+            "--profile",
+            "a7",
+            "scan",
+            "--discover",
+            "--patient-ids",
+            ids,
+        ]);
+        assert_eq!(out.status.code(), Some(2), "{ids:?}: {out:?}");
+        assert!(out.stdout.is_empty(), "nothing sent: {out:?}");
+    }
+    let out = obdcracker(&[
+        "--dry-run",
+        "--profile",
+        "a7",
+        "scan",
+        "--patient-ids",
+        "71D",
+    ]);
+    assert_eq!(out.status.code(), Some(2), "needs --discover: {out:?}");
+}
+
+#[test]
 fn sim_scan_discover_wide_looks_past_the_discovery_range_without_sending_on_a_reply_id() {
     let log = temp_log("discover-wide");
     let out = obdcracker(&[
