@@ -42,15 +42,16 @@ duplicate. Include:
 - how to reproduce it, or why it matters
 - what you expected and what actually happens
 - a suggested fix
-- the milestone it blocks, if any
+- the feature it belongs to, if you know
 
 Label it `bug`, `documentation` or `enhancement`, and tag what it impacts:
 
 - **Every area it affects:** `area:core`, `area:safety`, `area:transport`, `area:sim`, `area:profile`, `area:cli`, `area:facade`
   (the `obdcracker` crate), `area:docs` (any `*.md` or `docs/`), `area:ci` (workflows, `scripts/`, Cargo and tool
   config).
-- **The milestone it blocks,** if any: `milestone:M1` to `milestone:M13`. A planned feature that isn't scheduled yet gets
-  `milestone:later` instead.
+- **Its milestone** (a GitHub milestone, not a label): the feature it belongs to, such as `M7 · TP2.0 & scan-tool
+  reads`. Milestones are numbered in the order they'll be worked on. If you're not sure where it falls, leave it
+  without a milestone; the maintainer sorts those.
 - **Its status:** `status:ready` if it can be picked up now, or `status:blocked` if it waits on something else
   (another issue, a car session, hardware or a decision). See [Blocked issues](#blocked-issues).
 
@@ -86,12 +87,13 @@ link) that the PR doesn't fix too, whatever the blocker's labels. A blocker in a
 since this PR can't close it. Run:
 
 ```sh
-scripts/pr-gate.sh M2   # the PR's milestone; leave it out if none
+scripts/pr-gate.sh M2   # the PR's milestone; leave it out to use the open PR's, if any
 ```
 
 It fails on any such blocker: fix it in the same PR, or land it first. It also lists, without failing, the open
-issues not marked `status:blocked` that cite a file the PR changes and are due by the PR's milestone or have none
-(not `milestone:later`). Fold those in when they're small and related; keep the PR to one feature. Last, it lists
+issues not marked `status:blocked` that cite a file the PR changes and are in the PR's milestone or an earlier one
+(any milestone when the PR has none; issues without a milestone aren't listed). Fold those in when they're small and
+related; keep the PR to one feature. Give the PR the milestone of the feature it's part of. Last, it lists
 open issues whose `status:blocked` label and "blocked by" links disagree (see [Blocked issues](#blocked-issues)).
 
 ## Reviews
@@ -120,7 +122,8 @@ Every finding gets one outcome, and its thread is resolved once it has one:
 
 - **Fix:** with a test first, in its own commit. Reply on the thread with the commit.
 - **Doesn't apply:** reply explaining why, with evidence.
-- **Defer:** file an issue tagged `milestone:later`. Reply with the link.
+- **Defer:** file an issue in the milestone of the feature it belongs to, or with none if that isn't clear. Reply
+  with the link.
 - **Out of scope:** a real problem outside the PR becomes a tagged issue, as in
   [Found a problem?](#found-a-problem-file-an-issue-and-keep-going). Reply with the link.
 
