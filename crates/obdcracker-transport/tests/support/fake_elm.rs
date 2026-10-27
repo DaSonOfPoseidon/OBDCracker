@@ -44,6 +44,15 @@ pub struct FakeElm {
     pub repeats: usize,
     /// Leave the prompt off after a bus request, as an adapter that hangs would.
     pub hang_after_request: bool,
+    /// With CAN auto formatting off, keep listening after a bus request's frames until the
+    /// host writes, as a real adapter does until its timeout runs out. The byte that stops it
+    /// is discarded, and it prints `STOPPED` and its prompt after the frames it printed.
+    pub listen_raw: bool,
+    /// With `listen_raw`, the timeout runs out just as the host writes: the prompt comes
+    /// first, and the byte is the first of the next line.
+    pub listen_ends_on_write: bool,
+    // Listening after a raw bus request (`listen_raw`).
+    listening: bool,
     /// Programmable parameters turned on, and their values (datasheet pp. 57-61). The rest are
     /// off, at their factory values.
     pub pp: Vec<(u8, u8)>,
@@ -186,6 +195,9 @@ impl FakeElm {
             interrupted: 0,
             repeats: 0,
             hang_after_request: false,
+            listen_raw: false,
+            listen_ends_on_write: false,
+            listening: false,
             pp: Vec::new(),
             pps: None,
             after_echo: Vec::new(),
@@ -206,6 +218,18 @@ impl FakeElm {
 
     pub fn write(&mut self, bytes: &[u8]) {
         for &byte in bytes {
+            if self.listening {
+                self.listening = false;
+                if self.listen_ends_on_write {
+                    self.prompt();
+                    self.printing = false;
+                } else {
+                    self.interrupted += 1;
+                    self.print("STOPPED");
+                    self.prompt();
+                    continue;
+                }
+            }
             if self.printing && !self.output.is_empty() {
                 // Any byte interrupts the adapter while it's busy (datasheet p. 7).
                 self.interrupted += 1;
@@ -601,7 +625,9 @@ impl FakeElm {
             }
             self.print(&line);
         }
-        if !self.hang_after_request {
+        if self.listen_raw && !self.settings.caf {
+            self.listening = true;
+        } else if !self.hang_after_request {
             self.prompt();
         }
     }

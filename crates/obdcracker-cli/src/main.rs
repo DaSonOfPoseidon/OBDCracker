@@ -7,7 +7,7 @@ use std::time::Duration;
 use clap::builder::PossibleValuesParser;
 use clap::{Parser, Subcommand};
 use obdcracker_core::obd;
-use obdcracker_core::response::{Error as ReplyError, Nrc};
+use obdcracker_core::response::{self, Error as ReplyError, Nrc};
 use obdcracker_core::uds::{DiagnosticSession, UdsDtc};
 use obdcracker_profile::{Decode, DidSession, Profile, Protocol};
 use obdcracker_safety::{ModuleIds, Policy, Target};
@@ -21,7 +21,7 @@ use obdcracker_transport::scan::{
     self, DidFormat, ExtraDid, PidValue, Scan, ScanModule, ScanOptions,
 };
 use obdcracker_transport::sweep::{self, SweepOptions};
-use obdcracker_transport::tp20::{self, Answer, Disconnect};
+use obdcracker_transport::tp20::{self, Answer, ChannelSession, Disconnect};
 use obdcracker_transport::{
     Audited, DryRun, Expect, S3, Timing, Transport, exchange, hex, log_failure,
 };
@@ -857,7 +857,9 @@ fn run_scan<T: Transport>(
         }
         if cli.dry_run {
             println!(
-                "a live TP2.0 pass also sends, on each channel a module gives: A8 (disconnect)"
+                "a live TP2.0 pass also sends, on each channel a module gives: A8 (disconnect); \
+                 then it opens the channel again to read the module's identification: A0 \
+                 (parameters), 1A 9B in one data frame, an ACK of each frame that asks, and A8"
             );
         }
     }
@@ -928,13 +930,75 @@ fn discover_tp20_modules<T: Transport>(
             addresses.len()
         );
     }
-    if found
-        .iter()
-        .any(|module| matches!(module.answer, Answer::Channel(_)))
-    {
-        println!("TP2.0 modules aren't scanned: nothing reads over a TP2.0 channel yet");
+    if !dry_run {
+        for module in &found {
+            if matches!(module.answer, Answer::Channel(_)) {
+                // The adapter's state is unknown after it fails, so nothing more is sent.
+                let shown = tp20_identification(transport, policy, module.address, timing)
+                    .map_err(|e| {
+                        eprintln!("TP2.0 {:02X} identification: {e}", module.address);
+                        ExitCode::FAILURE
+                    })?;
+                println!("TP2.0 {:02X} identification: {shown}", module.address);
+            }
+        }
     }
     Ok(!found.is_empty())
+}
+
+// VAG's ECU identification (KWP2000 `ReadEcuIdentification`, option 0x9B).
+const TP20_IDENTIFICATION: [u8; 2] = [0x1A, 0x9B];
+
+// Reads a TP2.0 module's identification on a channel of its own, and says what came back. An
+// adapter failure, opening, reading or closing, is the error.
+fn tp20_identification<T: Transport>(
+    transport: &mut T,
+    policy: &Policy,
+    address: u8,
+    timing: Timing,
+) -> Result<String, tp20::ChannelError> {
+    let mut session = match ChannelSession::open(transport, policy, address, timing) {
+        Ok(session) => session,
+        Err(e @ tp20::ChannelError::Transport(_)) => return Err(e),
+        Err(e) => return Ok(format!("no channel ({e})")),
+    };
+    let read = session.request(&TP20_IDENTIFICATION);
+    let closed = session.close();
+    if let Err(e @ tp20::ChannelError::Transport(_)) = read {
+        return Err(e);
+    }
+    if let Err(e @ tp20::ChannelError::Transport(_)) = closed {
+        return Err(e);
+    }
+    Ok(match read {
+        Err(e) => format!("not read ({e})"),
+        Ok(answer) => match response::positive(TP20_IDENTIFICATION[0], &answer) {
+            Err(ReplyError::Negative(refusal)) => format!("refused ({})", refusal.nrc),
+            Err(e) => format!("not read ({e}) [{}]", hex(&answer)),
+            // The generic KWP2000 match leaves the record to the manufacturer; VAG's starts with
+            // the option it answers.
+            Ok([]) => format!("not read (no option) [{}]", hex(&answer)),
+            Ok([option, ..]) if *option != TP20_IDENTIFICATION[1] => format!(
+                "not read (option {option:02X}, not {:02X}) [{}]",
+                TP20_IDENTIFICATION[1],
+                hex(&answer)
+            ),
+            // The rest of its record is VAG's: shown as bytes, and as text where printable.
+            Ok([_, rest @ ..]) => {
+                let text: String = rest
+                    .iter()
+                    .map(|&b| {
+                        if b == b' ' || b.is_ascii_graphic() {
+                            char::from(b)
+                        } else {
+                            '.'
+                        }
+                    })
+                    .collect();
+                format!("[{}] \"{text}\"", hex(&answer))
+            }
+        },
+    })
 }
 
 // The command that ran, with its `--range` starting at `from`, for a shell to run again: a
@@ -1333,7 +1397,7 @@ mod tests {
     use obdcracker_sim::SimBus;
     use obdcracker_transport::{Error, Response, Timing, Transport};
 
-    use super::{Cli, Discovery, resume_command, run_scan, unanswered_note};
+    use super::{Cli, Discovery, resume_command, run_scan, tp20_identification, unanswered_note};
 
     fn a7_with_tp20() -> SimBus {
         let mut bus = SimBus::builtin("a7").unwrap();
@@ -1345,6 +1409,8 @@ mod tests {
             },
         )
         .unwrap();
+        bus.add_tp20_answer(0x5F, &[0x1A, 0x9B], b"\x5A\x9B4G0907401")
+            .unwrap();
         bus
     }
 
@@ -1359,10 +1425,88 @@ mod tests {
         run_scan(&cli, bus, Timing::default(), passes, false)
     }
 
-    fn disconnects(sent: &[Approved]) -> usize {
+    // On the module's channel: how many frames had this payload.
+    fn on_channel(sent: &[Approved], payload: &[u8]) -> usize {
         sent.iter()
-            .filter(|request| request.target() == Target::Tp20Channel(0x740))
+            .filter(|request| {
+                request.target() == Target::Tp20Channel(0x740) && request.payload() == payload
+            })
             .count()
+    }
+
+    fn disconnects(sent: &[Approved]) -> usize {
+        on_channel(sent, &[0xA8])
+    }
+
+    #[test]
+    fn a_tp20_identification_is_shown_as_bytes_and_text_and_a_refusal_as_one() {
+        let policy = obdcracker_safety::Policy::read_only();
+        let mut bus = a7_with_tp20();
+        assert_eq!(
+            tp20_identification(&mut bus, &policy, 0x5F, Timing::default()).unwrap(),
+            "[5A 9B 34 47 30 39 30 37 34 30 31] \"4G0907401\""
+        );
+        // A module with no identification refuses the read.
+        let mut bus = SimBus::builtin("a7").unwrap();
+        bus.add_tp20(
+            0x5F,
+            Channel {
+                send_id: 0x740,
+                receive_id: 0x300,
+            },
+        )
+        .unwrap();
+        let shown = tp20_identification(&mut bus, &policy, 0x5F, Timing::default()).unwrap();
+        assert!(shown.starts_with("refused ("), "{shown}");
+    }
+
+    #[test]
+    fn a_tp20_record_without_the_9b_echo_isnt_shown_as_the_identification() {
+        let policy = obdcracker_safety::Policy::read_only();
+        for (record, shown) in [
+            (
+                &b"\x5A\x904G0907401"[..],
+                "not read (option 90, not 9B) [5A 90 34 47 30 39 30 37 34 30 31]",
+            ),
+            (&b"\x5A"[..], "not read (no option) [5A]"),
+        ] {
+            let mut bus = SimBus::builtin("a7").unwrap();
+            bus.add_tp20(
+                0x5F,
+                Channel {
+                    send_id: 0x740,
+                    receive_id: 0x300,
+                },
+            )
+            .unwrap();
+            bus.add_tp20_answer(0x5F, &[0x1A, 0x9B], record).unwrap();
+            assert_eq!(
+                tp20_identification(&mut bus, &policy, 0x5F, Timing::default()).unwrap(),
+                shown
+            );
+        }
+    }
+
+    // Discovery works, then the adapter fails on the first frame on a channel.
+    struct FailsOnChannels(SimBus);
+
+    impl Transport for FailsOnChannels {
+        fn send(&mut self, request: &Approved) -> Result<(), Error> {
+            if request.target() == Target::Tp20Channel(0x740) && request.payload() != [0xA8] {
+                return Err(Error::Adapter("the link went away".into()));
+            }
+            self.0.send(request)
+        }
+
+        fn recv(&mut self, timeout: Duration) -> Result<Response, Error> {
+            self.0.recv(timeout)
+        }
+    }
+
+    #[test]
+    fn an_adapter_failure_while_reading_identifications_fails_the_scan() {
+        let mut bus = FailsOnChannels(a7_with_tp20());
+        assert_eq!(scan(&mut bus, false), ExitCode::FAILURE);
     }
 
     #[test]
@@ -1370,7 +1514,8 @@ mod tests {
         // 0x740 is in the A7's discovery range, but no module answered there.
         let mut bus = a7_with_tp20();
         assert_eq!(scan(&mut bus, true), ExitCode::SUCCESS);
-        assert_eq!(disconnects(bus.sent()), 1);
+        // The probe's, and the identification read's.
+        assert_eq!(disconnects(bus.sent()), 2);
     }
 
     // The ISO-TP modules are asleep; only TP2.0 answers.
@@ -1395,7 +1540,9 @@ mod tests {
     fn tp20_discovery_runs_after_a_silent_iso_tp_scan() {
         let mut bus = Tp20Only(a7_with_tp20());
         assert_eq!(scan(&mut bus, false), ExitCode::SUCCESS);
-        assert_eq!(disconnects(bus.0.sent()), 1);
+        assert_eq!(disconnects(bus.0.sent()), 2);
+        // Each channel a module gives is read for its identification.
+        assert_eq!(on_channel(bus.0.sent(), &[0x10, 0x00, 0x02, 0x1A, 0x9B]), 1);
         // With nothing on TP2.0 either, nothing answered.
         let mut bus = Tp20Only(SimBus::builtin("a7").unwrap());
         assert_eq!(scan(&mut bus, false), ExitCode::FAILURE);

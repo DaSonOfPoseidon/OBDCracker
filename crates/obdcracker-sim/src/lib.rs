@@ -28,13 +28,15 @@ use std::time::{Duration, Instant};
 
 use obdcracker_core::isotp::Addressing;
 use obdcracker_core::tp20::{self, Channel};
-use obdcracker_core::{obd, uds};
+use obdcracker_core::{obd, response, uds};
 use obdcracker_profile::{Decode, Profile, ProfileError, Protocol, STANDARD_DIDS, standard_decode};
-use obdcracker_safety::{Approved, Policy, Target};
+use obdcracker_safety::{Approved, Policy, Target, Tier};
 use obdcracker_transport::{Error, Response, Transport};
+use tp20_module::Tp20Module;
 
 mod ecu;
 mod fixture;
+mod tp20_module;
 
 pub use ecu::{Ecu, Fault, Session};
 
@@ -104,21 +106,18 @@ impl From<ProfileError> for FixtureError {
 /// A request to an ID no module listens on gets no reply.
 /// A module leaves a non-default diagnostic session after S3 without a request: 5 s, as
 /// ISO 14229-2 gives it, unless [`Ecu::set_s3`] changes it.
-/// A VW TP2.0 module ([`SimBus::add_tp20`]) answers a channel setup to its address and the
-/// disconnect of the channel it gave, once.
+/// A VW TP2.0 module ([`SimBus::add_tp20`]) answers a channel setup to its address, and on the
+/// channel it gave: the tester's parameters and keep-alives (with its own: block size 15, T1
+/// 100 ms, T3 5 ms), KWP2000 requests ([`SimBus::add_tp20_answer`]) in data frames that wait for
+/// the tester's ACK after each block of the tester's block size, and the disconnect, once. A
+/// request it has no answer for gets `7F <service> 31` if it answers that service otherwise,
+/// else `7F <service> 11`.
 #[derive(Debug)]
 pub struct SimBus {
     ecus: Vec<Ecu>,
     tp20: Vec<Tp20Module>,
     sent: Vec<Approved>,
     replies: VecDeque<Response>,
-}
-
-#[derive(Debug)]
-struct Tp20Module {
-    address: u8,
-    channel: Channel,
-    open: bool,
 }
 
 impl SimBus {
@@ -257,12 +256,59 @@ impl SimBus {
                 "TP2.0 module {address:02X}: the address or {channel:X?} is taken"
             )));
         }
-        self.tp20.push(Tp20Module {
-            address,
-            channel,
-            open: false,
-        });
+        self.tp20.push(Tp20Module::new(address, channel));
         Ok(())
+    }
+
+    /// Makes the TP2.0 module at `address` answer the KWP2000 `request` with `answer`.
+    ///
+    /// # Errors
+    ///
+    /// [`FixtureError::Value`] if there's no TP2.0 module at `address`, the request isn't a
+    /// read the policy would send on a channel or is given twice, or `answer` doesn't answer it
+    /// ([`response::kwp2000_answers`]), is response-pending, or is longer than 65535 bytes.
+    pub fn add_tp20_answer(
+        &mut self,
+        address: u8,
+        request: &[u8],
+        answer: &[u8],
+    ) -> Result<(), FixtureError> {
+        let fault = |why: &str| {
+            Err(FixtureError::Value(format!(
+                "TP2.0 module {address:02X}: {why} ({request:02X?} -> {answer:02X?})"
+            )))
+        };
+        let Some(module) = self.tp20.iter_mut().find(|m| m.address == address) else {
+            return fault("no such module");
+        };
+        let read = Policy::read_only()
+            .approve(
+                obdcracker_safety::Protocol::Kwp2000,
+                Target::Physical(0x7E0),
+                request,
+            )
+            .is_ok_and(|approved| approved.tier() == Tier::Read);
+        if !read || request.len() > tp20::MAX_SINGLE_FRAME {
+            return fault("not a read that fits one frame");
+        }
+        if module.answers.iter().any(|(asked, _)| asked == request) {
+            return fault("the request is given twice");
+        }
+        let pending = answer.len() == 3 && answer[0] == 0x7F && answer[2] == 0x78;
+        if !response::kwp2000_answers(request, answer) || pending || answer.len() > 0xFFFF {
+            return fault("not an answer to it");
+        }
+        module.answers.push((request.to_vec(), answer.to_vec()));
+        Ok(())
+    }
+
+    /// Makes the adapter lose frame `index` (from 0) of the next answer the TP2.0 module at
+    /// `address` sends, as an ELM327 does with a frame that arrives between its prompt and the
+    /// next line. Does nothing if there's no module there.
+    pub fn lose_tp20_frame(&mut self, address: u8, index: usize) {
+        if let Some(module) = self.tp20.iter_mut().find(|m| m.address == address) {
+            module.lose = Some(index);
+        }
     }
 
     /// Every request sent so far, oldest first.
@@ -278,7 +324,7 @@ impl Transport for SimBus {
         match request.target() {
             Target::Tp20Setup(address) => {
                 if let Some(module) = self.tp20.iter_mut().find(|m| m.address == address) {
-                    module.open = true;
+                    module.open();
                     self.replies.push_back(Response {
                         source: tp20::setup_reply_id(address),
                         payload: setup_reply(module.channel).to_vec(),
@@ -291,14 +337,11 @@ impl Transport for SimBus {
                     .tp20
                     .iter_mut()
                     .find(|m| m.open && m.channel.send_id == id);
-                if let Some(module) = module
-                    && request.payload() == tp20::DISCONNECT
-                {
-                    module.open = false;
-                    self.replies.push_back(Response {
-                        source: module.channel.receive_id,
-                        payload: tp20::DISCONNECT.to_vec(),
-                    });
+                if let Some(module) = module {
+                    let source = module.channel.receive_id;
+                    for payload in module.hear(request.payload()) {
+                        self.replies.push_back(Response { source, payload });
+                    }
                 }
                 return Ok(());
             }

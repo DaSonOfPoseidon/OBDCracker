@@ -146,7 +146,8 @@ pub enum Protocol {
     Uds,
     /// KWP2000 (ISO 14230) on ISO-TP. Nothing reads such a module yet.
     Kwp2000,
-    /// VW TP2.0 transport with KWP2000. Nothing reads such a module yet (#142).
+    /// VW TP2.0 transport with KWP2000, read through `obdcracker_transport::tp20::ChannelSession`.
+    /// Scan doesn't read such a module yet (#170).
     Tp20,
 }
 

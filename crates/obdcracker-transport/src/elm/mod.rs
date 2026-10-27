@@ -90,6 +90,10 @@ const ECHO_WAIT: Duration = Duration::from_secs(1);
 // Ends a misheard line so the adapter refuses it: no single flipped bit of this leaves a line of
 // hex digits (docs/elm327.md#safety).
 const KILL: &[u8] = b"XX\r";
+// Stops an adapter listening after a request (ELM327DS p. 7), which discards it. No single
+// flipped bit of it is a hex digit, and if the prompt came first, `KILL`'s `X\r` ends the line it
+// starts so the adapter refuses it.
+const INTERRUPT: &[u8] = b"X";
 // Characters in a printed consecutive frame, `7E8 21 41 41 41 41 41 41 41 \r`, and with a 29-bit
 // ID, `17 FE 00 76 21 41 41 41 41 41 41 41 \r`.
 const FRAME_LINE: u32 = 29;
@@ -667,6 +671,93 @@ impl<L: Link> Elm<L> {
         Err(self.break_down(format!("the adapter printed {what} while idle")))
     }
 
+    // Stops the adapter listening for more of the last request's replies. Lines it printed
+    // until then that nobody read are reported as unread.
+    fn interrupt(&mut self) -> Result<(), Error> {
+        // It may have finished already, its prompt read or waiting on the link: then there's
+        // nothing to stop.
+        let deadline = Instant::now() + IDLE_CHECK;
+        while let Some(event) = self.next_event(deadline)? {
+            match event {
+                // `ready` finishes the request as usual.
+                Event::Prompt => {
+                    self.events.push_front((self.event_at, Event::Prompt));
+                    return Ok(());
+                }
+                Event::Overlong => {
+                    return Err(self.break_down("the adapter printed an overlong line".into()));
+                }
+                Event::Line(text) => {
+                    if self.reply_line(&text)?.is_some() {
+                        self.note(left_over(self.event_at, text));
+                    }
+                }
+            }
+        }
+        let at = SystemTime::now();
+        let mut answer = Vec::new();
+        let interrupted = self
+            .write(INTERRUPT)
+            .and_then(|()| self.read_interrupted(&mut answer));
+        self.note(LinkEvent::Command {
+            at,
+            command: String::from_utf8_lossy(INTERRUPT).into_owned(),
+            answer,
+        });
+        let stopped = interrupted?;
+        if !stopped {
+            // The prompt came first, so `X` began a line: end it so the adapter refuses it.
+            let at = SystemTime::now();
+            let mut lines = Vec::new();
+            let refused = self
+                .write(&KILL[1..])
+                .and_then(|()| self.read_answer("XX", &mut lines));
+            self.note(LinkEvent::Command {
+                at,
+                command: "XX".to_owned(),
+                answer: lines.clone(),
+            });
+            refused?;
+            if !lines.iter().map(String::as_str).eq(["?"]) {
+                return Err(self.break_down(format!(
+                    "the adapter didn't refuse XX after its prompt: {}",
+                    lines.join(" / ")
+                )));
+            }
+        }
+        self.busy = false;
+        self.drop_senders();
+        Ok(())
+    }
+
+    // Reads up to the prompt after `INTERRUPT`, noting the lines read on the way; returns
+    // whether the adapter said it stopped (`STOPPED`), or had already finished.
+    fn read_interrupted(&mut self, answer: &mut Vec<String>) -> Result<bool, Error> {
+        let deadline = Instant::now() + COMMAND_WAIT;
+        let mut stopped = false;
+        loop {
+            match self.next_event(deadline)? {
+                None => {
+                    return Err(self.break_down("the adapter didn't stop listening".into()));
+                }
+                Some(Event::Prompt) => return Ok(stopped),
+                Some(Event::Overlong) => {
+                    return Err(self.break_down("the adapter printed an overlong line".into()));
+                }
+                Some(Event::Line(text)) if !stopped && text == "STOPPED" => {
+                    stopped = true;
+                    answer.push(text);
+                }
+                Some(Event::Line(text)) => {
+                    // A reply the caller never read, checked as any other.
+                    if self.reply_line(&text)?.is_some() {
+                        self.note(left_over(self.event_at, text));
+                    }
+                }
+            }
+        }
+    }
+
     fn break_down(&mut self, why: String) -> Error {
         let error = Error::Adapter(why.clone());
         self.broken = Some(why);
@@ -956,6 +1047,11 @@ impl<L: Link> Transport for Elm<L> {
                 "a {}-byte request doesn't fit one CAN frame; this adapter driver only sends single frames",
                 payload.len()
             )));
+        }
+        // A module on a TP2.0 channel waits only its T1 (about 100 ms) for an ACK, and the
+        // adapter listens for its whole timeout after a frame (docs/elm327.md#vw-tp20-channel-frames).
+        if raw && self.raw && self.busy && matches!(request.target(), Target::Tp20Channel(_)) {
+            self.interrupt()?;
         }
         self.ready()?;
         if self.raw != raw {

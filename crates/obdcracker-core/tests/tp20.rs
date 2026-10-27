@@ -381,3 +381,27 @@ fn channel_replies_answer_only_their_own_request() {
     assert!(!tp20::answers(&tp20::DISCONNECT, &[0xB1]));
     assert!(!tp20::answers(&[0x1A, 0x9B], &[0x5A, 0x9B]));
 }
+
+#[test]
+fn channel_parameters_answer_the_tester_s_parameters_and_keep_alive() {
+    let parameters = [0xA1, 0x0F, 0x8A, 0xFF, 0x32, 0xFF];
+    for request in [&tp20::channel_parameters()[..], &tp20::KEEP_ALIVE] {
+        assert!(tp20::answers(request, &parameters), "{request:02X?}");
+        // Only a whole, well-formed A1 answers: not a short one, an A0, or a block size of 0.
+        for reply in [
+            &parameters[..5],
+            &[0xA0, 0x0F, 0x8A, 0xFF, 0x32, 0xFF],
+            &[0xA1, 0x00, 0x8A, 0xFF, 0x32, 0xFF],
+            &[0xA8],
+            &[0xB1],
+        ] {
+            assert!(
+                !tp20::answers(request, reply),
+                "{request:02X?} {reply:02X?}"
+            );
+        }
+    }
+    // A data frame or ACK isn't answered through `answers`.
+    assert!(!tp20::answers(&[0x10, 0x00, 0x02, 0x1A, 0x9B], &parameters));
+    assert!(!tp20::answers(&tp20::ack(1), &parameters));
+}

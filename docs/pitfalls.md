@@ -90,7 +90,9 @@ Each entry names the class, what to check, and where it bit us.
 
 - **Every wait on the bus must be bounded by something the ECU can't extend forever.** Count response-pending
   replies; accept one answer per ECU for a broadcast (J1979); ignore repeats without extending the wait. A test with a
-  transport that never stops sending proves it (PR #9: an ECU repeating its VIN reply hung `exchange` forever).
+  transport that never stops sending proves it (PR #9: an ECU repeating its VIN reply hung `exchange` forever). A
+  loop that skips input it doesn't use, such as another module's frames, must still check its deadline: the TP2.0
+  session's first draft only checked it inside `recv`, so a flood from another ID never ended (#142).
 - **Keep limits per source, too.** One shared `max_pending` counter let one stuck ECU throw away every other ECU's
   answer to a broadcast. Count per ECU, and drop only the one that goes over (PR #9).
 - **Keep timers per source.** Each pending ECU gets its own P2*. One global "latest deadline" lets a late ECU in:
@@ -147,7 +149,12 @@ Each entry names the class, what to check, and where it bit us.
   not a read sent into the default session (#68, three Codex rounds).
 - **Use the limits the other side declares.** A module's `50 03` gives its own P2 and P2*; ignoring them timed
   out a module that said it needs 100 ms. Extend the caller's timing by the excess over the standard defaults,
-  so an adapter's allowance stays on top (#68, Codex).
+  so an adapter's allowance stays on top (#68, Codex). The same holds for a gap it asks for: the TP2.0 session kept
+  the module's T3 but sent frames as fast as they came (PR #183, Codex). A value decoded and stored but never read
+  is a sign. And the tester's own wait for it mustn't eat into the time the module was given. Bound a limit only by
+  the deadlines of the frames it actually governs: capping every frame's T3 wait at T1, which only limits ACKs, sent
+  requests and `A8` early (PR #183, gate). Count a minimum gap from when the frame went out, after `send` returns:
+  stamped before, an adapter's own work in `send` (an ELM's settings and echo) ate the gap (PR #183, Codex).
 - **Keep cleanup armed until it has worked.** `end()` marked the guard finished before sending `10 01`, so a
   failed send left nothing to retry it, and `end` had consumed the guard. Disarm only after a definite answer
   (#68, Codex).
@@ -223,11 +230,18 @@ Each entry names the class, what to check, and where it bit us.
   some make it could mean anything; and it fixed widths for `17`/`18` parameters the standard also leaves to them,
   refusing valid reads, and a 2-byte clear-DTC group the standard makes optional (#137, Codex). The same goes for
   replies: what follows `5A` is the manufacturer's record, so matching it on an echoed option would drop valid answers.
+  The other side of that: code that knows the make must check what the generic match left open. The VAG
+  identification display skipped `5A`'s first byte as the `9B` echo without checking it, so `5A 90 …` showed as
+  the `9B` identification (PR #183, Codex).
   Before relying on a parameter, find its row in the standard's table; if it's the manufacturer's, it needs a
   profile-specific rule.
 - **A new protocol reaches past the allowlist.** Approving KWP2000 requests wasn't enough: `exchange` still matched
   their replies as UDS, so KWP2000's bare `7E` answer to `3E 01` was dropped as not answering it (#137, Codex). Follow
   a request through everything that reads its reply: matching, response-pending, decoding.
+- **A fresh state machine takes any starting point, so give it the one the protocol fixes.** The TP2.0 reassembler
+  starts at whatever sequence number comes first, so with a channel's first frame lost, `11 00 02 5A 9B` (a later
+  frame that happens to look like a whole message) read as a complete, truncated answer (PR #183, Codex). Where the
+  protocol says where numbering starts (0 on a new channel), check the first one against it.
 - **After dropping a message, skip to its end.** TP2.0 marks only a message's last frame, so a reassembler that
   forgot a bad message at once read its next frame as a new message: `31 00 02 AA BB` became a 2-byte reply. On an
   error mid-message, drop frames through the next one marked last (PR #149).

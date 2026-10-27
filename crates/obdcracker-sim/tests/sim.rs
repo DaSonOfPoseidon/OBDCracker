@@ -1149,3 +1149,141 @@ fn a_tp20_module_must_have_a_channel_a_module_could_give() {
     bus.add_tp20(0x09, channel(0x741, 0x300)).unwrap();
     bus.add_tp20(0xEF, channel(0x742, 0x300)).unwrap();
 }
+
+mod tp20_reads {
+    use obdcracker_core::tp20::Channel;
+    use obdcracker_transport::tp20::{ChannelError, ChannelSession, Disconnect};
+
+    use super::*;
+
+    const DOOR: u8 = 0x52;
+
+    // The A7 with its passenger door on TP2.0, answering `1A 9B` with a 160-byte identification:
+    // 24 frames with its length, so the tester ACKs once mid-answer (block size 15) and once at
+    // the end.
+    fn door() -> (SimBus, Vec<u8>) {
+        let mut bus = a7();
+        bus.add_tp20(
+            DOOR,
+            Channel {
+                send_id: 0x740,
+                receive_id: 0x300,
+            },
+        )
+        .unwrap();
+        let mut identification = vec![0x5A, 0x9B];
+        identification.extend((b'A'..=b'Z').cycle().take(158));
+        bus.add_tp20_answer(DOOR, &[0x1A, 0x9B], &identification)
+            .unwrap();
+        bus.add_tp20_answer(DOOR, &[0x21, 0x01], &[0x61, 0x01, 0x12, 0x34])
+            .unwrap();
+        (bus, identification)
+    }
+
+    fn policy() -> Policy {
+        Profile::builtin("a7")
+            .unwrap()
+            .narrow(Policy::read_only())
+            .unwrap()
+            .narrowed_to_tp20(&[DOOR])
+    }
+
+    #[test]
+    fn a_long_answer_comes_back_whole_one_block_at_a_time() {
+        let (mut bus, identification) = door();
+        let policy = policy();
+        let mut session = ChannelSession::open(&mut bus, &policy, DOOR, Timing::default()).unwrap();
+        assert_eq!(session.parameters().block_size, 15);
+        assert_eq!(session.request(&[0x1A, 0x9B]).unwrap(), identification);
+        assert_eq!(
+            session.request(&[0x21, 0x01]).unwrap(),
+            [0x61, 0x01, 0x12, 0x34]
+        );
+        assert_eq!(session.close(), Ok(Disconnect::Closed));
+        // Every frame the tester sent was the policy's, and the ACKs came where the module
+        // asked: after frame 15 (sequence 14) and after the last (sequence 23, so 7); the
+        // module's sequence numbers go on into the next answer.
+        let channel: Vec<Vec<u8>> = bus
+            .sent()
+            .iter()
+            .filter(|sent| sent.target() == Target::Tp20Channel(0x740))
+            .map(|sent| sent.payload().to_vec())
+            .collect();
+        assert_eq!(
+            channel,
+            [
+                vec![0xA0, 0x0F, 0x8A, 0xFF, 0x32, 0xFF],
+                vec![0x10, 0x00, 0x02, 0x1A, 0x9B],
+                vec![0xBF],
+                vec![0xB8],
+                vec![0x11, 0x00, 0x02, 0x21, 0x01],
+                vec![0xB9],
+                vec![0xA8],
+            ]
+        );
+    }
+
+    #[test]
+    fn a_lost_frame_closes_the_channel_rather_than_misreading_the_answer() {
+        for lost in [0, 1, 14, 15, 23] {
+            let (mut bus, _) = door();
+            bus.lose_tp20_frame(DOOR, lost);
+            let policy = policy();
+            let mut session =
+                ChannelSession::open(&mut bus, &policy, DOOR, Timing::default()).unwrap();
+            let result = session.request(&[0x1A, 0x9B]);
+            assert!(
+                matches!(
+                    result,
+                    Err(ChannelError::Framing(_) | ChannelError::Timeout)
+                ),
+                "{lost}: {result:?}"
+            );
+            assert_eq!(session.request(&[0x21, 0x01]), Err(ChannelError::Closed));
+            drop(session);
+            assert_eq!(
+                bus.sent().last().map(|sent| sent.payload().to_vec()),
+                Some(vec![0xA8]),
+                "{lost}"
+            );
+        }
+    }
+
+    #[test]
+    fn requests_the_module_has_no_answer_for_are_refused() {
+        let (mut bus, _) = door();
+        let policy = policy();
+        let mut session = ChannelSession::open(&mut bus, &policy, DOOR, Timing::default()).unwrap();
+        assert_eq!(session.request(&[0x21, 0x02]).unwrap(), [0x7F, 0x21, 0x31]);
+        assert_eq!(session.request(&[0x18, 0x02]).unwrap(), [0x7F, 0x18, 0x11]);
+    }
+
+    #[test]
+    fn a_tp20_answer_must_answer_a_read_that_fits_one_frame() {
+        let (mut bus, _) = door();
+        for (address, request, answer) in [
+            (0x5F, &[0x1A, 0x9B][..], &[0x5A, 0x9B][..]),
+            (DOOR, &[0x2E, 0xF1, 0x98], &[0x6E, 0xF1, 0x98]),
+            (DOOR, &[0x31, 0x01], &[0x71, 0x01]),
+            (DOOR, &[0x18, 0x02, 0xFF, 0xFF, 0x00, 0x00], &[0x58, 0x00]),
+            (DOOR, &[0x21, 0x01], &[0x61, 0x01]),
+            (DOOR, &[0x21, 0x03], &[0x61, 0x04]),
+            (DOOR, &[0x21, 0x03], &[0x7F, 0x21, 0x78]),
+            (DOOR, &[0x21, 0x03], &[]),
+        ] {
+            assert!(
+                matches!(
+                    bus.add_tp20_answer(address, request, answer),
+                    Err(FixtureError::Value(_))
+                ),
+                "{address:02X} {request:02X?} {answer:02X?}"
+            );
+        }
+        let long = [&[0x61, 0x03][..], &vec![0; 0xFFFE]].concat();
+        assert!(bus.add_tp20_answer(DOOR, &[0x21, 0x03], &long).is_err());
+        assert!(
+            bus.add_tp20_answer(DOOR, &[0x21, 0x03], &long[..0xFFFF])
+                .is_ok()
+        );
+    }
+}
