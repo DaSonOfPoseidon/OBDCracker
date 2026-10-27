@@ -54,7 +54,7 @@ if [ -n "$changed" ]; then
 		| ([\$names[] | select(startswith(\"milestone:M\")) | ltrimstr(\"milestone:M\") | tonumber] | min) as \$due
 		| select(\$due == null or (\$m > 0 and \$due <= \$m))
 		| ([(.body // \"\") | scan(\"[A-Za-z0-9_./-]+\") | sub(\"\\\\.+$\"; \"\") as \$word
-			| \$changed[] | select(. == \$word or (\$word | endswith(\"/\" + .)))] | unique) as \$cited
+			| \$changed[] | select(. as \$path | \$word == \$path or (\$word | endswith(\"/\" + \$path)))] | unique) as \$cited
 		| select(\$cited | length > 0)
 		| \"#\\(.number) [\\(\$cited | join(\", \"))] \\(.title)\"
 	")
