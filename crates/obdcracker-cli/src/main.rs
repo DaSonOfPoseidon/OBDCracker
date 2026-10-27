@@ -106,8 +106,9 @@ enum Command {
         discover_29bit: bool,
         /// After the scan, look for VW TP2.0 modules: send a channel setup to each address in the
         /// profile's TP2.0 list (on the A7, the modules silent on ISO-TP), show the channel each
-        /// one gives, and close it again (A8). Nothing is read over a channel yet. Needs an
-        /// adapter that echoes each character as it reads it, such as an `OBDLink` EX
+        /// one gives, and close it again (A8). Then read each module's identification (KWP2000
+        /// 1A 9B) on a channel of its own, closed the same way. Needs an adapter that echoes each
+        /// character as it reads it, such as an `OBDLink` EX
         #[arg(long)]
         discover_tp20: bool,
     },
