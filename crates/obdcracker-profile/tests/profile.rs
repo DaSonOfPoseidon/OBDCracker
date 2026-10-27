@@ -1027,10 +1027,15 @@ fn the_a7_profile_lists_the_modules_silent_on_iso_tp_for_tp20() {
     assert_eq!(
         profile.tp20_addresses(),
         [
-            0x05, 0x09, 0x0E, 0x16, 0x36, 0x42, 0x46, 0x47, 0x52, 0x56, 0x5F, 0x62, 0x72
+            0x05, 0x09, 0x0E, 0x16, 0x36, 0x42, 0x46, 0x47, 0x52, 0x56, 0x5F, 0x62, 0x72,
+            // The gateway's 2A29 table marks these 02, as it does 52 (#124). Some may be modules
+            // that answer on ISO-TP: a setup to one is still a read, and shows what 02 means.
+            0x06, 0x10, 0x14, 0x18, 0x1E, 0x20, 0x2E, 0x30, 0x3C, 0x3D, 0x3E, 0x48, 0x57, 0x5B,
+            0x69, 0x7F
         ]
     );
-    // None of them is a module the profile already reaches on ISO-TP.
+    // None is the VAG address of a module the profile reaches on ISO-TP, where the profile knows
+    // that module's address.
     for module in &profile.modules {
         if let Some(address) = module.vag_address {
             assert!(

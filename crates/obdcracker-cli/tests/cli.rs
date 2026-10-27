@@ -1069,7 +1069,7 @@ fn sim_scan_discover_tp20_sets_up_a_channel_to_each_profile_address_after_the_sc
     );
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(
-        stdout.contains("TP2.0 discovery: 0 of 13 addresses answered"),
+        stdout.contains("TP2.0 discovery: 0 of 29 addresses answered"),
         "{stdout}"
     );
     let scanned = stdout.find("77A gateway F197 J533--Gateway").unwrap();
@@ -1082,7 +1082,7 @@ fn sim_scan_discover_tp20_sets_up_a_channel_to_each_profile_address_after_the_sc
         .lines()
         .filter(|l| l.contains(r#""dir":"tx","id":"200""#))
         .collect();
-    assert_eq!(setups.len(), 13, "{audit}");
+    assert_eq!(setups.len(), 29, "{audit}");
     assert!(
         setups[10].contains(r#""payload":"5F C0 00 10 00 03 01""#),
         "{}",
@@ -1101,6 +1101,7 @@ fn dry_run_scan_discover_tp20_lists_the_channel_setups() {
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(stdout.contains("200 05 C0 00 10 00 03 01"), "{stdout}");
     assert!(stdout.contains("200 72 C0 00 10 00 03 01"), "{stdout}");
+    assert!(stdout.contains("200 7F C0 00 10 00 03 01"), "{stdout}");
     assert!(stdout.contains("A8 (disconnect)"), "{stdout}");
     // Nothing was sent, so nothing could answer.
     assert!(!stdout.contains("addresses answered"), "{stdout}");
