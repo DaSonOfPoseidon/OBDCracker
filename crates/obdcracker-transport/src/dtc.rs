@@ -44,10 +44,10 @@ impl From<uds::DtcData<'_>> for RecordData {
 pub struct DtcDetail {
     /// The snapshot records asked for (`19 04 <DTC> <record>`).
     pub snapshots: Result<RecordData, ReadError>,
-    /// The extended data records asked for (`19 06 <DTC> <record>`). `None` if it wasn't asked: the snapshot
-    /// read went unanswered (a refusal doesn't name its DTC, so that read's late refusal could
-    /// have passed for this one's answer), or the module said it was busy (NRC 0x21), so it
-    /// isn't sent another request.
+    /// The extended data records asked for (`19 06 <DTC> <record>`). `None` if it wasn't asked:
+    /// the snapshot read went unanswered (a refusal doesn't name its DTC, so that read's late
+    /// refusal could have passed for this one's answer), or the module said it was busy (NRC
+    /// 0x21), so it isn't sent another request.
     pub extended_data: Option<Result<RecordData, ReadError>>,
     /// A read went unanswered, so its reply may still arrive as the answer to the connection's
     /// next request.
@@ -57,8 +57,8 @@ pub struct DtcDetail {
 /// Reads `dtc`'s snapshot records, then its extended data records, from `module`: the record
 /// numbered `record` of each, or every record for 0xFF (and every OBD extended data record for
 /// 0xFE). A reply for another record doesn't answer the read: it may be a late answer to an
-/// earlier request. Both requests are approved before anything is sent. The extended data isn't asked after an unanswered or
-/// busy snapshot read ([`DtcDetail::extended_data`]).
+/// earlier request. Both requests are approved before anything is sent. The extended data isn't
+/// asked after an unanswered or busy snapshot read ([`DtcDetail::extended_data`]).
 ///
 /// # Errors
 ///

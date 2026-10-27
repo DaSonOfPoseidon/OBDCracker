@@ -148,6 +148,6 @@ refusal doesn't say which read it answers; nor if the module says it's busy (NRC
 The code can't be 000000 (no code) or FFFFFF (every group). If the module answers nothing, the command fails.
 
 `--record 01` reads only that record of each instead (`19 04 <DTC> 01`, then `19 06 <DTC> 01`), as two hex digits;
-the default is `FF`, every record. Some modules refuse `FF` but answer a single record: the A7's gateway refused
-`19 04 00 16 A0 FF` with 0x13 (#124). A reply for another record isn't taken as the answer, since it may be a late
-answer to an earlier request.
+the default is `FF`, every record. `FE` is refused: it means every OBD record only to the extended data read. It's
+for a module that refuses `FF` but may answer a single record (#169). A reply for another record isn't taken as the
+answer, since it may be a late answer to an earlier request.

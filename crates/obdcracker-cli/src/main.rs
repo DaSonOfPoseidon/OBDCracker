@@ -136,7 +136,9 @@ enum Command {
         /// The DTC, as six hex digits, as scan lists it, such as 0016A0
         #[arg(long, value_parser = parse_dtc)]
         code: UdsDtc,
-        /// The record number to read of each, as two hex digits, such as 01; FF is every record
+        /// The record number to read of each, as two hex digits, such as 01; FF is every record.
+        /// FE isn't taken: it would mean one record to the snapshot read and every OBD record to
+        /// the extended data read
         #[arg(long, value_parser = parse_record, default_value = "FF")]
         record: u8,
     },
@@ -490,14 +492,19 @@ fn profile_module(cli: &Cli, name: &str, command: &str) -> Result<(UdsModule, Po
     Ok((module, policy(cli)?))
 }
 
-// Exactly two hex digits. `from_str_radix` alone would also take `+1`.
+// Exactly two hex digits. `from_str_radix` alone would also take `+1`. FE means every OBD record
+// only to the extended data read; to the snapshot read it's one record, so the two would differ.
 fn parse_record(text: &str) -> Result<u8, String> {
-    if text.len() == 2 && text.bytes().all(|b| b.is_ascii_hexdigit()) {
-        u8::from_str_radix(text, 16).map_err(|e| e.to_string())
-    } else {
-        Err(format!(
+    if text.len() != 2 || !text.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Err(format!(
             "{text:?} isn't a record number: give two hex digits, such as 01"
-        ))
+        ));
+    }
+    match u8::from_str_radix(text, 16).map_err(|e| e.to_string())? {
+        0xFE => {
+            Err("FE means every OBD record only for extended data; give FF for every record".into())
+        }
+        record => Ok(record),
     }
 }
 

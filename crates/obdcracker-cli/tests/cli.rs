@@ -991,7 +991,7 @@ fn dry_run_dtc_reads_one_record_by_its_number() {
 
 #[test]
 fn dtc_refuses_a_bad_record_number() {
-    for record in ["1", "001", "+1", "0G", ""] {
+    for record in ["1", "001", "+1", "0G", "", "FE", "fe"] {
         let out = obdcracker(&[
             "--dry-run",
             "--profile",
