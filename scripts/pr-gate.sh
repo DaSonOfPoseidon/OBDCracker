@@ -2,8 +2,8 @@
 # Run before opening a PR, with the PR's milestone if it has one: `scripts/pr-gate.sh M2`.
 # Fails if an issue this branch fixes (`fixes #N` in a commit subject) is blocked by an open issue
 # (GitHub's "blocked by" link) that the branch doesn't fix too; the blocker's labels don't matter.
-# Then lists, without failing, the ready issues that cite a file the branch changes and are due by
-# the PR's milestone (or have none), so related fixes can go in the same PR.
+# Then lists, without failing, the issues not marked `status:blocked` that cite a file the branch
+# changes and are due by the PR's milestone (or have none), so related fixes can go in the same PR.
 set -e
 cd "$(dirname "$0")/.."
 repo=DaSonOfPoseidon/OBDCracker
@@ -36,9 +36,9 @@ blocked=$(for n in $(echo "$fixed" | tr ',' ' '); do
 	" || exit 1
 done)
 
-# Every open, ready issue due by the PR's milestone that cites a changed file (the issues API also
-# lists PRs, which are skipped). A cited path is matched whole, without any `:line` or full stop
-# after it.
+# Every open issue not marked `status:blocked`, due by the PR's milestone, that cites a changed file
+# (the issues API also lists PRs, which are skipped). A cited path is matched whole, without any
+# `:line` or full stop after it, or as the end of a longer path such as a GitHub blob URL's.
 related=
 if [ -n "$changed" ]; then
 	related=$(CHANGED=$changed gh api --paginate "repos/$repo/issues?state=open&per_page=100" --jq "
@@ -53,7 +53,8 @@ if [ -n "$changed" ]; then
 		| select(\"milestone:later\" | IN(\$names[]) | not)
 		| ([\$names[] | select(startswith(\"milestone:M\")) | ltrimstr(\"milestone:M\") | tonumber] | min) as \$due
 		| select(\$due == null or (\$m > 0 and \$due <= \$m))
-		| ([(.body // \"\") | scan(\"[A-Za-z0-9_./-]+\") | sub(\"\\\\.+$\"; \"\") | select(IN(\$changed[]))] | unique) as \$cited
+		| ([(.body // \"\") | scan(\"[A-Za-z0-9_./-]+\") | sub(\"\\\\.+$\"; \"\") as \$word
+			| \$changed[] | select(. == \$word or (\$word | endswith(\"/\" + .)))] | unique) as \$cited
 		| select(\$cited | length > 0)
 		| \"#\\(.number) [\\(\$cited | join(\", \"))] \\(.title)\"
 	")

@@ -69,9 +69,9 @@ link) that the PR doesn't fix too, whatever the blocker's labels. Run:
 scripts/pr-gate.sh M2   # the PR's milestone; leave it out if none
 ```
 
-It fails on any such blocker: fix it in the same PR, or land it first. It also lists, without failing, the
-`status:ready` issues that cite a file the PR changes and are due by the PR's milestone or have none (not
-`milestone:later`). Fold those in when they're small and related; keep the PR to one feature.
+It fails on any such blocker: fix it in the same PR, or land it first. It also lists, without failing, the open
+issues not marked `status:blocked` that cite a file the PR changes and are due by the PR's milestone or have none
+(not `milestone:later`). Fold those in when they're small and related; keep the PR to one feature.
 
 ## Reviews
 
