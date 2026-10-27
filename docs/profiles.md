@@ -8,7 +8,7 @@ which of them may be copied, see [third-party.md](third-party.md#reference-only)
 
 | Profile | Expected setup (confirmed by a read-only module scan before use) |
 |---|---|
-| 2014 Audi A7 3.0 TDI (C7) | CAN 500k behind the J533 gateway; UDS on ISO-TP with 11-bit IDs: all 24 modules found so far answer UDS (#54), engine 0x7E0/0x7E8, head-up display 0x71B/0x785. A TP2.0/KWP2000-only module wouldn't show up in discovery, which only sends UDS. A 29-bit discovery range covers VAG's 0x17FC00xx IDs, untried on this car. A TP2.0 list names the 13 modules silent on ISO-TP (#92); in session 6 one of them, the passenger door (52), opened a channel (#124) |
+| 2014 Audi A7 3.0 TDI (C7) | CAN 500k behind the J533 gateway; UDS on ISO-TP with 11-bit IDs: all 24 modules found so far answer UDS (#54), engine 0x7E0/0x7E8, head-up display 0x71B/0x785. A TP2.0/KWP2000-only module wouldn't show up in discovery, which only sends UDS. A 29-bit discovery range covers VAG's 0x17FC00xx IDs, untried on this car. A TP2.0 list names the 13 modules silent on ISO-TP (#92); in session 6 one of them, the passenger door (52), opened a channel (#124). It also has the 16 other addresses the gateway's `2A29` table marks like 52 (#169) |
 | 2014 Toyota Camry (XV50) | CAN 500k; OBD-II on 0x7DF/0x7E0+; enhanced diagnostics are KWP2000-style (e.g. 0x21 read by local ID) on ISO-TP; body modules sit behind 0x750 with an extended-address byte |
 
 ## File format
