@@ -601,13 +601,18 @@ impl<L: Link> Elm<L> {
         }
     }
 
+    fn trusted(&self) -> Result<(), Error> {
+        match &self.broken {
+            Some(why) => Err(Error::Adapter(format!(
+                "the adapter is in an unknown state ({why}); connect again"
+            ))),
+            None => Ok(()),
+        }
+    }
+
     // Fails if the adapter can't be trusted; otherwise waits for any request still running.
     fn ready(&mut self) -> Result<(), Error> {
-        if let Some(why) = &self.broken {
-            return Err(Error::Adapter(format!(
-                "the adapter is in an unknown state ({why}); connect again"
-            )));
-        }
+        self.trusted()?;
         if !self.busy {
             return self.check_idle();
         }
@@ -1051,6 +1056,7 @@ impl<L: Link> Transport for Elm<L> {
         // A module on a TP2.0 channel waits only its T1 (about 100 ms) for an ACK, and the
         // adapter listens for its whole timeout after a frame (docs/elm327.md#vw-tp20-channel-frames).
         if raw && self.raw && self.busy && matches!(request.target(), Target::Tp20Channel(_)) {
+            self.trusted()?;
             self.interrupt()?;
         }
         self.ready()?;
@@ -1276,11 +1282,7 @@ impl<L: Link> Elm<L> {
     }
 
     fn ready_to_receive(&mut self) -> Result<(), Error> {
-        if let Some(why) = &self.broken {
-            return Err(Error::Adapter(format!(
-                "the adapter is in an unknown state ({why}); connect again"
-            )));
-        }
+        self.trusted()?;
         if self.busy {
             Ok(())
         } else {

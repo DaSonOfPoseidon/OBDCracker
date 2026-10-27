@@ -190,6 +190,10 @@ Each entry names the class, what to check, and where it bit us.
   after the header commands (M3 branch, Codex). Read until the deadline, not until the first read: bytes that make
   no event (a stray NUL) aren't silence. And write down the window no check can close (a reset still in flight when
   you write), so reviews stop at the limit instead of chasing variants.
+- **Once the driver has failed closed, nothing more may reach the adapter, including any step that runs before the
+  usual check.** `send` interrupted a TP2.0 channel's listening (`X`) before `ready()` checked `broken`, so an
+  adapter already in an unknown state got one more write (#185, Codex). Check the failure state first on every path
+  that can write.
 - **Don't ask for an answer that looks like a failure.** `ATI` answers with the same banner a reset prints, so a
   reset during `info` looked like an answer. Take such values once, when they can't be confused (the reset banner),
   and treat them as failures everywhere else (M3 branch, Codex).
