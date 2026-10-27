@@ -933,11 +933,13 @@ fn discover_tp20_modules<T: Transport>(
     if !dry_run {
         for module in &found {
             if matches!(module.answer, Answer::Channel(_)) {
-                println!(
-                    "TP2.0 {:02X} identification: {}",
-                    module.address,
-                    tp20_identification(transport, policy, module.address, timing)
-                );
+                // The adapter's state is unknown after it fails, so nothing more is sent.
+                let shown = tp20_identification(transport, policy, module.address, timing)
+                    .map_err(|e| {
+                        eprintln!("TP2.0 {:02X} identification: {e}", module.address);
+                        ExitCode::FAILURE
+                    })?;
+                println!("TP2.0 {:02X} identification: {shown}", module.address);
             }
         }
     }
@@ -947,20 +949,28 @@ fn discover_tp20_modules<T: Transport>(
 // VAG's ECU identification (KWP2000 `ReadEcuIdentification`, option 0x9B).
 const TP20_IDENTIFICATION: [u8; 2] = [0x1A, 0x9B];
 
-// Reads a TP2.0 module's identification on a channel of its own, and says what came back.
+// Reads a TP2.0 module's identification on a channel of its own, and says what came back. An
+// adapter failure, opening, reading or closing, is the error.
 fn tp20_identification<T: Transport>(
     transport: &mut T,
     policy: &Policy,
     address: u8,
     timing: Timing,
-) -> String {
+) -> Result<String, tp20::ChannelError> {
     let mut session = match ChannelSession::open(transport, policy, address, timing) {
         Ok(session) => session,
-        Err(e) => return format!("no channel ({e})"),
+        Err(e @ tp20::ChannelError::Transport(_)) => return Err(e),
+        Err(e) => return Ok(format!("no channel ({e})")),
     };
     let read = session.request(&TP20_IDENTIFICATION);
     let closed = session.close();
-    let shown = match read {
+    if let Err(e @ tp20::ChannelError::Transport(_)) = read {
+        return Err(e);
+    }
+    if let Err(e @ tp20::ChannelError::Transport(_)) = closed {
+        return Err(e);
+    }
+    Ok(match read {
         Err(e) => format!("not read ({e})"),
         Ok(answer) => match response::positive(TP20_IDENTIFICATION[0], &answer) {
             Err(ReplyError::Negative(refusal)) => format!("refused ({})", refusal.nrc),
@@ -981,13 +991,7 @@ fn tp20_identification<T: Transport>(
                 format!("[{}] \"{text}\"", hex(&answer))
             }
         },
-    };
-    match closed {
-        Err(e @ tp20::ChannelError::Transport(_)) => {
-            format!("{shown}; closing the channel failed: {e}")
-        }
-        _ => shown,
-    }
+    })
 }
 
 // The command that ran, with its `--range` starting at `from`, for a shell to run again: a
@@ -1432,7 +1436,7 @@ mod tests {
         let policy = obdcracker_safety::Policy::read_only();
         let mut bus = a7_with_tp20();
         assert_eq!(
-            tp20_identification(&mut bus, &policy, 0x5F, Timing::default()),
+            tp20_identification(&mut bus, &policy, 0x5F, Timing::default()).unwrap(),
             "[5A 9B 34 47 30 39 30 37 34 30 31] \"4G0907401\""
         );
         // A module with no identification refuses the read.
@@ -1445,8 +1449,30 @@ mod tests {
             },
         )
         .unwrap();
-        let shown = tp20_identification(&mut bus, &policy, 0x5F, Timing::default());
+        let shown = tp20_identification(&mut bus, &policy, 0x5F, Timing::default()).unwrap();
         assert!(shown.starts_with("refused ("), "{shown}");
+    }
+
+    // Discovery works, then the adapter fails on the first frame on a channel.
+    struct FailsOnChannels(SimBus);
+
+    impl Transport for FailsOnChannels {
+        fn send(&mut self, request: &Approved) -> Result<(), Error> {
+            if request.target() == Target::Tp20Channel(0x740) && request.payload() != [0xA8] {
+                return Err(Error::Adapter("the link went away".into()));
+            }
+            self.0.send(request)
+        }
+
+        fn recv(&mut self, timeout: Duration) -> Result<Response, Error> {
+            self.0.recv(timeout)
+        }
+    }
+
+    #[test]
+    fn an_adapter_failure_while_reading_identifications_fails_the_scan() {
+        let mut bus = FailsOnChannels(a7_with_tp20());
+        assert_eq!(scan(&mut bus, false), ExitCode::FAILURE);
     }
 
     #[test]
