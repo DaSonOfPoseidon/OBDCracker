@@ -361,9 +361,11 @@ impl<'a, T: Transport + ?Sized> ChannelSession<'a, T> {
             request,
             self.channel.receive_id(),
             self.timing,
-        )
-        .map_err(ChannelError::Transport)?
-        .ok_or(ChannelError::Timeout)?;
+        );
+        self.last = Instant::now();
+        let reply = reply
+            .map_err(ChannelError::Transport)?
+            .ok_or(ChannelError::Timeout)?;
         tp20::decode_channel_parameters(&reply.payload)
             .map_err(|_| ChannelError::Undecodable(reply.payload))
     }
@@ -494,29 +496,34 @@ impl<'a, T: Transport + ?Sized> ChannelSession<'a, T> {
                 .approve_tp20_ack(&self.channel, next)
                 .map_err(ChannelError::Rejected)?;
             // An ACK later than the module's T1 would be too late anyway.
-            self.pace_within(self.parameters.t1);
-            self.transport.send(&ack).map_err(ChannelError::Transport)?;
+            self.send_within(&ack, self.parameters.t1)?;
         }
         Ok(message)
     }
 
     fn send(&mut self, frame: &Approved) -> Result<(), ChannelError> {
-        self.pace();
-        self.transport.send(frame).map_err(ChannelError::Transport)
+        self.send_within(frame, LONGEST_PACE)
     }
 
-    // Waits out the gap the module wants between the tester's frames (its T3), then marks a
-    // frame as sent.
-    fn pace(&mut self) {
+    // The gap is counted from when the last frame went out: an adapter can work a while (an
+    // ELM's settings and echo) before it sends.
+    fn send_within(&mut self, frame: &Approved, limit: Duration) -> Result<(), ChannelError> {
+        self.pace_within(limit);
+        let sent = self.transport.send(frame);
+        self.last = Instant::now();
+        sent.map_err(ChannelError::Transport)
+    }
+
+    // Waits out the gap the module wants between the tester's frames (its T3).
+    fn pace(&self) {
         self.pace_within(LONGEST_PACE);
     }
 
-    fn pace_within(&mut self, limit: Duration) {
+    fn pace_within(&self, limit: Duration) {
         let wait = self.paced_wait(limit);
         if !wait.is_zero() {
             std::thread::sleep(wait);
         }
-        self.last = Instant::now();
     }
 
     fn paced_wait(&self, limit: Duration) -> Duration {

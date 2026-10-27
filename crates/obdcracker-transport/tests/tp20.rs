@@ -455,14 +455,18 @@ fn a_lost_first_frame_isnt_read_as_a_short_answer() {
     ));
 }
 
-// Records when each frame was sent.
+// Records when each frame went out, after an adapter spends `a0_delay` before sending `A0`.
 struct Timed {
     car: Car,
     at: Vec<std::time::Instant>,
+    a0_delay: Duration,
 }
 
 impl Transport for Timed {
     fn send(&mut self, request: &Approved) -> Result<(), Error> {
+        if request.payload().first() == Some(&0xA0) {
+            std::thread::sleep(self.a0_delay);
+        }
         self.at.push(std::time::Instant::now());
         self.car.send(request)
     }
@@ -474,7 +478,14 @@ impl Transport for Timed {
 
 #[test]
 fn frames_on_a_channel_keep_the_module_s_t3_apart() {
-    // T3 of 20 ms (`54`: 1 ms units, 20): every frame after the parameters waits for it.
+    // T3 of 20 ms (`54`: 1 ms units, 20): every frame after the parameters waits for it, counted
+    // from when the one before went out, not from when the adapter was handed it.
+    for a0_delay in [Duration::ZERO, Duration::from_millis(40)] {
+        t3_apart(a0_delay);
+    }
+}
+
+fn t3_apart(a0_delay: Duration) {
     let car = Car::new(|id, frame| match (id, frame) {
         (0x200, _) => reply(0x25F, &SETUP_REPLY),
         (0x740, [0xA0, ..]) => reply(0x300, &[0xA1, 0x0F, 0x8A, 0xFF, 0x54, 0xFF]),
@@ -494,6 +505,7 @@ fn frames_on_a_channel_keep_the_module_s_t3_apart() {
     let mut timed = Timed {
         car,
         at: Vec::new(),
+        a0_delay,
     };
     let policy = Policy::read_only();
     let mut session = ChannelSession::open(&mut timed, &policy, 0x5F, TIMING).unwrap();
@@ -505,7 +517,7 @@ fn frames_on_a_channel_keep_the_module_s_t3_apart() {
     for pair in timed.at[1..].windows(2) {
         assert!(
             pair[1] - pair[0] >= Duration::from_millis(20),
-            "{:?}",
+            "{:?} after an A0 delay of {a0_delay:?}",
             pair[1] - pair[0]
         );
     }
@@ -535,6 +547,7 @@ fn only_an_ack_cuts_the_module_s_t3_short_and_no_wait_passes_a_second() {
     let mut timed = Timed {
         car,
         at: Vec::new(),
+        a0_delay: Duration::ZERO,
     };
     let policy = Policy::read_only();
     let mut session = ChannelSession::open(&mut timed, &policy, 0x5F, TIMING).unwrap();

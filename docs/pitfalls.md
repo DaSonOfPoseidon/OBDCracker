@@ -153,7 +153,8 @@ Each entry names the class, what to check, and where it bit us.
   the module's T3 but sent frames as fast as they came (PR #183, Codex). A value decoded and stored but never read
   is a sign. And the tester's own wait for it mustn't eat into the time the module was given. Bound a limit only by
   the deadlines of the frames it actually governs: capping every frame's T3 wait at T1, which only limits ACKs, sent
-  requests and `A8` early (PR #183, gate).
+  requests and `A8` early (PR #183, gate). Count a minimum gap from when the frame went out, after `send` returns:
+  stamped before, an adapter's own work in `send` (an ELM's settings and echo) ate the gap (PR #183, Codex).
 - **Keep cleanup armed until it has worked.** `end()` marked the guard finished before sending `10 01`, so a
   failed send left nothing to retry it, and `end` had consumed the guard. Disarm only after a definite answer
   (#68, Codex).
