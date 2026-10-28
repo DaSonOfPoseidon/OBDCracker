@@ -401,9 +401,11 @@ impl<'a, T: Transport + ?Sized> ChannelSession<'a, T> {
                 Ok(reply) => reply,
                 // An adapter that stops listening between frames (an ELM327 after its prompt)
                 // listens again after a frame the tester sends: a keep-alive, while the module
-                // works on an answer it said is pending.
+                // works on an answer it said is pending, or while our own wait hasn't run out
+                // (a timeout before the deadline is the adapter's, not the module's, #218).
                 Err(Error::Timeout)
-                    if pending > 0 && keep_alives < usize::from(self.timing.max_pending) =>
+                    if (pending > 0 || Instant::now() < deadline)
+                        && keep_alives < usize::from(self.timing.max_pending) =>
                 {
                     let keep_alive = self
                         .policy

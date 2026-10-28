@@ -277,7 +277,12 @@ Each entry names the class, what to check, and where it bit us.
   (PR #149).
 - **An adapter's learned timeout can hide a slow module.** The ELM327's adaptive timing (`AT AT1`) shortens its wait
   to fit the modules that answered fast, so a module that wakes slowly reads as absent. Before acting on "nothing is
-  there", as discovery's wide pass does, look again with the adapter's longest wait.
+  there", as discovery's wide pass does, look again with the adapter's longest wait. The same held after a TP2.0
+  module's ACK: the adapter had learned ~45 to 80 ms from the setup replies, printed its prompt, and the session
+  took that early `Timeout` for the module's and gave up ~36 ms after the request, with its own wait still running (#218). A timeout before your own
+  deadline is the transport's, not the peer's: keep listening (re-arm) until the deadline. And when two features
+  each switch the same adapter setting (raw mode and a patient window both want adaptive timing off), keep one rule
+  for the setting rather than each sending its own on and off, or one undoes the other.
 - **Check that a fix changes what the logs show.** Discovery's "waiting longer" recheck turned adaptive timing off,
   but an STN always waits its whole timeout for a first reply, so in #86 the recheck waited the same 1.09 s per
   silent ID as the first pass (#87). Read the datasheet for what a setting changes, and compare the real audit log's

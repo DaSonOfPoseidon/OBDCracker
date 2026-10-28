@@ -762,6 +762,165 @@ mod requests {
         assert_eq!(commands, ["ATCFC0", "ATV1"]);
     }
 
+    // `tp20_car` as an STN on a fast link: its replies aren't paced, so adaptive timing is on
+    // unless the driver turns it off (docs/elm327.md#timing).
+    fn unpaced_tp20_car() -> FakeElm {
+        let mut car = tp20_car();
+        car.sti = Some("STN2232 v5.12.4".into());
+        car
+    }
+
+    // Connects to `car` and sends an ISO-TP request, which shows the adapter echoes characters
+    // as it reads them (raw mode needs that).
+    fn with_echo_shown(car: FakeElm) -> Elm<FakeLink> {
+        let mut elm = connect(car);
+        read_vin(&mut elm);
+        elm
+    }
+
+    fn open_tp20(elm: &mut Elm<FakeLink>) {
+        elm.send(&Policy::read_only().approve_tp20_setup(0x5F).unwrap())
+            .unwrap();
+        while elm.recv(Duration::from_secs(1)).is_ok() {}
+    }
+
+    fn read_vin(elm: &mut Elm<FakeLink>) {
+        elm.send(&approve(Target::Physical(0x7E0), &[0x09, 0x02]))
+            .unwrap();
+        while elm.recv(Duration::from_secs(1)).is_ok() {}
+    }
+
+    fn atat_since(elm: &Elm<FakeLink>, before: usize) -> Vec<String> {
+        commands(elm)[before..]
+            .iter()
+            .filter(|c| c.starts_with("ATAT"))
+            .cloned()
+            .collect()
+    }
+
+    #[test]
+    fn raw_mode_turns_adaptive_timing_off_on_an_unpaced_adapter_and_back_on() {
+        // A learned timeout from the fast setup replies ended the wait for a module's data
+        // frames after its ACK, so the session gave up before its own deadline (#218).
+        let mut elm = with_echo_shown(unpaced_tp20_car());
+        let before = commands(&elm).len();
+        open_tp20(&mut elm);
+        assert_eq!(
+            commands(&elm)[before..],
+            [
+                "ATCFC0",
+                "ATV1",
+                "ATCAF0",
+                "ATAT0",
+                "ATSH200",
+                "ATCRA25F",
+                "5FC00010000301"
+            ]
+        );
+        let before = commands(&elm).len();
+        read_vin(&mut elm);
+        assert_eq!(
+            commands(&elm)[before..],
+            [
+                "ATCAF1", "ATV0", "ATCFC1", "ATAT1", "ATSH7E0", "ATCRA7E8", "0902"
+            ]
+        );
+        // And off again for the next channel.
+        let before = commands(&elm).len();
+        open_tp20(&mut elm);
+        assert_eq!(atat_since(&elm, before), ["ATAT0"]);
+    }
+
+    #[test]
+    fn a_paced_adapter_gets_no_adaptive_timing_commands_after_connecting() {
+        // It runs with adaptive timing off throughout (PR #70).
+        let mut elm = with_echo_shown(tp20_car());
+        let before = commands(&elm).len();
+        open_tp20(&mut elm);
+        read_vin(&mut elm);
+        elm.patient(Some(Duration::from_secs(5))).unwrap();
+        elm.patient(None).unwrap();
+        assert_eq!(atat_since(&elm, before), Vec::<String>::new());
+    }
+
+    #[test]
+    fn a_patient_window_opened_in_raw_mode_keeps_adaptive_timing_off_after_raw_ends() {
+        // Raw mode stays on after a channel closes, so discovery can open its window in it. The
+        // switch back to ISO-TP must not undo the window's `ATAT0`.
+        let mut elm = with_echo_shown(unpaced_tp20_car());
+        open_tp20(&mut elm);
+        let before = commands(&elm).len();
+        elm.patient(Some(Duration::from_secs(5))).unwrap();
+        assert_eq!(atat_since(&elm, before), Vec::<String>::new());
+        read_vin(&mut elm);
+        assert!(commands(&elm)[before..].iter().any(|c| c == "ATCFC1"));
+        assert_eq!(atat_since(&elm, before), Vec::<String>::new());
+        // Closing the window turns it back on, once.
+        elm.patient(None).unwrap();
+        assert_eq!(atat_since(&elm, before), ["ATAT1"]);
+    }
+
+    #[test]
+    fn closing_a_patient_window_in_raw_mode_leaves_adaptive_timing_off() {
+        let mut elm = with_echo_shown(unpaced_tp20_car());
+        elm.patient(Some(Duration::from_secs(5))).unwrap();
+        open_tp20(&mut elm);
+        let before = commands(&elm).len();
+        elm.patient(None).unwrap();
+        assert_eq!(atat_since(&elm, before), Vec::<String>::new());
+        // The next channel finds raw mode on already: nothing to switch.
+        open_tp20(&mut elm);
+        assert_eq!(atat_since(&elm, before), Vec::<String>::new());
+        // Leaving raw mode turns adaptive timing on, once.
+        read_vin(&mut elm);
+        assert_eq!(atat_since(&elm, before), ["ATAT1"]);
+    }
+
+    #[test]
+    fn a_patient_window_sends_each_adaptive_timing_command_once() {
+        let mut elm = connect(unpaced_tp20_car());
+        let before = commands(&elm).len();
+        elm.patient(None).unwrap();
+        assert_eq!(atat_since(&elm, before), Vec::<String>::new());
+        elm.patient(Some(Duration::from_secs(5))).unwrap();
+        elm.patient(Some(Duration::from_secs(2))).unwrap();
+        elm.patient(None).unwrap();
+        elm.patient(None).unwrap();
+        assert_eq!(atat_since(&elm, before), ["ATAT0", "ATAT1"]);
+    }
+
+    #[test]
+    fn a_misheard_adaptive_timing_command_never_reaches_the_bus() {
+        // As the other mode switch commands: `ATAT0` and `ATAT1` are checked before their
+        // carriage return, whichever bit flips.
+        for (leaving, command) in [(false, "ATAT0"), (true, "ATAT1")] {
+            for index in 0..command.len() {
+                for bit in 0..8 {
+                    let mut elm = with_echo_shown(unpaced_tp20_car());
+                    if leaving {
+                        open_tp20(&mut elm);
+                    }
+                    let sent = elm.link().elm.sent.len();
+                    elm.link_mut().corrupt_write_of =
+                        Some((command.as_bytes().to_vec(), index, 1 << bit));
+                    let result = if leaving {
+                        elm.send(&approve(Target::Physical(0x7E0), &[0x09, 0x02]))
+                    } else {
+                        elm.send(&Policy::read_only().approve_tp20_setup(0x5F).unwrap())
+                    };
+                    assert!(elm.link().corrupt_write_of.is_none(), "{command}");
+                    let on_bus = &elm.link().elm.sent[sent..];
+                    if result.is_ok() {
+                        assert_eq!(bit, 5, "{command} {index}");
+                        assert_eq!(on_bus.len(), 1, "{command} {index}");
+                    } else {
+                        assert_eq!(on_bus, [], "{command} {index} {bit}");
+                    }
+                }
+            }
+        }
+    }
+
     #[test]
     fn a_raw_reply_like_a_first_frame_gets_no_flow_control() {
         // With `CAF0` alone the adapter would still answer a frame starting `1x` with flow
