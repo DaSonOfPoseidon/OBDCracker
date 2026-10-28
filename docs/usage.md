@@ -48,6 +48,31 @@ in the profile it reads the standard identification DIDs plus the profile's own 
 untested codes. DIDs whose length the profile gives are read three to a request; any a reply leaves out or doesn't fit
 are read again one at a time, and must then be exactly that length.
 
+### Gateway list
+
+If the profile has a `[gateway_list]` ([profiles](profiles.md#gateway-list)) and its gateway answered, scan ends by
+reading the gateway's installed-module list and comparing it with the modules it tried:
+
+```
+gateway lists 73 installed modules: 6 found, 29 silent, 38 not in profile
+  05 silent
+  13 not in profile (request 0x757)
+  22 not in profile (request 0x71D)
+```
+
+The summary counts each status and names the addresses when there are 8 or fewer of a status; each module that wasn't
+found then gets a line, with its request CAN ID if the gateway gave one. An address the gateway lists twice shows
+twice. The statuses:
+
+- `found`: a profile module with that VAG address answered the scan, or a TP2.0 setup to it (`--discover-tp20`).
+- `silent`: it was tried and nothing answered. A TP2.0 setup counts as a try only with `--discover-tp20`.
+- `not tried`: a profile module has the address but scan skipped it, such as one that isn't plain UDS.
+- `not in profile`: no profile module has that VAG address. That includes a module the profile lists without a
+  `vag_address`.
+
+If the list can't be read, scan prints a `warning:` and its result and exit status are unchanged. `--dry-run` says
+which two reads a live scan adds.
+
 ### `--extended`
 
 ```sh

@@ -16,6 +16,7 @@ use obdcracker_transport::discover;
 use obdcracker_transport::dtc::{self, RecordData};
 use obdcracker_transport::elm::Elm;
 use obdcracker_transport::fingerprint::{self, DidValue, Fingerprint, ReadError, UdsModule};
+use obdcracker_transport::gateway::{self, Compared, GatewayTables, ListedAs, Tried};
 use obdcracker_transport::link::{Link, SerialLink, TcpLink};
 use obdcracker_transport::scan::{
     self, DidFormat, ExtraDid, PidValue, Scan, ScanModule, ScanOptions,
@@ -874,7 +875,8 @@ fn run_scan<T: Transport>(
     }
     // A TP2.0 pass goes after the scan, whose ISO-TP requests show whether the adapter echoes
     // each character as it reads it, which the ELM driver's raw mode needs.
-    let answered = match scan::scan_with(transport, &policy, &modules, timing, &options) {
+    let mut scanned = None;
+    let mut answered = match scan::scan_with(transport, &policy, &modules, timing, &options) {
         Ok(_) if cli.dry_run => {
             println!("dry run: nothing was sent");
             // Nothing answers a dry run, so the reads that depend on the answers aren't shown.
@@ -883,6 +885,7 @@ fn run_scan<T: Transport>(
                  the next bitmap is supported, then 01 <PID> for each PID an ECU says it supports \
                  (mode 01 reads only)"
             );
+            print_gateway_list_preview(cli);
             if extended {
                 // `10 03` gets no answer here, so the reads it would allow aren't shown.
                 println!(
@@ -895,7 +898,9 @@ fn run_scan<T: Transport>(
         }
         Ok(found) => {
             print_scan(&found);
-            found.anything_answered()
+            let answered = found.anything_answered();
+            scanned = Some(found);
+            answered
         }
         Err(e) => {
             eprintln!("{e}");
@@ -903,10 +908,13 @@ fn run_scan<T: Transport>(
         }
     };
     // A module that's silent on ISO-TP may still answer on TP2.0.
-    let mut answered = answered;
+    let mut tp20_tries = Vec::new();
     if let Some(addresses) = tp20_addresses {
         match discover_tp20_modules(transport, &policy, &addresses, timing, cli.dry_run) {
-            Ok(found) => answered |= found,
+            Ok(found) => {
+                answered |= !found.is_empty();
+                tp20_tries = tp20_outcomes(&addresses, &found);
+            }
             Err(code) => return code,
         }
         if cli.dry_run {
@@ -917,12 +925,169 @@ fn run_scan<T: Transport>(
             );
         }
     }
+    if let (Some(profile), Some(scanned)) = (profile_of(cli), &scanned) {
+        show_gateway_list(&profile, transport, &policy, scanned, tp20_tries, timing);
+    }
     if answered {
         ExitCode::SUCCESS
     } else {
         eprintln!("nothing answered: check the ignition and the adapter's connection");
         ExitCode::FAILURE
     }
+}
+
+// What a TP2.0 pass did at each address it tried.
+fn tp20_outcomes(tried: &[u8], answered: &[u8]) -> Vec<(u8, Tried)> {
+    tried
+        .iter()
+        .map(|&address| {
+            let outcome = if answered.contains(&address) {
+                Tried::Answered
+            } else {
+                Tried::Silent
+            };
+            (address, outcome)
+        })
+        .collect()
+}
+
+fn print_gateway_list_preview(cli: &Cli) {
+    let Some(profile) = profile_of(cli) else {
+        return;
+    };
+    let Some((module, list)) = profile.gateway_list_module() else {
+        return;
+    };
+    let dids = std::iter::once(list.addresses).chain(list.request_ids);
+    let dids: Vec<_> = dids
+        .map(|did| format!("22 {:02X} {:02X}", did >> 8, did & 0xFF))
+        .collect();
+    println!(
+        "a live scan also reads the gateway's installed-module list, to {:03X}: {}",
+        module.request_id,
+        dids.join(", ")
+    );
+}
+
+fn profile_of(cli: &Cli) -> Option<Profile> {
+    let name = cli.profile.as_ref().or(cli.sim.as_ref())?;
+    Profile::builtin(name).ok()
+}
+
+// Reads the gateway's list of installed modules, if the profile has one and the gateway answered
+// the scan, and compares it with what answered. Any failure is a warning: the scan's result
+// stands. `tp20_tries` is what the TP2.0 pass found at each address it tried.
+fn show_gateway_list<T: Transport>(
+    profile: &Profile,
+    transport: &mut T,
+    policy: &Policy,
+    scanned: &Scan,
+    tp20_tries: Vec<(u8, Tried)>,
+    timing: Timing,
+) {
+    let Some((module, list)) = profile.gateway_list_module() else {
+        return;
+    };
+    if !scanned
+        .modules
+        .iter()
+        .any(|m| m.name == module.name && m.answered)
+    {
+        return;
+    }
+    let gateway_module = UdsModule {
+        name: module.name.clone(),
+        request_id: module.request_id,
+        response_id: module.response_id,
+    };
+    let tables = GatewayTables {
+        addresses: list.addresses,
+        request_ids: list.request_ids,
+    };
+    let read = match gateway::read_gateway_list(transport, policy, &gateway_module, tables, timing)
+    {
+        Ok(Ok(read)) => read,
+        Ok(Err(e)) => {
+            eprintln!("warning: the gateway's installed-module list wasn't read ({e})");
+            return;
+        }
+        Err(e) => {
+            eprintln!("warning: the gateway's installed-module list wasn't read ({e})");
+            return;
+        }
+    };
+    if let Err(e) = &read.request_ids {
+        eprintln!("warning: the gateway's request ID table wasn't read ({e})");
+    }
+    // What the scan did with each profile module, then what the TP2.0 pass did at each address.
+    let mut tries: Vec<(u8, Tried)> = profile
+        .modules
+        .iter()
+        .filter_map(|m| {
+            let tried = match scanned.modules.iter().find(|s| s.name == m.name) {
+                Some(s) if s.answered => Tried::Answered,
+                Some(_) => Tried::Silent,
+                None => Tried::NotTried,
+            };
+            Some((m.vag_address?, tried))
+        })
+        .collect();
+    tries.extend(tp20_tries);
+    for line in gateway_list_lines(&gateway::compare(&read.installed, &tries)) {
+        println!("{line}");
+    }
+}
+
+// Most addresses a summary line names for one status; more are left to the lines below it.
+const SUMMARY_ADDRESSES: usize = 8;
+
+// The summary line, then one line for each listed module that wasn't found.
+fn gateway_list_lines(compared: &[Compared]) -> Vec<String> {
+    let of = |status: ListedAs| compared.iter().filter(move |c| c.status == status);
+    let address = |c: &Compared| format!("{:02X}", c.installed.address);
+    let mut parts = Vec::new();
+    let found = of(ListedAs::Found).count();
+    if found > 0 {
+        parts.push(format!("{found} found"));
+    }
+    for (status, name) in [
+        (ListedAs::Silent, "silent"),
+        (ListedAs::NotTried, "not tried"),
+        (ListedAs::NotInProfile, "not in profile"),
+    ] {
+        let listed: Vec<String> = of(status)
+            .map(|c| match (status, c.installed.request_id) {
+                (ListedAs::NotInProfile, Some(id)) => format!("{} at 0x{id:03X}", address(c)),
+                _ => address(c),
+            })
+            .collect();
+        match listed.len() {
+            0 => {}
+            // The lines below name them all.
+            n if n > SUMMARY_ADDRESSES => parts.push(format!("{n} {name}")),
+            n => parts.push(format!("{n} {name} ({})", listed.join(", "))),
+        }
+    }
+    let n = compared.len();
+    let plural = if n == 1 { "" } else { "s" };
+    let mut lines = vec![format!(
+        "gateway lists {n} installed module{plural}: {}",
+        parts.join(", ")
+    )];
+    for c in compared {
+        let status = match c.status {
+            ListedAs::Found => continue,
+            ListedAs::Silent => "silent",
+            ListedAs::NotTried => "not tried",
+            ListedAs::NotInProfile => "not in profile",
+        };
+        let request = c
+            .installed
+            .request_id
+            .map_or_else(String::new, |id| format!(" (request 0x{id:03X})"));
+        lines.push(format!("  {} {status}{request}", address(c)));
+    }
+    lines
 }
 
 fn tp20_addresses(cli: &Cli) -> Result<Vec<u8>, String> {
@@ -942,14 +1107,14 @@ fn tp20_addresses(cli: &Cli) -> Result<Vec<u8>, String> {
 }
 
 // Sends a TP2.0 channel setup to each address and closes each channel a module gives, printing
-// what each module that answered did. Returns whether any did.
+// what each module that answered did. Returns the addresses that did.
 fn discover_tp20_modules<T: Transport>(
     transport: &mut T,
     policy: &Policy,
     addresses: &[u8],
     timing: Timing,
     dry_run: bool,
-) -> Result<bool, ExitCode> {
+) -> Result<Vec<u8>, ExitCode> {
     let found = tp20::probe(transport, policy, addresses, timing).map_err(|e| {
         eprintln!("{e}");
         ExitCode::FAILURE
@@ -997,7 +1162,7 @@ fn discover_tp20_modules<T: Transport>(
             }
         }
     }
-    Ok(!found.is_empty())
+    Ok(found.iter().map(|module| module.address).collect())
 }
 
 // VAG's ECU identification (KWP2000 `ReadEcuIdentification`, option 0x9B).
@@ -1498,12 +1663,60 @@ mod tests {
     use obdcracker_core::tp20::Channel;
     use obdcracker_safety::{Approved, Target};
     use obdcracker_sim::SimBus;
+    use obdcracker_transport::gateway::{Compared, Installed, ListedAs};
     use obdcracker_transport::{Error, Response, Timing, Transport};
 
     use super::{
-        Cli, Discovery, dtc_out_of_step_note, resume_command, run_scan, sweep_out_of_step_note,
-        tp20_identification,
+        Cli, Discovery, dtc_out_of_step_note, gateway_list_lines, resume_command, run_scan,
+        sweep_out_of_step_note, tp20_identification,
     };
+
+    fn compared(address: u8, request_id: Option<u16>, status: ListedAs) -> Compared {
+        Compared {
+            installed: Installed {
+                slot: 0,
+                address,
+                request_id,
+            },
+            status,
+        }
+    }
+
+    #[test]
+    fn the_gateway_list_summary_counts_each_status_and_names_the_few_that_are_not_found() {
+        let compared = [
+            compared(0x01, None, ListedAs::Found),
+            compared(0x13, Some(0x757), ListedAs::Silent),
+            compared(0x1B, None, ListedAs::Silent),
+            compared(0x05, None, ListedAs::NotTried),
+            compared(0x22, Some(0x71D), ListedAs::NotInProfile),
+        ];
+        assert_eq!(
+            gateway_list_lines(&compared),
+            [
+                "gateway lists 5 installed modules: 1 found, 2 silent (13, 1B), \
+                 1 not tried (05), 1 not in profile (22 at 0x71D)",
+                "  13 silent (request 0x757)",
+                "  1B silent",
+                "  05 not tried",
+                "  22 not in profile (request 0x71D)",
+            ]
+        );
+    }
+
+    #[test]
+    fn the_gateway_list_summary_handles_one_module_none_missing_and_many_missing() {
+        assert_eq!(
+            gateway_list_lines(&[compared(0x01, None, ListedAs::Found)]),
+            ["gateway lists 1 installed module: 1 found"]
+        );
+        let many: Vec<_> = (1..=9)
+            .map(|a| compared(a, None, ListedAs::Silent))
+            .collect();
+        let lines = gateway_list_lines(&many);
+        assert_eq!(lines[0], "gateway lists 9 installed modules: 9 silent");
+        assert_eq!(lines.len(), 10);
+    }
 
     fn a7_with_tp20() -> SimBus {
         let mut bus = SimBus::builtin("a7").unwrap();
