@@ -216,6 +216,8 @@ fn a_refused_session_stops_the_sweep_before_any_read() {
         got.stop
     );
     assert_eq!(car.sent, ["7E0 10 03"]);
+    // A plain refusal is a definite answer: nothing is left to arrive.
+    assert!(!got.out_of_step);
 }
 
 #[test]
@@ -658,6 +660,26 @@ fn a_sweep_whose_leave_was_retried_is_out_of_step() {
 }
 
 #[test]
+fn a_sweep_whose_leave_went_unanswered_is_out_of_step() {
+    let mut car = Car::new(|_, request| match request {
+        [0x10, 0x03] => reply(&[0x50, 0x03, 0x00, 0x32, 0x01, 0xF4]),
+        [0x22, 0x06, 0x00] => reply(&[0x62, 0x06, 0x00, 0x12]),
+        _ => Vec::new(),
+    });
+    let got = sweep_dids(
+        &mut car,
+        &Policy::read_only(),
+        &engine(),
+        0x0600..=0x0600,
+        TIMING,
+        &extended(),
+    )
+    .unwrap();
+    assert_eq!(got.still_extended, Some(ReadError::NoReply));
+    assert!(got.out_of_step);
+}
+
+#[test]
 fn an_unconfirmed_entry_and_leave_say_the_module_may_still_be_extended() {
     let mut car = Car::new(|_, request| match request {
         [0x10, 0x03] => reply(&[0x7F, 0x10, 0x22, 0x00]),
@@ -685,6 +707,7 @@ fn an_unconfirmed_entry_and_leave_say_the_module_may_still_be_extended() {
         "{:?}",
         got.still_extended
     );
+    assert!(got.out_of_step);
 }
 
 #[test]

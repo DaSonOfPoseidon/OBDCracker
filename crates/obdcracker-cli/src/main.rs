@@ -713,13 +713,11 @@ fn print_sweep(module: &UdsModule, found: &sweep::Sweep, last: u16) -> ExitCode 
             module.name
         );
     }
+    if found.out_of_step {
+        eprintln!("{}", unanswered_note("some requests", &module.name));
+    }
     match &found.stop {
-        None => {
-            if found.out_of_step {
-                eprintln!("{}", unanswered_note("some requests", &module.name));
-            }
-            ExitCode::SUCCESS
-        }
+        None => ExitCode::SUCCESS,
         Some(stop) => {
             eprintln!("stopped at {:04X}: {}", stop.at, stop.why);
             // A module that refused `22` or the session refuses it again; the rest may pass.

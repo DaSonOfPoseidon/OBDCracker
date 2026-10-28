@@ -41,9 +41,9 @@ pub struct Sweep {
     /// With [`SweepOptions::extended`]: why the module may still be in the extended session
     /// afterwards, as it refused `10 01` or didn't answer it.
     pub still_extended: Option<ReadError>,
-    /// Whether a read went without a final answer, or `10 01` had to be sent twice
-    /// ([`crate::Left::out_of_step`]), so an answer may still arrive and be taken for a later
-    /// request's. Connect again before reading from this module again.
+    /// Whether a read, or with [`SweepOptions::extended`] a session request, went without a
+    /// definite answer ([`crate::Left::out_of_step`]), so an answer may still arrive and be taken
+    /// for a later request's. Connect again before reading from this module again.
     pub out_of_step: bool,
 }
 
@@ -219,6 +219,9 @@ fn sweep_approved<T: Transport + ?Sized>(
             Ok(session) => session,
             // `still_extended` reports why a session that may have been entered wasn't left.
             Err(e) => {
+                // Only a plain refusal is a definite answer; after anything else, the late
+                // answer to `10 03` or `10 01` may still arrive.
+                let out_of_step = !matches!(&e, SessionError::Refused(reply) if crate::session::plainly_refused(reply));
                 let (entry, still_extended) = match e {
                     SessionError::Unconfirmed { entry, leave } => {
                         (*entry, session_error(*leave).ok())
@@ -232,15 +235,16 @@ fn sweep_approved<T: Transport + ?Sized>(
                         at: first,
                         why: stopped(session_error(entry)),
                     }),
-                    // A session request's late answer isn't a read's.
-                    out_of_step: false,
+                    out_of_step,
                 };
             }
         };
         let sweep = read_each(&mut session, requests, &mut progress);
         return match session.end().map_err(session_error) {
+            // A refusal may be the retry's, after the first `10 01` went unanswered: `end` doesn't say.
             Err(Ok(e)) => Sweep {
                 still_extended: Some(e),
+                out_of_step: true,
                 ..sweep
             },
             Err(Err(FingerprintError::Transport(e))) => with_adapter_failure(sweep, e, last),

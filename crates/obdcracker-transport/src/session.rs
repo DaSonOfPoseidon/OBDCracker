@@ -342,7 +342,7 @@ impl<'a, T: Transport + ?Sized> ExtendedSession<'a, T> {
 }
 
 // A well-formed refusal (`7F 10 <NRC>`): the module stayed in the session it was in.
-fn plainly_refused(reply: &[u8]) -> bool {
+pub(crate) fn plainly_refused(reply: &[u8]) -> bool {
     matches!(
         response::positive(uds::DIAGNOSTIC_SESSION_CONTROL, reply),
         Err(response::Error::Negative(_))

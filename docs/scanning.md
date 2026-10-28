@@ -119,8 +119,8 @@ A module that doesn't confirm `10 01` at the end is left to return after S3.
   when the adapter fails, or when the extended session's keepalive or re-entry fails.
 - UDS refusals don't name the DID. After an unanswered read, a later refusal or undecodable reply may be the late
   answer to it, even past answers that were plainly this connection's own, so the sweep stops (`Why::Unmatched`) with
-  `Stop::at` on that DID. `Sweep::out_of_step` says a read went unanswered or `10 01` had to be retried, so connect
-  again before reading from the module again.
+  `Stop::at` on that DID. `Sweep::out_of_step` says a read or a session request went without a definite answer, so
+  connect again before reading from the module again.
 - A refusal of `22` itself (service not supported, in this session or at all, bad format, or busy) stops the sweep:
   every later read would get the same, and asking the next DID at once would only keep a busy module busy.
 - A general reject (NRC 0x10) gives no reason, so it may be every DID's answer: that DID is listed and the sweep stops
