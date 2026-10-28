@@ -142,6 +142,13 @@ mod setup {
         elm.send(&approve(Target::Physical(0x714), &[0x22, 0xF1, 0x87]))
             .unwrap();
         while elm.recv(Duration::from_secs(1)).is_ok() {}
+        // A multi-frame request: only an STN sends it, as `STPX`, and the plain adapter refuses.
+        let long = approve(
+            Target::Physical(0x7E0),
+            &[0x22, 0xF1, 0x87, 0xF1, 0x88, 0xF1, 0x89, 0xF1, 0x91],
+        );
+        let _ = elm.send(&long);
+        while elm.recv(Duration::from_secs(1)).is_ok() {}
         elm.patient(Some(Duration::from_secs(5))).unwrap();
         elm.patient(None).unwrap();
         commands(&elm)
@@ -182,6 +189,7 @@ mod setup {
             "ATCRA18DAF110",
             "ATCRA17FE0076",
             "ATCRA17FE00XX",
+            "STPTO5000",
         ] {
             assert!(
                 commands.iter().any(|c| c == expected),
@@ -190,7 +198,15 @@ mod setup {
         }
         // `ATCAF0`/`ATCAF1` are written guarded, their echo checked before the carriage return
         // (`a_misheard_caf0_never_reaches_the_bus`), so a flip in them never gets that far.
-        for command in commands.iter().filter(|c| !c.starts_with("ATCAF")) {
+        // `STPX` lines are written the same way (`stpx::no_single_bit_error_in_the_stpx_line_sends_a_different_request`).
+        assert!(
+            commands.iter().any(|c| c.starts_with("STPXD:")),
+            "{commands:?}"
+        );
+        for command in commands
+            .iter()
+            .filter(|c| !c.starts_with("ATCAF") && !c.starts_with("STPX"))
+        {
             let line = format!("{command}\r");
             for index in 0..line.len() {
                 for bit in 0..8 {
@@ -1233,6 +1249,178 @@ mod requests {
         let reply = elm.recv(Duration::from_secs(1)).unwrap();
         assert_eq!((reply.source, reply.payload.as_slice()), (0x7E8, VIN));
         assert_eq!(elm.recv(Duration::from_secs(1)), Err(Error::Timeout));
+    }
+}
+
+mod stpx {
+    use super::*;
+
+    const FOUR_DIDS: [u8; 9] = [0x22, 0xF1, 0x87, 0xF1, 0x88, 0xF1, 0x89, 0xF1, 0x91];
+    const LINE: &[u8] = b"STPX d:22F187F188F189F191";
+
+    // An STN whose engine ECU answers the four-DID read with a multi-frame reply.
+    fn stn() -> FakeElm {
+        let mut adapter = FakeElm::new(Box::new(|header, request| {
+            if header == 0x7E0 && request == FOUR_DIDS {
+                let mut reply = vec![0x62, 0xF1, 0x87];
+                reply.extend((0..20).map(|n| 0x30 + n));
+                vec![(0x7E8, reply)]
+            } else {
+                Vec::new()
+            }
+        }));
+        adapter.sti = Some("STN2232 v5.12.4".into());
+        adapter
+    }
+
+    // Connected to `adapter` and past a first request, so the driver has seen it echo each
+    // character as it arrives.
+    fn warmed(adapter: FakeElm) -> Elm<FakeLink> {
+        let mut elm = connect(adapter);
+        elm.send(&approve(Target::Physical(0x7E0), &[0x09, 0x02]))
+            .unwrap();
+        while elm.recv(Duration::from_secs(1)).is_ok() {}
+        elm
+    }
+
+    fn four_dids() -> Approved {
+        approve(Target::Physical(0x7E0), &FOUR_DIDS)
+    }
+
+    // A `22` read of `dids` distinct DIDs: 1 + 2 * dids bytes.
+    fn long_request(dids: u8) -> Approved {
+        let mut payload = vec![0x22];
+        for did in 0..dids {
+            payload.extend([0xF1, 0x80 + did]);
+        }
+        approve(Target::Physical(0x7E0), &payload)
+    }
+
+    #[test]
+    fn an_stn_sends_a_request_of_several_frames_and_reads_the_answer() {
+        let mut elm = warmed(stn());
+        elm.send(&four_dids()).unwrap();
+        let reply = elm.recv(Duration::from_secs(1)).unwrap();
+        assert_eq!(reply.source, 0x7E8);
+        assert_eq!(reply.payload.len(), 23);
+        while elm.recv(Duration::from_secs(1)).is_ok() {}
+        assert_eq!(elm.link().elm.sent.len(), 2);
+        assert_eq!(elm.link().elm.sent[1], (0x7E0, FOUR_DIDS.to_vec()));
+    }
+
+    #[test]
+    fn the_carriage_return_waits_for_the_echo_of_the_stpx_line() {
+        let mut elm = warmed(stn());
+        elm.link_mut().writes.clear();
+        elm.send(&four_dids()).unwrap();
+        assert_eq!(elm.link().writes, [LINE.to_vec(), b"\r".to_vec()]);
+    }
+
+    #[test]
+    fn a_plain_elm327_refuses_a_long_request_and_writes_nothing() {
+        let mut elm = warmed(car());
+        let written = elm.link().written.len();
+        let err = elm.send(&four_dids()).unwrap_err();
+        assert!(err.to_string().contains("STN"), "{err}");
+        assert_eq!(elm.link().written.len(), written);
+        assert_eq!(elm.link().elm.sent.len(), 1);
+    }
+
+    #[test]
+    fn an_stn_that_has_not_shown_it_echoes_as_it_reads_refuses_and_writes_nothing() {
+        // Before any request, and after one an adapter echoed only as whole lines.
+        let mut fresh = connect(stn());
+        let written = fresh.link().written.len();
+        assert!(fresh.send(&four_dids()).is_err());
+        assert_eq!(fresh.link().written.len(), written);
+
+        let mut late = stn();
+        late.echo_at_line_end = true;
+        let mut elm = warmed(late);
+        let written = elm.link().written.len();
+        assert!(elm.send(&four_dids()).is_err());
+        assert_eq!(elm.link().written.len(), written);
+        assert_eq!(elm.link().elm.sent.len(), 1);
+    }
+
+    #[test]
+    fn no_single_bit_error_in_the_stpx_line_sends_a_different_request() {
+        // The line is written without its carriage return and its echo checked first, so a bit
+        // flipped on the way in is caught before the adapter acts on it. A flip that only changes
+        // a letter's case is the same command and sends the same request.
+        let mut same = 0;
+        for index in 0..LINE.len() {
+            for bit in 0..8 {
+                let mut elm = warmed(stn());
+                elm.link_mut().corrupt_write_of = Some((LINE.to_vec(), index, 1 << bit));
+                let result = elm.send(&four_dids());
+                let sent = &elm.link().elm.sent[1..];
+                if result.is_ok() {
+                    same += 1;
+                    assert_eq!(
+                        sent,
+                        [(0x7E0, FOUR_DIDS.to_vec())],
+                        "byte {index} bit {bit}"
+                    );
+                } else {
+                    assert_eq!(sent, [], "byte {index} bit {bit}");
+                    let written = elm.link().written.len();
+                    assert!(elm.send(&four_dids()).is_err());
+                    assert_eq!(elm.link().written.len(), written);
+                }
+            }
+        }
+        // Only the flips of bit 5 of a letter (its case), so the check isn't passing vacuously.
+        assert!(same > 0 && same < 30, "{same}");
+    }
+
+    #[test]
+    fn a_misheard_stpx_line_is_killed_and_the_driver_stops() {
+        let mut elm = warmed(stn());
+        elm.link_mut().corrupt_write_of = Some((LINE.to_vec(), 9, 0x01));
+        let err = elm.send(&four_dids()).unwrap_err();
+        assert!(err.to_string().contains("echoed"), "{err}");
+        assert_eq!(elm.link().elm.sent.len(), 1);
+        assert!(commands(&elm).last().unwrap().ends_with("XX"));
+    }
+
+    #[test]
+    fn the_longest_request_is_sent_and_one_byte_more_is_refused() {
+        // The echoed line has to fit the line splitter: `STPX d:` and up to 44 bytes of digits,
+        // which a `22` read reaches at 43 (21 DIDs); 22 DIDs are 45 bytes.
+        let mut elm = warmed(stn());
+        elm.send(&long_request(21)).unwrap();
+        while elm.recv(Duration::from_secs(1)).is_ok() {}
+        assert_eq!(elm.link().elm.sent.len(), 2);
+        assert_eq!(elm.link().elm.sent[1].1.len(), 43);
+        let written = elm.link().written.len();
+        let err = elm.send(&long_request(22)).unwrap_err();
+        assert!(matches!(err, Error::Adapter(_)), "{err}");
+        assert_eq!(elm.link().written.len(), written);
+    }
+
+    #[test]
+    fn an_audited_stn_logs_the_whole_request_before_sending_it() {
+        let log = std::env::temp_dir().join(format!(
+            "obdcracker-transport-{}-stpx.jsonl",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&log);
+        let mut elm = Audited::open(&log, warmed(stn()), "fake").unwrap();
+        elm.send(&four_dids()).unwrap();
+        while elm.recv(Duration::from_secs(1)).is_ok() {}
+        let audit = std::fs::read_to_string(&log).unwrap();
+        let _ = std::fs::remove_file(&log);
+        let lines: Vec<serde_json::Value> = audit
+            .lines()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect();
+        let tx = lines.iter().position(|v| v["dir"] == "tx").unwrap();
+        assert_eq!(
+            lines[tx]["payload"], "22 F1 87 F1 88 F1 89 F1 91",
+            "{audit}"
+        );
+        assert!(!audit.contains("STPX"), "{audit}");
     }
 }
 

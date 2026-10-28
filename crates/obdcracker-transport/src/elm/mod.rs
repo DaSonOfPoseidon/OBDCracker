@@ -85,6 +85,9 @@ const LONGEST_REQUEST: Duration = STN_LONGEST_TIMEOUT
 const SILENCE_MARGIN: Duration = Duration::from_secs(6);
 // The longest any single receive waits, so a huge timeout can't overflow the clock.
 const LONGEST_WAIT: Duration = Duration::from_secs(3600);
+// The most bytes of a multi-frame request: its `STPX d:` line is echoed back as one line, which
+// the line splitter caps at `MAX_LINE`. Far below the STN's own limit, 2 KB (docs/elm327.md).
+const STPX_MAX: usize = (codec::MAX_LINE - "STPX d:".len()) / 2;
 // How long a request's digits may take to echo before its carriage return (#54).
 const ECHO_WAIT: Duration = Duration::from_secs(1);
 // Ends a misheard line so the adapter refuses it: no single flipped bit of this leaves a line of
@@ -110,8 +113,11 @@ const STN_UNPACED_RATE: u32 = 115_200 / 10;
 /// (`OBDLink` adapters, which call themselves v1.4b). Older chips refuse it, and
 /// [`Elm::connect`] fails.
 ///
-/// Requests must fit one CAN frame (up to 7 bytes) and are refused otherwise, before anything is
-/// written. Multi-frame replies are reassembled per module, for up to 16 modules per request.
+/// A request must fit one CAN frame (up to 7 bytes), or on an STN chip that echoes each character
+/// as it reads it (such as an `OBDLink`), up to 44 bytes as an `STPX` command, which segments it
+/// ([`docs/elm327.md#multi-frame-requests`](https://github.com/DaSonOfPoseidon/OBDCracker/blob/main/docs/elm327.md#multi-frame-requests)).
+/// Anything else is refused before anything is written. Multi-frame replies are reassembled per
+/// module, for up to 16 modules per request.
 /// Replies still arriving at the next request are dropped and reported as [`LinkEvent`]s,
 /// along with every command sent ([`Transport::take_events`]).
 ///
@@ -1043,14 +1049,30 @@ impl<L: Link> Transport for Elm<L> {
         let payload = request.payload();
         // A TP2.0 channel frame goes out as it is, with CAN auto formatting off.
         let raw = request.protocol() == Protocol::Tp20Channel;
-        let longest = if raw {
-            8
-        } else {
-            Addressing::Normal.max_single_frame()
-        };
-        if payload.is_empty() || payload.len() > longest {
+        let single = Addressing::Normal.max_single_frame();
+        // Longer requests go out as `STPX` on an STN that has shown it echoes each character as
+        // it reads it (docs/elm327.md#multi-frame-requests).
+        let stpx = !raw && payload.len() > single;
+        if payload.is_empty() || (raw && payload.len() > 8) || (!raw && payload.len() > STPX_MAX) {
             return Err(Error::Adapter(format!(
-                "a {}-byte request doesn't fit one CAN frame; this adapter driver only sends single frames",
+                "a {}-byte request doesn't fit this driver's limit ({} bytes on an STN, {single} \
+                 on other adapters)",
+                payload.len(),
+                STPX_MAX,
+            )));
+        }
+        if stpx && self.stn.is_none() {
+            return Err(Error::Adapter(format!(
+                "a {}-byte request doesn't fit one CAN frame, and only an STN adapter sends \
+                 multi-frame requests",
+                payload.len()
+            )));
+        }
+        if stpx && self.early_echo != Some(true) {
+            return Err(Error::Adapter(format!(
+                "a {}-byte request needs an adapter that echoes each character as it reads it \
+                 (such as an OBDLink), and this one hasn't shown it does; send a single-frame \
+                 request first",
                 payload.len()
             )));
         }
@@ -1070,7 +1092,12 @@ impl<L: Link> Transport for Elm<L> {
         self.set_target(request)?;
         // A setting command's prompt may have been followed by a reset.
         self.check_idle()?;
-        let line = hex(payload).replace(' ', "");
+        let digits = hex(payload).replace(' ', "");
+        let line = if stpx {
+            format!("STPX d:{digits}")
+        } else {
+            digits
+        };
         if self.early_echo == Some(false) {
             self.write(format!("{line}\r").as_bytes())?;
         } else {
