@@ -397,6 +397,7 @@ pub(crate) fn session_error(e: SessionError) -> Result<ReadError, ScanError> {
         SessionError::Transport(e) => Err(FingerprintError::Transport(e)),
         // As far as the values go the session wasn't entered; the module leaves by itself after S3.
         SessionError::Unconfirmed { entry, .. } => session_error(*entry),
+        SessionError::Retried(retry) => session_error(*retry),
         // A refusal of `10 03` or `3E 00`, or a positive answer with unusable timing.
         SessionError::Refused(reply) => {
             let sid = match *reply.as_slice() {
@@ -610,6 +611,8 @@ fn scan_module<T: Transport + ?Sized>(
                         dids.extend(values);
                         batch_answered |= answered;
                         // A module that doesn't confirm `10 01` leaves the session after S3.
+                        // A retried one may leave its answer queued, but a scan sends no more
+                        // `10` requests to the module, and reads don't take a `50`/`7F 10`.
                         if let Err(e) = session.end() {
                             session_error(e)?;
                         }

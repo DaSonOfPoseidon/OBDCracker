@@ -125,7 +125,11 @@ Each entry names the class, what to check, and where it bit us.
   stay so for the rest of the connection, even past answers that plainly match: stop at the next one that can't be
   matched, and resume on a fresh connection from there. A run that *ends* out of step must say so too
   (`Sweep::out_of_step`, #82), or the caller's next read on the same connection can take the late refusal as its
-  answer.
+  answer. That includes a retried cleanup request: `ExtendedSession::end` reported a clean leave when its `10 01`
+  retry took the first try's late `50 01`, leaving the retry's own answer queued (#121, Codex). Anything short of a
+  definite answer after a timeout leaves the connection out of step, a failed retry included (#121, gate), but a
+  definite answer to the first try leaves it in step, so the result must say which (`SessionError::Retried`), and
+  a note about it must show whether or not the run stopped.
 - **A reply can't change what the request already fixed.** A TP2.0 channel setup asks to be answered on 0x300, but
   `decode_channel_setup` took any valid receive ID, so a reply giving 0x301 read as an open channel the policy then
   wouldn't close (#153). When the request names a value the reply repeats, check it equals the request's, not just

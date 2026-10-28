@@ -62,6 +62,10 @@ pub enum SessionError {
         /// Why leaving wasn't.
         leave: Box<SessionError>,
     },
+    /// [`ExtendedSession::end`]'s first `10 01` got no definite answer, and the retry failed
+    /// with this. As with [`Left::out_of_step`], a late answer may still arrive: connect again
+    /// before sending this module another `10` request.
+    Retried(Box<SessionError>),
 }
 
 impl fmt::Display for SessionError {
@@ -80,6 +84,10 @@ impl fmt::Display for SessionError {
             Self::Unconfirmed { entry, leave } => {
                 write!(f, "{entry}; leaving the session then failed too: {leave}")
             }
+            Self::Retried(retry) => write!(
+                f,
+                "`10 01` got no definite answer, then the retry failed: {retry}"
+            ),
         }
     }
 }
@@ -90,6 +98,17 @@ impl From<Error> for SessionError {
     fn from(e: Error) -> Self {
         Self::Transport(e)
     }
+}
+
+/// How [`ExtendedSession::end`] returned the module to the default session.
+#[must_use]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Left {
+    /// Whether `10 01` went unanswered and the retry got the answer. The first try's late answer
+    /// may have been taken for the retry's, and the retry's own may still arrive. A refusal of
+    /// a later `10` request to this module doesn't echo the subfunction, so it can't be told
+    /// apart from that leftover: connect again before sending one.
+    pub out_of_step: bool,
 }
 
 /// Holds one module in the extended diagnostic session (`10 03`) and returns it to the default
@@ -263,20 +282,20 @@ impl<'a, T: Transport + ?Sized> ExtendedSession<'a, T> {
     }
 
     /// Returns the module to the default session. Dropping the session does the same (one try),
-    /// but can't report a failure.
+    /// but can't report a failure. Unless the module accepted or plainly refused `10 01`, it's
+    /// tried once more, and [`Left::out_of_step`] says whether that retry is what succeeded.
     ///
     /// # Errors
     ///
-    /// The module refuses `10 01` or doesn't answer, or the adapter fails. Unless the module
-    /// accepted or plainly refused it, `10 01` is tried once more first. An adapter failure on
-    /// the first try is returned however the retry goes, as the adapter's state is unknown;
-    /// otherwise the retry's result is.
-    pub fn end(mut self) -> Result<(), SessionError> {
+    /// The module refuses `10 01` or doesn't answer, or the adapter fails. An adapter failure on
+    /// either try is returned as it is, as the adapter's state is unknown. Any other failure of
+    /// the retry is [`SessionError::Retried`].
+    pub fn end(mut self) -> Result<Left, SessionError> {
         // Drop must not send a second `10 01` unobserved.
         self.ended = true;
         let first = self.request(&self.leave.clone());
         match first {
-            Ok(()) => Ok(()),
+            Ok(()) => Ok(Left { out_of_step: false }),
             Err(SessionError::Refused(reply)) if plainly_refused(&reply) => {
                 Err(SessionError::Refused(reply))
             }
@@ -285,7 +304,11 @@ impl<'a, T: Transport + ?Sized> ExtendedSession<'a, T> {
                 let _ = self.request(&self.leave.clone());
                 Err(first)
             }
-            Err(_) => self.request(&self.leave.clone()),
+            Err(_) => match self.request(&self.leave.clone()) {
+                Ok(()) => Ok(Left { out_of_step: true }),
+                Err(e @ SessionError::Transport(Error::Adapter(_))) => Err(e),
+                Err(e) => Err(SessionError::Retried(Box::new(e))),
+            },
         }
     }
 
@@ -328,7 +351,7 @@ impl<'a, T: Transport + ?Sized> ExtendedSession<'a, T> {
 }
 
 // A well-formed refusal (`7F 10 <NRC>`): the module stayed in the session it was in.
-fn plainly_refused(reply: &[u8]) -> bool {
+pub(crate) fn plainly_refused(reply: &[u8]) -> bool {
     matches!(
         response::positive(uds::DIAGNOSTIC_SESSION_CONTROL, reply),
         Err(response::Error::Negative(_))

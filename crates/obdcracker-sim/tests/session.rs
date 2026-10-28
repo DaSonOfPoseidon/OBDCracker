@@ -201,7 +201,7 @@ fn ending_the_guard_returns_to_the_default_session_once() {
         GUARD,
     )
     .unwrap();
-    guard.end().unwrap();
+    assert!(!guard.end().unwrap().out_of_step);
     assert_eq!(session(&bus), Session::Default);
     assert_eq!(sent(&bus), [vec![0x10, 0x03], vec![0x10, 0x01]]);
 }
