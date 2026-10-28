@@ -2,7 +2,7 @@
 //!
 //! A [`SimBus`] is a [`Transport`] whose modules come from a vehicle profile (where each module
 //! sits) and a fixture file (what each module answers). Requests reach it the same way they reach
-//! a real adapter: only as [`Approved`] requests. See docs/fixtures.md for the fixture format.
+//! a real adapter: only as [`Approved`] requests. See [`docs/fixtures.md`](https://github.com/DaSonOfPoseidon/OBDCracker/blob/main/docs/fixtures.md) for the fixture format.
 //!
 //! ```
 //! use std::time::Duration;

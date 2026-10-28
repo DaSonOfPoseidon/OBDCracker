@@ -34,7 +34,7 @@ pub const SCAN_DIDS: [u16; 14] = [
 ];
 
 /// The DTC status bits scan asks for (ISO 14229-1 D.2), without the "not tested" bits.
-/// See docs/scanning.md#dtcs.
+/// See [`docs/scanning.md#dtcs`](https://github.com/DaSonOfPoseidon/OBDCracker/blob/main/docs/scanning.md#dtcs).
 pub const FAULT_MASK: u8 = 0xAF;
 
 /// Why a scan couldn't be taken at all.
@@ -60,7 +60,7 @@ pub struct ExtraDid {
     /// How to show its value.
     pub format: DidFormat,
     /// Its value's length in bytes, if the module always sends this many. DIDs with a length
-    /// are read up to three to a request (docs/scanning.md#did-batching).
+    /// are read up to three to a request ([`docs/scanning.md#did-batching`](https://github.com/DaSonOfPoseidon/OBDCracker/blob/main/docs/scanning.md#did-batching)).
     pub length: Option<u16>,
     /// The diagnostic session the module reads it in. One that needs the extended session is
     /// read only when [`ScanOptions::extended`] asks for it.
@@ -150,7 +150,7 @@ pub struct ModuleScan {
     /// The CAN ID it answers on.
     pub response_id: u32,
     /// Each of [`SCAN_DIDS`], then each of [`ScanModule::extra_dids`], and its value. Batching
-    /// and re-reads: docs/scanning.md#did-batching.
+    /// and re-reads: [`docs/scanning.md#did-batching`](https://github.com/DaSonOfPoseidon/OBDCracker/blob/main/docs/scanning.md#did-batching).
     pub dids: Vec<(u16, Result<DidValue, ReadError>)>,
     /// How it encodes DTCs, and how many have a [`FAULT_MASK`] bit set (`ReadDTCInformation`
     /// 0x01).
@@ -159,7 +159,7 @@ pub struct ModuleScan {
     /// Only bits the module says it supports count.
     pub dtcs: Result<Vec<DtcRecord>, ReadError>,
     /// Whether the module answered anything at all, a refusal included. It can be true when
-    /// every value above is [`ReadError::NoReply`] (docs/scanning.md#did-batching).
+    /// every value above is [`ReadError::NoReply`] ([`docs/scanning.md#did-batching`](https://github.com/DaSonOfPoseidon/OBDCracker/blob/main/docs/scanning.md#did-batching)).
     pub answered: bool,
 }
 
@@ -185,7 +185,7 @@ pub fn scan<T: Transport + ?Sized>(
 /// in it (`10 03`) after its other reads and returned to the default session (`10 01`). Those
 /// requests are approved before anything is sent too, and the policy must know each such
 /// module's reply ID, or [`FingerprintError::Session`] is returned. A module that refuses the
-/// session or doesn't answer loses only those DIDs. See docs/scanning.md#when-a-session-fails.
+/// session or doesn't answer loses only those DIDs. See [`docs/scanning.md#when-a-session-fails`](https://github.com/DaSonOfPoseidon/OBDCracker/blob/main/docs/scanning.md#when-a-session-fails).
 pub fn scan_with<T: Transport + ?Sized>(
     transport: &mut T,
     policy: &Policy,
@@ -680,7 +680,7 @@ fn read_dids(
             }
         }
         // Then the DIDs it left out. A late multi-DID reply could pass for the first DID's, so
-        // each must be exactly its length (docs/scanning.md#did-batching).
+        // each must be exactly its length ([`docs/scanning.md#did-batching`](https://github.com/DaSonOfPoseidon/OBDCracker/blob/main/docs/scanning.md#did-batching)).
         for &i in batch {
             if values[i].is_none() {
                 let (

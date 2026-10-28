@@ -1,5 +1,5 @@
 //! VW TP2.0, the transport VAG's older modules use for KWP2000 on CAN: channel setup, data
-//! frames with ACKs, keep-alive and disconnect. See docs/tp20.md#frames.
+//! frames with ACKs, keep-alive and disconnect. See [`docs/tp20.md#frames`](https://github.com/DaSonOfPoseidon/OBDCracker/blob/main/docs/tp20.md#frames).
 //!
 //! There is no public standard, and only the channel setup and disconnect are confirmed on the
 //! A7 (#124), so every reply is checked exactly.

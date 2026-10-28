@@ -1,5 +1,5 @@
 //! The fixture file format: what each simulated module answers. Addresses come from the profile.
-//! See docs/fixtures.md.
+//! See [`docs/fixtures.md`](https://github.com/DaSonOfPoseidon/OBDCracker/blob/main/docs/fixtures.md).
 
 use std::collections::{BTreeMap, HashSet};
 

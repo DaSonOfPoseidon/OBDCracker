@@ -1,6 +1,6 @@
 //! Positive and negative responses. OBD-II on CAN (ISO 15765-4) and UDS (ISO 14229-1) share the
 //! format: a positive reply starts with the request's service ID + 0x40, a negative one is
-//! `7F <service ID> <code>`. Reply matching: docs/protocols.md#matching-replies-to-requests.
+//! `7F <service ID> <code>`. Reply matching: [`docs/protocols.md#matching-replies-to-requests`](https://github.com/DaSonOfPoseidon/OBDCracker/blob/main/docs/protocols.md#matching-replies-to-requests).
 
 use core::fmt;
 
@@ -175,7 +175,7 @@ pub(crate) fn printable(bytes: &[u8]) -> Result<&str, Error> {
 /// A positive reply must have the request's service ID + 0x40 and echo what the request asked
 /// for, and a request with the suppress-positive-response bit set is answered only after
 /// response-pending (see [`answers_after_pending`]). Any `7F <service> <code>` for the request's
-/// service answers it. See docs/protocols.md#matching-replies-to-requests.
+/// service answers it. See [`docs/protocols.md#matching-replies-to-requests`](https://github.com/DaSonOfPoseidon/OBDCracker/blob/main/docs/protocols.md#matching-replies-to-requests).
 #[must_use]
 pub fn answers(request: &[u8], reply: &[u8]) -> bool {
     matches(request, reply, false)
@@ -192,7 +192,7 @@ pub fn answers_after_pending(request: &[u8], reply: &[u8]) -> bool {
 }
 
 /// Whether `reply` answers the KWP2000 (ISO 14230-3) `request`. [`answers`] reads UDS, which
-/// differs here: see docs/protocols.md#matching-replies-to-requests. A decoder must still check
+/// differs here: see [`docs/protocols.md#matching-replies-to-requests`](https://github.com/DaSonOfPoseidon/OBDCracker/blob/main/docs/protocols.md#matching-replies-to-requests). A decoder must still check
 /// what it reads.
 #[must_use]
 pub fn kwp2000_answers(request: &[u8], reply: &[u8]) -> bool {

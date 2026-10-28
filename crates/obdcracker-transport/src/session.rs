@@ -9,7 +9,7 @@ use crate::{Error, Expect, Response, Timing, Transport, exchange};
 
 /// How long a module keeps a non-default session without a request, and how often to remind it.
 ///
-/// Any values are safe, they only change what's sent. See docs/scanning.md#extended-session-and-testerpresent.
+/// Any values are safe, they only change what's sent. See [`docs/scanning.md#extended-session-and-testerpresent`](https://github.com/DaSonOfPoseidon/OBDCracker/blob/main/docs/scanning.md#extended-session-and-testerpresent).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct S3 {
     /// How long after the last request the module accepted to send `TesterPresent`: 2 s by
@@ -120,7 +120,7 @@ pub struct Left {
 /// it again first. Every request, keepalives included, goes through the policy and the
 /// transport, so an [`crate::Audited`] transport logs them all.
 ///
-/// See docs/scanning.md#extended-session-and-testerpresent.
+/// See [`docs/scanning.md#extended-session-and-testerpresent`](https://github.com/DaSonOfPoseidon/OBDCracker/blob/main/docs/scanning.md#extended-session-and-testerpresent).
 ///
 /// ```
 /// use std::time::Duration;
