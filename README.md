@@ -41,11 +41,13 @@ irm https://raw.githubusercontent.com/DaSonOfPoseidon/OBDCracker/main/scripts/in
 Then, with the adapter plugged into the car and the ignition on:
 
 ```sh
-obdcracker ports                              # find the adapter's port
-obdcracker --serial <PORT> adapter            # check the adapter; sends nothing to the car
-obdcracker --serial <PORT> fingerprint
-obdcracker --serial <PORT> --profile a7 scan
+obdcracker adapter                            # check the adapter; sends nothing to the car
+obdcracker fingerprint
+obdcracker --profile a7 scan
 ```
+
+With exactly one USB adapter plugged in the port is found for you; with none or several, give `--serial <PORT>`
+(`obdcracker ports` lists them).
 
 See [Install](docs/install.md) for notes for each OS, and [Using the CLI](docs/usage.md) for every command.
 
