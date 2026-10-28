@@ -8,11 +8,21 @@ recording what it sent the adapter and heard back.
 ## Connecting
 
 ```sh
+obdcracker adapter                                 # the one USB adapter plugged in is found for you
 obdcracker ports                                   # list serial ports
 obdcracker --serial /dev/ttyUSB0 adapter           # what the adapter is, and the battery voltage; sends nothing on the bus
 obdcracker --serial /dev/ttyUSB0 vin               # 115200 baud by default; --baud 38400 for many clones
 obdcracker --tcp 192.168.0.10:35000 vin            # a Wi-Fi adapter
 ```
+
+`--serial` is optional when exactly one USB adapter is plugged in: the CLI says `using the adapter on <port>` and
+carries on as if you had given it, `--baud` included. With none it stops and says so, and with several it lists them
+and asks you to pick one with `--serial`; both exit with status 2 and write no audit log. Only ports that look like
+USB adapters count (Linux `ttyUSB*` and `ttyACM*`; macOS `cu.usbserial*`, `cu.usbmodem*`, `cu.SLAB_USBtoUART*`
+and `cu.wchusbserial*`), so built-in and Bluetooth ports are never picked. Windows can't tell USB from built-in
+ports, so a lone built-in COM port would be picked and the connection would fail there as "not an ELM"; give
+`--serial` on a PC with one. `--serial`, `--tcp`, `--sim` and `--dry-run` skip the search, and `ports` still lists
+every port.
 
 On macOS use the `/dev/cu.*` port. Leaving a wireless adapter plugged in drains the battery and lets anyone in range
 connect, so the CLI warns about it, and the audit log records which link a session used. See

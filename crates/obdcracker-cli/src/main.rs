@@ -1,6 +1,6 @@
 //! The `obdcracker` command-line tool.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::Duration;
 
@@ -17,7 +17,7 @@ use obdcracker_transport::dtc::{self, RecordData};
 use obdcracker_transport::elm::Elm;
 use obdcracker_transport::fingerprint::{self, DidValue, Fingerprint, ReadError, UdsModule};
 use obdcracker_transport::gateway::{self, Compared, GatewayTables, ListedAs, Tried};
-use obdcracker_transport::link::{Link, SerialLink, TcpLink};
+use obdcracker_transport::link::{self, FindAdapterError, Link, SerialLink, TcpLink};
 use obdcracker_transport::scan::{
     self, DidFormat, ExtraDid, PidValue, Scan, ScanModule, ScanOptions,
 };
@@ -36,13 +36,14 @@ const TCP_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
     about = "Talk to a car's diagnostic bus through an OBD2 adapter"
 )]
 struct Cli {
-    /// Use an ELM327/STN adapter on this serial port (e.g. /dev/ttyUSB0, COM3)
+    /// Use an ELM327/STN adapter on this serial port (e.g. /dev/ttyUSB0, COM3); found
+    /// automatically when only one USB adapter is plugged in
     #[arg(long, value_name = "PORT", group = "adapter")]
     serial: Option<PathBuf>,
 
     /// The serial port's baud rate [default: 115200, for `OBDLink` adapters; ELM327 clones use
     /// 38400, 9600, 230400 or 500000]
-    #[arg(long, requires = "serial", conflicts_with_all = ["tcp", "dry_run", "sim"])]
+    #[arg(long, conflicts_with_all = ["tcp", "dry_run", "sim"])]
     baud: Option<u32>,
 
     /// Use a Wi-Fi ELM327/STN adapter at this address (e.g. 192.168.0.10:35000)
@@ -166,13 +167,7 @@ fn main() -> ExitCode {
         return ports();
     }
     if let Some(port) = &cli.serial {
-        match SerialLink::open(port, cli.baud.unwrap_or(DEFAULT_BAUD)) {
-            Ok(link) => adapter(&cli, link),
-            Err(e) => {
-                eprintln!("can't open {}: {e}", port.display());
-                ExitCode::FAILURE
-            }
-        }
+        open_serial(&cli, port)
     } else if let Some(addr) = &cli.tcp {
         eprintln!(
             "warning: a Wi-Fi adapter left plugged in drains the battery, and anyone in range can \
@@ -185,7 +180,7 @@ fn main() -> ExitCode {
                 ExitCode::FAILURE
             }
         }
-    } else if let Command::Adapter = cli.command {
+    } else if (cli.sim.is_some() || cli.dry_run) && matches!(cli.command, Command::Adapter) {
         eprintln!("`adapter` needs a real adapter: use --serial <PORT> or --tcp <HOST:PORT>");
         ExitCode::from(2)
     } else if let Some(profile) = &cli.sim {
@@ -204,11 +199,56 @@ fn main() -> ExitCode {
             Timing::default(),
         )
     } else {
-        eprintln!(
-            "no adapter given; use --serial <PORT> or --tcp <HOST:PORT>, or try --dry-run or \
-             --sim <PROFILE>"
-        );
-        ExitCode::from(2)
+        match find_adapter() {
+            Ok(port) => {
+                eprintln!("using the adapter on {}", port.display());
+                open_serial(&cli, &port)
+            }
+            Err(FindAdapterError::NotFound) => {
+                eprintln!(
+                    "no adapter found; plug one in, or use --serial <PORT> or --tcp <HOST:PORT>, \
+                     or try --dry-run or --sim <PROFILE>"
+                );
+                ExitCode::from(2)
+            }
+            Err(e @ FindAdapterError::Many(_)) => {
+                eprintln!("{e}; pick one with --serial <PORT>");
+                ExitCode::from(2)
+            }
+            Err(e) => {
+                eprintln!("{e}; use --serial <PORT>");
+                ExitCode::from(2)
+            }
+        }
+    }
+}
+
+fn open_serial(cli: &Cli, port: &Path) -> ExitCode {
+    match SerialLink::open(port, cli.baud.unwrap_or(DEFAULT_BAUD)) {
+        Ok(link) => adapter(cli, link),
+        Err(e) => {
+            eprintln!("can't open {}: {e}", port.display());
+            ExitCode::FAILURE
+        }
+    }
+}
+
+// Tests set OBDCRACKER_TEST_PORTS (paths separated by `;`, empty for none) so they never reach a
+// real adapter, in debug or release builds. It only chooses among paths the user names, as
+// --serial does.
+fn find_adapter() -> Result<PathBuf, FindAdapterError> {
+    match std::env::var_os("OBDCRACKER_TEST_PORTS") {
+        Some(ports) => {
+            let ports = ports.to_string_lossy();
+            link::find_adapter_in(
+                ports
+                    .split(';')
+                    .filter(|p| !p.is_empty())
+                    .map(PathBuf::from)
+                    .collect(),
+            )
+        }
+        None => link::find_adapter(),
     }
 }
 

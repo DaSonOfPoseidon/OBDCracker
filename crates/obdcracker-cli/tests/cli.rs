@@ -12,11 +12,33 @@ use std::time::Duration;
 
 use fake_elm::FakeElm;
 
+// No serial ports are found unless a test lists some, so a test never reaches a real adapter.
 fn obdcracker(args: &[&str]) -> Output {
+    obdcracker_with_ports("", args)
+}
+
+fn obdcracker_with_ports(ports: &str, args: &[&str]) -> Output {
     Command::new(env!("CARGO_BIN_EXE_obdcracker"))
+        .env("OBDCRACKER_TEST_PORTS", ports)
         .args(args)
         .output()
         .unwrap()
+}
+
+// Port names the host OS's adapter rule keeps.
+fn usb_ports(names: &[&str]) -> Vec<String> {
+    names
+        .iter()
+        .map(|n| {
+            if cfg!(windows) {
+                format!("COM{n}")
+            } else if cfg!(target_os = "macos") {
+                format!("/dev/cu.usbserial-{n}")
+            } else {
+                format!("/dev/ttyUSB{n}")
+            }
+        })
+        .collect()
 }
 
 fn temp_log(name: &str) -> PathBuf {
@@ -130,10 +152,10 @@ fn adapter_choices_are_exclusive() {
 }
 
 #[test]
-fn baud_needs_a_serial_port() {
+fn baud_alone_looks_for_the_adapter() {
     let out = obdcracker(&["--baud", "38400", "vin"]);
-    assert!(!out.status.success());
-    assert!(String::from_utf8_lossy(&out.stderr).contains("--serial"));
+    assert_eq!(out.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("no adapter found"));
     for other in [
         &["--tcp", "127.0.0.1:1"][..],
         &["--sim", "a7"],
@@ -278,6 +300,53 @@ fn adapter_needs_a_real_adapter() {
     let out = obdcracker(&["--sim", "a7", "adapter"]);
     assert!(!out.status.success());
     assert!(String::from_utf8_lossy(&out.stderr).contains("--serial"));
+}
+
+#[test]
+fn adapter_without_a_flag_and_no_port_found_says_so() {
+    let out = obdcracker(&["adapter"]);
+    assert_eq!(out.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("no adapter found"));
+}
+
+#[test]
+fn many_adapters_found_are_listed_and_none_is_used() {
+    let log = temp_log("many");
+    let ports = usb_ports(&["98", "99"]);
+    let out = obdcracker_with_ports(
+        &ports.join(";"),
+        &["--audit-log", log.to_str().unwrap(), "vin"],
+    );
+    assert_eq!(out.status.code(), Some(2));
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("found 2 adapters"), "{stderr}");
+    for port in &ports {
+        assert!(stderr.contains(port.as_str()), "{stderr}");
+    }
+    assert!(stderr.contains("--serial"), "{stderr}");
+    assert!(!log.exists());
+}
+
+#[test]
+fn the_one_adapter_found_is_opened_as_if_given_with_serial() {
+    let log = temp_log("one");
+    let ports = usb_ports(&["98"]);
+    let out = obdcracker_with_ports(&ports[0], &["--audit-log", log.to_str().unwrap(), "vin"]);
+    assert_eq!(out.status.code(), Some(1));
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let using = format!("using the adapter on {}", ports[0]);
+    let cant_open = format!("can't open {}", ports[0]);
+    let (a, b) = (stderr.find(&using), stderr.find(&cant_open));
+    assert!(a.is_some() && b.is_some() && a < b, "{stderr}");
+    assert!(!log.exists());
+}
+
+#[test]
+#[cfg(not(windows))]
+fn a_port_that_cannot_be_an_adapter_is_not_used() {
+    let out = obdcracker_with_ports("/dev/ttyS0;/dev/cu.debug-console", &["vin"]);
+    assert_eq!(out.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("no adapter found"));
 }
 
 const FINGERPRINT_FRAMES: [&str; 12] = [
