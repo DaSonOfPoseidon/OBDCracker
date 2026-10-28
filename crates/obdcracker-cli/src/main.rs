@@ -613,7 +613,7 @@ fn run_dtc<T: Transport>(
         ),
     }
     if found.out_of_step {
-        eprintln!("{}", unanswered_note("a read", &module.name));
+        eprintln!("{}", dtc_out_of_step_note(&module.name));
     }
     if found.answered() {
         ExitCode::SUCCESS
@@ -714,7 +714,7 @@ fn print_sweep(module: &UdsModule, found: &sweep::Sweep, last: u16) -> ExitCode 
         );
     }
     if found.out_of_step {
-        eprintln!("{}", unanswered_note("some requests", &module.name));
+        eprintln!("{}", sweep_out_of_step_note(&module.name));
     }
     match &found.stop {
         None => ExitCode::SUCCESS,
@@ -1472,9 +1472,18 @@ fn print_scan(found: &Scan) {
     }
 }
 
-fn unanswered_note(reads: &str, module: &str) -> String {
+fn dtc_out_of_step_note(module: &str) -> String {
+    out_of_step_note("a read went unanswered", module)
+}
+
+// A sweep is also out of step when a `10 01` timed out and its retry was answered.
+fn sweep_out_of_step_note(module: &str) -> String {
+    out_of_step_note("a request timed out", module)
+}
+
+fn out_of_step_note(what: &str, module: &str) -> String {
     format!(
-        "note: {reads} went unanswered, so a late answer may still arrive; connect again before \
+        "note: {what}, so a late answer may still arrive; connect again before \
          reading from {module} again"
     )
 }
@@ -1490,7 +1499,10 @@ mod tests {
     use obdcracker_sim::SimBus;
     use obdcracker_transport::{Error, Response, Timing, Transport};
 
-    use super::{Cli, Discovery, resume_command, run_scan, tp20_identification, unanswered_note};
+    use super::{
+        Cli, Discovery, dtc_out_of_step_note, resume_command, run_scan, sweep_out_of_step_note,
+        tp20_identification,
+    };
 
     fn a7_with_tp20() -> SimBus {
         let mut bus = SimBus::builtin("a7").unwrap();
@@ -1725,10 +1737,19 @@ mod tests {
     }
 
     #[test]
-    fn unanswered_note_reads_as_one_sentence() {
+    fn dtc_note_reads_as_one_sentence() {
         assert_eq!(
-            unanswered_note("a read", "gateway"),
+            dtc_out_of_step_note("gateway"),
             "note: a read went unanswered, so a late answer may still arrive; connect again \
+             before reading from gateway again"
+        );
+    }
+
+    #[test]
+    fn sweep_note_says_a_request_timed_out() {
+        assert_eq!(
+            sweep_out_of_step_note("gateway"),
+            "note: a request timed out, so a late answer may still arrive; connect again \
              before reading from gateway again"
         );
     }
