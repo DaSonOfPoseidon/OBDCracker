@@ -1,13 +1,14 @@
 #!/bin/sh
 # Run before opening a PR, with the PR's milestone if it has one: `scripts/pr-gate.sh M2`. Without
-# one, it uses the milestone of the branch's open PR, if there is one.
+# one, it uses the milestone of the branch's PR, if that PR is open.
 # Fails if an issue this branch fixes (`fixes #N` in a commit subject) is blocked by an open issue
 # (GitHub's "blocked by" link) that the branch doesn't fix too; the blocker's labels don't matter,
 # and one in another repository always blocks, since a commit here can't close it.
 # Then lists, without failing, the issues not marked `status:blocked` that cite a file the branch
 # changes and are in the PR's milestone or an earlier one (any milestone if the PR has none; issues
 # with no milestone aren't sorted yet), so related fixes can go in the same PR, and the open issues
-# whose `status:blocked` label and links disagree.
+# whose `status:blocked` label and links disagree. If either list can't be fetched, it warns on stderr
+# and the blocker report still runs; only a failed blocker query fails the script outright.
 set -e
 cd "$(dirname "$0")/.."
 repo=DaSonOfPoseidon/OBDCracker
@@ -17,9 +18,10 @@ milestone=$(echo "${1:-}" | tr -d 'Mm')
 case $milestone in
 '' | *[!0-9]*) [ -n "$1" ] && { echo "usage: $0 [M<n>]" >&2; exit 2; } ;;
 esac
-# Milestones are titled "M<n> · <feature>". No PR, or a PR without one, leaves this empty.
+# Milestones are titled "M<n> · <feature>". No PR, a closed or merged PR (`gh pr view` still
+# finds the branch's old one), or a PR without one, leaves this empty.
 if [ -z "$1" ]; then
-	milestone=$(gh pr view --json milestone --jq '.milestone.title // ""' 2>/dev/null |
+	milestone=$(gh pr view --json milestone,state --jq 'select(.state == "OPEN") | .milestone.title // ""' 2>/dev/null |
 		sed -n 's/^M\([0-9][0-9]*\) · .*/\1/p') || true
 fi
 
@@ -49,7 +51,8 @@ done)
 
 # Every open issue not marked `status:blocked`, due by the PR's milestone, that cites a changed file
 # (the issues API also lists PRs, which are skipped). A cited path is matched whole, without any
-# `:line` or full stop after it, or as the end of a longer path such as a GitHub blob URL's.
+# `:line` or full stop after it, or as the path in a link to this repository's `blob/<ref>/` or
+# `tree/<ref>/` page (a one-segment ref). Any other prefix, such as another directory's, doesn't count.
 related=
 if [ -n "$changed" ]; then
 	related=$(CHANGED=$changed gh api --paginate "repos/$repo/issues?state=open&per_page=100" --jq "
@@ -63,11 +66,15 @@ if [ -n "$changed" ]; then
 		| select(\"status:blocked\" | IN(\$names[]) | not)
 		| ((.milestone.title // \"\") | capture(\"^M(?<n>[0-9]+) · \").n | tonumber) as \$due
 		| select(\$m == 0 or \$due <= \$m)
-		| ([(.body // \"\") | scan(\"[A-Za-z0-9_./-]+\") | sub(\"\\\\.+$\"; \"\") as \$word
-			| \$changed[] | select(. as \$path | \$word == \$path or (\$word | endswith(\"/\" + \$path)))] | unique) as \$cited
+		| ([(.body // \"\") | scan(\"[A-Za-z0-9_./-]+\") | sub(\"\\\\.+$\"; \"\")
+			| sub(\"^//github\\\\.com/$repo/(blob|tree)/[^/]+/\"; \"\") as \$word
+			| \$changed[] | select(. == \$word)] | unique) as \$cited
 		| select(\$cited | length > 0)
 		| \"#\\(.number) [\\(\$cited | join(\", \"))] \\(.title)\"
-	")
+	") || {
+		echo "warning: couldn't list related issues; the blocker check still applies" >&2
+		related=
+	}
 fi
 if [ -n "$related" ]; then
 	echo "Related open issues you could fold in:"
@@ -92,7 +99,10 @@ drift=$(gh api graphql --paginate -f query='
 	| if $labelled and $open == 0 then "#\(.number) is status:blocked with no open blocker linked: \(.title)"
 	elif ($labelled | not) and $open > 0 then "#\(.number) has \($open) open blocker(s) linked but isn'"'"'t status:blocked: \(.title)"
 	else empty end
-')
+') || {
+	echo "warning: couldn't list blocked-label drift; the blocker check still applies" >&2
+	drift=
+}
 if [ -n "$drift" ]; then
 	echo "Blocked labels and links that disagree (fix them on the issues):"
 	echo "$drift"

@@ -92,7 +92,7 @@ link) that the PR doesn't fix too, whatever the blocker's labels. A blocker in a
 since this PR can't close it. Run:
 
 ```sh
-scripts/pr-gate.sh M2   # the PR's milestone; leave it out to use the open PR's, if any
+scripts/pr-gate.sh M2   # the PR's milestone; leave it out to use the branch's open PR's, if any
 ```
 
 It fails on any such blocker: fix it in the same PR, or land it first. It also lists, without failing, the open
@@ -100,6 +100,7 @@ issues not marked `status:blocked` that cite a file the PR changes and are in th
 (any milestone when the PR has none; issues without a milestone aren't listed). Fold those in when they're small and
 related; keep the PR to one feature. Give the PR the milestone of the feature it's part of. Last, it lists
 open issues whose `status:blocked` label and "blocked by" links disagree (see [Blocked issues](#blocked-issues)).
+If either list can't be fetched, the script warns on stderr and still reports the blockers.
 
 ## Reviews
 
