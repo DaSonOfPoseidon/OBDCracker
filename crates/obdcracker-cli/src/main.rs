@@ -233,9 +233,9 @@ fn open_serial(cli: &Cli, port: &Path) -> ExitCode {
     }
 }
 
-// Debug builds let a test list the ports (paths separated by `;`, empty for none) so that it
-// never auto-picks a real adapter plugged into the machine running it.
-#[cfg(debug_assertions)]
+// Tests set OBDCRACKER_TEST_PORTS (paths separated by `;`, empty for none) so they never reach a
+// real adapter, in debug or release builds. It only chooses among paths the user names, as
+// --serial does.
 fn find_adapter() -> Result<PathBuf, FindAdapterError> {
     match std::env::var_os("OBDCRACKER_TEST_PORTS") {
         Some(ports) => {
@@ -250,11 +250,6 @@ fn find_adapter() -> Result<PathBuf, FindAdapterError> {
         }
         None => link::find_adapter(),
     }
-}
-
-#[cfg(not(debug_assertions))]
-fn find_adapter() -> Result<PathBuf, FindAdapterError> {
-    link::find_adapter()
 }
 
 fn ports() -> ExitCode {
