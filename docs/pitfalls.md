@@ -410,3 +410,6 @@ Each entry names the class, what to check, and where it bit us.
   (PR #176, Codex: a claude-ship blocker numbered like a fixed OBDCracker issue was exempted).
 - **Codex threads re-anchor.** After a push, old resolved threads show up again at new line numbers. Pick new
   findings by comment ID or unresolved state, not by commit.
+- **A required check must always report.** Branch protection waits for the literal check names, so a job-level `if:`
+  or a dynamic matrix that drops a leg leaves the PR waiting forever. To skip work, keep the matrix and run the
+  steps conditionally (`ci.yml`, #207).

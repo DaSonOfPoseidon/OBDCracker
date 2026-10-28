@@ -33,33 +33,82 @@ jobs:
       - run: docker run --rm -v "$PWD:/repo" -w /repo rhysd/actionlint:1.7.7
       - run: shellcheck scripts/install.sh
 
+  # Branch protection requires the contexts "build (macos-latest)" etc., and a skipped matrix leg
+  # never reports one, so a PR that cannot change the build would wait forever. The macOS legs
+  # instead run on ubuntu with their steps skipped, so they report green in seconds without a
+  # macOS runner.
+  changes:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      code: ${{ steps.diff.outputs.code }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - id: diff
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT" != pull_request ]; then
+            echo "code=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          files=$(git diff --name-only "$BASE_SHA" HEAD)
+          echo "$files"
+          if echo "$files" | grep -Eq '(\.rs$|(^|/)Cargo\.(toml|lock)$|^rust-toolchain\.toml$|^deny\.toml$|^scripts/install\.(sh|ps1)$|^\.github/workflows/ci\.yml$|^crates/|^\.cargo/)'; then
+            echo "code=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "code=false" >> "$GITHUB_OUTPUT"
+          fi
+
   build:
+    needs: changes
+    timeout-minutes: 15
     strategy:
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
-    runs-on: ${{ matrix.os }}
+    runs-on: ${{ (matrix.os == 'macos-latest' && needs.changes.outputs.code != 'true') && 'ubuntu-latest' || matrix.os }}
+    env:
+      SKIP_LEG: ${{ matrix.os == 'macos-latest' && needs.changes.outputs.code != 'true' }}
     steps:
-      - uses: actions/checkout@v5
-      - run: rustup show
-      - uses: Swatinem/rust-cache@v2
-      - run: cargo build --release -p obdcracker-cli
+      - if: env.SKIP_LEG == 'true'
+        run: echo "skipped, no build input changed"
+      - if: env.SKIP_LEG != 'true'
+        uses: actions/checkout@v5
+      - if: env.SKIP_LEG != 'true'
+        run: rustup show
+      - if: env.SKIP_LEG != 'true'
+        uses: Swatinem/rust-cache@v2
+      - if: env.SKIP_LEG != 'true'
+        run: cargo build --release -p obdcracker-cli
 
   # The install scripts, building this commit (--source) on each OS. The runners already have a
   # linker and rustup, so this covers the skip paths, PATH handling, build and check, not the
   # installs from scratch. Windows uses Windows PowerShell 5.1, what a fresh laptop has.
   install:
+    needs: changes
+    timeout-minutes: 15
     strategy:
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
-    runs-on: ${{ matrix.os }}
+    runs-on: ${{ (matrix.os == 'macos-latest' && needs.changes.outputs.code != 'true') && 'ubuntu-latest' || matrix.os }}
+    env:
+      SKIP_LEG: ${{ matrix.os == 'macos-latest' && needs.changes.outputs.code != 'true' }}
     steps:
-      - uses: actions/checkout@v5
-      - if: runner.os != 'Windows'
+      - if: env.SKIP_LEG == 'true'
+        run: echo "skipped, no build input changed"
+      - if: env.SKIP_LEG != 'true'
+        uses: actions/checkout@v5
+      - if: env.SKIP_LEG != 'true' && matrix.os != 'windows-latest'
         run: sh scripts/install.sh --source .
-      - if: runner.os == 'Windows'
+      - if: env.SKIP_LEG != 'true' && matrix.os == 'windows-latest'
         shell: powershell
         run: powershell -NoProfile -ExecutionPolicy Bypass -File scripts\install.ps1 -Source .
-      - run: obdcracker --version
+      - if: env.SKIP_LEG != 'true'
+        run: obdcracker --version
 
   # The ELM driver against an ELM327 implementation we didn't write (issue #13). Not required
   # by branch protection, and it doesn't fail the run while it settles in.
