@@ -25,6 +25,7 @@ A profile is TOML. Unknown fields are errors. `Profile::from_toml` and `Profile:
 | `[discovery]` | Where to look on 11-bit IDs for modules the profile doesn't list (optional). |
 | `[discovery_29bit]` | Where to look on 29-bit IDs (optional). |
 | `[discovery_tp20]` | The VAG addresses to try VW TP2.0 channel setups to (optional). Without it the narrowed policy allows no channel setup. |
+| `[gateway_list]` | The DIDs of a VAG gateway's installed-module list, which `scan` reads and compares with what answered (optional). |
 
 Names (the profile's, modules' and DIDs') can't be empty or blank, and can't start or end with spaces, so a lookup by
 the visible text finds them. Module names are unique ignoring case.
@@ -78,6 +79,25 @@ a 29-bit pair the safety policy accepts, and the range at most 256 IDs (one byte
 
 `[discovery_tp20]` is `addresses`, the VAG addresses to try in order: at least one, none of them 0 (the tester's) or
 `0xF0` to `0xFF` (broadcasts), none twice.
+
+## Gateway list
+
+A VAG gateway keeps a list of the modules fitted to the car, as parallel tables with one slot per module, which `scan`
+reads with `22` and compares with the modules it found (#172). The layout is VAG's, so it is profile data:
+
+```toml
+[gateway_list]
+module = "gateway"      # a [[module]] name: plain UDS, no extended address
+addresses = 0x2A2A      # DID of one VAG address per slot (00 = empty slot)
+request_ids = 0x2A2C    # optional DID of two bytes of request CAN ID per slot (0000 = none)
+```
+
+`addresses` is required. The two DIDs must differ, and neither may be one of the module's own `[[module.did]]`
+entries. On the A7 (#124) the gateway answers 80 slots: 73 addresses, with `03` and `17` listed twice, then
+zero padding; the request ID table has 8 non-zero entries. A reply with another `request_ids` length than the
+`addresses` table (two bytes per slot) is refused. A third table, `2A29`, is left out until its meaning is
+confirmed: it looks like one byte per slot (`01` on the modules that answer on ISO-TP, `02` on those that don't) but that is a
+guess.
 
 ## Narrowing the policy
 
