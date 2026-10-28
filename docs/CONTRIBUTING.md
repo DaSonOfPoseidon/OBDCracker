@@ -92,7 +92,7 @@ link) that the PR doesn't fix too, whatever the blocker's labels. A blocker in a
 since this PR can't close it. Run:
 
 ```sh
-scripts/pr-gate.sh M2   # the PR's milestone; leave it out to use the open PR's, if any
+scripts/pr-gate.sh M2   # the PR's milestone; leave it out to use the milestone of the branch's PR, if that is open
 ```
 
 It fails on any such blocker: fix it in the same PR, or land it first. It also lists, without failing, the open

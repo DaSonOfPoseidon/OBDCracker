@@ -1,6 +1,6 @@
 #!/bin/sh
 # Run before opening a PR, with the PR's milestone if it has one: `scripts/pr-gate.sh M2`. Without
-# one, it uses the milestone of the branch's open PR, if there is one.
+# one, it uses the milestone of the branch's PR, if that PR is open.
 # Fails if an issue this branch fixes (`fixes #N` in a commit subject) is blocked by an open issue
 # (GitHub's "blocked by" link) that the branch doesn't fix too; the blocker's labels don't matter,
 # and one in another repository always blocks, since a commit here can't close it.
@@ -17,9 +17,10 @@ milestone=$(echo "${1:-}" | tr -d 'Mm')
 case $milestone in
 '' | *[!0-9]*) [ -n "$1" ] && { echo "usage: $0 [M<n>]" >&2; exit 2; } ;;
 esac
-# Milestones are titled "M<n> · <feature>". No PR, or a PR without one, leaves this empty.
+# Milestones are titled "M<n> · <feature>". No PR, a closed or merged PR (`gh pr view` still
+# finds the branch's old one), or a PR without one, leaves this empty.
 if [ -z "$1" ]; then
-	milestone=$(gh pr view --json milestone --jq '.milestone.title // ""' 2>/dev/null |
+	milestone=$(gh pr view --json milestone,state --jq 'select(.state == "OPEN") | .milestone.title // ""' 2>/dev/null |
 		sed -n 's/^M\([0-9][0-9]*\) · .*/\1/p') || true
 fi
 
