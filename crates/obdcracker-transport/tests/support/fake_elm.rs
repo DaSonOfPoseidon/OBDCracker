@@ -349,6 +349,8 @@ impl FakeElm {
                 "?"
             });
             self.prompt();
+        } else if let Some(params) = line.strip_prefix("STPX") {
+            self.stpx(params);
         } else {
             self.request(&line);
         }
@@ -520,7 +522,7 @@ impl FakeElm {
     }
 
     fn request(&mut self, hex_text: &str) {
-        let mut bytes = match parse_hex(hex_text) {
+        let bytes = match parse_hex(hex_text) {
             // With CAN auto formatting on, a request is one single frame: 1 to 7 bytes. Off, it's
             // the frame's data as it is: 1 to 8.
             Some(bytes) if (1..=7).contains(&bytes.len()) => bytes,
@@ -531,6 +533,28 @@ impl FakeElm {
                 return;
             }
         };
+        self.transmit(bytes);
+    }
+
+    // `STPX d:<hex>`, the only form the driver writes (STN FRPM, section 8.6): an STN sends up
+    // to 2 KB, segmenting it itself. Anything else, or a plain ELM327, answers `?`.
+    fn stpx(&mut self, params: &str) {
+        // Spaces never reach `input`, so the line is `STPXD:<hex>`.
+        let data = params
+            .strip_prefix("D:")
+            .and_then(parse_hex)
+            .filter(|bytes| (1..=2048).contains(&bytes.len()));
+        match data {
+            Some(bytes) if self.sti.is_some() => self.transmit(bytes),
+            _ => {
+                self.print("?");
+                self.prompt();
+            }
+        }
+    }
+
+    // Puts a request on the bus and prints its answer.
+    fn transmit(&mut self, mut bytes: Vec<u8>) {
         if !self.settings.caf && !self.settings.variable_dlc {
             bytes.resize(8, 0x00);
         }

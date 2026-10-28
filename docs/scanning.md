@@ -24,7 +24,7 @@ takes its first extra entry's length and session, and its format unless ISO 1422
 F190 must be a VIN or the placeholder for none.
 
 DIDs with a known length are read up to three in one `22` request (7 bytes, one CAN frame, which every adapter driver
-can send), and as many as fit in `MAX_REPLY` (4095 bytes, the most a short ISO-TP first frame declares) of reply. A multi-DID reply doesn't say where each value
+can send; an STN adapter could take more, but a scan doesn't use that yet), and as many as fit in `MAX_REPLY` (4095 bytes, the most a short ISO-TP first frame declares) of reply. A multi-DID reply doesn't say where each value
 ends, so the layout comes from the profile's lengths. The module may leave out DIDs it doesn't support, but those it
 sends must come in the order asked, each at its length, with nothing left over; anything else is malformed.
 

@@ -7,7 +7,7 @@ adapter's command set. The ELM driver takes any two-way byte stream, so serial, 
 |---|---|---|---|---|
 | `mock` | none (tests) | — | all | done |
 | `sim` | none: a simulated car from a vehicle profile and a fixture (`--sim a7`) | — | all | done |
-| `elm` | ELM327 v2.0+ / STN (e.g. OBDLink EX, MX+, CX) | USB serial, Wi-Fi (TCP); Bluetooth LE and Classic planned | all | done for USB serial and TCP; three read-only sessions on the A7 over USB (OBDLink EX). Clones that refuse `AT CRA` with `X` digits are refused at connect ([clone policy](elm327.md#clones)) |
+| `elm` | ELM327 v2.0+ / STN (e.g. OBDLink EX, MX+, CX) | USB serial, Wi-Fi (TCP); Bluetooth LE and Classic planned | all | done for USB serial and TCP; three read-only sessions on the A7 over USB (OBDLink EX). Clones that refuse `AT CRA` with `X` digits are refused at connect ([clone policy](elm327.md#clones)). Multi-frame requests (`STPX`) on STN only, tested against the fake adapter, not yet on hardware |
 | `gsusb` | CANable / candleLight (USB-C) and an OBD2-to-DB9 cable | USB | all | planned, with listen-only mode |
 | `socketcan` | any SocketCAN interface | kernel | Linux | planned |
 | `j2534` | J2534 pass-thru (Tactrix OpenPort, Toyota Mini VCI, VAS 5054A clones) | vendor DLL | Windows | later |
@@ -18,9 +18,11 @@ the audit log records which link a session used.
 
 ## The ELM driver
 
-The ELM driver only sends single-frame requests (up to 7 bytes: the OBD-II reads, and UDS 0x22 with up to 3 DIDs),
-never lets the adapter search for a protocol, and stops if the adapter stops answering. On a plain ELM327 it paces a
-physical request's long reply to the link's speed, so its 512-byte buffer doesn't overflow (down to about 2300 baud).
+The ELM driver sends single-frame requests (up to 7 bytes: the OBD-II reads, and UDS 0x22 with up to 3 DIDs), and on
+an STN chip that echoes as it reads (such as the OBDLink EX) longer ones, up to 44 bytes, as `STPX`
+([details](elm327.md#multi-frame-requests)). It never lets the adapter search for a protocol, and stops if the
+adapter stops answering. On a plain ELM327 it paces a physical request's long reply to the link's speed, so its
+512-byte buffer doesn't overflow (down to about 2300 baud).
 Broadcasts can't be paced: several ECUs' multi-frame replies at once on a slow link can still overflow it, which the
 driver reports as `BUFFER FULL` (#71).
 
