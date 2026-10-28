@@ -87,7 +87,8 @@ Leaving: dropping an `ExtendedSession` sends `10 01` once and can't report a fai
 `10 01` once unless the module accepted or plainly refused it (`7F 10 <NRC>`, a definite answer that it stayed where it
 was). An adapter failure on the first try is returned however the retry goes, as the adapter's state is unknown. A
 retry that works sets `Left::out_of_step`: the first try's late `50 01` may have answered it, leaving the retry's own
-answer queued, and a later `7F 10` can't be told apart from it. If
+answer queued, and a later `7F 10` can't be told apart from it. A retry that fails is `SessionError::Retried`, for the
+same reason. If
 entry wasn't confirmed (anything but a plain refusal; the module may have switched and only its reply been lost), the
 session sends `10 01` straight away, and `SessionError::Unconfirmed` means that failed too: the module may stay in the
 extended session until S3 runs out.

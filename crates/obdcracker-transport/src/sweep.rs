@@ -240,11 +240,12 @@ fn sweep_approved<T: Transport + ?Sized>(
             }
         };
         let sweep = read_each(&mut session, requests, &mut progress);
-        return match session.end().map_err(session_error) {
-            // A refusal may be the retry's, after the first `10 01` went unanswered: `end` doesn't say.
+        let left = session.end();
+        let retried = matches!(left, Err(SessionError::Retried(_)));
+        return match left.map_err(session_error) {
             Err(Ok(e)) => Sweep {
                 still_extended: Some(e),
-                out_of_step: true,
+                out_of_step: sweep.out_of_step || retried,
                 ..sweep
             },
             Err(Err(FingerprintError::Transport(e))) => with_adapter_failure(sweep, e, last),

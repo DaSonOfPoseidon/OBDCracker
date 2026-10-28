@@ -62,6 +62,10 @@ pub enum SessionError {
         /// Why leaving wasn't.
         leave: Box<SessionError>,
     },
+    /// [`ExtendedSession::end`]'s first `10 01` got no definite answer, and the retry failed
+    /// with this. As with [`Left::out_of_step`], a late answer may still arrive: connect again
+    /// before sending this module another `10` request.
+    Retried(Box<SessionError>),
 }
 
 impl fmt::Display for SessionError {
@@ -80,6 +84,10 @@ impl fmt::Display for SessionError {
             Self::Unconfirmed { entry, leave } => {
                 write!(f, "{entry}; leaving the session then failed too: {leave}")
             }
+            Self::Retried(retry) => write!(
+                f,
+                "`10 01` got no definite answer, then the retry failed: {retry}"
+            ),
         }
     }
 }
@@ -280,9 +288,8 @@ impl<'a, T: Transport + ?Sized> ExtendedSession<'a, T> {
     /// # Errors
     ///
     /// The module refuses `10 01` or doesn't answer, or the adapter fails. An adapter failure on
-    /// the first try is returned however the retry goes, as the adapter's state is unknown;
-    /// otherwise the retry's result is. After an error, as after [`Left::out_of_step`], a late
-    /// answer may still arrive: connect again before sending this module another `10` request.
+    /// either try is returned as it is, as the adapter's state is unknown. Any other failure of
+    /// the retry is [`SessionError::Retried`].
     pub fn end(mut self) -> Result<Left, SessionError> {
         // Drop must not send a second `10 01` unobserved.
         self.ended = true;
@@ -297,9 +304,11 @@ impl<'a, T: Transport + ?Sized> ExtendedSession<'a, T> {
                 let _ = self.request(&self.leave.clone());
                 Err(first)
             }
-            Err(_) => self
-                .request(&self.leave.clone())
-                .map(|()| Left { out_of_step: true }),
+            Err(_) => match self.request(&self.leave.clone()) {
+                Ok(()) => Ok(Left { out_of_step: true }),
+                Err(e @ SessionError::Transport(Error::Adapter(_))) => Err(e),
+                Err(e) => Err(SessionError::Retried(Box::new(e))),
+            },
         }
     }
 
