@@ -6,9 +6,10 @@ uses; a library caller must wrap the transport itself) records each one before i
 
 ## Module discovery
 
-OBD-II emissions ECUs are found by broadcast: each mode 01 PID, mode 09 PIDs 00 and 0A and mode 03 go to the
-functional address, and every CAN ID that answers is an ECU. Other modules are not discovered by `scan`; the caller
-gives it the modules to read (from a vehicle profile).
+OBD-II emissions ECUs are found by broadcast: the mode 01 bitmap chain (PID 00, 20, ...), each mode 01 value PID
+a bitmap advertises, mode 09 PIDs 00 and 0A and mode 03 go to the functional address, and every CAN ID that answers
+is an ECU. The policy approves every mode 01 PID up front, but one no bitmap lists is never sent. Other modules are
+not discovered by `scan`; the caller gives it the modules to read (from a vehicle profile).
 
 Supported PIDs are read as a chain of bitmaps (PID 00, 20, 40, ... E0). Each ECU's chain follows only the bitmaps
 that ECU says it supports, and ends at a bitmap that is missing or garbled even while another ECU's chain keeps the
@@ -45,12 +46,13 @@ ignores the mask can't list untested DTCs.
 
 ## Extended session and TesterPresent
 
-`scan` reads DIDs whose profile session is extended only with `ScanOptions::extended`. Without it they are
-`ReadError::NeedsExtendedSession`. With it, a module that has such DIDs and answered something in
-the default session is put in the extended session after its other reads (`10 03`), kept there with `TesterPresent`
-(`3E 00`) and returned to the default session (`10 01`). A module that answered nothing isn't there, so no session is
-entered for it. `sweep_dids` doesn't consult profile sessions: without `SweepOptions::extended` every DID is read in the
-default session, and with it the whole range is read in the extended one.
+`scan` never enters the extended session, so it reports DIDs whose profile session is extended as
+`ReadError::NeedsExtendedSession`. `scan_with` reads them when given `ScanOptions::extended`: then a module that has
+such DIDs and answered something in the default session is put in the extended session after its other reads
+(`10 03`), kept there with `TesterPresent` (`3E 00`) and returned to the default session (`10 01`). A module that
+answered nothing isn't there, so no session is entered for it. `sweep_dids` doesn't consult profile sessions: without
+`SweepOptions::extended` every DID is read in the default session, and with it the whole range is read in the
+extended one.
 
 The session's own requests are approved before anything is sent, and the policy must know the module's reply ID
 (narrow it with the vehicle profile), or `FingerprintError::Session` is returned with nothing sent.
