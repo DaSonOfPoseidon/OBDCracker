@@ -130,6 +130,8 @@ const STN_UNPACED_RATE: u32 = 115_200 / 10;
 /// and the caller must connect again.
 ///
 /// See [`docs/elm327.md#failure-states`](https://github.com/DaSonOfPoseidon/OBDCracker/blob/main/docs/elm327.md#failure-states), [`#flow-control-per-target`](https://github.com/DaSonOfPoseidon/OBDCracker/blob/main/docs/elm327.md#flow-control-per-target) and [`#receive-filter`](https://github.com/DaSonOfPoseidon/OBDCracker/blob/main/docs/elm327.md#receive-filter).
+// Each flag is an independent piece of the adapter's state.
+#[allow(clippy::struct_excessive_bools)]
 #[derive(Debug)]
 pub struct Elm<L> {
     link: L,
@@ -143,6 +145,11 @@ pub struct Elm<L> {
     bits29: bool,
     // Whether the adapter sends raw frames ([`RAW_ON`]), for VW TP2.0.
     raw: bool,
+    // Whether the adapter's adaptive timing (`AT AT1`) is on, as far as we know: `None` while a
+    // command that may have changed it is unanswered, so the next `sync_adaptive` sends it again.
+    adaptive: Option<bool>,
+    // Whether a patient window is open ([`Transport::patient`]).
+    patient: bool,
     flow: Option<Flow>,
     // The `AT CRA` pattern in effect.
     filter: String,
@@ -250,6 +257,8 @@ impl<L: Link> Elm<L> {
             header: None,
             bits29: false,
             raw: false,
+            adaptive: None,
+            patient: false,
             flow: None,
             filter: WIDE_FILTER.to_owned(),
             busy: false,
@@ -286,14 +295,44 @@ impl<L: Link> Elm<L> {
         for command in SETUP {
             elm.expect_ok(command)?;
         }
+        // SETUP ends with `ATAT1`.
+        elm.adaptive = Some(true);
         // Only an STN chip names itself so; a clone may answer anything.
         let stn = elm.command("STI")?.join(" ");
         elm.stn = stn.starts_with("STN").then_some(stn);
         elm.pace = pace(elm.stn.is_some(), elm.link.byte_rate());
         // A learned timeout could be shorter than a paced module's gap and end its reply early.
-        if elm.pace.is_some() {
-            elm.expect_ok("ATAT0")?;
+        elm.sync_adaptive()
+    }
+
+    // Whether the adapter should learn how long to wait (`AT AT1`). Not while pacing, in raw mode
+    // or in a patient window: each needs it to wait its whole timeout after a frame, and a
+    // learned one from the fast setup replies ended the wait for a TP2.0 module's data after
+    // its ACK (#218).
+    fn adaptive_wanted(&self) -> bool {
+        self.pace.is_none() && !self.raw && !self.patient
+    }
+
+    // Sends `AT AT0` or `AT AT1` if the adapter isn't in the state `adaptive_wanted` names. Every
+    // change to `pace`, `raw` or `patient` calls this after making it.
+    fn sync_adaptive(&mut self) -> Result<(), Error> {
+        let wanted = self.adaptive_wanted();
+        if self.adaptive == Some(wanted) {
+            return Ok(());
         }
+        // Unknown until the adapter has answered: a command that fails may still have taken effect.
+        self.adaptive = None;
+        let command = if wanted { "ATAT1" } else { "ATAT0" };
+        // Written like the other mode switch commands once the adapter has shown it echoes
+        // characters as it reads them; before that (a patient window can open first) as any
+        // setting. Either way the line holds a non-hex letter twice, so a single flipped bit
+        // can't make it a bus request.
+        if self.early_echo == Some(true) {
+            self.guarded_command(command)?;
+        } else {
+            self.expect_ok(command)?;
+        }
+        self.adaptive = Some(wanted);
         Ok(())
     }
 
@@ -1088,6 +1127,7 @@ impl<L: Link> Transport for Elm<L> {
                 self.guarded_command(command)?;
             }
             self.raw = raw;
+            self.sync_adaptive()?;
         }
         self.set_target(request)?;
         // A setting command's prompt may have been followed by a reset.
@@ -1119,14 +1159,12 @@ impl<L: Link> Transport for Elm<L> {
                 self.expect_ok("ATSTFF")?;
                 self.timeout = ADAPTER_TIMEOUT;
             }
-            if self.pace.is_none() {
-                self.expect_ok("ATAT1")?;
-            }
+            self.patient = false;
+            self.sync_adaptive()?;
             return Ok(None);
         };
-        if self.pace.is_none() {
-            self.expect_ok("ATAT0")?;
-        }
+        self.patient = true;
+        self.sync_adaptive()?;
         if self.stn.is_none() {
             return Ok(Some(ADAPTER_TIMEOUT));
         }
