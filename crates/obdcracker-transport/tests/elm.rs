@@ -2509,6 +2509,12 @@ mod events {
     // interleaved: more frame lines are in flight than the driver keeps (`MAX_EVENTS`, 4096)
     // before the first reply completes.
     fn eight_long_replies() -> (Elm<FakeLink>, usize) {
+        eight_replies_first_shorter_by(0)
+    }
+
+    // The same, but 0x7E8's reply is `cut` bytes shorter, so it completes while the others'
+    // lines are still arriving.
+    fn eight_replies_first_shorter_by(cut: usize) -> (Elm<FakeLink>, usize) {
         let payload: Vec<u8> = [0x49, 0x02]
             .into_iter()
             .chain((0..=250u8).cycle().take(4093))
@@ -2516,7 +2522,16 @@ mod events {
         let per_ecu = frames(&payload).len();
         let mut fake = FakeElm::new(Box::new(move |header, request| {
             if header == 0x7DF && request == [0x09, 0x02] {
-                (0x7E8..=0x7EF).map(|id| (id, payload.clone())).collect()
+                (0x7E8..=0x7EF)
+                    .map(|id| {
+                        let end = if id == 0x7E8 {
+                            payload.len() - cut
+                        } else {
+                            payload.len()
+                        };
+                        (id, payload[..end].to_vec())
+                    })
+                    .collect()
             } else {
                 Vec::new()
             }
@@ -2573,6 +2588,46 @@ mod events {
         let unread = unread_in(events).len();
         assert!(lost > 0, "{unread} unread");
         assert_eq!(unread + lost, 7 * per_ecu);
+    }
+
+    #[test]
+    fn lines_read_after_one_is_lost_are_lost_too() {
+        // 0x7E8's reply completes after the cap is hit, freeing the room its lines held, and
+        // 0x7E9's completes later still. Lines read after the first loss must not be kept, or
+        // `Lost` would be reported after lines read later than the ones it counts.
+        let (mut elm, per_ecu) = eight_replies_first_shorter_by(300);
+        let first = elm.recv(Duration::from_secs(5)).unwrap();
+        assert_eq!(first.source, 0x7E8);
+        let second = elm.recv(Duration::from_secs(5)).unwrap();
+        assert_eq!(second.source, 0x7E9);
+        elm.take_events();
+        elm.settle().unwrap();
+        let events = elm.take_events();
+        // The modules' frames arrive in rounds of eight, so the 4096 lines kept are 512 rounds,
+        // 512 from each module; the two replies took theirs back.
+        let kept = 4096 - 2 * 512;
+        // The other six modules' last frames are only read by `settle`, after the loss.
+        let late = ["7EA", "7EB", "7EC", "7ED", "7EE", "7EF"];
+        let lost = 6 * per_ecu - late.len() - kept;
+        let marker = events
+            .iter()
+            .position(|e| matches!(e, LinkEvent::Lost(_)))
+            .unwrap();
+        assert_eq!(marker, kept, "{:?}", &events[marker.saturating_sub(2)..]);
+        assert_eq!(events[marker], LinkEvent::Lost(lost));
+        assert!(
+            events[..marker]
+                .iter()
+                .all(|e| matches!(e, LinkEvent::Unread { .. }))
+        );
+        let after: Vec<&str> = events[marker + 1..]
+            .iter()
+            .map(|e| match e {
+                LinkEvent::Unread { line, .. } => &line[..3],
+                other => panic!("{other:?}"),
+            })
+            .collect();
+        assert_eq!(after, late);
     }
 
     #[test]

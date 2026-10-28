@@ -170,7 +170,8 @@ pub struct Elm<L> {
     heard: Vec<(u64, SystemTime, String)>,
     next_heard: u64,
     // How many lines of the request in progress didn't fit in `heard`: lost unless a reply
-    // turns out to use them.
+    // turns out to use them. Once one doesn't fit, no later line is kept (`hear`), so every
+    // kept line was read before every lost one and `Lost` can follow them in order.
     overflowed: usize,
     // What it did besides requests and replies, until taken, and how many more were dropped.
     log: Vec<LinkEvent>,
@@ -889,7 +890,7 @@ impl<L: Link> Elm<L> {
     fn hear(&mut self, line: &str) -> u64 {
         let number = self.next_heard;
         self.next_heard += 1;
-        if self.heard.len() < MAX_EVENTS {
+        if self.overflowed == 0 && self.heard.len() < MAX_EVENTS {
             self.heard.push((number, self.event_at, line.to_owned()));
         } else {
             self.overflowed += 1;
