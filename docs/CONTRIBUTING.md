@@ -99,7 +99,8 @@ It fails on any such blocker: fix it in the same PR, or land it first. It also l
 issues not marked `status:blocked` that cite a file the PR changes and are in the PR's milestone or an earlier one
 (any milestone when the PR has none; issues without a milestone aren't listed). Fold those in when they're small and
 related; keep the PR to one feature. Give the PR the milestone of the feature it's part of. Last, it lists
-open issues whose `status:blocked` label and "blocked by" links disagree (see [Blocked issues](#blocked-issues)).
+open issues whose `status:blocked` label and "blocked by" links disagree (see [Blocked issues](#blocked-issues)). If either list can't be fetched, the script warns on stderr and
+still reports the blockers.
 
 ## Reviews
 

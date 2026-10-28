@@ -7,7 +7,8 @@
 # Then lists, without failing, the issues not marked `status:blocked` that cite a file the branch
 # changes and are in the PR's milestone or an earlier one (any milestone if the PR has none; issues
 # with no milestone aren't sorted yet), so related fixes can go in the same PR, and the open issues
-# whose `status:blocked` label and links disagree.
+# whose `status:blocked` label and links disagree. If either list can't be fetched, it warns on stderr
+# and the blocker report still runs; only a failed blocker query fails the script outright.
 set -e
 cd "$(dirname "$0")/.."
 repo=DaSonOfPoseidon/OBDCracker
@@ -68,7 +69,10 @@ if [ -n "$changed" ]; then
 			| \$changed[] | select(. as \$path | \$word == \$path or (\$word | endswith(\"/\" + \$path)))] | unique) as \$cited
 		| select(\$cited | length > 0)
 		| \"#\\(.number) [\\(\$cited | join(\", \"))] \\(.title)\"
-	")
+	") || {
+		echo "warning: couldn't list related issues; the blocker check still applies" >&2
+		related=
+	}
 fi
 if [ -n "$related" ]; then
 	echo "Related open issues you could fold in:"
@@ -93,7 +97,10 @@ drift=$(gh api graphql --paginate -f query='
 	| if $labelled and $open == 0 then "#\(.number) is status:blocked with no open blocker linked: \(.title)"
 	elif ($labelled | not) and $open > 0 then "#\(.number) has \($open) open blocker(s) linked but isn'"'"'t status:blocked: \(.title)"
 	else empty end
-')
+') || {
+	echo "warning: couldn't list blocked-label drift; the blocker check still applies" >&2
+	drift=
+}
 if [ -n "$drift" ]; then
 	echo "Blocked labels and links that disagree (fix them on the issues):"
 	echo "$drift"
