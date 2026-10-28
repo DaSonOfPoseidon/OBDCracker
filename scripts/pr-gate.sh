@@ -51,7 +51,8 @@ done)
 
 # Every open issue not marked `status:blocked`, due by the PR's milestone, that cites a changed file
 # (the issues API also lists PRs, which are skipped). A cited path is matched whole, without any
-# `:line` or full stop after it, or as the end of a longer path such as a GitHub blob URL's.
+# `:line` or full stop after it, or as the path in a link to this repository's `blob/<ref>/` or
+# `tree/<ref>/` page (a one-segment ref). Any other prefix, such as another directory's, doesn't count.
 related=
 if [ -n "$changed" ]; then
 	related=$(CHANGED=$changed gh api --paginate "repos/$repo/issues?state=open&per_page=100" --jq "
@@ -65,8 +66,9 @@ if [ -n "$changed" ]; then
 		| select(\"status:blocked\" | IN(\$names[]) | not)
 		| ((.milestone.title // \"\") | capture(\"^M(?<n>[0-9]+) · \").n | tonumber) as \$due
 		| select(\$m == 0 or \$due <= \$m)
-		| ([(.body // \"\") | scan(\"[A-Za-z0-9_./-]+\") | sub(\"\\\\.+$\"; \"\") as \$word
-			| \$changed[] | select(. as \$path | \$word == \$path or (\$word | endswith(\"/\" + \$path)))] | unique) as \$cited
+		| ([(.body // \"\") | scan(\"[A-Za-z0-9_./-]+\") | sub(\"\\\\.+$\"; \"\")
+			| sub(\"^//github\\\\.com/$repo/(blob|tree)/[^/]+/\"; \"\") as \$word
+			| \$changed[] | select(. == \$word)] | unique) as \$cited
 		| select(\$cited | length > 0)
 		| \"#\\(.number) [\\(\$cited | join(\", \"))] \\(.title)\"
 	") || {
