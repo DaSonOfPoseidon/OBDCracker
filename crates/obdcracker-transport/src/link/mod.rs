@@ -106,5 +106,5 @@ mod serial;
 mod tcp;
 
 #[cfg(feature = "serial")]
-pub use serial::SerialLink;
+pub use serial::{FindAdapterError, SerialLink, find_adapter, find_adapter_in};
 pub use tcp::TcpLink;
