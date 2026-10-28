@@ -325,6 +325,84 @@ fn an_adapter_that_stops_listening_while_pending_listens_again_after_a_keep_aliv
 }
 
 #[test]
+fn an_adapter_that_stops_listening_after_the_ack_listens_again_before_the_deadline() {
+    // An ELM327 prints its prompt a moment after the module's ACK, having learned a short wait
+    // from the fast setup replies (#218): nothing more arrives until the tester sends again.
+    // The module's data comes ~60 ms later, well inside the session's own wait.
+    let mut car = channel_car(|frame| match frame {
+        [0x10, 0x00, 0x02, 0x1A, 0x9B] => frames(&[&[0xB1]]),
+        [0xA3] => frames(&[&MODULE_PARAMETERS, &[0x10, 0x00, 0x02, 0x5A, 0x9B]]),
+        [0x11, 0x00, 0x02, 0x21, 0x01] => frames(&[&[0xB2], &[0x11, 0x00, 0x02, 0x61, 0x01]]),
+        _ => Vec::new(),
+    });
+    let policy = Policy::read_only();
+    let mut session = ChannelSession::open(&mut car, &policy, 0x5F, TIMING).unwrap();
+    assert_eq!(session.request(&[0x1A, 0x9B]).unwrap(), [0x5A, 0x9B]);
+    // The keep-alive took no sequence number: the next request is 1.
+    assert_eq!(session.request(&[0x21, 0x01]).unwrap(), [0x61, 0x01]);
+    drop(session);
+    assert_eq!(
+        car.sent[2..],
+        [
+            "740 10 00 02 1A 9B",
+            "740 A3",
+            "740 B1",
+            "740 11 00 02 21 01",
+            "740 B2",
+            "740 A8"
+        ]
+    );
+}
+
+#[test]
+fn an_adapter_that_keeps_stopping_early_is_given_up_on_after_the_keep_alive_budget() {
+    // Never any data: `max_pending` (2) keep-alives, then a timeout, not a loop.
+    let mut car = channel_car(|frame| match frame {
+        [0x10, ..] => frames(&[&[0xB1]]),
+        [0xA3] => frames(&[&MODULE_PARAMETERS]),
+        _ => Vec::new(),
+    });
+    let policy = Policy::read_only();
+    let mut session = ChannelSession::open(&mut car, &policy, 0x5F, TIMING).unwrap();
+    assert_eq!(session.request(&[0x1A, 0x9B]), Err(ChannelError::Timeout));
+    drop(session);
+    assert_eq!(
+        car.sent[2..],
+        ["740 10 00 02 1A 9B", "740 A3", "740 A3", "740 A8"]
+    );
+}
+
+// Waits out the whole timeout it's given before reporting `Timeout`, as an adapter that has
+// really been listening that long.
+struct Waiting(Car);
+
+impl Transport for Waiting {
+    fn send(&mut self, request: &Approved) -> Result<(), Error> {
+        self.0.send(request)
+    }
+
+    fn recv(&mut self, timeout: Duration) -> Result<Response, Error> {
+        self.0.replies.pop_front().ok_or_else(|| {
+            std::thread::sleep(timeout);
+            Error::Timeout
+        })
+    }
+}
+
+#[test]
+fn a_timeout_after_the_whole_wait_is_the_module_s_and_sends_no_keep_alive() {
+    let mut car = Waiting(channel_car(|frame| match frame {
+        [0x10, ..] => frames(&[&[0xB1]]),
+        _ => Vec::new(),
+    }));
+    let policy = Policy::read_only();
+    let mut session = ChannelSession::open(&mut car, &policy, 0x5F, TIMING).unwrap();
+    assert_eq!(session.request(&[0x1A, 0x9B]), Err(ChannelError::Timeout));
+    drop(session);
+    assert_eq!(car.0.sent[2..], ["740 10 00 02 1A 9B", "740 A8"]);
+}
+
+#[test]
 fn one_keep_alive_gets_one_answer() {
     let mut car = channel_car(|frame| match frame {
         [0x10, 0x00, 0x02, 0x1A, 0x9B] => frames(&[&[0xB1], &[0x10, 0x00, 0x03, 0x7F, 0x1A, 0x78]]),
