@@ -52,8 +52,10 @@ Label it `bug`, `documentation` or `enhancement`, and tag what it impacts:
 - **Its milestone** (a GitHub milestone, not a label): the feature it belongs to, such as `M7 · TP2.0 & scan-tool
   reads`. Milestones are numbered in the order they'll be worked on. If you're not sure where it falls, leave it
   without a milestone; the maintainer sorts those.
-- **Its status:** `status:ready` if it can be picked up now, or `status:blocked` if it waits on something else
-  (another issue, a car session, hardware or a decision). See [Blocked issues](#blocked-issues).
+- **Its status:** `status:ready` if it can be picked up now, `status:blocked` if it waits on something else
+  (another issue, a car session, hardware or a decision), or `status:queued` if it waits only for an earlier
+  milestone to close. Milestones are worked in order, so an issue in a later milestone than the earliest open one
+  is queued unless the maintainer has pulled it forward. See [Blocked issues](#blocked-issues).
 
 Only fix it in the same change if it blocks your task, and then reference it in the commit (`fixes #N`).
 
@@ -76,6 +78,9 @@ issue. `scripts/pr-gate.sh` reads only the links, so keep both in step whenever 
 - **Closing an issue:** list what it blocked
   (`gh api repos/DaSonOfPoseidon/OBDCracker/issues/<n>/dependencies/blocking --jq '.[].number'`) and move each
   to `status:ready` unless it has another open blocker. A link to a closed issue stays but no longer blocks.
+- **Closing a milestone:** move the next milestone's `status:queued` issues to `status:ready`, or to
+  `status:blocked` if an open blocker is linked. `status:queued` needs no links, and `scripts/pr-gate.sh` doesn't
+  check it.
 - **Reviewing the issue list:** run `scripts/pr-gate.sh`. Its last list shows open issues whose label and links
   disagree: `status:blocked` with no open blocker linked, or an open blocker linked without `status:blocked`. Fix
   each one on the issue.
