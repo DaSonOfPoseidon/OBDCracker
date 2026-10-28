@@ -7,7 +7,7 @@
 //! names a service, so every request to a profile's module still goes through
 //! `obdcracker_safety::Policy::approve`.
 //!
-//! See docs/profiles.md#file-format for the file format.
+//! See [`docs/profiles.md#file-format`](https://github.com/DaSonOfPoseidon/OBDCracker/blob/main/docs/profiles.md#file-format) for the file format.
 //!
 //! ```
 //! use obdcracker_profile::Profile;
@@ -58,7 +58,7 @@ pub struct DiscoveryTp20 {
 /// request ID plus a fixed offset. Every candidate must be a 29-bit pair the safety policy
 /// accepts, and the range at most [`Discovery29::MAX_IDS`] long.
 ///
-/// See docs/profiles.md#discovery-ranges.
+/// See [`docs/profiles.md#discovery-ranges`](https://github.com/DaSonOfPoseidon/OBDCracker/blob/main/docs/profiles.md#discovery-ranges).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Discovery29 {
@@ -79,7 +79,7 @@ impl Discovery29 {
 /// request ID plus a fixed offset. No candidate's request ID may be any module's or candidate's
 /// reply ID.
 ///
-/// See docs/profiles.md#discovery-ranges.
+/// See [`docs/profiles.md#discovery-ranges`](https://github.com/DaSonOfPoseidon/OBDCracker/blob/main/docs/profiles.md#discovery-ranges).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Discovery {

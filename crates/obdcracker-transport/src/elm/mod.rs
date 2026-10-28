@@ -2,7 +2,7 @@
 //!
 //! A line of hex digits is a request the adapter puts on the bus, so [`Elm`] writes only a fixed
 //! set of `AT` commands and the hex of [`Approved`] requests, checks every echo, and never
-//! writes an empty line. See `docs/elm327.md` for the adapter's behaviour and why.
+//! writes an empty line. See [`docs/elm327.md`](https://github.com/DaSonOfPoseidon/OBDCracker/blob/main/docs/elm327.md) for the adapter's behaviour and why.
 
 pub mod codec;
 
@@ -123,7 +123,7 @@ const STN_UNPACED_RATE: u32 = 115_200 / 10;
 /// or the link fails), its state is unknown: every later call fails without writing anything,
 /// and the caller must connect again.
 ///
-/// See docs/elm327.md#failure-states, #flow-control-per-target and #receive-filter.
+/// See [`docs/elm327.md#failure-states`](https://github.com/DaSonOfPoseidon/OBDCracker/blob/main/docs/elm327.md#failure-states), [`#flow-control-per-target`](https://github.com/DaSonOfPoseidon/OBDCracker/blob/main/docs/elm327.md#flow-control-per-target) and [`#receive-filter`](https://github.com/DaSonOfPoseidon/OBDCracker/blob/main/docs/elm327.md#receive-filter).
 #[derive(Debug)]
 pub struct Elm<L> {
     link: L,
@@ -292,7 +292,7 @@ impl<L: Link> Elm<L> {
 
     /// Timing for [`crate::exchange`] through this adapter. The adapter's prompt ends a request,
     /// so P2 and P2* are only outer bounds, about 7 minutes; an adapter that goes quiet
-    /// fails within seconds instead. See docs/elm327.md#timing.
+    /// fails within seconds instead. See [`docs/elm327.md#timing`](https://github.com/DaSonOfPoseidon/OBDCracker/blob/main/docs/elm327.md#timing).
     #[must_use]
     pub fn timing() -> Timing {
         let default = Timing::default();

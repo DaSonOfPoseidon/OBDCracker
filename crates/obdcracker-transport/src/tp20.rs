@@ -1,5 +1,5 @@
 //! VW TP2.0: looking for modules ([`probe`]), and KWP2000 reads on a channel one opens
-//! ([`ChannelSession`]). See docs/tp20.md.
+//! ([`ChannelSession`]). See [`docs/tp20.md`](https://github.com/DaSonOfPoseidon/OBDCracker/blob/main/docs/tp20.md).
 
 use std::fmt;
 use std::time::{Duration, Instant};
@@ -184,7 +184,7 @@ impl fmt::Display for ChannelError {
 
 impl std::error::Error for ChannelError {}
 
-/// An open VW TP2.0 channel to one module, for KWP2000 reads: see docs/tp20.md#data-transfer.
+/// An open VW TP2.0 channel to one module, for KWP2000 reads: see [`docs/tp20.md#data-transfer`](https://github.com/DaSonOfPoseidon/OBDCracker/blob/main/docs/tp20.md#data-transfer).
 ///
 /// Every frame is approved by the policy for the channel the module opened: the tester's
 /// parameters, each request's data frame, every ACK, keep-alives and the disconnect. A request

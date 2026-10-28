@@ -1,5 +1,5 @@
 //! ISO 15765-2 (ISO-TP) framing of diagnostic payloads onto 8-byte classic CAN frames. See
-//! docs/protocols.md#iso-tp-decoding.
+//! [`docs/protocols.md#iso-tp-decoding`](https://github.com/DaSonOfPoseidon/OBDCracker/blob/main/docs/protocols.md#iso-tp-decoding).
 
 use core::fmt;
 use core::time::Duration;

@@ -1,6 +1,6 @@
 //! A read-only DID sweep: one `ReadDataByIdentifier` (`22`) per DID over a range, to find what a
 //! module answers that no profile lists yet. A whole range is 65 536 requests, so give it the
-//! narrowest range that can hold what you're after. See docs/scanning.md#sweeps.
+//! narrowest range that can hold what you're after. See [`docs/scanning.md#sweeps`](https://github.com/DaSonOfPoseidon/OBDCracker/blob/main/docs/scanning.md#sweeps).
 
 use std::ops::RangeInclusive;
 use std::time::Duration;

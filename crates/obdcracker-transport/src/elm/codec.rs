@@ -2,7 +2,7 @@
 //! treats the adapter's output as untrusted input.
 //!
 //! The formats follow the ELM327 datasheet (ELM327DS v2.0) with headers and spaces on, as
-//! [`super::Elm`] sets them. See docs/elm327.md#output-format.
+//! [`super::Elm`] sets them. See [`docs/elm327.md#output-format`](https://github.com/DaSonOfPoseidon/OBDCracker/blob/main/docs/elm327.md#output-format).
 
 /// The longest line kept, in bytes. A frame line with headers and spaces on is 27 characters
 /// (35 with a 29-bit ID), and one marked `<DATA ERROR` is under 50; anything longer isn't from
@@ -158,7 +158,7 @@ pub enum Status {
 impl Status {
     /// Whether the adapter has lost the settings a driver gave it: it has reset or is about to
     /// (`LV RESET`, `LP ALERT`, any `ERRxx`) or is searching for a protocol (`SEARCHING...`,
-    /// `UNABLE TO CONNECT`). See docs/elm327.md#safety for why each counts.
+    /// `UNABLE TO CONNECT`). See [`docs/elm327.md#safety`](https://github.com/DaSonOfPoseidon/OBDCracker/blob/main/docs/elm327.md#safety) for why each counts.
     #[must_use]
     pub fn loses_settings(self) -> bool {
         matches!(

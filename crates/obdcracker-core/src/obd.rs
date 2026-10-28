@@ -247,7 +247,7 @@ impl fmt::Display for Dtc {
 }
 
 /// Decodes a mode 03 reply in the CAN format (ISO 15765-4): a count byte, then that many
-/// two-byte codes. Pre-CAN layouts aren't decoded; see docs/protocols.md#obd-ii-decoding.
+/// two-byte codes. Pre-CAN layouts aren't decoded; see [`docs/protocols.md#obd-ii-decoding`](https://github.com/DaSonOfPoseidon/OBDCracker/blob/main/docs/protocols.md#obd-ii-decoding).
 pub fn decode_stored_dtcs(reply: &[u8]) -> Result<Dtcs<'_>, Error> {
     let (&count, codes) = positive(STORED_DTCS, reply)?
         .split_first()

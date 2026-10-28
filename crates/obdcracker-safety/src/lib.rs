@@ -2,7 +2,7 @@
 //!
 //! Every transport's `send` takes an [`Approved`] request, and only [`Policy::approve`] can make one.
 //! Approval checks the payload against a closed allowlist, one per [`Protocol`]: anything not on it is
-//! rejected, unknown services included. See `docs/safety.md` for the model and the addressing rules.
+//! rejected, unknown services included. See [`docs/safety.md`](https://github.com/DaSonOfPoseidon/OBDCracker/blob/main/docs/safety.md) for the model and the addressing rules.
 //!
 //! ```compile_fail
 //! // Approved can't be built outside this crate, so nothing can skip the policy.
@@ -53,7 +53,7 @@ pub enum Target {
     /// One module's 11-bit request ID.
     Physical(u32),
     /// One module's 29-bit request ID, in the ISO 15765-4 or VAG request range. See
-    /// `docs/safety.md#addressing`.
+    /// [`docs/safety.md#addressing`](https://github.com/DaSonOfPoseidon/OBDCracker/blob/main/docs/safety.md#addressing).
     Physical29(u32),
     /// A VW TP2.0 channel setup for the module at this address, sent on 0x200.
     Tp20Setup(u8),
@@ -99,7 +99,7 @@ pub enum Rejection {
     Banned,
     /// Not on the allowlist, malformed, or empty.
     NotAllowed,
-    /// The target isn't allowed for the request: see `docs/safety.md#addressing`. Once the policy is
+    /// The target isn't allowed for the request: see [`docs/safety.md#addressing`](https://github.com/DaSonOfPoseidon/OBDCracker/blob/main/docs/safety.md#addressing). Once the policy is
     /// narrowed ([`Policy::narrowed_to`]), any ID that isn't a module's request ID is one too.
     WrongTarget,
 }
@@ -140,7 +140,7 @@ pub struct ModuleIds {
 pub enum NarrowingError {
     /// A request ID the policy refuses anyway.
     Request(u32),
-    /// A reply ID that isn't a valid reply of the request ID's width (`docs/safety.md#addressing`).
+    /// A reply ID that isn't a valid reply of the request ID's width ([`docs/safety.md#addressing`](https://github.com/DaSonOfPoseidon/OBDCracker/blob/main/docs/safety.md#addressing)).
     Reply(u32),
     /// An ID that is one module's request ID and a module's reply ID.
     RequestIsReply(u32),
@@ -377,7 +377,7 @@ impl Policy {
     /// # Errors
     ///
     /// [`Rejection::WrongTarget`] unless the channel's IDs are ones the policy lets `A8` go on
-    /// (`docs/safety.md#addressing`).
+    /// ([`docs/safety.md#addressing`](https://github.com/DaSonOfPoseidon/OBDCracker/blob/main/docs/safety.md#addressing)).
     pub fn approve_tp20_disconnect(
         &self,
         channel: &OpenTp20Channel,
