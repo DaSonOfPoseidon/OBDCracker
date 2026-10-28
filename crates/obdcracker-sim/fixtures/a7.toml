@@ -574,6 +574,30 @@ text = "1271971803          "
 id = 0x0754
 text = "J367-BDMHella"
 
+# The installed-module list (#124, 2026-10-22): 80 slots of VAG addresses (03 and 17 twice, then
+# padding), and a two-byte request CAN ID per slot. Named by the profile's gateway_list.
+[[ecu.did]]
+id = 0x2A2A
+hex = """
+  01 02 03 03 04 05 06 08 09 0E 10 11 13 8B 34 15 16 17 17 18
+  19 1B 1E 20 22 28 2E 30 36 3C 3D 3E 42 46 47 52 53 55 56 57
+  85 5F 62 26 65 69 6C 6D 6F 72 3B 7F 82 84 48 5B 88 89 8A 8D
+  8F 90 AC 44 81 8E C0 A9 40 51 8C BA 14 00 00 00 00 00 00 00
+"""
+
+[[ecu.did]]
+id = 0x2A2C
+hex = """
+  00 00 00 00 07 13 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+  00 00 00 00 07 57 07 56 07 55 00 00 00 00 00 00 00 00 00 00
+  00 00 00 00 00 00 00 00 07 1D 00 00 00 00 00 00 00 00 00 00
+  00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+  00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+  07 21 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+  00 00 00 00 00 00 07 12 00 00 07 58 00 00 00 00 00 00 00 00
+  00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+"""
+
 # The instruments refuse F190, and send one response-pending before most answers.
 [[ecu]]
 module = "instruments"

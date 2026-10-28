@@ -43,6 +43,24 @@ pub struct Profile {
     /// The VAG addresses to try VW TP2.0 channel setups to, if any. Without it, the profile
     /// allows no channel setup.
     pub discovery_tp20: Option<DiscoveryTp20>,
+    /// The tables of the VAG gateway's installed-module list, if the car has them.
+    pub gateway_list: Option<GatewayList>,
+}
+
+/// The DIDs of a VAG gateway's installed-module list: parallel tables with one slot per module
+/// ([`Profile::gateway_list_module`]). The two DIDs differ, and neither is one of the module's own
+/// `[[module.did]]` ones, which scan reads in the format the profile gives.
+///
+/// See docs/profiles.md#gateway-list.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GatewayList {
+    /// The name of the gateway's `[[module]]`: plain UDS, with no extended address.
+    pub module: String,
+    /// The DID of the table of one VAG address per slot (0 = empty slot).
+    pub addresses: u16,
+    /// The DID of the table of two-byte request IDs per slot (0 = none), if the car has one.
+    pub request_ids: Option<u16>,
 }
 
 /// The VAG addresses to try VW TP2.0 channel setups to ([`Profile::tp20_addresses`]): at least
@@ -256,6 +274,16 @@ pub enum ProfileError {
     /// The TP2.0 discovery list has an address no setup may go to (0, the tester's, or a broadcast
     /// address from 0xF0), or has this address twice.
     Tp20Address(u8),
+    /// The gateway list names no module, or one that isn't plain UDS (KWP2000, TP2.0 or extended
+    /// addressing), which a scan can't read the tables from.
+    GatewayListModule(String),
+    /// A gateway list DID is the other table's, or one of its module's own DIDs.
+    GatewayListDid {
+        /// The gateway module.
+        module: String,
+        /// The DID.
+        did: u16,
+    },
 }
 
 impl fmt::Display for ProfileError {
@@ -303,6 +331,13 @@ impl fmt::Display for ProfileError {
             Self::Tp20Address(address) => write!(
                 f,
                 "TP2.0 discovery: address {address:02X} is the tester's, a broadcast or listed twice"
+            ),
+            Self::GatewayListModule(module) => {
+                write!(f, "gateway list: no plain UDS module is named \"{module}\"")
+            }
+            Self::GatewayListDid { module, did } => write!(
+                f,
+                "gateway list: DID {did:04X} is used twice or is one of {module}'s own"
             ),
         }
     }
@@ -593,7 +628,34 @@ impl Profile {
                 }
             }
         }
+        if let Some(list) = &self.gateway_list {
+            self.validate_gateway_list(list)?;
+        }
         Ok(())
+    }
+
+    fn validate_gateway_list(&self, list: &GatewayList) -> Result<(), ProfileError> {
+        let module = self
+            .module(&list.module)
+            .filter(|m| m.protocol == Protocol::Uds && m.extended_address.is_none())
+            .ok_or_else(|| ProfileError::GatewayListModule(list.module.clone()))?;
+        let mut seen = HashSet::new();
+        for did in std::iter::once(list.addresses).chain(list.request_ids) {
+            if module.dids.iter().any(|own| own.id == did) || !seen.insert(did) {
+                return Err(ProfileError::GatewayListDid {
+                    module: module.name.clone(),
+                    did,
+                });
+            }
+        }
+        Ok(())
+    }
+
+    /// The gateway module and the DIDs of its installed-module list, if the profile has them.
+    #[must_use]
+    pub fn gateway_list_module(&self) -> Option<(&Module, &GatewayList)> {
+        let list = self.gateway_list.as_ref()?;
+        Some((self.module(&list.module)?, list))
     }
 
     fn validate_29_bit_discovery(discovery: Discovery29) -> Result<(), ProfileError> {

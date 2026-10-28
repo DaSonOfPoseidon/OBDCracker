@@ -1289,3 +1289,78 @@ fn scan_discover_tp20_needs_a_profile() {
     assert_eq!(out.status.code(), Some(2), "{out:?}");
     assert_eq!(String::from_utf8_lossy(&out.stdout), "", "nothing sent");
 }
+
+#[test]
+fn sim_scan_compares_the_gateways_list_with_the_modules_that_answered() {
+    let log = temp_log("scan-gateway-list");
+    let out = obdcracker(&["--sim", "a7", "--audit-log", log.to_str().unwrap(), "scan"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let summary = stdout
+        .lines()
+        .find(|l| l.starts_with("gateway lists "))
+        .unwrap_or_else(|| panic!("no gateway list in:\n{stdout}"));
+    // The profile's VAG addresses 01, 02, 19, 82 and 17 answer; the gateway lists 17 twice.
+    assert_eq!(
+        summary,
+        "gateway lists 73 installed modules: 6 found, 67 not in profile"
+    );
+    // The A7 profile has no VAG address for 13, and none at all for 22; 03 is listed twice.
+    for line in [
+        "  13 not in profile (request 0x757)",
+        "  22 not in profile (request 0x71D)",
+    ] {
+        assert!(stdout.lines().any(|l| l == line), "{line:?} in:\n{stdout}");
+    }
+    assert_eq!(
+        stdout.lines().filter(|l| l.starts_with("  03 ")).count(),
+        2,
+        "{stdout}"
+    );
+    // Two extra reads of the gateway, and nothing but reads.
+    let audit = std::fs::read_to_string(&log).unwrap();
+    for did in ["22 2A 2A", "22 2A 2C"] {
+        let sent = format!(r#""dir":"tx","id":"710","payload":"{did}""#);
+        assert_eq!(audit.matches(&sent).count(), 1, "{did}");
+    }
+}
+
+#[test]
+fn dry_run_scan_with_a_profile_names_the_gateway_list_reads() {
+    let out = obdcracker(&["--dry-run", "--profile", "a7", "scan"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("a live scan also reads the gateway's installed-module list"),
+        "{stdout}"
+    );
+    assert!(!stdout.contains("gateway lists "), "{stdout}");
+}
+
+#[test]
+fn sim_scan_with_tp20_discovery_calls_the_listed_addresses_it_tried_silent() {
+    let out = obdcracker(&["--sim", "a7", "scan", "--discover-tp20"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    // The A7 profile tries TP2.0 setups to 29 addresses, and the gateway lists every one.
+    assert!(
+        stdout
+            .lines()
+            .any(|l| l
+                == "gateway lists 73 installed modules: 6 found, 29 silent, 38 not in profile"),
+        "{stdout}"
+    );
+    assert!(stdout.lines().any(|l| l == "  05 silent"), "{stdout}");
+}

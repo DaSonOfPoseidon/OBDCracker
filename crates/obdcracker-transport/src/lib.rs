@@ -13,6 +13,7 @@ pub mod dtc;
 pub mod elm;
 mod exchange;
 pub mod fingerprint;
+pub mod gateway;
 pub mod link;
 mod mock;
 pub mod scan;

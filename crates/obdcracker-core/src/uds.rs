@@ -139,6 +139,75 @@ pub fn tester_present() -> [u8; 2] {
     [TESTER_PRESENT, 0x00]
 }
 
+/// The VAG gateway's table of installed modules, one address byte per slot (0 = empty slot).
+///
+/// See docs/profiles.md.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GatewayAddresses<'a>(&'a [u8]);
+
+impl<'a> GatewayAddresses<'a> {
+    /// The number of slots in the table, empty ones included.
+    #[must_use]
+    pub fn entries(&self) -> usize {
+        self.0.len()
+    }
+
+    /// Each non-zero slot as `(slot, VAG address)`. An address the gateway lists twice comes back
+    /// once per slot.
+    pub fn installed(&self) -> impl Iterator<Item = (usize, u8)> + 'a {
+        self.0
+            .iter()
+            .copied()
+            .enumerate()
+            .filter(|&(_, address)| address != 0)
+    }
+}
+
+/// Decodes the reply to a read of the gateway's address table (`did` is the profile's).
+///
+/// No data is [`Error::TooShort`]; a table of nothing but empty slots is [`Error::Malformed`], since
+/// a gateway lists at least itself.
+pub fn decode_gateway_addresses(reply: &[u8], did: u16) -> Result<GatewayAddresses<'_>, Error> {
+    let data = decode_did(reply, did)?;
+    if data.iter().all(|&address| address == 0) {
+        return Err(Error::Malformed);
+    }
+    Ok(GatewayAddresses(data))
+}
+
+/// The VAG gateway's table of request CAN IDs, two big-endian bytes per slot (0 = none).
+///
+/// See docs/profiles.md.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GatewayRequestIds<'a>(&'a [[u8; 2]]);
+
+impl<'a> GatewayRequestIds<'a> {
+    /// Each non-zero slot as `(slot, request ID)`.
+    pub fn installed(&self) -> impl Iterator<Item = (usize, u16)> + 'a {
+        self.0
+            .iter()
+            .map(|&id| u16::from_be_bytes(id))
+            .enumerate()
+            .filter(|&(_, id)| id != 0)
+    }
+}
+
+/// Decodes the reply to a read of the gateway's request ID table, which must hold exactly
+/// `entries` slots (the address table's [`GatewayAddresses::entries`]). Any other length, or
+/// `entries` of 0, is [`Error::Malformed`].
+pub fn decode_gateway_request_ids(
+    reply: &[u8],
+    did: u16,
+    entries: usize,
+) -> Result<GatewayRequestIds<'_>, Error> {
+    let data = decode_did(reply, did)?;
+    let (ids, partial) = data.as_chunks::<2>();
+    if entries == 0 || !partial.is_empty() || ids.len() != entries {
+        return Err(Error::Malformed);
+    }
+    Ok(GatewayRequestIds(ids))
+}
+
 // The DID echoed at the start of `data`, and the bytes after it.
 fn split_did(data: &[u8]) -> Result<(u16, &[u8]), Error> {
     let [high, low, rest @ ..] = data else {

@@ -1045,3 +1045,96 @@ fn the_a7_profile_lists_the_modules_silent_on_iso_tp_for_tp20() {
         }
     }
 }
+
+fn with_gateway_list(section: &str) -> String {
+    format!(
+        "{MINIMAL}\n[[module.did]]\nid = 0x2A2A\nname = \"taken\"\ndecode = \"hex\"\n\n\
+         [[module]]\nname = \"gateway\"\nvag_address = 0x19\nrequest_id = 0x710\nresponse_id = 0x77A\n\
+         protocol = \"uds\"\n\n[gateway_list]\n{section}\n"
+    )
+}
+
+const OWN_TABLES: &str = "module = \"gateway\"\naddresses = 0x2A2A\nrequest_ids = 0x2A2C";
+
+#[test]
+fn a_profile_names_the_gateways_list_tables() {
+    let profile = Profile::from_toml(&with_gateway_list(OWN_TABLES)).unwrap();
+    let (module, list) = profile.gateway_list_module().unwrap();
+    assert_eq!(module.name, "gateway");
+    assert_eq!((list.addresses, list.request_ids), (0x2A2A, Some(0x2A2C)));
+    // The request ID table is optional, and a profile without the section has no list.
+    let no_ids = Profile::from_toml(&with_gateway_list(
+        "module = \"gateway\"\naddresses = 0x2A2A",
+    ))
+    .unwrap();
+    assert_eq!(no_ids.gateway_list.unwrap().request_ids, None);
+    let none = Profile::from_toml(MINIMAL).unwrap();
+    assert!(none.gateway_list_module().is_none());
+}
+
+#[test]
+fn rejects_a_gateway_list_that_does_not_fit_the_profile() {
+    for (section, error) in [
+        (
+            "module = \"nobody\"\naddresses = 0x2A2A",
+            ProfileError::GatewayListModule("nobody".to_owned()),
+        ),
+        // 2A2A is one of the engine's own DIDs in this fixture.
+        (
+            "module = \"engine\"\naddresses = 0x2A2A",
+            ProfileError::GatewayListDid {
+                module: "engine".to_owned(),
+                did: 0x2A2A,
+            },
+        ),
+        (
+            "module = \"gateway\"\naddresses = 0x2A2A\nrequest_ids = 0x2A2A",
+            ProfileError::GatewayListDid {
+                module: "gateway".to_owned(),
+                did: 0x2A2A,
+            },
+        ),
+    ] {
+        assert_eq!(
+            Profile::from_toml(&with_gateway_list(section)),
+            Err(error),
+            "{section}"
+        );
+    }
+    // The address table is required, and unknown fields are errors.
+    for section in [
+        "module = \"gateway\"",
+        "module = \"gateway\"\naddresses = 0x2A2A\nextra = 1",
+    ] {
+        assert!(matches!(
+            Profile::from_toml(&with_gateway_list(section)),
+            Err(ProfileError::Toml(_))
+        ));
+    }
+}
+
+#[test]
+fn a_gateway_list_needs_a_plain_uds_module() {
+    let kwp = "protocol = \"kwp2000\"\n";
+    let extended = "protocol = \"uds\"\nextended_address = 0x12\n";
+    for protocol in [kwp, extended] {
+        let toml = format!(
+            "name = \"car\"\nbitrate = 500000\n\n[[module]]\nname = \"gateway\"\n\
+             request_id = 0x710\nresponse_id = 0x77A\n{protocol}\n\
+             [gateway_list]\nmodule = \"gateway\"\naddresses = 0x2A2A\n"
+        );
+        assert_eq!(
+            Profile::from_toml(&toml),
+            Err(ProfileError::GatewayListModule("gateway".to_owned())),
+            "{protocol}"
+        );
+    }
+}
+
+#[test]
+fn the_a7_profile_lists_the_gateways_tables() {
+    let profile = Profile::builtin("a7").unwrap();
+    let (module, list) = profile.gateway_list_module().unwrap();
+    assert_eq!((module.vag_address, module.request_id), (Some(0x19), 0x710));
+    assert_eq!((list.addresses, list.request_ids), (0x2A2A, Some(0x2A2C)));
+}

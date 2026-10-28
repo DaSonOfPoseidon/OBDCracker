@@ -59,7 +59,7 @@ pub enum FixtureError {
     /// replies at the request ID + 8).
     NotObd(String),
     /// A DID that is neither a standard identification DID (0xF180..=0xF19F) nor listed for the
-    /// module in its profile.
+    /// module in its profile (a `[[module.did]]`, or a table of its `[gateway_list]`).
     UnknownDid {
         /// The module.
         module: String,
@@ -141,7 +141,11 @@ impl SimBus {
             let dids = spec.dids()?;
             for did in &dids {
                 let def = module.dids.iter().find(|d| d.id == did.id);
-                if def.is_none() && !STANDARD_DIDS.contains(&did.id) {
+                let list_table = profile.gateway_list_module().is_some_and(|(owner, list)| {
+                    owner.name == module.name
+                        && (did.id == list.addresses || Some(did.id) == list.request_ids)
+                });
+                if def.is_none() && !list_table && !STANDARD_DIDS.contains(&did.id) {
                     return Err(FixtureError::UnknownDid {
                         module: spec.module,
                         did: did.id,

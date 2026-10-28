@@ -1287,3 +1287,33 @@ mod tp20_reads {
         );
     }
 }
+
+#[test]
+fn fixture_dids_may_name_the_gateway_lists_tables_on_its_module_only() {
+    let a7 = Profile::builtin("a7").unwrap();
+    let table = |module: &str, did: u16| {
+        format!("[[ecu]]\nmodule = \"{module}\"\n[[ecu.did]]\nid = {did}\nhex = \"01 02\"\n")
+    };
+    // 2A2A and 2A2C are the A7 profile's gateway_list tables, which need no [[module.did]].
+    for did in [0x2A2A, 0x2A2C] {
+        assert!(
+            SimBus::new(&a7, &table("gateway", did)).is_ok(),
+            "{did:04X}"
+        );
+        assert_eq!(
+            SimBus::new(&a7, &table("engine", did)).unwrap_err(),
+            FixtureError::UnknownDid {
+                module: "engine".into(),
+                did
+            }
+        );
+    }
+    // 2A29 is left out of the profile.
+    assert_eq!(
+        SimBus::new(&a7, &table("gateway", 0x2A29)).unwrap_err(),
+        FixtureError::UnknownDid {
+            module: "gateway".into(),
+            did: 0x2A29
+        }
+    );
+}
