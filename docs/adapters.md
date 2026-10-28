@@ -28,8 +28,8 @@ driver reports as `BUFFER FULL` (#71).
 
 It sends VW TP2.0 frames raw (`AT CAF0`), and only on an adapter that echoes each character as it reads it, such as
 the OBDLink EX; whole-line echoers, such as many clones, can't send them. On an open channel it stops the adapter
-listening to send each ACK in time, rather than wait out its timeout; the timing on a real module is checked in
-session 7 (#169) ([details](elm327.md#vw-tp20-channel-frames)).
+listening to send each ACK in time, rather than wait out its timeout, and keeps adaptive timing off so it listens for
+the module's data after the ACK (#218); the timing on a real module is rechecked in the next car session (#169) ([details](elm327.md#vw-tp20-channel-frames)).
 
 [`elm327.md`](elm327.md) lists the adapter behaviour it relies on, with datasheet pages. It's tested against a fake
 adapter written from the datasheet, against the simulated A7, and against
