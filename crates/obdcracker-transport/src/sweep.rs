@@ -41,8 +41,9 @@ pub struct Sweep {
     /// With [`SweepOptions::extended`]: why the module may still be in the extended session
     /// afterwards, as it refused `10 01` or didn't answer it.
     pub still_extended: Option<ReadError>,
-    /// Whether a read went without a final answer, so its answer may still arrive and be taken
-    /// for a later read's. Connect again before reading from this module again.
+    /// Whether a read went without a final answer, or `10 01` had to be sent twice
+    /// ([`crate::Left::out_of_step`]), so an answer may still arrive and be taken for a later
+    /// request's. Connect again before reading from this module again.
     pub out_of_step: bool,
 }
 
@@ -243,8 +244,12 @@ fn sweep_approved<T: Transport + ?Sized>(
                 ..sweep
             },
             Err(Err(FingerprintError::Transport(e))) => with_adapter_failure(sweep, e, last),
+            Ok(left) => Sweep {
+                out_of_step: sweep.out_of_step || left.out_of_step,
+                ..sweep
+            },
             // The other failures can't happen: the session's requests were approved up front.
-            Ok(()) | Err(Err(_)) => sweep,
+            Err(Err(_)) => sweep,
         };
     }
     let mut direct = Direct {

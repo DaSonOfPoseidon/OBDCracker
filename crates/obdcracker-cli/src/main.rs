@@ -716,7 +716,7 @@ fn print_sweep(module: &UdsModule, found: &sweep::Sweep, last: u16) -> ExitCode 
     match &found.stop {
         None => {
             if found.out_of_step {
-                eprintln!("{}", unanswered_note("some reads", &module.name));
+                eprintln!("{}", unanswered_note("some requests", &module.name));
             }
             ExitCode::SUCCESS
         }

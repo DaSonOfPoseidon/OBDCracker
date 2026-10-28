@@ -623,6 +623,38 @@ fn a_module_that_leaves_the_extended_session_is_not_still_in_it() {
     )
     .unwrap();
     assert_eq!(got.still_extended, None);
+    assert!(!got.out_of_step);
+}
+
+#[test]
+fn a_sweep_whose_leave_was_retried_is_out_of_step() {
+    // The first `10 01` goes unanswered; the retry's answer may be the first's, arriving late.
+    let mut leaves = 0;
+    let mut car = Car::new(move |_, request| match request {
+        [0x10, 0x03] => reply(&[0x50, 0x03, 0x00, 0x32, 0x01, 0xF4]),
+        [0x10, 0x01] => {
+            leaves += 1;
+            if leaves == 1 {
+                Vec::new()
+            } else {
+                reply(&[0x50, 0x01, 0x00, 0x32, 0x01, 0xF4])
+            }
+        }
+        [0x22, 0x06, 0x00] => reply(&[0x62, 0x06, 0x00, 0x12]),
+        _ => Vec::new(),
+    });
+    let got = sweep_dids(
+        &mut car,
+        &Policy::read_only(),
+        &engine(),
+        0x0600..=0x0600,
+        TIMING,
+        &extended(),
+    )
+    .unwrap();
+    assert_eq!(got.found, [(0x0600, Ok(vec![0x12]))]);
+    assert_eq!(got.still_extended, None);
+    assert!(got.out_of_step);
 }
 
 #[test]

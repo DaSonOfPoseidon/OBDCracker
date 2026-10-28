@@ -92,6 +92,17 @@ impl From<Error> for SessionError {
     }
 }
 
+/// How [`ExtendedSession::end`] returned the module to the default session.
+#[must_use]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Left {
+    /// Whether `10 01` went unanswered and the retry got the answer. The first try's late answer
+    /// may have been taken for the retry's, and the retry's own may still arrive. A refusal of
+    /// a later `10` request to this module doesn't echo the subfunction, so it can't be told
+    /// apart from that leftover: connect again before sending one.
+    pub out_of_step: bool,
+}
+
 /// Holds one module in the extended diagnostic session (`10 03`) and returns it to the default
 /// session (`10 01`) when dropped, so no module is left in the extended session.
 ///
@@ -263,20 +274,21 @@ impl<'a, T: Transport + ?Sized> ExtendedSession<'a, T> {
     }
 
     /// Returns the module to the default session. Dropping the session does the same (one try),
-    /// but can't report a failure.
+    /// but can't report a failure. Unless the module accepted or plainly refused `10 01`, it's
+    /// tried once more, and [`Left::out_of_step`] says whether that retry is what succeeded.
     ///
     /// # Errors
     ///
-    /// The module refuses `10 01` or doesn't answer, or the adapter fails. Unless the module
-    /// accepted or plainly refused it, `10 01` is tried once more first. An adapter failure on
+    /// The module refuses `10 01` or doesn't answer, or the adapter fails. An adapter failure on
     /// the first try is returned however the retry goes, as the adapter's state is unknown;
-    /// otherwise the retry's result is.
-    pub fn end(mut self) -> Result<(), SessionError> {
+    /// otherwise the retry's result is. After an error, as after [`Left::out_of_step`], a late
+    /// answer may still arrive: connect again before sending this module another `10` request.
+    pub fn end(mut self) -> Result<Left, SessionError> {
         // Drop must not send a second `10 01` unobserved.
         self.ended = true;
         let first = self.request(&self.leave.clone());
         match first {
-            Ok(()) => Ok(()),
+            Ok(()) => Ok(Left { out_of_step: false }),
             Err(SessionError::Refused(reply)) if plainly_refused(&reply) => {
                 Err(SessionError::Refused(reply))
             }
@@ -285,7 +297,9 @@ impl<'a, T: Transport + ?Sized> ExtendedSession<'a, T> {
                 let _ = self.request(&self.leave.clone());
                 Err(first)
             }
-            Err(_) => self.request(&self.leave.clone()),
+            Err(_) => self
+                .request(&self.leave.clone())
+                .map(|()| Left { out_of_step: true }),
         }
     }
 

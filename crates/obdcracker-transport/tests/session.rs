@@ -247,6 +247,64 @@ fn an_unanswered_end_is_tried_once_more() {
     );
 }
 
+// Confirms `10 03`, and every `10 01` but the first, which it answers only after the tester has
+// given up on it: the late `50 01` then answers the retry, and the retry's own stays queued.
+#[derive(Debug, Default)]
+struct LateLeave {
+    sent: Vec<Vec<u8>>,
+    replies: std::collections::VecDeque<Response>,
+}
+
+impl obdcracker_transport::Transport for LateLeave {
+    fn send(
+        &mut self,
+        request: &obdcracker_safety::Approved,
+    ) -> Result<(), obdcracker_transport::Error> {
+        self.sent.push(request.payload().to_vec());
+        let answers = match request.payload() {
+            [0x10, 0x03] => vec![vec![0x50, 0x03, 0x00, 0x32, 0x01, 0xF4]],
+            [0x10, 0x01] if self.sent.len() == 2 => Vec::new(),
+            _ => vec![vec![0x50, 0x01, 0x00, 0x32, 0x01, 0xF4]; 2],
+        };
+        self.replies
+            .extend(answers.into_iter().map(|payload| Response {
+                source: 0x7E8,
+                payload,
+            }));
+        Ok(())
+    }
+
+    fn recv(&mut self, _timeout: Duration) -> Result<Response, obdcracker_transport::Error> {
+        self.replies
+            .pop_front()
+            .ok_or(obdcracker_transport::Error::Timeout)
+    }
+}
+
+#[test]
+fn a_retried_end_says_replies_may_be_out_of_step() {
+    let mut adapter = LateLeave::default();
+    let guard =
+        ExtendedSession::enter(&mut adapter, &Policy::read_only(), ENGINE, FAST, GUARD).unwrap();
+    assert!(guard.end().unwrap().out_of_step);
+    assert_eq!(
+        adapter.sent,
+        [vec![0x10, 0x03], vec![0x10, 0x01], vec![0x10, 0x01]]
+    );
+}
+
+#[test]
+fn an_end_answered_at_once_is_in_step() {
+    let mut adapter = mock(&[
+        &[0x50, 0x03, 0x00, 0x32, 0x01, 0xF4],
+        &[0x50, 0x01, 0x00, 0x32, 0x01, 0xF4],
+    ]);
+    let guard =
+        ExtendedSession::enter(&mut adapter, &Policy::read_only(), ENGINE, FAST, GUARD).unwrap();
+    assert!(!guard.end().unwrap().out_of_step);
+    assert_eq!(sent(&adapter), [vec![0x10, 0x03], vec![0x10, 0x01]]);
+}
+
 #[test]
 fn a_bare_positive_entry_is_accepted() {
     // Older servers answer `50 03` without the timing; the caller's timing is kept.

@@ -610,6 +610,8 @@ fn scan_module<T: Transport + ?Sized>(
                         dids.extend(values);
                         batch_answered |= answered;
                         // A module that doesn't confirm `10 01` leaves the session after S3.
+                        // A retried one may leave its answer queued, but a scan sends no more
+                        // `10` requests to the module, and reads don't take a `50`/`7F 10`.
                         if let Err(e) = session.end() {
                             session_error(e)?;
                         }
