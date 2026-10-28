@@ -1112,9 +1112,10 @@ fn shell_word(word: &str, windows: bool) -> Option<String> {
     })
 }
 
-// Looks for modules in the profile's discovery range, then patiently at each of `patient_ids` that
-// didn't answer, and with `wide` in its wide range too, and prints each that answers. Returns those the profile doesn't list, to scan with the rest, and the
-// policy narrowed to the profile's modules and the ones found.
+// Looks for modules in the profile's discovery range, then patiently at each of `patient_ids`
+// that didn't answer, and with `wide` in its wide range too, and prints each that answers.
+// Returns those the profile doesn't list, to scan with the rest, and the policy narrowed to the
+// profile's modules and the ones found.
 fn discover_modules<T: Transport>(
     cli: &Cli,
     transport: &mut T,
