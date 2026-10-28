@@ -63,6 +63,12 @@ proptest! {
             values.for_each(drop);
         }
         let _ = uds::decode_text(&reply);
+        if let Ok(table) = uds::decode_gateway_addresses(&reply, did) {
+            table.installed().for_each(drop);
+        }
+        if let Ok(ids) = uds::decode_gateway_request_ids(&reply, did, layout.len()) {
+            ids.installed().for_each(drop);
+        }
         let _ = uds::decode_dtc_count(&reply);
         for decode in [uds::decode_dtcs_by_status_mask, uds::decode_supported_dtcs] {
             if let Ok((_, records)) = decode(&reply) {
@@ -113,6 +119,43 @@ proptest! {
                 prop_assert_eq!(got.status, uds::DtcStatus(status));
                 prop_assert_eq!(got.records, &records[..]);
             }
+        }
+    }
+
+    #[test]
+    fn gateway_tables_take_exactly_what_follows_the_echo(
+        did in any::<u16>(),
+        data in prop::collection::vec(any::<u8>(), 0..200),
+        entries in 0usize..120,
+    ) {
+        let mut reply = vec![0x62];
+        reply.extend(did.to_be_bytes());
+        reply.extend(&data);
+        // Addresses: every non-zero byte comes back with its slot, and an empty or all-zero
+        // table is refused.
+        match uds::decode_gateway_addresses(&reply, did) {
+            Ok(table) => {
+                prop_assert_eq!(table.entries(), data.len());
+                let want: Vec<_> = data.iter().copied().enumerate().filter(|&(_, a)| a != 0).collect();
+                prop_assert_eq!(table.installed().collect::<Vec<_>>(), want);
+            }
+            Err(error) => {
+                prop_assert!(data.iter().all(|&a| a == 0));
+                prop_assert_eq!(error, if data.is_empty() { response::Error::TooShort } else { response::Error::Malformed });
+            }
+        }
+        // Request ids: exactly two bytes per entry, or Malformed.
+        let got = uds::decode_gateway_request_ids(&reply, did, entries);
+        if entries > 0 && data.len() == 2 * entries {
+            let want: Vec<_> = data
+                .chunks(2)
+                .enumerate()
+                .map(|(i, c)| (i, u16::from_be_bytes([c[0], c[1]])))
+                .filter(|&(_, id)| id != 0)
+                .collect();
+            prop_assert_eq!(got.unwrap().installed().collect::<Vec<_>>(), want);
+        } else {
+            prop_assert!(got.is_err());
         }
     }
 

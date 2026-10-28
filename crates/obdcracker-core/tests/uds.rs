@@ -478,3 +478,110 @@ mod session {
         assert_eq!(tester_present(), [0x3E, 0x00]);
     }
 }
+
+mod gateway_list {
+    use obdcracker_core::response::Error;
+    use obdcracker_core::uds::{decode_gateway_addresses, decode_gateway_request_ids};
+
+    // The Audi A7's gateway (0x710), session #124: reads of 2A2A and 2A2C.
+    const ADDRESSES: &str = "62 2A 2A 01 02 03 03 04 05 06 08 09 0E 10 11 13 8B 34 15 16 17 17 18 19 1B 1E 20 22 28 2E 30 36 3C 3D 3E 42 46 47 52 53 55 56 57 85 5F 62 26 65 69 6C 6D 6F 72 3B 7F 82 84 48 5B 88 89 8A 8D 8F 90 AC 44 81 8E C0 A9 40 51 8C BA 14 00 00 00 00 00 00 00";
+    const REQUEST_IDS: &str = "62 2A 2C 00 00 00 00 07 13 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 07 57 07 56 07 55 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 07 1D 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 07 21 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 07 12 00 00 07 58 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00";
+
+    fn bytes(hex: &str) -> Vec<u8> {
+        hex.split(' ')
+            .map(|b| u8::from_str_radix(b, 16).unwrap())
+            .collect()
+    }
+
+    fn reply(sid_did: [u8; 3], data: &[u8]) -> Vec<u8> {
+        let mut reply = sid_did.to_vec();
+        reply.extend_from_slice(data);
+        reply
+    }
+
+    #[test]
+    fn lists_the_installed_addresses_of_the_a7_with_their_slots() {
+        let reply = bytes(ADDRESSES);
+        let table = decode_gateway_addresses(&reply, 0x2A2A).unwrap();
+        assert_eq!(table.entries(), 80);
+        let installed: Vec<_> = table.installed().collect();
+        assert_eq!(installed.len(), 73);
+        assert_eq!(installed[0], (0, 0x01));
+        assert_eq!(installed[72], (72, 0x14));
+        // The gateway lists 03 and 17 twice: both slots are kept.
+        for twice in [0x03, 0x17] {
+            assert_eq!(installed.iter().filter(|&&(_, a)| a == twice).count(), 2);
+        }
+        assert_eq!((installed[2], installed[3]), ((2, 0x03), (3, 0x03)));
+    }
+
+    #[test]
+    fn lists_the_request_ids_of_the_a7_by_slot() {
+        let reply = bytes(REQUEST_IDS);
+        let ids = decode_gateway_request_ids(&reply, 0x2A2C, 80).unwrap();
+        let ids: Vec<_> = ids.installed().collect();
+        // Slot 2 is address 03; slot 12 is address 13 (0x757); slot 24 is 22 (0x71D).
+        assert_eq!(ids[0], (2, 0x0713));
+        assert_eq!(ids.len(), 8);
+        assert!(ids.contains(&(12, 0x0757)));
+        assert!(ids.contains(&(50, 0x0721)));
+    }
+
+    #[test]
+    fn skips_zero_slots_and_keeps_their_numbering() {
+        let reply = reply([0x62, 0x2A, 0x2A], &[0, 0x13, 0, 0x1B]);
+        let table = decode_gateway_addresses(&reply, 0x2A2A).unwrap();
+        assert_eq!(table.entries(), 4);
+        assert_eq!(
+            table.installed().collect::<Vec<_>>(),
+            [(1, 0x13), (3, 0x1B)]
+        );
+    }
+
+    #[test]
+    fn refuses_an_address_table_that_is_empty_or_all_padding() {
+        assert_eq!(
+            decode_gateway_addresses(&[0x62, 0x2A, 0x2A], 0x2A2A).err(),
+            Some(Error::TooShort)
+        );
+        assert_eq!(
+            decode_gateway_addresses(&reply([0x62, 0x2A, 0x2A], &[0; 80]), 0x2A2A).err(),
+            Some(Error::Malformed)
+        );
+    }
+
+    #[test]
+    fn refuses_a_reply_for_another_identifier() {
+        let other = reply([0x62, 0x2A, 0x29], &[1, 2]);
+        assert_eq!(
+            decode_gateway_addresses(&other, 0x2A2A).err(),
+            Some(Error::Malformed)
+        );
+        assert_eq!(
+            decode_gateway_request_ids(&other, 0x2A2C, 1).err(),
+            Some(Error::Malformed)
+        );
+    }
+
+    #[test]
+    fn request_ids_take_exactly_two_bytes_per_entry() {
+        let ok = reply([0x62, 0x2A, 0x2C], &[0, 0, 0x07, 0x13]);
+        let ids = decode_gateway_request_ids(&ok, 0x2A2C, 2).unwrap();
+        assert_eq!(ids.installed().collect::<Vec<_>>(), [(1, 0x0713)]);
+        for (entries, len) in [(2, 3), (2, 5), (2, 2), (2, 6), (3, 4), (0, 4)] {
+            let bad = reply([0x62, 0x2A, 0x2C], &vec![1; len]);
+            assert_eq!(
+                decode_gateway_request_ids(&bad, 0x2A2C, entries).err(),
+                Some(Error::Malformed),
+                "{entries} entries, {len} bytes"
+            );
+        }
+    }
+
+    #[test]
+    fn a_request_id_table_of_only_zeros_lists_nothing() {
+        let none = reply([0x62, 0x2A, 0x2C], &[0; 6]);
+        let ids = decode_gateway_request_ids(&none, 0x2A2C, 3).unwrap();
+        assert_eq!(ids.installed().count(), 0);
+    }
+}
