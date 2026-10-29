@@ -359,6 +359,10 @@ Each entry names the class, what to check, and where it bit us.
   `ScanOptions::extended`" or "also allows the candidates" was clear; in a reference page it reads as true of every
   entry point, ID width and PID. Name the function (`scan_with`, not `scan`), the case (11-bit vs 29-bit, known vs
   unknown PID) and every exception the code makes (PRs #157, #158, Codex).
+- **A data change makes the docs' sample output false.** Filling in the A7 profile's VAG addresses changed what the
+  sim scan prints, but `docs/usage.md` still showed the old counts and `not in profile` lines. When a profile or
+  fixture changes, grep `docs/` for the numbers and lines the sim prints, and compare the example with a real run
+  (#211, gate).
 
 ## Tests
 
