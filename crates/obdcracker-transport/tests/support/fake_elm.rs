@@ -6,7 +6,7 @@
 
 use std::collections::VecDeque;
 use std::io;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use obdcracker_core::isotp::{Addressing, FlowControl, FlowStatus, Segmenter, Step};
 use obdcracker_transport::hex;
@@ -14,6 +14,11 @@ use obdcracker_transport::link::{Driver, Link, LinkKind};
 
 /// Answers a request sent to `header`: each reply's source CAN ID and payload.
 pub type Responder = Box<dyn FnMut(u32, &[u8]) -> Vec<(u32, Vec<u8>)> + Send>;
+
+/// Frames a module puts on the bus some time after a request: how long after, the source CAN ID
+/// and the frame's data. They reach the host only if the adapter is listening or monitoring when
+/// they arrive; otherwise they're lost, as on a real adapter.
+pub type Delayed = Box<dyn FnMut(u32, &[u8]) -> Vec<(Duration, u32, Vec<u8>)> + Send>;
 
 pub const BANNER: &str = "ELM327 v2.0";
 
@@ -53,6 +58,22 @@ pub struct FakeElm {
     pub listen_ends_on_write: bool,
     // Listening after a raw bus request (`listen_raw`).
     listening: bool,
+    /// With `listen_raw`, as an STN that ends a raw listen after one frame: it prints the first
+    /// frame the receive filter shows and then its prompt, and any frame after that is lost until
+    /// the host starts listening again. With none shown it listens until the host writes.
+    pub listen_one_frame: bool,
+    /// Frames a module sends after a request (see [`Delayed`]).
+    pub delayed: Option<Delayed>,
+    // Frames on the bus that haven't reached the adapter yet.
+    bus: Vec<(Instant, u32, Vec<u8>)>,
+    /// Frames the receive filter would have shown that arrived while the adapter was neither
+    /// listening nor monitoring, or after its listen ended: the module sent them, nobody heard.
+    pub lost_frames: Vec<(u32, Vec<u8>)>,
+    // Monitoring after `ATMA` or `STM`: every frame is printed until the host writes a byte.
+    monitoring: bool,
+    // `ATMA` on an STN passes every ID whatever `ATCRA` says (STN FRPM, section 7.3); `STM` uses
+    // the filters as set.
+    monitor_all: bool,
     /// Programmable parameters turned on, and their values (datasheet pp. 57-61). The rest are
     /// off, at their factory values.
     pub pp: Vec<(u8, u8)>,
@@ -198,6 +219,12 @@ impl FakeElm {
             listen_raw: false,
             listen_ends_on_write: false,
             listening: false,
+            listen_one_frame: false,
+            delayed: None,
+            bus: Vec::new(),
+            lost_frames: Vec::new(),
+            monitoring: false,
+            monitor_all: false,
             pp: Vec::new(),
             pps: None,
             after_echo: Vec::new(),
@@ -217,7 +244,22 @@ impl FakeElm {
     }
 
     pub fn write(&mut self, bytes: &[u8]) {
+        self.poll();
         for &byte in bytes {
+            if self.monitoring {
+                // Any byte stops a monitor; it's discarded, and `STOPPED` and the prompt follow
+                // what was printed (ELM327DS p. 20, STN FRPM section 8.9).
+                self.monitoring = false;
+                if self.listen_ends_on_write {
+                    self.prompt();
+                    self.printing = false;
+                } else {
+                    self.interrupted += 1;
+                    self.print("STOPPED");
+                    self.prompt();
+                    continue;
+                }
+            }
             if self.listening {
                 self.listening = false;
                 if self.listen_ends_on_write {
@@ -334,6 +376,16 @@ impl FakeElm {
         }
         if let Some(at) = line.strip_prefix("AT") {
             self.at(at);
+        } else if line == "STM" {
+            // Monitor with the filters as set; an STN's command (STN FRPM, section 8.9), unknown
+            // to a plain ELM327.
+            if self.sti.is_some() {
+                self.monitoring = true;
+                self.monitor_all = false;
+            } else {
+                self.print("?");
+                self.prompt();
+            }
         } else if line == "STI" {
             let reply = self.sti.clone().unwrap_or_else(|| "?".into());
             self.print(&reply);
@@ -380,6 +432,12 @@ impl FakeElm {
             }
             "PPS" => {
                 self.print_pps();
+                return;
+            }
+            "MA" => {
+                // No prompt until the host stops it.
+                self.monitoring = true;
+                self.monitor_all = self.sti.is_some();
                 return;
             }
             "RV" => {
@@ -578,7 +636,10 @@ impl FakeElm {
             self.prompt();
             return;
         }
-        if replies.is_empty() {
+        // A listen that hears nothing ends with `NO DATA` at its timeout, which this fake never
+        // reaches while listening.
+        let one_frame = self.listen_raw && self.listen_one_frame && !self.settings.caf;
+        if replies.is_empty() && !one_frame {
             self.print("NO DATA");
         }
         let gap_us = self.st_min_us().max(FRAME_TIME_US);
@@ -617,27 +678,26 @@ impl FakeElm {
                 }
             }
             for (k, frame) in frames.into_iter().enumerate() {
-                let line = if self.settings.headers && self.settings.bits29() {
-                    format!("{} {}", hex(&source.to_be_bytes()), hex(&frame))
-                } else if self.settings.headers {
-                    format!("{source:03X} {}", hex(&frame))
-                } else {
-                    hex(&frame)
-                };
+                let line = self.frame_line(source, &frame);
                 let (index, k) = (index as u64, k as u64);
                 let at = if self.drain_rate.is_some() {
                     k * gap_us + index
                 } else {
                     index << 32 | k
                 };
-                lines.push((at, line));
+                lines.push((at, source, frame, line));
             }
         }
-        lines.sort_by_key(|(at, _)| *at);
+        lines.sort_by_key(|(at, ..)| *at);
         // Bytes still in the buffer, in millionths of a byte, as the frames arrive.
         let mut queued: u64 = 0;
         let mut last = 0;
-        for (at, line) in lines {
+        let mut printed = 0;
+        for (at, source, frame, line) in lines {
+            if one_frame && printed > 0 {
+                self.lost_frames.push((source, frame));
+                continue;
+            }
             if let Some(rate) = self.drain_rate {
                 queued = queued.saturating_sub(u64::from(rate) * (at - last));
                 last = at;
@@ -648,11 +708,69 @@ impl FakeElm {
                 }
             }
             self.print(&line);
+            printed += 1;
         }
-        if self.listen_raw && !self.settings.caf {
+        if let Some(delayed) = self.delayed.as_mut() {
+            let now = Instant::now();
+            let late = delayed(header, &bytes);
+            self.bus.extend(
+                late.into_iter()
+                    .map(|(after, id, data)| (now + after, id, data)),
+            );
+        }
+        if one_frame && printed > 0 {
+            // The listen ended with its first frame.
+            self.prompt();
+        } else if self.listen_raw && !self.settings.caf {
             self.listening = true;
         } else if !self.hang_after_request {
             self.prompt();
+        }
+    }
+
+    // How a frame is printed after a request or while monitoring.
+    fn frame_line(&self, source: u32, frame: &[u8]) -> String {
+        if self.settings.headers && self.settings.bits29() {
+            format!("{} {}", hex(&source.to_be_bytes()), hex(frame))
+        } else if self.settings.headers {
+            format!("{source:03X} {}", hex(frame))
+        } else {
+            hex(frame)
+        }
+    }
+
+    /// When the next frame still on the bus reaches the adapter.
+    pub fn next_frame_at(&self) -> Option<Instant> {
+        self.bus.iter().map(|(at, ..)| *at).min()
+    }
+
+    /// Lets the frames that have reached the adapter by now in: printed if it's listening or
+    /// monitoring and the receive filter shows them, else lost.
+    pub fn poll(&mut self) {
+        let now = Instant::now();
+        let mut due: Vec<_> = self
+            .bus
+            .iter()
+            .filter(|(at, ..)| *at <= now)
+            .cloned()
+            .collect();
+        self.bus.retain(|(at, ..)| *at > now);
+        due.sort_by_key(|(at, ..)| *at);
+        for (_, id, data) in due {
+            let monitored = self.monitoring && self.monitor_all;
+            if !monitored && !self.settings.shows(id) {
+                continue;
+            }
+            if self.listening || self.monitoring {
+                let line = self.frame_line(id, &data);
+                self.print(&line);
+                if self.listening && self.listen_one_frame {
+                    self.listening = false;
+                    self.prompt();
+                }
+            } else {
+                self.lost_frames.push((id, data));
+            }
         }
     }
 }
@@ -839,6 +957,17 @@ impl Link for FakeLink {
                 std::thread::sleep((*at - now).min(timeout));
                 return Ok(0);
             }
+        }
+        self.elm.poll();
+        if !self.elm.has_output()
+            && let Some(at) = self.elm.next_frame_at()
+        {
+            // A module's frame is still on its way: wait for it, up to the read's timeout.
+            std::thread::sleep(
+                at.saturating_duration_since(std::time::Instant::now())
+                    .min(timeout),
+            );
+            self.elm.poll();
         }
         let bytes = self.elm.read(self.chunk.min(buf.len()));
         buf[..bytes.len()].copy_from_slice(&bytes);
