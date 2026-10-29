@@ -1373,23 +1373,27 @@ fn sim_scan_compares_the_gateways_list_with_the_modules_that_answered() {
         .lines()
         .find(|l| l.starts_with("gateway lists "))
         .unwrap_or_else(|| panic!("no gateway list in:\n{stdout}"));
-    // The profile's VAG addresses 01, 02, 19, 82 and 17 answer; the gateway lists 17 twice.
+    // The profile's VAG addresses 01, 02, 19, 82, 17, 03, 13, 8B, 3B, 44 and 8E answer; the
+    // gateway lists 17 and 03 twice, so each counts for both of its slots.
     assert_eq!(
         summary,
-        "gateway lists 73 installed modules: 6 found, 67 not in profile"
+        "gateway lists 73 installed modules: 13 found, 60 not in profile"
     );
-    // The A7 profile has no VAG address for 13, and none at all for 22; 03 is listed twice.
+    // The A7 profile has no module for 22 (request 0x71D) or 34 (request 0x755).
     for line in [
-        "  13 not in profile (request 0x757)",
         "  22 not in profile (request 0x71D)",
+        "  34 not in profile (request 0x755)",
     ] {
         assert!(stdout.lines().any(|l| l == line), "{line:?} in:\n{stdout}");
     }
-    assert_eq!(
-        stdout.lines().filter(|l| l.starts_with("  03 ")).count(),
-        2,
-        "{stdout}"
-    );
+    // The modules the profile gives an address no longer show up as not in profile.
+    for address in ["03", "13", "3B", "44", "8B", "8E"] {
+        let prefix = format!("  {address} not in profile");
+        assert!(
+            !stdout.lines().any(|l| l.starts_with(&prefix)),
+            "{prefix:?} in:\n{stdout}"
+        );
+    }
     // Two extra reads of the gateway, and nothing but reads.
     let audit = std::fs::read_to_string(&log).unwrap();
     for did in ["22 2A 2A", "22 2A 2C"] {
@@ -1428,7 +1432,7 @@ fn sim_scan_with_tp20_discovery_calls_the_listed_addresses_it_tried_silent() {
         stdout
             .lines()
             .any(|l| l
-                == "gateway lists 73 installed modules: 6 found, 29 silent, 38 not in profile"),
+                == "gateway lists 73 installed modules: 13 found, 29 silent, 31 not in profile"),
         "{stdout}"
     );
     assert!(stdout.lines().any(|l| l == "  05 silent"), "{stdout}");
