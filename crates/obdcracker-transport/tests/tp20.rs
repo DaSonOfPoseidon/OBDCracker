@@ -2,7 +2,7 @@
 //! and KWP2000 reads on an open channel.
 
 use std::collections::VecDeque;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use obdcracker_core::tp20::{self as codec, Channel};
 use obdcracker_safety::{Approved, ModuleIds, Policy, Rejection};
@@ -324,28 +324,59 @@ fn an_adapter_that_stops_listening_while_pending_listens_again_after_a_keep_aliv
     );
 }
 
+// An adapter that ends its listen after every frame it prints, as an STN does on a raw channel
+// (#227), and so reports `Timeout` between frames while a request's frames are still coming. It
+// listens again at once on its own, which a real driver does by monitoring: this stands for that.
+struct Stopping {
+    car: Car,
+    // The next call reports the end of a listen.
+    gap: bool,
+}
+
+impl Stopping {
+    fn new(car: Car) -> Self {
+        Self { car, gap: false }
+    }
+}
+
+impl Transport for Stopping {
+    fn send(&mut self, request: &Approved) -> Result<(), Error> {
+        self.car.send(request)
+    }
+
+    fn recv(&mut self, timeout: Duration) -> Result<Response, Error> {
+        if std::mem::take(&mut self.gap) {
+            return Err(Error::Timeout);
+        }
+        match self.car.recv(timeout) {
+            Ok(reply) => {
+                // Only data frames (the ones a request and its ACKs are) end a listen early.
+                self.gap = !self.car.replies.is_empty();
+                Ok(reply)
+            }
+            Err(e) => Err(e),
+        }
+    }
+}
+
 #[test]
-fn an_adapter_that_stops_listening_after_the_ack_listens_again_before_the_deadline() {
-    // An ELM327 prints its prompt a moment after the module's ACK, having learned a short wait
-    // from the fast setup replies (#218): nothing more arrives until the tester sends again.
-    // The module's data comes ~60 ms later, well inside the session's own wait.
-    let mut car = channel_car(|frame| match frame {
-        [0x10, 0x00, 0x02, 0x1A, 0x9B] => frames(&[&[0xB1]]),
-        [0xA3] => frames(&[&MODULE_PARAMETERS, &[0x10, 0x00, 0x02, 0x5A, 0x9B]]),
+fn no_keep_alive_between_the_ack_and_the_answer() {
+    // The adapter's listen ends right after the module's ACK, and the answer follows. A keep-alive
+    // there tests the channel while the module is about to answer, and it may drop it (#227).
+    let mut car = Stopping::new(channel_car(|frame| match frame {
+        [0x10, 0x00, 0x02, 0x1A, 0x9B] => frames(&[&[0xB1], &[0x10, 0x00, 0x02, 0x5A, 0x9B]]),
         [0x11, 0x00, 0x02, 0x21, 0x01] => frames(&[&[0xB2], &[0x11, 0x00, 0x02, 0x61, 0x01]]),
         _ => Vec::new(),
-    });
+    }));
     let policy = Policy::read_only();
     let mut session = ChannelSession::open(&mut car, &policy, 0x5F, TIMING).unwrap();
     assert_eq!(session.request(&[0x1A, 0x9B]).unwrap(), [0x5A, 0x9B]);
-    // The keep-alive took no sequence number: the next request is 1.
     assert_eq!(session.request(&[0x21, 0x01]).unwrap(), [0x61, 0x01]);
     drop(session);
     assert_eq!(
-        car.sent[2..],
+        car.car.sent[2..],
         [
             "740 10 00 02 1A 9B",
-            "740 A3",
             "740 B1",
             "740 11 00 02 21 01",
             "740 B2",
@@ -355,21 +386,20 @@ fn an_adapter_that_stops_listening_after_the_ack_listens_again_before_the_deadli
 }
 
 #[test]
-fn an_adapter_that_keeps_stopping_early_is_given_up_on_after_the_keep_alive_budget() {
-    // Never any data: `max_pending` (2) keep-alives, then a timeout, not a loop.
-    let mut car = channel_car(|frame| match frame {
+fn an_adapter_that_keeps_stopping_early_sends_no_keep_alives_and_times_out_at_the_deadline() {
+    // Never any data: the wait ends at its deadline with one `Timeout`, and nothing was sent in
+    // between.
+    let mut car = Stopping::new(channel_car(|frame| match frame {
         [0x10, ..] => frames(&[&[0xB1]]),
-        [0xA3] => frames(&[&MODULE_PARAMETERS]),
         _ => Vec::new(),
-    });
+    }));
     let policy = Policy::read_only();
     let mut session = ChannelSession::open(&mut car, &policy, 0x5F, TIMING).unwrap();
+    let started = Instant::now();
     assert_eq!(session.request(&[0x1A, 0x9B]), Err(ChannelError::Timeout));
+    assert!(started.elapsed() >= TIMING.p2, "{:?}", started.elapsed());
     drop(session);
-    assert_eq!(
-        car.sent[2..],
-        ["740 10 00 02 1A 9B", "740 A3", "740 A3", "740 A8"]
-    );
+    assert_eq!(car.car.sent[2..], ["740 10 00 02 1A 9B", "740 A8"]);
 }
 
 // Waits out the whole timeout it's given before reporting `Timeout`, as an adapter that has

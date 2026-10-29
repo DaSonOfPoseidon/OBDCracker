@@ -93,9 +93,15 @@ const ECHO_WAIT: Duration = Duration::from_secs(1);
 // Ends a misheard line so the adapter refuses it: no single flipped bit of this leaves a line of
 // hex digits (docs/elm327.md#safety).
 const KILL: &[u8] = b"XX\r";
-// Stops an adapter listening after a request (ELM327DS p. 7), which discards it. No single
-// flipped bit of it is a hex digit, and if the prompt came first, `KILL`'s `X\r` ends the line it
-// starts so the adapter refuses it.
+// Monitors the bus with the filters as set, printing every frame until stopped: `AT MA` on an
+// ELM327 (ELM327DS p. 20), `STM` on an STN, where `AT MA` and `STMA` pass every ID whatever
+// `AT CRA` says (OBDLink FRPM, section 7.3). Each has two or more non-hex letters, so no single
+// flipped bit makes a bus request (docs/elm327.md#safety).
+const MONITOR_ELM: &str = "ATMA";
+const MONITOR_STN: &str = "STM";
+// Stops an adapter listening after a request, or monitoring (ELM327DS pp. 7, 20; STN FRPM,
+// section 8.9), which discards it. No single flipped bit of it is a hex digit, and if the prompt
+// came first, `KILL`'s `X\r` ends the line it starts so the adapter refuses it.
 const INTERRUPT: &[u8] = b"X";
 // Characters in a printed consecutive frame, `7E8 21 41 41 41 41 41 41 41 \r`, and with a 29-bit
 // ID, `17 FE 00 76 21 41 41 41 41 41 41 41 \r`.
@@ -155,6 +161,15 @@ pub struct Elm<L> {
     filter: String,
     // A request is out and the adapter hasn't printed its prompt yet.
     busy: bool,
+    // The request in progress is a frame on an open TP2.0 channel, so when the adapter's listen
+    // ends before the caller's wait does, `recv` monitors the channel instead of going quiet
+    // (docs/elm327.md#vw-tp20-channel-frames).
+    listen: bool,
+    // The adapter is monitoring the bus (`MONITOR_ELM` or `MONITOR_STN`) and prints no prompt
+    // until the driver stops it.
+    monitoring: bool,
+    // A monitor printed `BUFFER FULL` while the driver was stopping it: frames were lost.
+    monitor_overflow: bool,
     // The request line the adapter hasn't echoed yet.
     echo: Option<String>,
     // Whether the adapter echoes a request's characters before its carriage return, once the
@@ -262,6 +277,9 @@ impl<L: Link> Elm<L> {
             flow: None,
             filter: WIDE_FILTER.to_owned(),
             busy: false,
+            listen: false,
+            monitoring: false,
+            monitor_overflow: false,
             echo: None,
             early_echo: None,
             quiet: Duration::ZERO,
@@ -659,6 +677,10 @@ impl<L: Link> Elm<L> {
     // Fails if the adapter can't be trusted; otherwise waits for any request still running.
     fn ready(&mut self) -> Result<(), Error> {
         self.trusted()?;
+        // A monitor prints no prompt, so nothing else can be written until it's stopped.
+        if self.busy && self.monitoring {
+            self.interrupt()?;
+        }
         if !self.busy {
             return self.check_idle();
         }
@@ -676,7 +698,7 @@ impl<L: Link> Elm<L> {
                 }
                 Some(Event::Line(text)) => {
                     if self.echo.is_none() {
-                        self.note(left_over(self.event_at, text.clone()));
+                        self.unread(text.clone());
                     }
                     self.reply_line(&text)?;
                 }
@@ -686,7 +708,63 @@ impl<L: Link> Elm<L> {
             }
         }
         self.busy = false;
+        self.take_overflow()?;
         self.check_idle()
+    }
+
+    // Reports a line nobody read. A monitor's `BUFFER FULL` means frames were lost: the caller
+    // is told once the monitor has stopped (`take_overflow`).
+    fn unread(&mut self, text: String) {
+        if self.monitoring && matches!(parse_line(&text), Line::Status(Status::BufferFull)) {
+            self.monitor_overflow = true;
+        }
+        self.note(left_over(self.event_at, text));
+    }
+
+    fn take_overflow(&mut self) -> Result<(), Error> {
+        if std::mem::take(&mut self.monitor_overflow) {
+            return Err(Error::Adapter(
+                "the adapter said BUFFER FULL while monitoring: its link is too slow for the \
+                 frames, and some were lost; use a faster baud rate"
+                    .into(),
+            ));
+        }
+        Ok(())
+    }
+
+    // Starts monitoring the bus right after the prompt, with the receive filter set for the
+    // channel, to hear the frames the module sends from now on. Written like the other mode
+    // switches: its echo is checked before the carriage return. Prints no prompt until
+    // `interrupt` stops it.
+    fn start_monitor(&mut self) -> Result<(), Error> {
+        let command = if self.stn.is_some() {
+            MONITOR_STN
+        } else {
+            MONITOR_ELM
+        };
+        if self.early_echo != Some(true) {
+            return Err(Error::Adapter(format!(
+                "{command} needs an adapter that echoes each character as it reads it (such as \
+                 an OBDLink), and this one hasn't shown it does; send an ISO-TP request first"
+            )));
+        }
+        self.check_idle()?;
+        let at = SystemTime::now();
+        // Noted however it ends: a misheard command may still have done something.
+        let written = self
+            .write(command.as_bytes())
+            .and_then(|()| self.check_early_echo(command))
+            .and_then(|()| self.write(b"\r"));
+        self.note(LinkEvent::Command {
+            at,
+            command: command.to_owned(),
+            answer: Vec::new(),
+        });
+        written?;
+        self.quiet = Duration::ZERO;
+        self.echo = Some(command.to_owned());
+        self.monitoring = true;
+        Ok(())
     }
 
     // The adapter prints nothing between its prompt and the next line it's sent, so anything
@@ -722,8 +800,8 @@ impl<L: Link> Elm<L> {
         Err(self.break_down(format!("the adapter printed {what} while idle")))
     }
 
-    // Stops the adapter listening for more of the last request's replies. Lines it printed
-    // until then that nobody read are reported as unread.
+    // Stops the adapter listening for more of the last request's replies, or monitoring. Lines it
+    // printed until then that nobody read are reported as unread.
     fn interrupt(&mut self) -> Result<(), Error> {
         // It may have finished already, its prompt read or waiting on the link: then there's
         // nothing to stop.
@@ -731,16 +809,20 @@ impl<L: Link> Elm<L> {
         while let Some(event) = self.next_event(deadline)? {
             match event {
                 // `ready` finishes the request as usual.
-                Event::Prompt => {
+                Event::Prompt if !self.monitoring => {
                     self.events.push_front((self.event_at, Event::Prompt));
                     return Ok(());
+                }
+                // Nothing was written to stop it.
+                Event::Prompt => {
+                    return Err(self.break_down("the adapter stopped monitoring on its own".into()));
                 }
                 Event::Overlong => {
                     return Err(self.break_down("the adapter printed an overlong line".into()));
                 }
                 Event::Line(text) => {
                     if self.reply_line(&text)?.is_some() {
-                        self.note(left_over(self.event_at, text));
+                        self.unread(text);
                     }
                 }
             }
@@ -776,9 +858,16 @@ impl<L: Link> Elm<L> {
                 )));
             }
         }
+        // A monitor's command has been echoed by now, whether or not anyone read it.
+        if std::mem::take(&mut self.monitoring)
+            && let Some(request) = self.echo.take()
+        {
+            return Err(self.break_down(format!("the adapter didn't echo {request}")));
+        }
+        self.listen = false;
         self.busy = false;
         self.drop_senders();
-        Ok(())
+        self.take_overflow()
     }
 
     // Reads up to the prompt after `INTERRUPT`, noting the lines read on the way; returns
@@ -802,7 +891,7 @@ impl<L: Link> Elm<L> {
                 Some(Event::Line(text)) => {
                     // A reply the caller never read, checked as any other.
                     if self.reply_line(&text)?.is_some() {
-                        self.note(left_over(self.event_at, text));
+                        self.unread(text);
                     }
                 }
             }
@@ -1148,6 +1237,7 @@ impl<L: Link> Transport for Elm<L> {
         self.quiet = Duration::ZERO;
         self.echo = Some(line);
         self.busy = true;
+        self.listen = raw && matches!(request.target(), Target::Tp20Channel(_));
         self.drop_senders();
         Ok(())
     }
@@ -1203,12 +1293,29 @@ impl<L: Link> Transport for Elm<L> {
         self.ready_to_receive()?;
         let deadline = Instant::now() + timeout.min(LONGEST_WAIT);
         loop {
-            match self.next_request_event(deadline)? {
+            // A monitor can stay quiet for as long as the caller waits, so only the caller's
+            // deadline bounds it; stopping it is bounded by `COMMAND_WAIT`.
+            let event = if self.monitoring {
+                self.next_event(deadline)?
+            } else {
+                self.next_request_event(deadline)?
+            };
+            match event {
                 None => return Err(Error::Timeout),
                 Some(Event::Prompt) => {
+                    let listen = self.listen;
                     self.prompt_after_request()?;
-                    self.busy = false;
                     self.drop_senders();
+                    // The adapter stopped listening before the caller's wait ran out. Whatever
+                    // the module sends from now on is lost unless the adapter listens again, and
+                    // sending anything to make it would be a frame on the channel (an `A3` the
+                    // module may answer by dropping it, #227): monitor instead, which transmits
+                    // nothing.
+                    if listen && Instant::now() < deadline {
+                        self.start_monitor()?;
+                        continue;
+                    }
+                    self.busy = false;
                     return Err(Error::Timeout);
                 }
                 Some(Event::Overlong) => {
@@ -1341,6 +1448,12 @@ impl<L: Link> Elm<L> {
     }
 
     fn prompt_after_request(&mut self) -> Result<(), Error> {
+        // A monitor prints no prompt until the driver stops it (`interrupt` reads that one
+        // itself), so this one means the adapter's state isn't what the driver cached.
+        if self.monitoring {
+            return Err(self.break_down("the adapter stopped monitoring on its own".into()));
+        }
+        self.listen = false;
         match self.echo.take() {
             Some(request) => Err(self.break_down(format!("the adapter didn't echo {request}"))),
             None => Ok(()),

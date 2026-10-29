@@ -11,6 +11,10 @@ use obdcracker_safety::{Approved, OpenTp20Channel, Policy, Rejection};
 use crate::fingerprint::FingerprintError;
 use crate::{Error, Expect, Response, Timing, Transport, exchange};
 
+// How long to pause when the transport reports a timeout before the session's own wait has
+// run out, before asking it again.
+const EARLY_TIMEOUT_PAUSE: Duration = Duration::from_millis(1);
+
 /// A channel the session hasn't sent on for this long gets a keep-alive before its next request.
 pub const KEEP_ALIVE_IDLE: Duration = Duration::from_millis(500);
 
@@ -399,24 +403,24 @@ impl<'a, T: Transport + ?Sized> ChannelSession<'a, T> {
             }
             let reply = match self.transport.recv(left) {
                 Ok(reply) => reply,
-                // An adapter that stops listening between frames (an ELM327 after its prompt)
-                // listens again after a frame the tester sends: a keep-alive, while the module
-                // works on an answer it said is pending, or while our own wait hasn't run out
-                // (a timeout before the deadline is the adapter's, not the module's, #218).
+                // While the module works on an answer it said is pending, an adapter that stops
+                // listening (an ELM327 after its prompt) listens again after a frame the tester
+                // sends: a keep-alive, at most `max_pending` of them.
                 Err(Error::Timeout)
-                    if (pending > 0 || Instant::now() < deadline)
-                        && keep_alives < usize::from(self.timing.max_pending) =>
+                    if pending > 0 && keep_alives < usize::from(self.timing.max_pending) =>
                 {
-                    let keep_alive = self
-                        .policy
-                        .approve_tp20_keep_alive(&self.channel)
-                        .map_err(ChannelError::Rejected)?;
-                    // The tester's own wait for T3 doesn't count against the module.
-                    let paced = self.paced_wait(LONGEST_PACE);
-                    self.send(&keep_alive)?;
-                    deadline += paced;
+                    deadline += self.pending_keep_alive()?;
                     keep_alives += 1;
-                    self.unanswered += 1;
+                    continue;
+                }
+                // A timeout before our own deadline is the transport's, not the module's (#218).
+                // Sending anything to make the adapter listen again would be a frame on the
+                // channel between the module's ACK and its answer, which the module may answer
+                // by dropping the channel (#227): ask again for the time left. A transport that
+                // keeps this up gets a pause, so the wait isn't a busy loop.
+                Err(Error::Timeout) if pending == 0 && Instant::now() < deadline => {
+                    let left = deadline.saturating_duration_since(Instant::now());
+                    std::thread::sleep(left.min(EARLY_TIMEOUT_PAUSE));
                     continue;
                 }
                 Err(Error::Timeout) if pending > 0 => return Err(ChannelError::StillPending),
@@ -483,6 +487,20 @@ impl<'a, T: Transport + ?Sized> ChannelSession<'a, T> {
                 }
             }
         }
+    }
+
+    // Sends the keep-alive that makes an adapter listen again while the module's answer is
+    // pending, and returns the time the tester spent pacing it, which doesn't count against the
+    // module's wait.
+    fn pending_keep_alive(&mut self) -> Result<Duration, ChannelError> {
+        let keep_alive = self
+            .policy
+            .approve_tp20_keep_alive(&self.channel)
+            .map_err(ChannelError::Rejected)?;
+        let paced = self.paced_wait(LONGEST_PACE);
+        self.send(&keep_alive)?;
+        self.unanswered += 1;
+        Ok(paced)
     }
 
     // Feeds one data frame, sends the ACK it asks for, and returns the message it completes.
