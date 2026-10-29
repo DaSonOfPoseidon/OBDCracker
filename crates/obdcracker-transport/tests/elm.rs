@@ -664,6 +664,8 @@ mod requests {
                 "ATSH740",
                 "ATCRA300",
                 "A8",
+                // The reply to `A8` ended the adapter's listen before the caller's wait did.
+                "ATMA",
                 "ATCAF1",
                 "ATV0",
                 "ATCFC1",
@@ -1111,6 +1113,364 @@ mod requests {
                             built.contains(frame),
                             "{crossing} {index} {bit}: {frame:02X?}"
                         );
+                    }
+                }
+            }
+        }
+    }
+
+    // An STN with module 0x5F on channel 0x740/0x300 that ends a raw listen after one frame
+    // (#227). A request frame gets its immediate reply, and the frames after it come `delay`
+    // later; the adapter hears them only if it listens again by then.
+    fn one_frame_stn(delay: Duration) -> FakeElm {
+        let mut car = FakeElm::new(Box::new(|header, request| match (header, request) {
+            (0x200, [0x5F, 0xC0, ..]) => {
+                vec![(0x25F, vec![0x00, 0xD0, 0x00, 0x03, 0x40, 0x07, 0x01])]
+            }
+            (0x740, [0xA0, ..]) => vec![(0x300, vec![0xA1, 0x0F, 0x8A, 0xFF, 0x32, 0xFF])],
+            (0x740, [0x10, 0x00, 0x02, 0x1A, 0x9B]) => vec![(0x300, vec![0xB1])],
+            (0x740, [0xB2]) => vec![(0x300, vec![0x22, 0x4B])],
+            (0x740, [0xA8]) => vec![(0x300, vec![0xA8])],
+            (0x7E0, [0x09, 0x02]) => vec![(0x7E8, VIN.to_vec())],
+            _ => Vec::new(),
+        }));
+        car.sti = Some("STN2232 v5.12.4".into());
+        car.listen_raw = true;
+        car.listen_one_frame = true;
+        car.delayed = Some(Box::new(move |header, request| match (header, request) {
+            (0x740, [0x10, 0x00, 0x02, 0x1A, 0x9B]) => vec![
+                (
+                    delay,
+                    0x300,
+                    vec![0x20, 0x00, 0x0E, 0x5A, 0x9B, 0x41, 0x42, 0x43],
+                ),
+                (
+                    delay + Duration::from_millis(1),
+                    0x300,
+                    vec![0x01, 0x44, 0x45, 0x46, 0x47, 0x48, 0x49, 0x4A],
+                ),
+            ],
+            (0x740, [0xB2]) => vec![(delay, 0x300, vec![0x13, 0x4C])],
+            _ => Vec::new(),
+        }));
+        car
+    }
+
+    // Opens channel 0x740/0x300 on `elm` and sends the `1A 9B` request; the module's ACK has
+    // been read when this returns.
+    fn request_sent(elm: &mut Elm<FakeLink>) -> obdcracker_safety::OpenTp20Channel {
+        let policy = Policy::read_only();
+        let setup = policy.approve_tp20_setup(0x5F).unwrap();
+        elm.send(&setup).unwrap();
+        let reply = elm.recv(Duration::from_secs(1)).unwrap();
+        let channel = policy
+            .tp20_channel(&setup, reply.source, &reply.payload)
+            .unwrap();
+        while elm.recv(Duration::from_secs(1)).is_ok() {}
+        elm.send(&policy.approve_tp20_parameters(&channel).unwrap())
+            .unwrap();
+        assert_eq!(elm.recv(Duration::from_secs(1)).unwrap().payload[0], 0xA1);
+        let request = policy
+            .approve_tp20_request(&channel, 0, &[0x1A, 0x9B])
+            .unwrap();
+        elm.send(&request).unwrap();
+        assert_eq!(elm.recv(Duration::from_secs(1)).unwrap().payload, [0xB1]);
+        channel
+    }
+
+    #[test]
+    fn a_tp20_answer_right_after_the_ack_is_heard_and_acked() {
+        // The STN prints its prompt after the module's ACK, and the module's data follows 5 ms
+        // later: with nothing listening, that frame was lost (#227).
+        let mut elm = with_echo_shown(one_frame_stn(Duration::from_millis(5)));
+        let channel = request_sent(&mut elm);
+        let policy = Policy::read_only();
+        let data = elm.recv(Duration::from_secs(1)).unwrap();
+        assert_eq!(
+            data.payload,
+            [0x20, 0x00, 0x0E, 0x5A, 0x9B, 0x41, 0x42, 0x43]
+        );
+        assert_eq!(elm.recv(Duration::from_secs(1)).unwrap().payload[0], 0x01);
+        elm.send(&policy.approve_tp20_ack(&channel, 2).unwrap())
+            .unwrap();
+        assert_eq!(
+            elm.link().elm.sent.last(),
+            Some(&(0x740, vec![0xB2])),
+            "the ACK went out"
+        );
+        assert_eq!(elm.link().elm.lost_frames, []);
+    }
+
+    fn count(elm: &Elm<FakeLink>, command: &str) -> usize {
+        commands(elm).iter().filter(|c| *c == command).count()
+    }
+
+    #[test]
+    fn a_multi_frame_answer_is_heard_whole_over_an_adapter_that_ends_every_listen() {
+        // Monitor, stop for the ACK, and monitor again, each cycle with no frame lost: the second
+        // ACK's reply arrives one frame at a time too.
+        use obdcracker_transport::Timing;
+        use obdcracker_transport::tp20::{ChannelSession, Disconnect};
+        let mut elm = with_echo_shown(one_frame_stn(Duration::from_millis(5)));
+        let policy = Policy::read_only();
+        let timing = Timing {
+            p2: Duration::from_millis(100),
+            ..Timing::default()
+        };
+        let mut session = ChannelSession::open(&mut elm, &policy, 0x5F, timing).unwrap();
+        assert_eq!(
+            session.request(&[0x1A, 0x9B]).unwrap(),
+            b"\x5A\x9BABCDEFGHIJKL"
+        );
+        assert_eq!(session.close(), Ok(Disconnect::Closed));
+        assert_eq!(elm.link().elm.lost_frames, []);
+        assert_eq!(
+            elm.link().elm.sent[1..],
+            [
+                (0x200, vec![0x5F, 0xC0, 0x00, 0x10, 0x00, 0x03, 0x01]),
+                (0x740, vec![0xA0, 0x0F, 0x8A, 0xFF, 0x32, 0xFF]),
+                (0x740, vec![0x10, 0x00, 0x02, 0x1A, 0x9B]),
+                (0x740, vec![0xB2]),
+                (0x740, vec![0xB4]),
+                (0x740, vec![0xA8]),
+            ]
+        );
+        // After the module's ACK, and after the first frame of the ACK's reply.
+        assert_eq!(count(&elm, "STM"), 2, "{:?}", commands(&elm));
+        assert_eq!(count(&elm, "STMA") + count(&elm, "ATMA"), 0);
+    }
+
+    #[test]
+    fn a_module_that_never_answers_gets_one_timeout_and_nothing_sent() {
+        use obdcracker_transport::LinkEvent;
+        let mut elm = with_echo_shown(one_frame_stn(Duration::from_secs(60)));
+        let channel = request_sent(&mut elm);
+        elm.take_events();
+        let sent = elm.link().elm.sent.len();
+        let started = Instant::now();
+        assert!(matches!(
+            elm.recv(Duration::from_millis(300)),
+            Err(Error::Timeout)
+        ));
+        assert!(started.elapsed() >= Duration::from_millis(300));
+        // Still monitoring: a second wait doesn't start it again.
+        assert!(matches!(
+            elm.recv(Duration::from_millis(100)),
+            Err(Error::Timeout)
+        ));
+        assert_eq!(elm.link().elm.sent.len(), sent, "nothing was sent");
+        assert_eq!(count(&elm, "STM"), 1);
+        // The monitor command is in the log.
+        let logged: Vec<String> = elm
+            .take_events()
+            .into_iter()
+            .filter_map(|e| match e {
+                LinkEvent::Command { command, .. } => Some(command),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(logged, ["STM"]);
+        // The channel's next frame stops the monitor first.
+        let policy = Policy::read_only();
+        elm.send(&policy.approve_tp20_disconnect(&channel).unwrap())
+            .unwrap();
+        assert_eq!(elm.recv(Duration::from_secs(1)).unwrap().payload, [0xA8]);
+        assert_eq!(elm.link().elm.interrupted, 1);
+    }
+
+    #[test]
+    fn only_a_raw_channel_frame_is_listened_to_with_a_monitor() {
+        // An ISO-TP request, a channel setup and a plain ELM327's channel frame: the first two
+        // never monitor, and the last uses `ATMA`.
+        let mut elm = with_echo_shown(one_frame_stn(Duration::from_secs(60)));
+        let started = Instant::now();
+        open_tp20(&mut elm);
+        read_vin(&mut elm);
+        assert!(started.elapsed() < Duration::from_millis(500));
+        assert_eq!(count(&elm, "STM") + count(&elm, "ATMA"), 0);
+        let mut plain = one_frame_stn(Duration::from_secs(60));
+        plain.sti = None;
+        let mut elm = with_echo_shown(plain);
+        request_sent(&mut elm);
+        assert!(matches!(
+            elm.recv(Duration::from_millis(50)),
+            Err(Error::Timeout)
+        ));
+        assert_eq!(count(&elm, "ATMA"), 1);
+        assert_eq!(count(&elm, "STM") + count(&elm, "STMA"), 0);
+    }
+
+    #[test]
+    fn a_monitor_is_stopped_before_anything_else_is_written() {
+        let mut elm = with_echo_shown(one_frame_stn(Duration::from_secs(60)));
+        request_sent(&mut elm);
+        assert!(matches!(
+            elm.recv(Duration::from_millis(20)),
+            Err(Error::Timeout)
+        ));
+        // An ISO-TP request, which can't take a monitor's place, and a command.
+        elm.send(&approve(Target::Physical(0x7E0), &[0x09, 0x02]))
+            .unwrap();
+        assert_eq!(elm.recv(Duration::from_secs(1)).unwrap().payload, VIN);
+        assert_eq!(elm.link().elm.interrupted, 1);
+        let mut elm = with_echo_shown(one_frame_stn(Duration::from_secs(60)));
+        request_sent(&mut elm);
+        assert!(matches!(
+            elm.recv(Duration::from_millis(20)),
+            Err(Error::Timeout)
+        ));
+        assert_eq!(elm.info().unwrap().stn.as_deref(), Some("STN2232 v5.12.4"));
+        assert_eq!(elm.link().elm.interrupted, 1);
+        // And once it settles, nothing is left running.
+        let mut elm = with_echo_shown(one_frame_stn(Duration::from_secs(60)));
+        request_sent(&mut elm);
+        assert!(matches!(
+            elm.recv(Duration::from_millis(20)),
+            Err(Error::Timeout)
+        ));
+        elm.settle().unwrap();
+        assert_eq!(elm.link().elm.interrupted, 1);
+        assert!(matches!(
+            elm.recv(Duration::from_millis(20)),
+            Err(Error::Timeout)
+        ));
+    }
+
+    #[test]
+    fn a_quiet_channel_isnt_a_hung_adapter() {
+        // The adapter's silence watchdog (its timeout and a margin, about 7 s) bounds a request
+        // that should print its prompt. A monitor prints none, and is bounded by the caller.
+        let mut elm = with_echo_shown(one_frame_stn(Duration::from_secs(60)));
+        let channel = request_sent(&mut elm);
+        assert!(matches!(
+            elm.recv(Duration::from_millis(7600)),
+            Err(Error::Timeout)
+        ));
+        elm.send(
+            &Policy::read_only()
+                .approve_tp20_disconnect(&channel)
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(elm.recv(Duration::from_secs(1)).unwrap().payload, [0xA8]);
+    }
+
+    #[test]
+    fn frames_printed_between_reads_are_reported_not_returned() {
+        // The module's data arrives while the caller isn't reading; the stop that comes with the
+        // next frame reads it on the way (the adapter prints in 3-byte pieces) and logs it.
+        use obdcracker_transport::LinkEvent;
+        let mut elm = with_echo_shown(one_frame_stn(Duration::from_millis(10)));
+        let channel = request_sent(&mut elm);
+        elm.link_mut().chunk = 3;
+        assert!(matches!(
+            elm.recv(Duration::from_millis(2)),
+            Err(Error::Timeout)
+        ));
+        elm.take_events();
+        std::thread::sleep(Duration::from_millis(40));
+        let policy = Policy::read_only();
+        elm.send(&policy.approve_tp20_ack(&channel, 1).unwrap())
+            .unwrap();
+        assert_eq!(elm.link().elm.sent.last(), Some(&(0x740, vec![0xB1])));
+        let unread: Vec<String> = elm
+            .take_events()
+            .into_iter()
+            .filter_map(|e| match e {
+                LinkEvent::Unread { line, .. } => Some(line),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            unread.iter().any(|l| l == "300 20 00 0E 5A 9B 41 42 43"),
+            "{unread:?}"
+        );
+        assert_eq!(count(&elm, "XX"), 0);
+    }
+
+    #[test]
+    fn a_monitor_that_ended_before_the_stop_byte_is_refused_not_run() {
+        // The prompt comes first, so `X` starts a line: ended as `XX`, which the adapter refuses.
+        let mut car = one_frame_stn(Duration::from_secs(60));
+        car.listen_ends_on_write = true;
+        let mut elm = with_echo_shown(car);
+        let channel = request_sent(&mut elm);
+        assert!(matches!(
+            elm.recv(Duration::from_millis(20)),
+            Err(Error::Timeout)
+        ));
+        let sent = elm.link().elm.sent.len();
+        elm.send(
+            &Policy::read_only()
+                .approve_tp20_disconnect(&channel)
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(elm.recv(Duration::from_secs(1)).unwrap().payload, [0xA8]);
+        assert_eq!(count(&elm, "XX"), 1);
+        assert_eq!(elm.link().elm.interrupted, 0);
+        assert_eq!(elm.link().elm.sent[sent..], [(0x740, vec![0xA8])]);
+    }
+
+    #[test]
+    fn buffer_full_while_monitoring_fails_the_wait_and_the_stop() {
+        let mut elm = with_echo_shown(one_frame_stn(Duration::from_secs(60)));
+        let channel = request_sent(&mut elm);
+        assert!(matches!(
+            elm.recv(Duration::from_millis(20)),
+            Err(Error::Timeout)
+        ));
+        // In a wait.
+        elm.link_mut().inject = b"BUFFER FULL\r".to_vec();
+        let err = elm.recv(Duration::from_secs(1)).unwrap_err();
+        assert!(err.to_string().contains("BUFFER FULL"), "{err}");
+        // While stopping, before a frame goes out: that frame isn't sent.
+        let mut elm = with_echo_shown(one_frame_stn(Duration::from_secs(60)));
+        let channel2 = request_sent(&mut elm);
+        assert!(matches!(
+            elm.recv(Duration::from_millis(20)),
+            Err(Error::Timeout)
+        ));
+        let sent = elm.link().elm.sent.len();
+        elm.link_mut().inject = b"BUFFER FULL\r".to_vec();
+        let disconnect = Policy::read_only()
+            .approve_tp20_disconnect(&channel2)
+            .unwrap();
+        let err = elm.send(&disconnect).unwrap_err();
+        assert!(err.to_string().contains("BUFFER FULL"), "{err}");
+        assert_eq!(elm.link().elm.sent.len(), sent);
+        // The monitor was stopped, and the adapter can still be used.
+        assert_eq!(elm.link().elm.interrupted, 1);
+        elm.send(&disconnect).unwrap();
+        assert_eq!(elm.recv(Duration::from_secs(1)).unwrap().payload, [0xA8]);
+        let _ = channel;
+    }
+
+    #[test]
+    fn a_misheard_monitor_command_never_reaches_the_bus() {
+        // Every bit of every character of `STM` and `ATMA`: the echo shows the flip before the
+        // carriage return, so the line is ended with `XX` and the adapter refuses it. A flip of a
+        // letter's case is the same command to the adapter.
+        for (stn, command) in [(true, "STM"), (false, "ATMA")] {
+            for index in 0..command.len() {
+                for bit in 0..8 {
+                    let mut car = one_frame_stn(Duration::from_secs(60));
+                    if !stn {
+                        car.sti = None;
+                    }
+                    let mut elm = with_echo_shown(car);
+                    request_sent(&mut elm);
+                    let sent = elm.link().elm.sent.len();
+                    elm.link_mut().corrupt_write_of =
+                        Some((command.as_bytes().to_vec(), index, 1 << bit));
+                    let result = elm.recv(Duration::from_millis(20));
+                    assert!(elm.link().corrupt_write_of.is_none(), "{command}");
+                    assert_eq!(elm.link().elm.sent[sent..], [], "{command} {index} {bit}");
+                    if bit == 5 {
+                        assert!(matches!(result, Err(Error::Timeout)), "{command} {index}");
+                    } else {
+                        let err = result.unwrap_err();
+                        assert!(matches!(err, Error::Adapter(_)), "{command} {index} {bit}");
                     }
                 }
             }
