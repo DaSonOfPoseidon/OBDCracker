@@ -64,9 +64,9 @@ If the profile has a `[gateway_list]` ([profiles](profiles.md#gateway-list)) and
 reading the gateway's installed-module list and comparing it with the modules it tried:
 
 ```
-gateway lists 73 installed modules: 6 found, 29 silent, 38 not in profile
+gateway lists 73 installed modules: 13 found, 29 silent, 31 not in profile
   05 silent
-  13 not in profile (request 0x757)
+  34 not in profile (request 0x755)
   22 not in profile (request 0x71D)
 ```
 
