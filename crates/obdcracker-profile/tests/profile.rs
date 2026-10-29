@@ -181,6 +181,24 @@ fn every_builtin_profile_parses() {
 }
 
 #[test]
+fn a7_profile_gives_the_gateway_listed_modules_their_vag_address() {
+    // Each pair is the same slot of the gateway's 2A2A and 2A2C tables in car session 6 (#124).
+    let a7 = Profile::builtin("a7").unwrap();
+    for (name, address, request) in [
+        ("brakes", 0x03, 0x713),
+        ("acc", 0x13, 0x757),
+        ("acc 2", 0x8B, 0x756),
+        ("sensor cluster", 0x3B, 0x721),
+        ("steering", 0x44, 0x712),
+        ("image processing", 0x8E, 0x758),
+    ] {
+        let module = a7.module(name).unwrap_or_else(|| panic!("{name} missing"));
+        assert_eq!(module.vag_address, Some(address), "{name}");
+        assert_eq!(module.request_id, request, "{name}");
+    }
+}
+
+#[test]
 fn a7_profile_has_the_expected_uds_modules() {
     let a7 = Profile::builtin("a7").unwrap();
     assert_eq!(a7.bitrate, 500_000);

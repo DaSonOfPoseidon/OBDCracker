@@ -3,8 +3,11 @@
 # The first four modules come from public VAG UDS references, and the second read-only session
 # (#49) confirmed them. The rest are what `scan --discover` found in the third (#54, engine idling).
 # Every module answered on its request and reply IDs: a VAG reply ID is the request ID + 0x6A,
-# except for the OBD-II pairs. A module's VAG address is given only where a public source confirms it:
-# the head-up display's 0x82 is from an Audi bulletin (J898, "diag. addr. 0082").
+# except for the OBD-II pairs. A module's VAG address is given only where a source confirms it:
+# the head-up display's 0x82 is from an Audi bulletin (J898, "diag. addr. 0082"). Brakes 03, acc 13,
+# acc 2 8B, sensor cluster 3B, steering 44 and image processing 8E are from the gateway's installed-
+# module list in car session 6 (#124): its 2A2A table gives each address and its 2A2C table the same
+# slot's request ID (0x713, 0x757, 0x756, 0x721, 0x712, 0x758). The other modules have none yet.
 # Standard identification DIDs (0xF180..=0xF19F) need no entry; they're listed here to give their
 # length, which lets a scan read several in one request. Each length is the data (not the whole
 # reply) this car's module sent in #49 or #54, so it holds for these ECU variants (part numbers),
@@ -356,6 +359,7 @@ length = 3
 
 [[module]]
 name = "steering"
+vag_address = 0x44
 request_id = 0x712
 response_id = 0x77C
 protocol = "uds"
@@ -410,6 +414,7 @@ length = 6
 
 [[module]]
 name = "brakes"
+vag_address = 0x03
 request_id = 0x713
 response_id = 0x77D
 protocol = "uds"
@@ -706,6 +711,7 @@ length = 1
 
 [[module]]
 name = "sensor cluster"
+vag_address = 0x3B
 request_id = 0x721
 response_id = 0x78B
 protocol = "uds"
@@ -1204,6 +1210,7 @@ length = 8
 
 [[module]]
 name = "acc 2"
+vag_address = 0x8B
 request_id = 0x756
 response_id = 0x7C0
 protocol = "uds"
@@ -1252,6 +1259,7 @@ length = 5
 
 [[module]]
 name = "acc"
+vag_address = 0x13
 request_id = 0x757
 response_id = 0x7C1
 protocol = "uds"
@@ -1300,6 +1308,7 @@ length = 5
 
 [[module]]
 name = "image processing"
+vag_address = 0x8E
 request_id = 0x758
 response_id = 0x7C2
 protocol = "uds"
