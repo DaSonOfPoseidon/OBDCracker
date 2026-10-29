@@ -1413,6 +1413,47 @@ mod requests {
     }
 
     #[test]
+    fn a_monitor_that_prompts_on_its_own_fails_the_adapter_closed_on_every_path() {
+        // The prompt arrives between the caller's `recv` and whatever comes next: nothing the
+        // driver wrote could have caused it, so the cached adapter state can't be trusted and
+        // nothing more is written, whichever call finds it (#227, Codex).
+        type Next =
+            fn(&mut Elm<FakeLink>, &obdcracker_safety::OpenTp20Channel) -> Result<(), Error>;
+        let nexts: [(&str, Next); 5] = [
+            ("a channel frame", |elm, channel| {
+                let frame = Policy::read_only()
+                    .approve_tp20_disconnect(channel)
+                    .unwrap();
+                elm.send(&frame)
+            }),
+            ("an ISO-TP request", |elm, _| {
+                elm.send(&approve(Target::Physical(0x7E0), &[0x09, 0x02]))
+            }),
+            ("a command", |elm, _| elm.info().map(|_| ())),
+            ("settle", |elm, _| elm.settle()),
+            ("a wait", |elm, _| {
+                elm.recv(Duration::from_secs(1)).map(|_| ())
+            }),
+        ];
+        for (name, next) in nexts {
+            let mut elm = with_echo_shown(one_frame_stn(Duration::from_secs(60)));
+            let channel = request_sent(&mut elm);
+            assert!(matches!(
+                elm.recv(Duration::from_millis(20)),
+                Err(Error::Timeout)
+            ));
+            elm.link_mut().inject = b"\r>".to_vec();
+            let written = elm.link().written.len();
+            let err = next(&mut elm, &channel).unwrap_err();
+            assert!(err.to_string().contains("monitoring"), "{name}: {err}");
+            // Failed closed: it stays failed, and nothing was written.
+            let frame = approve(Target::Physical(0x7E0), &[0x09, 0x02]);
+            assert!(elm.send(&frame).is_err(), "{name}");
+            assert_eq!(elm.link().written.len(), written, "{name}");
+        }
+    }
+
+    #[test]
     fn buffer_full_while_monitoring_fails_the_wait_and_the_stop() {
         let mut elm = with_echo_shown(one_frame_stn(Duration::from_secs(60)));
         let channel = request_sent(&mut elm);

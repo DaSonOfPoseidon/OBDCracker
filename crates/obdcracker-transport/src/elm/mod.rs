@@ -809,9 +809,13 @@ impl<L: Link> Elm<L> {
         while let Some(event) = self.next_event(deadline)? {
             match event {
                 // `ready` finishes the request as usual.
-                Event::Prompt => {
+                Event::Prompt if !self.monitoring => {
                     self.events.push_front((self.event_at, Event::Prompt));
                     return Ok(());
+                }
+                // Nothing was written to stop it.
+                Event::Prompt => {
+                    return Err(self.break_down("the adapter stopped monitoring on its own".into()));
                 }
                 Event::Overlong => {
                     return Err(self.break_down("the adapter printed an overlong line".into()));
@@ -1298,10 +1302,6 @@ impl<L: Link> Transport for Elm<L> {
             };
             match event {
                 None => return Err(Error::Timeout),
-                Some(Event::Prompt) if self.monitoring => {
-                    // The driver didn't stop it.
-                    return Err(self.break_down("the adapter stopped monitoring on its own".into()));
-                }
                 Some(Event::Prompt) => {
                     let listen = self.listen;
                     self.prompt_after_request()?;
@@ -1448,8 +1448,12 @@ impl<L: Link> Elm<L> {
     }
 
     fn prompt_after_request(&mut self) -> Result<(), Error> {
+        // A monitor prints no prompt until the driver stops it (`interrupt` reads that one
+        // itself), so this one means the adapter's state isn't what the driver cached.
+        if self.monitoring {
+            return Err(self.break_down("the adapter stopped monitoring on its own".into()));
+        }
         self.listen = false;
-        self.monitoring = false;
         match self.echo.take() {
             Some(request) => Err(self.break_down(format!("the adapter didn't echo {request}"))),
             None => Ok(()),

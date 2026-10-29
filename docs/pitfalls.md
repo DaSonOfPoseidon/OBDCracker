@@ -286,7 +286,8 @@ Each entry names the class, what to check, and where it bit us.
   The re-arm itself was the next bug (#227): an STN ends a raw listen after one frame, and the session re-armed it by
   sending an `A3` keep-alive, which leaves a gap in which the module's answer is lost and can make the module drop the
   channel as a test it didn't expect. Make the adapter listen without sending (the driver monitors the bus, `STM` or
-  `AT MA`), and check what a mode does with the filter you set: on an STN `AT MA` and `STMA` pass every ID.
+  `AT MA`), and check what a mode does with the filter you set: on an STN `AT MA` and `STMA` pass every ID. A state that has no prompt of its own (a monitor) makes every prompt a failure: check each path
+  that reads one, not only the wait, or the adapter's cached state outlives a monitor that ended unseen (Codex).
 - **Check that a fix changes what the logs show.** Discovery's "waiting longer" recheck turned adaptive timing off,
   but an STN always waits its whole timeout for a first reply, so in #86 the recheck waited the same 1.09 s per
   silent ID as the first pass (#87). Read the datasheet for what a setting changes, and compare the real audit log's
