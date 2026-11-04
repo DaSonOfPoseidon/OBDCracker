@@ -427,3 +427,10 @@ Each entry names the class, what to check, and where it bit us.
 - **A required check must always report.** Branch protection waits for the literal check names, so a job-level `if:`
   or a dynamic matrix that drops a leg leaves the PR waiting forever. To skip work, keep the matrix and run the
   steps conditionally (`ci.yml`, #207).
+- **A CI skip list must include every file the build pulls in.** `include_str!` and `#[doc = include_str!]` read files
+  outside `crates/` (`README.md` and `docs/library.md` become `obdcracker` doctests), so a path regex that skips
+  "docs" lets a doc edit break the doctests unseen. When a skip list changes, grep the crates for `include_str!`,
+  `include_bytes!` and `include!` and check each target is on it (`ci.yml`, #222).
+- **`grep -q` in a `pipefail` pipeline can fail on a match.** `grep -q` exits at the first hit, `echo` then dies of
+  SIGPIPE, and `set -o pipefail` reports the pipeline failed, so a large list reads as "no match". Feed it with a
+  here-string (`grep -Eq ... <<< "$files"`) instead (`ci.yml`, #222).

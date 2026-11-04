@@ -12,9 +12,12 @@
 - **ECU replies are untrusted input.** Every parser returns an error on bad bytes and never panics. A property test
   that feeds it arbitrary bytes shows this.
 - **Changes land through pull requests.** Nobody pushes to `main` directly. Work on a branch, open a PR, and merge only
-  once CI is green, including the Windows and macOS builds (a PR that touches no Rust, Cargo, toolchain, deny or
-  install-script file skips the macOS work and still reports those checks). PRs are squash-merged, the only merge method the repo
-  allows, so each PR becomes one commit on `main`.
+  once CI is green, including the Windows and macOS builds. A PR that changes no build input still reports every
+  required check, but each runs on ubuntu with its steps skipped, so a docs-only PR is green in seconds. The build
+  inputs are any `.rs` file, anything under `crates/` or `.cargo/` or `.github/workflows/`, `Cargo.toml`,
+  `Cargo.lock`, `rust-toolchain.toml`, `deny.toml`, `scripts/install.sh` and `install.ps1`, `README.md` and
+  `docs/library.md` (the last two are `include_str!`ed into the `obdcracker` doctests). Pushes to `main` always run
+  everything. PRs are squash-merged, the only merge method the repo allows, so each PR becomes one commit on `main`.
 - **Comments are for what the code can't say.** Reference material goes in `docs/`, not in code files. See
   [Comments](#comments).
 

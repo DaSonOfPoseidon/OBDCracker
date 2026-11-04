@@ -17,26 +17,42 @@ env:
 
 jobs:
   check:
+    needs: changes
     runs-on: ubuntu-latest
+    env:
+      SKIP_LEG: ${{ needs.changes.outputs.code != 'true' }}
     steps:
-      - uses: actions/checkout@v5
+      - if: env.SKIP_LEG == 'true'
+        run: echo "skipped, no build input changed"
+      - if: env.SKIP_LEG != 'true'
+        uses: actions/checkout@v5
       # rust-toolchain.toml pins the version; rustup installs it on first use.
-      - run: rustup show
-      - uses: Swatinem/rust-cache@v2
-      - run: cargo fmt --check
-      - run: cargo clippy --all-targets --all-features -- -D warnings
-      - run: cargo test --all-features
+      - if: env.SKIP_LEG != 'true'
+        run: rustup show
+      - if: env.SKIP_LEG != 'true'
+        uses: Swatinem/rust-cache@v2
+      - if: env.SKIP_LEG != 'true'
+        run: cargo fmt --check
+      - if: env.SKIP_LEG != 'true'
+        run: cargo clippy --all-targets --all-features -- -D warnings
+      - if: env.SKIP_LEG != 'true'
+        run: cargo test --all-features
       # obdcracker-core must stay no_std so dongle firmware can reuse it
-      - run: cargo build -p obdcracker-core --target thumbv7em-none-eabihf
-      - uses: EmbarkStudios/cargo-deny-action@v2
+      - if: env.SKIP_LEG != 'true'
+        run: cargo build -p obdcracker-core --target thumbv7em-none-eabihf
+      - if: env.SKIP_LEG != 'true'
+        uses: EmbarkStudios/cargo-deny-action@v2
       # GitHub rejects an invalid workflow file without running it, so lint them here
-      - run: docker run --rm -v "$PWD:/repo" -w /repo rhysd/actionlint:1.7.7
-      - run: shellcheck scripts/install.sh
+      - if: env.SKIP_LEG != 'true'
+        run: docker run --rm -v "$PWD:/repo" -w /repo rhysd/actionlint:1.7.7
+      - if: env.SKIP_LEG != 'true'
+        run: shellcheck scripts/install.sh
 
-  # Branch protection requires the contexts "build (macos-latest)" etc., and a skipped matrix leg
-  # never reports one, so a PR that cannot change the build would wait forever. The macOS legs
-  # instead run on ubuntu with their steps skipped, so they report green in seconds without a
-  # macOS runner.
+  # Branch protection requires the contexts "check", "build (macos-latest)" etc., and a skipped job or
+  # matrix leg never reports one, so a PR that cannot change the build would wait forever. When no
+  # build input changed, every job still runs, but on ubuntu with its steps skipped, so it reports
+  # green in seconds without a Windows or macOS runner. A failed `changes` job fails the jobs that
+  # need it, so a broken diff step never reads as a skip.
   changes:
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -58,7 +74,7 @@ jobs:
           fi
           files=$(git diff --name-only "$BASE_SHA" HEAD)
           echo "$files"
-          if echo "$files" | grep -Eq '(\.rs$|(^|/)Cargo\.(toml|lock)$|^rust-toolchain\.toml$|^deny\.toml$|^scripts/install\.(sh|ps1)$|^\.github/workflows/ci\.yml$|^crates/|^\.cargo/)'; then
+          if grep -Eq '(\.rs$|(^|/)Cargo\.(toml|lock)$|^rust-toolchain\.toml$|^deny\.toml$|^scripts/install\.(sh|ps1)$|^\.github/workflows/|^crates/|^\.cargo/|^README\.md$|^docs/library\.md$)' <<< "$files"; then
             echo "code=true" >> "$GITHUB_OUTPUT"
           else
             echo "code=false" >> "$GITHUB_OUTPUT"
@@ -70,9 +86,9 @@ jobs:
     strategy:
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
-    runs-on: ${{ (matrix.os == 'macos-latest' && needs.changes.outputs.code != 'true') && 'ubuntu-latest' || matrix.os }}
+    runs-on: ${{ needs.changes.outputs.code != 'true' && 'ubuntu-latest' || matrix.os }}
     env:
-      SKIP_LEG: ${{ matrix.os == 'macos-latest' && needs.changes.outputs.code != 'true' }}
+      SKIP_LEG: ${{ needs.changes.outputs.code != 'true' }}
     steps:
       - if: env.SKIP_LEG == 'true'
         run: echo "skipped, no build input changed"
@@ -94,9 +110,9 @@ jobs:
     strategy:
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
-    runs-on: ${{ (matrix.os == 'macos-latest' && needs.changes.outputs.code != 'true') && 'ubuntu-latest' || matrix.os }}
+    runs-on: ${{ needs.changes.outputs.code != 'true' && 'ubuntu-latest' || matrix.os }}
     env:
-      SKIP_LEG: ${{ matrix.os == 'macos-latest' && needs.changes.outputs.code != 'true' }}
+      SKIP_LEG: ${{ needs.changes.outputs.code != 'true' }}
     steps:
       - if: env.SKIP_LEG == 'true'
         run: echo "skipped, no build input changed"
@@ -113,14 +129,25 @@ jobs:
   # The ELM driver against an ELM327 implementation we didn't write (issue #13). Not required
   # by branch protection, and it doesn't fail the run while it settles in.
   elm-emulator:
+    needs: changes
     runs-on: ubuntu-latest
     continue-on-error: true
+    env:
+      SKIP_LEG: ${{ needs.changes.outputs.code != 'true' }}
     steps:
-      - uses: actions/checkout@v5
-      - run: rustup show
-      - uses: Swatinem/rust-cache@v2
-      - uses: astral-sh/setup-uv@v6
+      - if: env.SKIP_LEG == 'true'
+        run: echo "skipped, no build input changed"
+      - if: env.SKIP_LEG != 'true'
+        uses: actions/checkout@v5
+      - if: env.SKIP_LEG != 'true'
+        run: rustup show
+      - if: env.SKIP_LEG != 'true'
+        uses: Swatinem/rust-cache@v2
+      - if: env.SKIP_LEG != 'true'
+        uses: astral-sh/setup-uv@v6
       # Run as a separate process only: its licence (CC BY-NC-SA 4.0) keeps it out of the repo.
       # v4.0.0 from git: PyPI's 4.0.0 sdist says it's 4.0.0.post57, which uv refuses.
-      - run: uv tool install "elm327-emulator @ git+https://github.com/Ircama/ELM327-emulator@ff34d2f72da58c05a1b1f00d04f043e8b6c856fb"
-      - run: cargo test -p obdcracker-transport --test elm_emulator -- --ignored
+      - if: env.SKIP_LEG != 'true'
+        run: uv tool install "elm327-emulator @ git+https://github.com/Ircama/ELM327-emulator@ff34d2f72da58c05a1b1f00d04f043e8b6c856fb"
+      - if: env.SKIP_LEG != 'true'
+        run: cargo test -p obdcracker-transport --test elm_emulator -- --ignored
