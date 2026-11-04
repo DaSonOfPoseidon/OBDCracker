@@ -105,11 +105,11 @@ If either list can't be fetched, the script warns on stderr and still reports th
 
 ## Reviews
 
-Codex reviews a pull request only when asked, with an `@codex review` comment, and each review costs time
-and usage. Both Codex and the maintainer's pre-push review use the rules and P0–P3 scale in
-[`AGENTS.md`](../AGENTS.md); how each finding is handled is under
-[Handling review findings](#handling-review-findings). So review your own change just as hard before asking,
-and push fixes in batches rather than one at a time. Read
+Codex reviews a pull request only when asked, and each review costs time and usage. How the reviews are requested
+and re-run is in [claude-ship's README](https://github.com/DaSonOfPoseidon/claude-ship#readme). Both Codex and the
+maintainer's pre-push review use the rules and P0–P3 scale in [`AGENTS.md`](../AGENTS.md); how each finding is
+handled is under [Handling review findings](#handling-review-findings). So review your own change just as hard
+before asking, and push fixes in batches rather than one at a time. Read
 [`docs/pitfalls.md`](pitfalls.md) before making a change: it lists the classes of bug reviews have
 caught here. Add a new entry when a review finds a new class. Check each change against:
 
@@ -142,15 +142,14 @@ Which outcome a valid finding in the PR's scope gets depends on its priority and
 | P2 | Fix | Defer |
 | P3 | Defer | Defer |
 
-Push all the fixes at once, then ask for the next review with `@codex review`. There's no review after the
-third unless the maintainer asks for one, which they do when they have a P0 or P1 fixed in the PR, since
-`codex-review` needs a review of the new head.
+Push all the fixes at once before the next review. There's no review after the third unless the maintainer asks for
+one, which they do when they have a P0 or P1 fixed in the PR, since `codex-review` needs a review of the new head.
 
 A PR is ready for approval when Codex has reviewed its head commit, every Codex thread is resolved, CI is green on
 the head commit, and `scripts/pr-gate.sh` passes. Branch protection enforces the Codex part with the
-`codex-review` status (the `DaSonOfPoseidon/claude-ship@v1` action, run by `.github/workflows/codex-review.yml`):
-it passes only once Codex has completed a review of the head commit, finishing after that commit was pushed, and
-no Codex thread is unresolved. Resolving a thread doesn't trigger workflows, so after resolving, re-run the check
+`codex-review` status, which `.github/workflows/codex-review.yml` sets through claude-ship's reusable workflow: it
+passes only once Codex has completed a review of the head commit, finishing after that commit was pushed, and no
+Codex thread is unresolved. Resolving a thread doesn't trigger workflows, so after resolving, re-run the check
 with `gh workflow run codex-review.yml -f pr=<pr>`, then see the result with `gh pr checks <pr>`.
 
 ## Commits
