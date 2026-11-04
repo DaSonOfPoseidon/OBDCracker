@@ -45,7 +45,10 @@ obdcracker --serial <PORT> fingerprint
 Identifies the engine and transmission software: calibration IDs and CVNs (OBD-II mode 09), then part numbers and
 versions (UDS `22 F187`, `F188`, `F189`, `F191`, `F19E`), one read at a time. A tune changes the CVNs, so a saved
 fingerprint shows later what changed. Module addresses come from `--profile`, or the OBD-II engine and transmission IDs
-without one.
+without one. On an adapter whose driver paces its replies (every plain ELM327, and an STN below 115200 baud) the
+calibration IDs and CVNs are asked of each emissions ECU in turn rather than by broadcast, after a mode 01 PID 00
+broadcast that finds the ECUs, so that several ECUs' long replies don't overflow the adapter
+([details](scanning.md#module-discovery)); `--dry-run` shows the broadcasts.
 
 ## `scan`
 
@@ -55,7 +58,9 @@ obdcracker --serial <PORT> --profile a7 scan
 ```
 
 Reads everything the default diagnostic session allows, without changing any module's session. From each emissions
-ECU it reads every supported mode 01 PID, mode 09 PIDs 00 and 0A, and mode 03 stored DTCs. From each plain-UDS module
+ECU it reads every supported mode 01 PID, mode 09 PIDs 00 and 0A, and mode 03 stored DTCs (on an adapter whose driver
+paces its replies, PID 0A and mode 03 are asked of each ECU in turn rather than by broadcast;
+[details](scanning.md#module-discovery)). From each plain-UDS module
 in the profile it reads the standard identification DIDs plus the profile's own DIDs, and its DTCs (`19 01 AF`,
 `19 02 AF`). It lists only DTCs that are failed, pending, confirmed or failed since the last clear, not the module's
 untested codes. DIDs whose length the profile gives are read three to a request; any a reply leaves out or doesn't fit

@@ -11,6 +11,16 @@ a bitmap advertises, mode 09 PIDs 00 and 0A and mode 03 go to the functional add
 is an ECU. The policy approves every mode 01 PID up front, but one no bitmap lists is never sent. Other modules are
 not discovered by `scan`; the caller gives it the modules to read (from a vehicle profile).
 
+Mode 09 PIDs 0A (and 04 and 06 in `fingerprint`) and mode 03 can have long, multi-frame replies. Where the transport
+says broadcasts can overflow (`Transport::broadcasts_can_overflow`: the ELM driver on every plain ELM327, and on an STN
+below 115200 baud; [details](elm327.md#timing)), `scan_with` and `fingerprint` ask each ECU already known for them by
+its own request ID (0x7E0..=0x7E7), in ascending reply ID order, instead of broadcasting. `scan_with` knows the ECUs
+from the bitmaps and the reply to mode 09 PID 00; `fingerprint` broadcasts mode 01 PID 00 first. An ECU that doesn't
+answer is left out as in a broadcast, so it shows as `NoReply` in `scan` and isn't listed in `fingerprint`. If the
+policy allows no request of its own to one of the ECUs (a vehicle profile that leaves out its ID), that read is the
+broadcast. Every other transport, a dry run included (it has no adapter to judge), sends the broadcasts alone. Only
+`scan` and `fingerprint` do this: the CLI's `vin` still broadcasts and can overflow a slow link (#242).
+
 Supported PIDs are read as a chain of bitmaps (PID 00, 20, 40, ... E0). Each ECU's chain follows only the bitmaps
 that ECU says it supports, and ends at a bitmap that is missing or garbled even while another ECU's chain keeps the
 requests going. A bad first bitmap makes the ECU's whole PID list an error; a bad later one cuts the list short

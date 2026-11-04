@@ -55,3 +55,8 @@ fn writes_a_tp20_channel_frame_as_it_is() {
         "200 5F C0 00 10 00 03 01\n740 A8\n"
     );
 }
+
+#[test]
+fn shows_the_broadcast_path_because_it_has_no_adapter_to_judge() {
+    assert!(!DryRun::new(Vec::new()).broadcasts_can_overflow());
+}

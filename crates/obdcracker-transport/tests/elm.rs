@@ -3512,3 +3512,454 @@ mod events {
         );
     }
 }
+
+// `scan` and `fingerprint` through the real driver on links it paces (#71): eight ECUs' long
+// replies to one broadcast overflow a plain ELM327's buffer at 9600 baud.
+mod paced_reads {
+    use super::*;
+    use obdcracker_core::obd::{Cvn, Dtc, Unit};
+    use obdcracker_core::response::{Error as ReplyError, NegativeResponse, Nrc};
+    use obdcracker_transport::Timing;
+    use obdcracker_transport::fingerprint::{Calibration, ReadError, fingerprint};
+    use obdcracker_transport::scan::{ObdEcu, PidValue, scan};
+
+    // ECU `n` listens on 0x7E0 + n and answers on 0x7E8 + n.
+    #[derive(Clone, Copy)]
+    struct Fleet {
+        ecus: u32,
+        // Hears a physical request but never answers it (broadcasts still get answered).
+        silent_on: Option<u32>,
+        // Refuses every physical request with NRC 0x31.
+        refuses_on: Option<u32>,
+        // Whether anyone answers `01 00`.
+        answers_01_00: bool,
+    }
+
+    impl Fleet {
+        fn of(ecus: u32) -> Self {
+            Self {
+                ecus,
+                silent_on: None,
+                refuses_on: None,
+                answers_01_00: true,
+            }
+        }
+    }
+
+    fn ecu_reply(n: u32, request: &[u8]) -> Option<Vec<u8>> {
+        let tag = u8::try_from(n).unwrap();
+        match request {
+            [0x01, 0x00] => Some(vec![0x41, 0x00, 0x00, 0x10, 0x00, 0x00]),
+            [0x01, 0x0C] => Some(vec![0x41, 0x0C, tag + 1, 0x00]),
+            [0x09, 0x00] => Some(vec![0x49, 0x00, 0x14, 0x40, 0x00, 0x00]),
+            [0x09, 0x04] => {
+                let mut reply = vec![0x49, 0x04, 0x03];
+                for slot in 0..3 {
+                    let mut calid = format!("CAL{n}-{slot}").into_bytes();
+                    calid.resize(16, 0);
+                    reply.extend(calid);
+                }
+                Some(reply)
+            }
+            [0x09, 0x06] => {
+                let mut reply = vec![0x49, 0x06, 0x03];
+                for slot in 0..3 {
+                    reply.extend([tag, slot, 0xAA, 0xBB]);
+                }
+                Some(reply)
+            }
+            [0x09, 0x0A] => {
+                let mut reply = vec![0x49, 0x0A, 0x01];
+                let mut name = format!("ECU{n}-Engine").into_bytes();
+                name.resize(20, 0);
+                reply.extend(name);
+                Some(reply)
+            }
+            [0x03] => Some(vec![0x43, 0x03, 0x01, tag, 0x02, tag, 0x03, tag]),
+            _ => None,
+        }
+    }
+
+    fn adapter(fleet: Fleet) -> FakeElm {
+        FakeElm::new(Box::new(move |header, request| {
+            let asked: Vec<u32> = if header == 0x7DF {
+                (0..fleet.ecus).collect()
+            } else if (0x7E0..0x7E0 + fleet.ecus).contains(&header) {
+                vec![header - 0x7E0]
+            } else {
+                Vec::new()
+            };
+            let physical = header != 0x7DF;
+            asked
+                .into_iter()
+                .filter_map(|n| {
+                    if request == [0x01, 0x00] && !fleet.answers_01_00 {
+                        return None;
+                    }
+                    let reply = ecu_reply(n, request)?;
+                    if physical && fleet.silent_on == Some(n) {
+                        None
+                    } else if physical && fleet.refuses_on == Some(n) {
+                        Some((0x7E8 + n, vec![0x7F, request[0], 0x31]))
+                    } else {
+                        Some((0x7E8 + n, reply))
+                    }
+                })
+                .collect()
+        }))
+    }
+
+    fn plain_elm(fleet: Fleet, baud: u32) -> Elm<FakeLink> {
+        Elm::connect(FakeLink::at_baud(adapter(fleet), baud)).unwrap()
+    }
+
+    fn stn_at(fleet: Fleet, byte_rate: Option<u32>) -> Elm<FakeLink> {
+        let mut stn = adapter(fleet);
+        stn.sti = Some("STN2232 v5.12.4".into());
+        let mut link = FakeLink::new(stn);
+        link.byte_rate = byte_rate;
+        Elm::connect(link).unwrap()
+    }
+
+    // An STN's buffer isn't modelled, so it never overflows here, as the real one doesn't at
+    // this speed.
+    fn fast_stn(fleet: Fleet) -> Elm<FakeLink> {
+        stn_at(fleet, Some(11_520))
+    }
+
+    fn timing() -> Timing {
+        Elm::<FakeLink>::timing()
+    }
+
+    type Sent = Vec<(u32, Vec<u8>)>;
+
+    fn sent(elm: &Elm<FakeLink>) -> Sent {
+        elm.link().elm.sent.clone()
+    }
+
+    fn broadcasts(requests: &[&[u8]]) -> Sent {
+        requests.iter().map(|r| (0x7DF, r.to_vec())).collect()
+    }
+
+    fn physical_reads(of: &[u8], ecus: u32) -> Sent {
+        (0..ecus).map(|n| (0x7E0 + n, of.to_vec())).collect()
+    }
+
+    fn scanned(n: u32) -> ObdEcu {
+        let tag = u16::try_from(n).unwrap();
+        ObdEcu {
+            source: 0x7E8 + n,
+            pids: Ok(vec![(
+                0x0C,
+                Ok(PidValue::Quantity {
+                    value: f32::from(tag + 1) * 64.0,
+                    unit: Unit::Rpm,
+                }),
+            )]),
+            pids_cut_short: None,
+            supported_info: Ok(vec![0x04, 0x06, 0x0A]),
+            ecu_name: Ok(format!("ECU{n}-Engine")),
+            stored_dtcs: Ok(vec![
+                Dtc::new(0x0100 | tag),
+                Dtc::new(0x0200 | tag),
+                Dtc::new(0x0300 | tag),
+            ]),
+        }
+    }
+
+    fn calibrated(n: u32) -> Calibration {
+        let tag = u8::try_from(n).unwrap();
+        Calibration {
+            source: 0x7E8 + n,
+            calids: Ok((0..3).map(|slot| Some(format!("CAL{n}-{slot}"))).collect()),
+            cvns: Ok((0..3).map(|slot| Cvn([tag, slot, 0xAA, 0xBB])).collect()),
+        }
+    }
+
+    // Flow control went to each ECU's own request ID, and to nothing else.
+    fn assert_flow_control_per_ecu(elm: &Elm<FakeLink>, ecus: u32) {
+        let mut to = elm.link().elm.flow_control_ids.clone();
+        to.sort_unstable();
+        to.dedup();
+        assert_eq!(to, (0x7E0..0x7E0 + ecus).collect::<Vec<_>>());
+        assert!(commands(elm).iter().any(|c| c == "ATFCSM1"));
+    }
+
+    #[test]
+    fn a_plain_elm327_at_9600_baud_scans_eight_ecus() {
+        let mut elm = plain_elm(Fleet::of(8), 9600);
+        let result = scan(&mut elm, &Policy::read_only(), &[], timing()).unwrap();
+        assert_eq!(result.ecus, (0..8).map(scanned).collect::<Vec<_>>());
+        // The long reads go to each ECU in turn, after the broadcasts that name the ECUs.
+        let mut expected = broadcasts(&[&[0x01, 0x00], &[0x01, 0x0C], &[0x09, 0x00]]);
+        expected.extend(physical_reads(&[0x09, 0x0A], 8));
+        expected.extend(physical_reads(&[0x03], 8));
+        assert_eq!(sent(&elm), expected);
+        assert_flow_control_per_ecu(&elm, 8);
+    }
+
+    #[test]
+    fn a_plain_elm327_at_9600_baud_fingerprints_eight_ecus() {
+        let mut elm = plain_elm(Fleet::of(8), 9600);
+        let result = fingerprint(&mut elm, &Policy::read_only(), &[], timing()).unwrap();
+        assert_eq!(result.ecus, (0..8).map(calibrated).collect::<Vec<_>>());
+        let mut expected = broadcasts(&[&[0x01, 0x00]]);
+        expected.extend(physical_reads(&[0x09, 0x04], 8));
+        expected.extend(physical_reads(&[0x09, 0x06], 8));
+        assert_eq!(sent(&elm), expected);
+        assert_flow_control_per_ecu(&elm, 8);
+    }
+
+    #[test]
+    fn an_stn_at_115200_baud_sends_the_same_broadcasts_as_before() {
+        let mut elm = fast_stn(Fleet::of(8));
+        let result = fingerprint(&mut elm, &Policy::read_only(), &[], timing()).unwrap();
+        assert_eq!(result.ecus, (0..8).map(calibrated).collect::<Vec<_>>());
+        // No `01 00` to learn the ECUs, and no physical request.
+        assert_eq!(sent(&elm), broadcasts(&[&[0x09, 0x04], &[0x09, 0x06]]));
+
+        let mut elm = fast_stn(Fleet::of(8));
+        let result = scan(&mut elm, &Policy::read_only(), &[], timing()).unwrap();
+        assert_eq!(result.ecus, (0..8).map(scanned).collect::<Vec<_>>());
+        assert_eq!(
+            sent(&elm),
+            broadcasts(&[
+                &[0x01, 0x00],
+                &[0x01, 0x0C],
+                &[0x09, 0x00],
+                &[0x09, 0x0A],
+                &[0x03],
+            ])
+        );
+    }
+
+    #[test]
+    fn an_ecu_silent_on_its_physical_request_has_no_reply_and_the_others_are_complete() {
+        let fleet = Fleet {
+            silent_on: Some(3),
+            ..Fleet::of(8)
+        };
+        let mut elm = plain_elm(fleet, 9600);
+        let result = scan(&mut elm, &Policy::read_only(), &[], timing()).unwrap();
+        assert_eq!(result.ecus.len(), 8);
+        for (n, ecu) in (0..8).zip(&result.ecus) {
+            if n == 3 {
+                // Still listed: it answered the broadcasts.
+                assert_eq!(ecu.source, 0x7EB);
+                assert_eq!(ecu.ecu_name, Err(ReadError::NoReply));
+                assert_eq!(ecu.stored_dtcs, Err(ReadError::NoReply));
+                assert_eq!(ecu.pids, scanned(3).pids);
+            } else {
+                assert_eq!(*ecu, scanned(n));
+            }
+        }
+
+        let mut elm = plain_elm(fleet, 9600);
+        let result = fingerprint(&mut elm, &Policy::read_only(), &[], timing()).unwrap();
+        // It answered neither 09 04 nor 09 06, so it isn't listed, as with a broadcast.
+        assert_eq!(
+            result.ecus,
+            [0, 1, 2, 4, 5, 6, 7].map(calibrated).to_vec(),
+            "{:?}",
+            result.ecus
+        );
+    }
+
+    #[test]
+    fn an_ecu_refusing_its_physical_request_is_reported_as_a_refusal() {
+        let fleet = Fleet {
+            refuses_on: Some(5),
+            ..Fleet::of(8)
+        };
+        let refusal = |sid| {
+            ReadError::Reply(ReplyError::Negative(NegativeResponse {
+                sid,
+                nrc: Nrc::RequestOutOfRange,
+            }))
+        };
+        let mut elm = plain_elm(fleet, 9600);
+        let result = scan(&mut elm, &Policy::read_only(), &[], timing()).unwrap();
+        for (n, ecu) in (0..8).zip(&result.ecus) {
+            if n == 5 {
+                assert_eq!(ecu.ecu_name, Err(refusal(0x09)));
+                assert_eq!(ecu.stored_dtcs, Err(refusal(0x03)));
+            } else {
+                assert_eq!(*ecu, scanned(n));
+            }
+        }
+
+        let mut elm = plain_elm(fleet, 9600);
+        let result = fingerprint(&mut elm, &Policy::read_only(), &[], timing()).unwrap();
+        assert_eq!(result.ecus.len(), 8);
+        for (n, ecu) in (0..8).zip(&result.ecus) {
+            if n == 5 {
+                assert_eq!(ecu.calids, Err(refusal(0x09)));
+                assert_eq!(ecu.cvns, Err(refusal(0x09)));
+            } else {
+                assert_eq!(*ecu, calibrated(n));
+            }
+        }
+    }
+
+    // Two ECUs fit a broadcast even at 9600 baud, so a read that has to fall back works.
+    #[test]
+    fn a_read_falls_back_to_the_broadcast_when_the_policy_refuses_an_ecus_physical_id() {
+        let module = |request, reply| ModuleIds { request, reply };
+        for narrowed in [
+            // 0x7E1 isn't in the profile.
+            vec![module(0x7E0, 0x7E8)],
+            // 0x7E1 would be answered on an ID the ECU doesn't use.
+            vec![module(0x7E0, 0x7E8), module(0x7E1, 0x7EA)],
+        ] {
+            let policy = Policy::read_only().narrowed_to(&narrowed).unwrap();
+            let mut elm = plain_elm(Fleet::of(2), 9600);
+            let result = fingerprint(&mut elm, &policy, &[], timing()).unwrap();
+            assert_eq!(result.ecus, (0..2).map(calibrated).collect::<Vec<_>>());
+            assert_eq!(
+                sent(&elm),
+                broadcasts(&[&[0x01, 0x00], &[0x09, 0x04], &[0x09, 0x06]]),
+                "{narrowed:?}"
+            );
+
+            let mut elm = plain_elm(Fleet::of(2), 9600);
+            let result = scan(&mut elm, &policy, &[], timing()).unwrap();
+            assert_eq!(result.ecus, (0..2).map(scanned).collect::<Vec<_>>());
+            assert!(
+                sent(&elm).iter().all(|(header, _)| *header == 0x7DF),
+                "{:?}",
+                sent(&elm)
+            );
+        }
+    }
+
+    #[test]
+    fn a_narrowed_policy_still_reads_the_ecus_it_lists_physically() {
+        let all: Vec<_> = (0..8)
+            .map(|n| ModuleIds {
+                request: 0x7E0 + n,
+                reply: 0x7E8 + n,
+            })
+            .collect();
+        let policy = Policy::read_only().narrowed_to(&all).unwrap();
+        let mut elm = plain_elm(Fleet::of(8), 9600);
+        let result = fingerprint(&mut elm, &policy, &[], timing()).unwrap();
+        assert_eq!(result.ecus, (0..8).map(calibrated).collect::<Vec<_>>());
+        assert_eq!(sent(&elm).len(), 17);
+    }
+
+    #[test]
+    fn audited_forwards_that_the_adapter_paces() {
+        let log = std::env::temp_dir().join(format!(
+            "obdcracker-transport-{}-paced-fingerprint.jsonl",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&log);
+        let mut elm = Audited::open(&log, plain_elm(Fleet::of(8), 9600), "fake").unwrap();
+        assert!(elm.broadcasts_can_overflow());
+        let result = fingerprint(&mut elm, &Policy::read_only(), &[], timing()).unwrap();
+        assert_eq!(result.ecus, (0..8).map(calibrated).collect::<Vec<_>>());
+
+        let audit = std::fs::read_to_string(&log).unwrap();
+        let entries: Vec<(String, String, String)> = audit
+            .lines()
+            .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+            .filter(|entry| entry["dir"] == "tx" || entry["dir"] == "rx")
+            .map(|entry| {
+                let text = |key: &str| entry[key].as_str().unwrap().to_owned();
+                (text("dir"), text("id"), text("payload"))
+            })
+            .collect();
+        let sends: Vec<_> = entries
+            .iter()
+            .filter(|(dir, ..)| dir == "tx")
+            .map(|(_, id, payload)| (id.as_str(), payload.as_str()))
+            .collect();
+        let mut expected = vec![("7DF".to_owned(), "01 00")];
+        for pid in ["09 04", "09 06"] {
+            expected.extend((0..8).map(|n| (format!("7E{n}"), pid)));
+        }
+        assert_eq!(
+            sends,
+            expected
+                .iter()
+                .map(|(id, payload)| (id.as_str(), *payload))
+                .collect::<Vec<_>>(),
+            "{audit}"
+        );
+        // Each physical request is logged before its ECU's reply, and that reply before the
+        // next request.
+        let order: Vec<_> = entries
+            .iter()
+            .map(|(dir, id, _)| format!("{dir} {id}"))
+            .collect();
+        let in_turn = (0..8)
+            .flat_map(|n| {
+                [
+                    format!("tx {:03X}", 0x7E0 + n),
+                    format!("rx {:03X}", 0x7E8 + n),
+                ]
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            order.windows(in_turn.len()).any(|w| w == in_turn),
+            "{order:?}"
+        );
+    }
+
+    #[test]
+    fn no_ecu_answering_01_00_reads_as_before() {
+        let fleet = Fleet {
+            answers_01_00: false,
+            ..Fleet::of(2)
+        };
+        let mut elm = plain_elm(fleet, 9600);
+        let result = fingerprint(&mut elm, &Policy::read_only(), &[], timing()).unwrap();
+        // Nothing to read per ECU, so the broadcasts are asked and answered as ever.
+        assert_eq!(result.ecus, (0..2).map(calibrated).collect::<Vec<_>>());
+        assert_eq!(
+            sent(&elm),
+            broadcasts(&[&[0x01, 0x00], &[0x09, 0x04], &[0x09, 0x06]])
+        );
+
+        let mut elm = plain_elm(Fleet::of(0), 9600);
+        let result = fingerprint(&mut elm, &Policy::read_only(), &[], timing()).unwrap();
+        assert_eq!(result.ecus, Vec::<Calibration>::new());
+        assert!(!result.anything_answered());
+    }
+
+    #[test]
+    fn the_adapter_says_whether_its_broadcasts_can_overflow() {
+        // Every plain ELM327 is paced, at any speed and with no known speed.
+        for baud in [9600, 38_400, 115_200] {
+            assert!(
+                plain_elm(Fleet::of(1), baud).broadcasts_can_overflow(),
+                "{baud}"
+            );
+        }
+        let mut link = FakeLink::new(adapter(Fleet::of(1)));
+        link.byte_rate = None;
+        assert!(Elm::connect(link).unwrap().broadcasts_can_overflow());
+        // An STN is paced only on a slow link.
+        for (rate, paced) in [(Some(960), true), (Some(3840), true), (Some(11_520), false)] {
+            assert_eq!(
+                stn_at(Fleet::of(1), rate).broadcasts_can_overflow(),
+                paced,
+                "{rate:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_broadcast_sent_directly_still_overflows_a_slow_link() {
+        // Only `scan` and `fingerprint` read per ECU; the `vin` command broadcasts (#71).
+        let mut elm = plain_elm(Fleet::of(8), 9600);
+        elm.send(&approve(Target::ObdFunctional, &[0x09, 0x04]))
+            .unwrap();
+        let err = loop {
+            if let Err(e) = elm.recv(Duration::from_secs(5)) {
+                break e.to_string();
+            }
+        };
+        assert!(err.contains("BUFFER FULL"), "{err}");
+    }
+}

@@ -9,8 +9,8 @@ use obdcracker_core::uds::{self, DiagnosticSession, DtcCount, DtcRecord, did};
 use obdcracker_safety::{Approved, Policy, Protocol, Target};
 
 use crate::fingerprint::{
-    DidValue, FingerprintError, ReadError, UdsModule, ask, broadcast, decode_did_value, decoded,
-    from,
+    DidValue, FingerprintError, LongRead, ReadError, UdsModule, ask, broadcast, decode_did_value,
+    decoded, from,
 };
 use crate::{Error, ExtendedSession, S3, SessionError, Timing, Transport};
 
@@ -170,6 +170,12 @@ pub struct ModuleScan {
 ///
 /// Every request it could send is approved by `policy` before the first is sent. A timeout or
 /// refusal only loses that value; an adapter error stops the scan.
+///
+/// Where eight ECUs' long replies to one broadcast would overflow the adapter
+/// ([`Transport::broadcasts_can_overflow`], such as a plain ELM327), mode 09 PID 0A and mode 03
+/// are read from each ECU that has answered so far in turn, by its own request ID, in ascending
+/// reply ID order. If the policy allows no request of its own to one of them, that read is
+/// the broadcast.
 pub fn scan<T: Transport + ?Sized>(
     transport: &mut T,
     policy: &Policy,
@@ -203,8 +209,8 @@ pub fn scan_with<T: Transport + ?Sized>(
         .map(|pid| approve(Target::ObdFunctional, &obd::current_data(pid)))
         .collect::<Result<Vec<_>, _>>()?;
     let info_request = approve(Target::ObdFunctional, &obd::vehicle_info(0x00))?;
-    let name_request = approve(Target::ObdFunctional, &obd::vehicle_info(0x0A))?;
-    let dtc_request = approve(Target::ObdFunctional, &obd::stored_dtcs())?;
+    let name_request = LongRead::approve(policy, &obd::vehicle_info(0x0A))?;
+    let dtc_request = LongRead::approve(policy, &obd::stored_dtcs())?;
     let module_requests = modules
         .iter()
         .map(|scanned| module_requests(policy, scanned, options))
@@ -214,8 +220,14 @@ pub fn scan_with<T: Transport + ?Sized>(
     let mut values = pid_values(transport, &pid_requests, &supported, timing)?;
 
     let info = broadcast(transport, &info_request, timing)?;
-    let names = broadcast(transport, &name_request, timing)?;
-    let dtcs = broadcast(transport, &dtc_request, timing)?;
+    // Where each ECU is asked in turn (`LongRead`), these are the ones that answered so far.
+    let known: Vec<u32> = supported
+        .keys()
+        .copied()
+        .chain(info.iter().map(|r| r.source))
+        .collect();
+    let names = name_request.read(transport, &known, timing)?;
+    let dtcs = dtc_request.read(transport, &known, timing)?;
     let sources: BTreeSet<u32> = supported
         .keys()
         .copied()

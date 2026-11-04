@@ -1317,3 +1317,8 @@ fn fixture_dids_may_name_the_gateway_lists_tables_on_its_module_only() {
         }
     );
 }
+
+#[test]
+fn the_sim_does_not_pace_broadcasts() {
+    assert!(!a7().broadcasts_can_overflow());
+}
