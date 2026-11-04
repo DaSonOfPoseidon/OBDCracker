@@ -54,6 +54,9 @@ Each entry names the class, what to check, and where it bit us.
   between them passed, because both were wrong the same way, and the car's correct reply then read as malformed
   (#62). Keep the car's replies as test data (`crates/obdcracker-profile/tests/data/a7-did-replies.txt`) and
   check every value derived from them against it.
+- **An importer must fail on a line it can't read, not skip it.** `scripts/import-opendbc.sh` matched only
+  `b'...'` literals, so opendbc's one `b"..."` Hyundai reply (it holds a `'`) would have dropped out of a fixture
+  without a word. Accept every form the source uses, and exit with the line when one still doesn't parse (#12).
 - **Public fields bypass the parser.** Anything with `pub` fields can be built or edited by hand, so consumers must
   re-validate (`Profile::validate`), or the type must make invalid values impossible.
 - **Empty, blank and padding-only values** are input too: names, text DIDs, CALIDs. `"   "` is not empty but
