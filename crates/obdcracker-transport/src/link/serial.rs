@@ -64,14 +64,16 @@ impl std::error::Error for FindAdapterError {
     }
 }
 
-/// Finds the serial port of the one USB adapter plugged in, for [`SerialLink::open`].
+/// Finds the one serial port whose name looks like a USB adapter, for [`SerialLink::open`].
 ///
-/// Ports that can't be an adapter are ignored: on Linux only `ttyUSB*` and `ttyACM*` count, on
-/// macOS only the `cu.*` side of `usbserial`, `usbmodem`, `SLAB_USBtoUART` and `wchusbserial`
-/// devices, so built-in UARTs and Bluetooth ports are never picked. Windows lists only COM names,
-/// which can't tell USB from built-in or Bluetooth ports, so every COM port counts there and a
-/// lone built-in port would be chosen; the ELM initialization then fails on it. Nothing is sent
-/// to find a port: it is chosen by name alone.
+/// Ports whose names don't look like USB serial devices are ignored: on Linux only `ttyUSB*` and
+/// `ttyACM*` count, and those also match other USB serial devices (Arduinos, modems, printers),
+/// which a lone one would be chosen as. On macOS only the `cu.*` side of `usbserial`, `usbmodem`,
+/// `SLAB_USBtoUART` and `wchusbserial` devices counts, so built-in UARTs and Bluetooth ports are
+/// never picked. Windows lists only COM names, which can't tell USB from built-in or Bluetooth
+/// ports, so every COM port counts there and a lone built-in port would be chosen; the ELM
+/// initialization then fails on it. Other systems count every port. Nothing is sent to find a
+/// port: it is chosen by name alone.
 ///
 /// # Errors
 ///

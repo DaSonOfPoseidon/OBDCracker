@@ -2395,8 +2395,9 @@ mod misbehaving {
         }
     }
 
-    // The driver never interrupts the adapter, so STOPPED means something else wrote to it, and
-    // the interrupting byte may start the next line it reads.
+    // The driver interrupts the adapter only to stop a listen or a monitor, reading that STOPPED
+    // itself. Here nothing was stopped, so STOPPED means something else wrote to it, and the
+    // interrupting byte may start the next line it reads.
     #[test]
     fn an_unexplained_interruption_fails_closed() {
         let mut elm = broadcasting();

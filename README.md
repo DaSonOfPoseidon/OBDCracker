@@ -46,7 +46,8 @@ obdcracker fingerprint
 obdcracker --profile a7 scan
 ```
 
-With exactly one USB adapter plugged in the port is found for you; with none or several, give `--serial <PORT>`
+With exactly one port that looks like a USB adapter plugged in, the port is found for you (on Linux, other USB serial
+devices can match too; see [Using the CLI](docs/usage.md)). With none or several, give `--serial <PORT>`
 (`obdcracker ports` lists them).
 
 See [Install](docs/install.md) for notes for each OS, and [Using the CLI](docs/usage.md) for every command.
