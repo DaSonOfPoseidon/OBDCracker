@@ -363,6 +363,11 @@ Each entry names the class, what to check, and where it bit us.
   sim scan prints, but `docs/usage.md` still showed the old counts and `not in profile` lines. When a profile or
   fixture changes, grep `docs/` for the numbers and lines the sim prints, and compare the example with a real run
   (#211, gate).
+- **A dropped check leaves its prose claim behind.** A pitfall still said `--baud` requires `--serial` after the
+  `requires` went (#219). A scanning page kept "every length is checked" after the address table's length stopped
+  being checked (#209). A script header said only a blocker query could fail the script, though a failed `git fetch`
+  does too (#205). When a change adds, drops or relaxes a check, a `requires` or a limit, grep `docs/`, `README.md` and
+  the comments for the old wording, and check each claim against the code.
 
 ## Tests
 
@@ -408,9 +413,10 @@ Each entry names the class, what to check, and where it bit us.
   Sweep all of a script's inputs, including its environment, in one pass; this took four review rounds piecemeal.
 - **`pkill -f <pattern>` matches the shell running it** when the pattern is in its own command line. Save the PID
   when starting a background process and kill that.
-- **clap skips `requires` when the required argument conflicts with one that's present.** `--baud` requires
+- **clap skips `requires` when the required argument conflicts with one that's present.** `--baud` once required
   `--serial`, but with `--tcp` given (same group as `--serial`) clap accepted it silently. Add `conflicts_with` too,
-  and test every combination.
+  and test every combination. (`--baud` has since dropped the `requires`: without `--serial`, the adapter found
+  automatically takes it.)
 - **Keep commit subjects under 72 characters.** Check before committing: once a commit is pushed, fixing its subject
   means rewriting shared history.
 - **Run clippy before committing.** Pedantic lints that caught us: `manual_is_multiple_of`, `assert!(x.is_empty())`,
