@@ -8,7 +8,8 @@
 # changes and are in the PR's milestone or an earlier one (any milestone if the PR has none; issues
 # with no milestone aren't sorted yet), so related fixes can go in the same PR, and the open issues
 # whose `status:blocked` label and links disagree. If either list can't be fetched, it warns on stderr
-# and the blocker report still runs; only a failed blocker query fails the script outright.
+# and the blocker report still runs. A failed `git fetch` or `git diff` fails the script before any report,
+# and so does a failed blocker query.
 set -e
 cd "$(dirname "$0")/.."
 repo=DaSonOfPoseidon/OBDCracker
