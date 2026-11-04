@@ -39,3 +39,8 @@ fn returns_queued_responses_in_order_then_times_out() {
     assert_eq!(mock.recv(WAIT), Ok(second));
     assert_eq!(mock.recv(WAIT), Err(Error::Timeout));
 }
+
+#[test]
+fn does_not_pace_broadcasts() {
+    assert!(!Mock::default().broadcasts_can_overflow());
+}

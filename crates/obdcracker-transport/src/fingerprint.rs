@@ -1,5 +1,6 @@
 //! Identifying the software on a car: calibration IDs, CVNs and identification DIDs.
 
+use std::collections::BTreeSet;
 use std::fmt;
 
 use obdcracker_core::obd::{self, Cvn};
@@ -233,6 +234,12 @@ impl std::error::Error for FingerprintError {}
 ///
 /// Every request is approved by `policy` before the first is sent. A timeout or refusal only
 /// loses that value; an adapter error stops the fingerprint.
+///
+/// Where eight ECUs' long replies to one broadcast would overflow the adapter
+/// ([`Transport::broadcasts_can_overflow`], such as a plain ELM327), it first broadcasts mode 01
+/// PID 00 to learn which ECUs answer, then reads PIDs 04 and 06 from each of them in turn, by its
+/// own request ID, in ascending reply ID order. If the policy allows no request of its own to one
+/// of those ECUs, both are broadcast instead.
 pub fn fingerprint<T: Transport + ?Sized>(
     transport: &mut T,
     policy: &Policy,
@@ -244,8 +251,9 @@ pub fn fingerprint<T: Transport + ?Sized>(
             .approve(Protocol::Uds, target, payload)
             .map_err(FingerprintError::Rejected)
     };
-    let calid_request = approve(Target::ObdFunctional, &obd::vehicle_info(0x04))?;
-    let cvn_request = approve(Target::ObdFunctional, &obd::vehicle_info(0x06))?;
+    let calid_request = LongRead::approve(policy, &obd::vehicle_info(0x04))?;
+    let cvn_request = LongRead::approve(policy, &obd::vehicle_info(0x06))?;
+    let ecu_list_request = approve(Target::ObdFunctional, &obd::current_data(0x00))?;
     let did_requests = modules
         .iter()
         .map(|module| {
@@ -261,8 +269,17 @@ pub fn fingerprint<T: Transport + ?Sized>(
         })
         .collect::<Result<Vec<_>, _>>()?;
 
-    let calids = broadcast(transport, &calid_request, timing)?;
-    let cvns = broadcast(transport, &cvn_request, timing)?;
+    // Where each ECU is asked in turn, the supported-PID bitmap they all answer says which.
+    let asked: Vec<u32> = if transport.broadcasts_can_overflow() {
+        broadcast(transport, &ecu_list_request, timing)?
+            .iter()
+            .map(|r| r.source)
+            .collect()
+    } else {
+        Vec::new()
+    };
+    let calids = calid_request.read(transport, &asked, timing)?;
+    let cvns = cvn_request.read(transport, &asked, timing)?;
     let mut sources: Vec<u32> = calids.iter().chain(&cvns).map(|r| r.source).collect();
     sources.sort_unstable();
     sources.dedup();
@@ -351,6 +368,78 @@ pub(crate) fn broadcast<T: Transport + ?Sized>(
     timing: Timing,
 ) -> Result<Vec<Response>, FingerprintError> {
     exchange(transport, request, Expect::ObdEcus, timing).map_err(FingerprintError::Transport)
+}
+
+const FIRST_OBD_REQUEST: u32 = 0x7E0;
+const FIRST_OBD_RESPONSE: u32 = 0x7E8;
+const OBD_ECUS: usize = 8;
+
+// An OBD-II request whose replies can be long, approved as the broadcast and as a request to each
+// emissions ECU alone. Where the transport can't take eight ECUs' long replies at once
+// (`Transport::broadcasts_can_overflow`) it is asked of each ECU in turn.
+pub(crate) struct LongRead {
+    broadcast: Approved,
+    // By request ID, 0x7E0 first. `None` where the policy refuses that ECU's ID, or says it
+    // answers on an ID other than its ISO 15765-4 reply ID.
+    physical: [Option<Approved>; OBD_ECUS],
+}
+
+impl LongRead {
+    // Approves `payload` for the broadcast and for each emissions ECU, so everything `read` might
+    // send is approved before the first request goes out.
+    pub(crate) fn approve(policy: &Policy, payload: &[u8]) -> Result<Self, FingerprintError> {
+        let broadcast = policy
+            .approve(Protocol::Uds, Target::ObdFunctional, payload)
+            .map_err(FingerprintError::Rejected)?;
+        let mut physical = [const { None }; OBD_ECUS];
+        for (slot, id) in physical.iter_mut().zip(FIRST_OBD_REQUEST..) {
+            match policy.approve(Protocol::Uds, Target::Physical(id), payload) {
+                Ok(request) if request.reply_id() == Some(id + 8) => *slot = Some(request),
+                // The ECU would answer on an ID this read doesn't wait for.
+                Ok(_) | Err(Rejection::WrongTarget) => {}
+                Err(rejection) => return Err(FingerprintError::Rejected(rejection)),
+            }
+        }
+        Ok(Self {
+            broadcast,
+            physical,
+        })
+    }
+
+    // The request's replies. `ecus` are the reply IDs of the ECUs known to answer.
+    //
+    // It is broadcast unless the transport can overflow on that, `ecus` isn't empty, and each ECU
+    // in it has an approved request of its own. Then each is asked in turn, in ascending reply ID
+    // order, and one that doesn't answer in time is left out, as in a broadcast.
+    pub(crate) fn read<T: Transport + ?Sized>(
+        &self,
+        transport: &mut T,
+        ecus: &[u32],
+        timing: Timing,
+    ) -> Result<Vec<Response>, FingerprintError> {
+        let ecus: BTreeSet<u32> = ecus.iter().copied().collect();
+        let requests: Option<Vec<(u32, &Approved)>> = ecus
+            .iter()
+            .map(|&source| {
+                let index = usize::try_from(source.checked_sub(FIRST_OBD_RESPONSE)?).ok()?;
+                Some((source, self.physical.get(index)?.as_ref()?))
+            })
+            .collect();
+        let requests =
+            requests.filter(|requests| !requests.is_empty() && transport.broadcasts_can_overflow());
+        let Some(requests) = requests else {
+            return broadcast(transport, &self.broadcast, timing);
+        };
+        let mut replies = Vec::new();
+        for (source, request) in requests {
+            match exchange(transport, request, Expect::Module(source), timing) {
+                Ok(mut reply) => replies.append(&mut reply),
+                Err(Error::Timeout | Error::StillPending) => {}
+                Err(e) => return Err(FingerprintError::Transport(e)),
+            }
+        }
+        Ok(replies)
+    }
 }
 
 pub(crate) fn from<V>(

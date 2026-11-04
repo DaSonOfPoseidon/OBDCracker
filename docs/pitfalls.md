@@ -334,6 +334,11 @@ Each entry names the class, what to check, and where it bit us.
   one reply from overflowing the ELM327's buffer, but a broadcast can get long replies from 8 ECUs at once (PR #70,
   Codex). Size a rate limit for every source that can send at once, and make a fake interleave concurrent senders,
   not print each in turn.
+- **A wrapper that forgets a defaulted `Transport` method silently takes the default.** `Transport::broadcasts_can_overflow`
+  defaults to false, so an `Audited` that didn't forward it made every audited ELM327 session (the CLI's only kind) take
+  the broadcast path that overflows, with nothing failing to compile (#71). When a trait gains a defaulted method that
+  changes behaviour, grep for every non-test `impl Transport for` wrapping another transport, forward it, and add a
+  test that fails when the forward is removed.
 - **Read a mode's paragraph, not just its summary chart.** The ELM327's flow control chart says mode 2 has the adapter
   provide the ID bits; the text says they're copied from the First Frame unchanged, so flow control for 0x7E8 goes to
   0x7E8 and the ECU stalls. The first fix for broadcast pacing used mode 2, and a fake that only recorded that flow

@@ -1275,6 +1275,13 @@ impl<L: Link> Transport for Elm<L> {
         Ok(Some(self.timeout))
     }
 
+    fn broadcasts_can_overflow(&self) -> bool {
+        // The driver paces replies to a link it judges too slow to take them unpaced. A broadcast
+        // can't be paced, since the adapter's own flow control is the only one that reaches each
+        // ECU (docs/elm327.md#flow-control-per-target).
+        self.pace.is_some()
+    }
+
     fn settle(&mut self) -> Result<(), Error> {
         if self.broken.is_some() {
             self.drop_senders();

@@ -85,6 +85,17 @@ pub trait Transport {
     fn patient(&mut self, wait: Option<Duration>) -> Result<Option<Duration>, Error> {
         Ok(wait)
     }
+    /// Whether replies to one broadcast can overflow the adapter, so a caller that wants several
+    /// ECUs' long (multi-frame) replies should ask each ECU by its own request ID instead. True
+    /// for an ELM327-compatible adapter whose driver paces its replies ([`elm::Elm`]): the ELM327's
+    /// 512-byte buffer can't hold eight ECUs' replies at once on a slow link. The default is
+    /// false, for a transport that reads every reply as it arrives.
+    ///
+    /// `scan` and `fingerprint` use it to choose between a broadcast and one physical request
+    /// per ECU. A wrapper of a `Transport` must forward it.
+    fn broadcasts_can_overflow(&self) -> bool {
+        false
+    }
     /// What the adapter did besides carrying requests and replies since this was last called,
     /// oldest first, for the audit log ([`Audited`] takes them after every call). The default
     /// has none.

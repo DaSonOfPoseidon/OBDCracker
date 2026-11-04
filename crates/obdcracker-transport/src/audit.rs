@@ -151,6 +151,10 @@ impl<T: Transport> Transport for Audited<T> {
         Ok(waits)
     }
 
+    fn broadcasts_can_overflow(&self) -> bool {
+        self.inner.broadcasts_can_overflow()
+    }
+
     fn take_events(&mut self) -> Vec<LinkEvent> {
         // Already logged.
         Vec::new()
