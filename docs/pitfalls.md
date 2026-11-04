@@ -453,6 +453,10 @@ Each entry names the class, what to check, and where it bit us.
   "docs" lets a doc edit break the doctests unseen. When a skip list changes, grep the crates for `include_str!`,
   `include_bytes!` and `include!` and check each target is on it. Tool configs (`clippy.toml`, `rustfmt.toml`) change the checks' results, so they count
   too (`ci.yml`, #222).
+- **`git diff --name-only` C-quotes a name with non-ASCII or special characters.** `"crates/x/\303\251.txt"` has a
+  leading `"` and a trailing `"`, so an anchored filter (`^crates/`, `\.rs$`) misses it and a CI skip goes green
+  falsely. Read names with `-z` and match with `grep -z`. `core.quotepath=off` isn't enough: it still quotes tabs,
+  newlines, quotes and backslashes (`ci.yml`, #237).
 - **`git diff --name-only` hides a rename's source.** Moving `README.md` to `docs/x.md` lists only the destination, so a
   path filter sees a docs file while the build lost an input. Pass `--no-renames` wherever changed paths decide what
   runs (`ci.yml`, #222).

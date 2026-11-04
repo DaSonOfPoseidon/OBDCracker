@@ -74,9 +74,10 @@ jobs:
             echo "code=true" >> "$GITHUB_OUTPUT"
             exit 0
           fi
-          files=$(git diff --name-only --no-renames "$BASE_SHA" HEAD)
-          echo "$files"
-          if grep -Eq '(\.rs$|(^|/)Cargo\.(toml|lock)$|^rust-toolchain\.toml$|^deny\.toml$|^\.?(clippy|rustfmt)\.toml$|^scripts/install\.(sh|ps1)$|^\.github/workflows/|^crates/|^\.cargo/|^README\.md$|^docs/library\.md$)' <<< "$files"; then
+          # -z: NUL-separated and unquoted, so a name with non-ASCII or special characters isn't C-quoted.
+          git diff -z --name-only --no-renames "$BASE_SHA" HEAD > "$RUNNER_TEMP/changed"
+          tr '\0' '\n' < "$RUNNER_TEMP/changed"
+          if grep -zEq '(\.rs$|(^|/)Cargo\.(toml|lock)$|^rust-toolchain\.toml$|^deny\.toml$|^\.?(clippy|rustfmt)\.toml$|^scripts/install\.(sh|ps1)$|^\.github/workflows/|^crates/|^\.cargo/|^README\.md$|^docs/library\.md$)' "$RUNNER_TEMP/changed"; then
             echo "code=true" >> "$GITHUB_OUTPUT"
           else
             echo "code=false" >> "$GITHUB_OUTPUT"
