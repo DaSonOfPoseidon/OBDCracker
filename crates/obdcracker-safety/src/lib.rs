@@ -13,6 +13,15 @@
 //! // Nor can a TP2.0 channel, so a disconnect goes only on a channel a module opened.
 //! let forged = obdcracker_safety::OpenTp20Channel { send_id: 0x000, receive_id: 0x300 };
 //! ```
+//!
+//! ```compile_fail
+//! // Nor can a flow control frame, so one goes only in answer to an approved request.
+//! let forged = obdcracker_safety::ApprovedFlowControl { destination: 0x7DF, is_29_bit: false, frame: todo!() };
+//! ```
+
+mod flow_control;
+
+pub use flow_control::{ApprovedFlowControl, FeedOutcome, ReplyWindow};
 
 use obdcracker_core::tp20;
 

@@ -71,6 +71,37 @@ rule of its own.
   are the car's own frames and the setup range), not in `0x7DF..=0x7EF` (OBD-II) and, once the policy is narrowed to
   modules, not one of their IDs, since `A8` there would reach that module.
 
+## Flow control
+
+A raw-CAN backend must send an ISO-TP flow control (FC) frame while a module answers with a multi-frame reply.
+FC isn't a request, so it never goes through `Policy::approve`, but it is still a frame on the bus. The only way to get
+one is a `ReplyWindow`, opened from an `Approved` request, whose `feed` returns an `ApprovedFlowControl`. The token
+can't be built elsewhere (a `compile_fail` doctest guards this) and isn't `Clone` or `Copy`.
+
+A token is minted only when all four rules hold:
+
+1. The reassembler asked for flow control: a real first frame or a block boundary. Nothing else mints one.
+2. The source matches the request: `0x7E8..=0x7EF` for the OBD-II broadcast, or `Approved::reply_id()` for a physical
+   target.
+3. The destination is that source's physical request ID: the source minus 8 for the broadcast (never `0x7DF`), or the
+   request's own target ID.
+4. The status is continue-to-send. Wait and overflow are never minted.
+
+A frame from any other ID is ignored, since foreign traffic is normal on a bus. A frame from an accepted source that
+doesn't parse or fit its transfer is an error and drops only that source's transfer.
+
+**Fail closed:** a physical target with no known reply ID (`reply_id()` is `None`, as with a physical ID and no
+profile) never gets a token. The window still completes a single frame from any source, so the caller must check the
+reply's echoed service and ID, as `exchange` does. A first frame returns `NoFlowControl` and starts nothing, so a
+backend can report that a multi-frame reply needs a known reply ID. TP2.0 requests open no window, since TP2.0
+acknowledges its own frames.
+
+A reply of up to 4095 bytes fits a window. A first frame announcing more (the 32-bit length escape) is an overflow
+error and mints no token.
+
+A window has no timer; the backend drops it when the transfer ends. It uses normal addressing and block size 0 with no
+separation time (extended addressing is #112).
+
 ## Back up before every change
 
 A write (T1 and up) can't be approved without a `Backup` of what is on the module right now: read from the same
