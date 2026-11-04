@@ -1684,7 +1684,7 @@ fn dtc_out_of_step_note(module: &str) -> String {
 
 // A sweep is also out of step when a `10 01` timed out and its retry was answered.
 fn sweep_out_of_step_note(module: &str) -> String {
-    out_of_step_note("a request timed out", module)
+    out_of_step_note("a request went without a definite answer", module)
 }
 
 fn out_of_step_note(what: &str, module: &str) -> String {
@@ -2000,11 +2000,11 @@ mod tests {
     }
 
     #[test]
-    fn sweep_note_says_a_request_timed_out() {
+    fn sweep_note_says_a_request_went_without_a_definite_answer() {
         assert_eq!(
             sweep_out_of_step_note("gateway"),
-            "note: a request timed out, so a late answer may still arrive; connect again \
-             before reading from gateway again"
+            "note: a request went without a definite answer, so a late answer may still arrive; \
+             connect again before reading from gateway again"
         );
     }
 }

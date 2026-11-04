@@ -368,6 +368,10 @@ Each entry names the class, what to check, and where it bit us.
   never checked (#209). A script header said only a blocker query could fail the script, though a failed `git fetch`
   does too (#205). When a change adds, drops or relaxes a check, a `requires` or a limit, grep `docs/`, `README.md` and
   the comments for the old wording, and check each claim against the code.
+- **A message names one cause for a flag several causes set.** `Sweep::out_of_step` is set by a timed-out read and by a
+  `10 03` that got no plain refusal, but the sweep note said "a request timed out", so the second case was reported
+  as a timeout (#203, gate). When a message names a cause, grep for every place that sets the flag it
+  reports, and name the cause in terms that cover all of them.
 
 ## Tests
 
