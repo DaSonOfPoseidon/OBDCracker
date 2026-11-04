@@ -37,7 +37,7 @@ const TCP_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 )]
 struct Cli {
     /// Use an ELM327/STN adapter on this serial port (e.g. /dev/ttyUSB0, COM3); found
-    /// automatically when only one USB adapter is plugged in
+    /// automatically when only one USB serial port is plugged in
     #[arg(long, value_name = "PORT", group = "adapter")]
     serial: Option<PathBuf>,
 

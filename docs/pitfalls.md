@@ -205,9 +205,9 @@ Each entry names the class, what to check, and where it bit us.
   and treat them as failures everywhere else (M3 branch, Codex).
 - **A truncated answer must not pass as a complete one.** Accepting any well-formed subset of `AT PPS` let a cut-off
   summary skip the parameters that mattered. Require every entry you check (M3 branch, Codex).
-- **Output the driver could never have caused is evidence its assumptions broke.** `STOPPED` when the driver never
-  interrupts, or a frame from an ID the receive filter excludes, means something else wrote to the adapter or it lost
-  a setting. Stop, don't ignore it as noise (M3 branch, Codex).
+- **Output the driver could never have caused is evidence its assumptions broke.** `STOPPED` outside the two
+  interrupts the driver makes (`docs/elm327.md`), or a frame from an ID the receive filter excludes, means something
+  else wrote to the adapter or it lost a setting. Stop, don't ignore it as noise (M3 branch, Codex).
 - **Widening a parser reclassifies lines other code diagnoses.** Once the ELM codec read four header bytes as a
   29-bit ID, a headers-off data line after a reset (`03 62 F1 87 34`) parsed as a frame from 0x0362F187, and the
   driver's "unexpected output" diagnosis became a misleading receive-filter one (#146). When a parser accepts more,
@@ -364,8 +364,8 @@ Each entry names the class, what to check, and where it bit us.
   fixture changes, grep `docs/` for the numbers and lines the sim prints, and compare the example with a real run
   (#211, gate).
 - **A dropped check leaves its prose claim behind.** A pitfall still said `--baud` requires `--serial` after the
-  `requires` went (#219). A scanning page kept "every length is checked" after the address table's length stopped
-  being checked (#209). A script header said only a blocker query could fail the script, though a failed `git fetch`
+  `requires` went (#219). A scanning page claimed "every length is checked" although the address table's length was
+  never checked (#209). A script header said only a blocker query could fail the script, though a failed `git fetch`
   does too (#205). When a change adds, drops or relaxes a check, a `requires` or a limit, grep `docs/`, `README.md` and
   the comments for the old wording, and check each claim against the code.
 

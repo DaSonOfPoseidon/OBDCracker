@@ -1158,7 +1158,8 @@ fn left_over(at: SystemTime, line: String) -> LinkEvent {
     }
 }
 
-// The driver never interrupts the adapter, so `STOPPED` means something else wrote to it.
+// The driver interrupts the adapter only to stop a listen or a monitor, and reads that
+// `STOPPED` itself (`interrupt`, `read_interrupted`). Anywhere else it means something else wrote.
 fn leaves_unknown_state(status: Status) -> bool {
     status.loses_settings() || status == Status::Stopped
 }
