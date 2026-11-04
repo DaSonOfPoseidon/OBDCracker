@@ -48,11 +48,11 @@ ignores the mask can't list untested DTCs.
 
 When the vehicle profile has a `[gateway_list]` and its gateway answered the scan, scan sends two more reads to it:
 `22 <addresses>` and, if the profile gives one, `22 <request_ids>` (`22 2A 2A` and `22 2A 2C` on the A7), in the
-default session. Both are approved before the first is sent. Every length is checked against the profile's layout:
-the address table must have at least one non-zero address, and the request ID table exactly two bytes for each
-address-table slot. A request ID table that fails loses only the request IDs (a warning); an address table that fails
-loses the list. After an unanswered read nothing more is sent to the gateway. The A7's tables (#124) have 80 slots:
-73 addresses (03 and 17 twice) and 8 request IDs. See [profiles](profiles.md#gateway-list).
+default session. Both are approved before the first is sent. The address table's slot count is its reply's data
+length, and nothing checks that against the profile: the table must have at least one non-zero address. The request ID
+table must hold exactly two bytes for each address-table slot. A request ID table that fails loses only the request IDs
+(a warning); an address table that fails loses the list. After an unanswered read nothing more is sent to the gateway.
+The A7's tables (#124) have 80 slots: 73 addresses (03 and 17 twice) and 8 request IDs. See [profiles](profiles.md#gateway-list).
 
 ## Extended session and TesterPresent
 
