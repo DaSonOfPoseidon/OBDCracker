@@ -1847,12 +1847,20 @@ mod stpx {
         approve(Target::Physical(0x7E0), &FOUR_DIDS)
     }
 
-    // A `22` read of `dids` distinct DIDs: 1 + 2 * dids bytes.
+    // A `22` read of `dids` distinct DIDs: 1 + 2 * dids bytes, so always odd.
     fn long_request(dids: u8) -> Approved {
         let mut payload = vec![0x22];
         for did in 0..dids {
             payload.extend([0xF1, 0x80 + did]);
         }
+        approve(Target::Physical(0x7E0), &payload)
+    }
+
+    // A `19` read of `len` bytes. The policy takes any length of it, so it reaches the even
+    // lengths a `22` read can't.
+    fn long_dtc_read(len: usize) -> Approved {
+        let mut payload = vec![0x19, 0x02, 0xFF];
+        payload.resize(len, 0x00);
         approve(Target::Physical(0x7E0), &payload)
     }
 
@@ -1946,17 +1954,31 @@ mod stpx {
 
     #[test]
     fn the_longest_request_is_sent_and_one_byte_more_is_refused() {
-        // The echoed line has to fit the line splitter: `STPX d:` and up to 44 bytes of digits,
-        // which a `22` read reaches at 43 (21 DIDs); 22 DIDs are 45 bytes.
+        // The echoed line has to fit the line splitter: `STPX d:` and up to 44 bytes of digits
+        // are 95 characters, and 45 bytes would be 97 over its 96. A `22` read reaches 43 bytes
+        // (21 DIDs), so the exact limit is pinned with a `19` read, whose length is free.
         let mut elm = warmed(stn());
-        elm.send(&long_request(21)).unwrap();
+        elm.send(&long_dtc_read(44)).unwrap();
         while elm.recv(Duration::from_secs(1)).is_ok() {}
         assert_eq!(elm.link().elm.sent.len(), 2);
-        assert_eq!(elm.link().elm.sent[1].1.len(), 43);
+        let (_, sent) = &elm.link().elm.sent[1];
+        assert_eq!(sent.len(), 44);
+        let mut line = b"STPX d:".to_vec();
+        line.extend(sent.iter().flat_map(|b| format!("{b:02X}").into_bytes()));
+        assert_eq!(line.len(), 95);
+        assert!(
+            elm.link().written.windows(line.len()).any(|w| w == line),
+            "the {}-character STPX line was not written",
+            line.len()
+        );
         let written = elm.link().written.len();
-        let err = elm.send(&long_request(22)).unwrap_err();
-        assert!(matches!(err, Error::Adapter(_)), "{err}");
-        assert_eq!(elm.link().written.len(), written);
+        for refused in [long_dtc_read(45), long_request(22)] {
+            let err = elm.send(&refused).unwrap_err();
+            assert!(matches!(err, Error::Adapter(_)), "{err}");
+            assert_eq!(elm.link().written.len(), written);
+        }
+        elm.send(&long_request(21)).unwrap();
+        assert_eq!(elm.link().elm.sent.last().unwrap().1.len(), 43);
     }
 
     #[test]
