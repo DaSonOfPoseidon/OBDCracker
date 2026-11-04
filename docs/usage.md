@@ -36,6 +36,19 @@ Two options work with `vin`, `fingerprint`, `scan`, `sweep` and `dtc` (not `port
 - `--dry-run` prints the frames the command would send and opens no adapter.
 - `--sim a7` runs it against a simulated A7.
 
+## `vin`
+
+```sh
+obdcracker --serial <PORT> vin
+```
+
+Prints each ECU's VIN (OBD-II mode 09 PID 02), one `<reply ID> <VIN>` line per ECU. It is one broadcast, except on an
+adapter whose driver paces its replies (every plain ELM327, and an STN below 115200 baud): there it broadcasts mode 01
+PID 00 to find the ECUs, then asks each in turn by its own request ID, so that several ECUs' long replies don't
+overflow the adapter ([details](scanning.md#module-discovery)). `--dry-run` shows the one broadcast. With `--profile`,
+requests go only to the profile's request IDs. An ECU that has no VIN may refuse a request of its own: that is
+printed to stderr but isn't a failure if another ECU gave a VIN. A malformed VIN, or no VIN at all, exits 1.
+
 ## `fingerprint`
 
 ```sh

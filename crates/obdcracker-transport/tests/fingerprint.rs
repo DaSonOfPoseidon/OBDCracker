@@ -7,7 +7,8 @@ use obdcracker_core::obd::Cvn;
 use obdcracker_core::response::{Error as ReplyError, NegativeResponse, Nrc};
 use obdcracker_safety::{Approved, Policy, Rejection};
 use obdcracker_transport::fingerprint::{
-    Calibration, DidValue, FingerprintError, IDENTIFICATION_DIDS, ReadError, UdsModule, fingerprint,
+    Calibration, DidValue, FingerprintError, IDENTIFICATION_DIDS, ReadError, UdsModule,
+    fingerprint, read_vin,
 };
 use obdcracker_transport::{Error, Response, Timing, Transport, hex};
 
@@ -373,5 +374,39 @@ fn an_empty_calibration_slot_doesnt_hide_the_others() {
                 cvns: Ok(vec![Cvn([0xE4, 0x76, 0x49, 0x64])]),
             },
         ]
+    );
+}
+
+#[test]
+fn a_transport_that_cant_overflow_gets_one_functional_vin_request() {
+    let engine = reply(0x7E8, b"\x49\x02\x01WAUZZZ4G1EN000000");
+    let tcu = reply(0x7E9, &[0x7F, 0x09, 0x31]);
+    let answers = [engine.clone(), tcu.clone()];
+    let mut car = Car::new(move |id, request| match (id, request) {
+        (0x7DF, [0x09, 0x02]) => answers.to_vec(),
+        _ => Vec::new(),
+    });
+    let got = read_vin(&mut car, &Policy::read_only(), TIMING).unwrap();
+    // No `01 00` and no physical request: exactly the one broadcast.
+    assert_eq!(car.sent, ["7DF 09 02"]);
+    assert_eq!(got, [engine, tcu]);
+}
+
+#[test]
+fn a_vin_read_that_nothing_answers_is_empty() {
+    let mut car = Car::new(|_, _| Vec::new());
+    assert_eq!(read_vin(&mut car, &Policy::read_only(), TIMING), Ok(vec![]));
+    assert_eq!(car.sent, ["7DF 09 02"]);
+}
+
+#[test]
+fn a_vin_read_reports_an_adapter_failure() {
+    let mut car = Car::new(|_, _| Vec::new());
+    car.fail_after = Some(0);
+    assert_eq!(
+        read_vin(&mut car, &Policy::read_only(), TIMING),
+        Err(FingerprintError::Transport(Error::Adapter(
+            "unplugged".to_owned()
+        )))
     );
 }

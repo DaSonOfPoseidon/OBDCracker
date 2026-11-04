@@ -23,11 +23,11 @@ an STN chip that echoes as it reads (such as the OBDLink EX) longer ones, up to 
 ([details](elm327.md#multi-frame-requests)). It never lets the adapter search for a protocol, and stops if the
 adapter stops answering. On a plain ELM327 it paces a physical request's long reply to the link's speed, so its
 512-byte buffer doesn't overflow (down to about 2300 baud).
-Broadcasts can't be paced, so `scan` and `fingerprint` ask each ECU for its long replies (mode 09 PIDs 04, 06 and 0A,
-mode 03) by its own request ID where the driver paces ([`Transport::broadcasts_can_overflow`](scanning.md#module-discovery)):
+Broadcasts can't be paced, so `scan`, `fingerprint` and `vin` ask each ECU for its long replies (mode 09 PIDs 02, 04, 06
+and 0A, mode 03) by its own request ID where the driver paces ([`Transport::broadcasts_can_overflow`](scanning.md#module-discovery)):
 every plain ELM327, and an STN below 115200 baud. A dry run has no adapter to judge, so it shows the broadcasts. Any
-other broadcast whose ECUs send multi-frame replies (the CLI's `vin`) can still overflow a slow link, which the
-driver reports as `BUFFER FULL` (#242).
+other broadcast whose ECUs send multi-frame replies, sent by a library caller, can still overflow a slow link, which
+the driver reports as `BUFFER FULL`.
 
 It sends VW TP2.0 frames raw (`AT CAF0`), and only on an adapter that echoes each character as it reads it, such as
 the OBDLink EX; whole-line echoers, such as many clones, can't send them. On an open channel it stops the adapter

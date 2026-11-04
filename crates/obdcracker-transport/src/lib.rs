@@ -91,8 +91,11 @@ pub trait Transport {
     /// 512-byte buffer can't hold eight ECUs' replies at once on a slow link. The default is
     /// false, for a transport that reads every reply as it arrives.
     ///
-    /// `scan` and `fingerprint` use it to choose between a broadcast and one physical request
-    /// per ECU. A wrapper of a `Transport` must forward it.
+    /// `scan`, `fingerprint` and [`fingerprint::read_vin`] use it to choose between a broadcast
+    /// and one physical request per ECU. A caller that broadcasts a long request of its own
+    /// (such as mode 09 PID 02) should check it too, and ask each ECU by its own request ID
+    /// where it is true: the ECUs' replies can overflow the adapter and fail with `BUFFER FULL`.
+    /// A wrapper of a `Transport` must forward it.
     fn broadcasts_can_overflow(&self) -> bool {
         false
     }

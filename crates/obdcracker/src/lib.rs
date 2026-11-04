@@ -40,16 +40,17 @@
 //! use std::time::Duration;
 //!
 //! use obdcracker::core::obd;
-//! use obdcracker::safety::{Policy, Protocol, Target};
+//! use obdcracker::safety::Policy;
 //! use obdcracker::transport::elm::Elm;
+//! use obdcracker::transport::fingerprint::read_vin;
 //! use obdcracker::transport::link::TcpLink;
-//! use obdcracker::transport::{Audited, Expect, exchange};
+//! use obdcracker::transport::Audited;
 //!
 //! # fn main() -> Result<(), Box<dyn std::error::Error>> {
 //! let link = TcpLink::connect("192.168.0.10:35000", Duration::from_secs(5))?;
 //! let mut adapter = Audited::open("session.audit.jsonl".as_ref(), Elm::connect(link)?, "tcp")?;
-//! let vin = Policy::read_only().approve(Protocol::Uds, Target::ObdFunctional, &obd::vehicle_info(0x02))?;
-//! for reply in exchange(&mut adapter, &vin, Expect::ObdEcus, Elm::<TcpLink>::timing())? {
+//! // Asks each ECU by its own request ID where one broadcast could overflow the adapter.
+//! for reply in read_vin(&mut adapter, &Policy::read_only(), Elm::<TcpLink>::timing())? {
 //!     println!("{:03X} {}", reply.source, obd::decode_vin(&reply.payload)?);
 //! }
 //! # Ok(())

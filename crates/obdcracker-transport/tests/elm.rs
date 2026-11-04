@@ -3520,7 +3520,7 @@ mod paced_reads {
     use obdcracker_core::obd::{Cvn, Dtc, Unit};
     use obdcracker_core::response::{Error as ReplyError, NegativeResponse, Nrc};
     use obdcracker_transport::Timing;
-    use obdcracker_transport::fingerprint::{Calibration, ReadError, fingerprint};
+    use obdcracker_transport::fingerprint::{Calibration, ReadError, fingerprint, read_vin};
     use obdcracker_transport::scan::{ObdEcu, PidValue, scan};
 
     // ECU `n` listens on 0x7E0 + n and answers on 0x7E8 + n.
@@ -3546,12 +3546,22 @@ mod paced_reads {
         }
     }
 
+    // ECU `n`'s VIN, 17 characters.
+    fn vin(n: u32) -> String {
+        format!("WAUZZZ4G1EN00000{n}")
+    }
+
     fn ecu_reply(n: u32, request: &[u8]) -> Option<Vec<u8>> {
         let tag = u8::try_from(n).unwrap();
         match request {
             [0x01, 0x00] => Some(vec![0x41, 0x00, 0x00, 0x10, 0x00, 0x00]),
             [0x01, 0x0C] => Some(vec![0x41, 0x0C, tag + 1, 0x00]),
             [0x09, 0x00] => Some(vec![0x49, 0x00, 0x14, 0x40, 0x00, 0x00]),
+            [0x09, 0x02] => {
+                let mut reply = vec![0x49, 0x02, 0x01];
+                reply.extend(vin(n).bytes());
+                Some(reply)
+            }
             [0x09, 0x04] => {
                 let mut reply = vec![0x49, 0x04, 0x03];
                 for slot in 0..3 {
@@ -3949,9 +3959,102 @@ mod paced_reads {
         }
     }
 
+    fn vins(replies: &[obdcracker_transport::Response]) -> Vec<(u32, Vec<u8>)> {
+        replies
+            .iter()
+            .map(|r| (r.source, r.payload.clone()))
+            .collect()
+    }
+
+    fn vin_reply(n: u32) -> (u32, Vec<u8>) {
+        let mut payload = vec![0x49, 0x02, 0x01];
+        payload.extend(vin(n).bytes());
+        (0x7E8 + n, payload)
+    }
+
+    #[test]
+    fn a_plain_elm327_at_9600_baud_reads_eight_vins() {
+        let mut elm = plain_elm(Fleet::of(8), 9600);
+        let replies = read_vin(&mut elm, &Policy::read_only(), timing()).unwrap();
+        assert_eq!(vins(&replies), (0..8).map(vin_reply).collect::<Vec<_>>());
+        // `01 00` names the ECUs, then each is asked alone: no broadcast of `09 02`.
+        let mut expected = broadcasts(&[&[0x01, 0x00]]);
+        expected.extend(physical_reads(&[0x09, 0x02], 8));
+        assert_eq!(sent(&elm), expected);
+        assert_flow_control_per_ecu(&elm, 8);
+    }
+
+    #[test]
+    fn an_ecu_that_stays_silent_on_its_own_vin_request_is_left_out() {
+        let fleet = Fleet {
+            silent_on: Some(3),
+            ..Fleet::of(8)
+        };
+        let mut elm = plain_elm(fleet, 9600);
+        let replies = read_vin(&mut elm, &Policy::read_only(), timing()).unwrap();
+        let expected: Vec<_> = (0..8).filter(|&n| n != 3).map(vin_reply).collect();
+        assert_eq!(vins(&replies), expected);
+        let mut asked = broadcasts(&[&[0x01, 0x00]]);
+        asked.extend(physical_reads(&[0x09, 0x02], 8));
+        assert_eq!(sent(&elm), asked);
+    }
+
+    #[test]
+    fn an_ecu_that_refuses_its_own_vin_request_is_returned_as_the_refusal() {
+        let fleet = Fleet {
+            refuses_on: Some(5),
+            ..Fleet::of(8)
+        };
+        let mut elm = plain_elm(fleet, 9600);
+        let replies = read_vin(&mut elm, &Policy::read_only(), timing()).unwrap();
+        let mut expected: Vec<_> = (0..8).map(vin_reply).collect();
+        expected[5] = (0x7ED, vec![0x7F, 0x09, 0x31]);
+        assert_eq!(vins(&replies), expected);
+    }
+
+    #[test]
+    fn no_vin_read_asks_each_ecu_when_nothing_answers_01_00() {
+        let fleet = Fleet {
+            answers_01_00: false,
+            ..Fleet::of(2)
+        };
+        let mut elm = plain_elm(fleet, 9600);
+        let replies = read_vin(&mut elm, &Policy::read_only(), timing()).unwrap();
+        let mut got = vins(&replies);
+        got.sort_unstable();
+        assert_eq!(got, (0..2).map(vin_reply).collect::<Vec<_>>());
+        assert_eq!(sent(&elm), broadcasts(&[&[0x01, 0x00], &[0x09, 0x02]]));
+    }
+
+    #[test]
+    fn a_vin_read_broadcasts_when_the_policy_refuses_an_ecus_physical_id() {
+        let narrowed = [ModuleIds {
+            request: 0x7E0,
+            reply: 0x7E8,
+        }];
+        let policy = Policy::read_only().narrowed_to(&narrowed).unwrap();
+        let mut elm = plain_elm(Fleet::of(2), 9600);
+        let replies = read_vin(&mut elm, &policy, timing()).unwrap();
+        let mut got = vins(&replies);
+        got.sort_unstable();
+        assert_eq!(got, (0..2).map(vin_reply).collect::<Vec<_>>());
+        assert_eq!(sent(&elm), broadcasts(&[&[0x01, 0x00], &[0x09, 0x02]]));
+    }
+
+    #[test]
+    fn an_stn_at_115200_baud_reads_the_vin_with_one_broadcast() {
+        let mut elm = fast_stn(Fleet::of(8));
+        let replies = read_vin(&mut elm, &Policy::read_only(), timing()).unwrap();
+        let mut got = vins(&replies);
+        got.sort_unstable();
+        assert_eq!(got, (0..8).map(vin_reply).collect::<Vec<_>>());
+        assert_eq!(sent(&elm), broadcasts(&[&[0x09, 0x02]]));
+    }
+
     #[test]
     fn a_broadcast_sent_directly_still_overflows_a_slow_link() {
-        // Only `scan` and `fingerprint` read per ECU; the `vin` command broadcasts (#71).
+        // Only `scan`, `fingerprint` and `read_vin` read per ECU; any other broadcast of a long
+        // request is the caller's to split (#71).
         let mut elm = plain_elm(Fleet::of(8), 9600);
         elm.send(&approve(Target::ObdFunctional, &[0x09, 0x04]))
             .unwrap();

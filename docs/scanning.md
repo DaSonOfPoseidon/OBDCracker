@@ -11,15 +11,19 @@ a bitmap advertises, mode 09 PIDs 00 and 0A and mode 03 go to the functional add
 is an ECU. The policy approves every mode 01 PID up front, but one no bitmap lists is never sent. Other modules are
 not discovered by `scan`; the caller gives it the modules to read (from a vehicle profile).
 
-Mode 09 PIDs 0A (and 04 and 06 in `fingerprint`) and mode 03 can have long, multi-frame replies. Where the transport
+Mode 09 PIDs 0A (04 and 06 in `fingerprint`, 02 in `read_vin`) and mode 03 can have long, multi-frame replies. Where the transport
 says broadcasts can overflow (`Transport::broadcasts_can_overflow`: the ELM driver on every plain ELM327, and on an STN
-below 115200 baud; [details](elm327.md#timing)), `scan_with` and `fingerprint` ask each ECU already known for them by
+below 115200 baud; [details](elm327.md#timing)), `scan_with`, `fingerprint` and `read_vin` ask each ECU already known for them by
 its own request ID (0x7E0..=0x7E7), in ascending reply ID order, instead of broadcasting. `scan_with` knows the ECUs
-from the bitmaps and the reply to mode 09 PID 00; `fingerprint` broadcasts mode 01 PID 00 first. An ECU that doesn't
-answer is left out as in a broadcast, so it shows as `NoReply` in `scan` and isn't listed in `fingerprint`. If the
+from the bitmaps and the reply to mode 09 PID 00; `fingerprint` and `read_vin` broadcast mode 01 PID 00 first. An ECU
+that doesn't answer is left out as in a broadcast, so it shows as `NoReply` in `scan` and isn't listed in `fingerprint`
+or returned by `read_vin`. If the
 policy allows no request of its own to one of the ECUs (a vehicle profile that leaves out its ID), that read is the
-broadcast. Every other transport, a dry run included (it has no adapter to judge), sends the broadcasts alone. Only
-`scan` and `fingerprint` do this: the CLI's `vin` still broadcasts and can overflow a slow link (#242).
+broadcast. Every other transport, a dry run included (it has no adapter to judge), sends the broadcasts alone: for
+`read_vin` and the CLI's `vin`, the one `09 02`. `read_vin` returns each reply undecoded, because an ECU with no VIN may
+refuse a request of its own where it stayed silent for the broadcast. Only these three do this: any other broadcast of a
+long request can still overflow a slow link, so a caller sending its own should ask each ECU by its own request ID
+where `broadcasts_can_overflow` is true.
 
 Supported PIDs are read as a chain of bitmaps (PID 00, 20, 40, ... E0). Each ECU's chain follows only the bitmaps
 that ECU says it supports, and ends at a bitmap that is missing or garbled even while another ECU's chain keeps the
