@@ -46,7 +46,8 @@ Prints each ECU's VIN (OBD-II mode 09 PID 02), one `<reply ID> <VIN>` line per E
 adapter whose driver paces its replies (every plain ELM327, and an STN below 115200 baud): there it broadcasts mode 01
 PID 00 to find the ECUs, then asks each in turn by its own request ID, so that several ECUs' long replies don't
 overflow the adapter ([details](scanning.md#module-discovery)). `--dry-run` shows the one broadcast. With `--profile`,
-requests go only to the profile's request IDs. An ECU that has no VIN may refuse a request of its own: that is
+the requests to each ECU go only to request IDs the profile lists; if it leaves one out, the VINs are read by the
+broadcast instead. An ECU that has no VIN may refuse a request of its own: that is
 printed to stderr but isn't a failure if another ECU gave a VIN. A malformed VIN, or no VIN at all, exits 1.
 
 ## `fingerprint`
