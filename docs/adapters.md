@@ -27,7 +27,7 @@ Broadcasts can't be paced, so `scan` and `fingerprint` ask each ECU for its long
 mode 03) by its own request ID where the driver paces ([`Transport::broadcasts_can_overflow`](scanning.md#module-discovery)):
 every plain ELM327, and an STN below 115200 baud. A dry run has no adapter to judge, so it shows the broadcasts. Any
 other broadcast whose ECUs send multi-frame replies (the CLI's `vin`) can still overflow a slow link, which the
-driver reports as `BUFFER FULL` (#71).
+driver reports as `BUFFER FULL` (#242).
 
 It sends VW TP2.0 frames raw (`AT CAF0`), and only on an adapter that echoes each character as it reads it, such as
 the OBDLink EX; whole-line echoers, such as many clones, can't send them. On an open channel it stops the adapter
