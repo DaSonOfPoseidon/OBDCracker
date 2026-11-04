@@ -74,7 +74,7 @@ jobs:
             echo "code=true" >> "$GITHUB_OUTPUT"
             exit 0
           fi
-          files=$(git diff --name-only "$BASE_SHA" HEAD)
+          files=$(git diff --name-only --no-renames "$BASE_SHA" HEAD)
           echo "$files"
           if grep -Eq '(\.rs$|(^|/)Cargo\.(toml|lock)$|^rust-toolchain\.toml$|^deny\.toml$|^\.?(clippy|rustfmt)\.toml$|^scripts/install\.(sh|ps1)$|^\.github/workflows/|^crates/|^\.cargo/|^README\.md$|^docs/library\.md$)' <<< "$files"; then
             echo "code=true" >> "$GITHUB_OUTPUT"

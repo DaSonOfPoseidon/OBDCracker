@@ -435,6 +435,9 @@ Each entry names the class, what to check, and where it bit us.
   "docs" lets a doc edit break the doctests unseen. When a skip list changes, grep the crates for `include_str!`,
   `include_bytes!` and `include!` and check each target is on it. Tool configs (`clippy.toml`, `rustfmt.toml`) change the checks' results, so they count
   too (`ci.yml`, #222).
+- **`git diff --name-only` hides a rename's source.** Moving `README.md` to `docs/x.md` lists only the destination, so a
+  path filter sees a docs file while the build lost an input. Pass `--no-renames` wherever changed paths decide what
+  runs (`ci.yml`, #222).
 - **`grep -q` in a `pipefail` pipeline can fail on a match.** `grep -q` exits at the first hit, `echo` then dies of
   SIGPIPE, and `set -o pipefail` reports the pipeline failed, so a large list reads as "no match". Feed it with a
   here-string (`grep -Eq ... <<< "$files"`) instead (`ci.yml`, #222).
