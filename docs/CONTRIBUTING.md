@@ -18,6 +18,11 @@
   `rust-toolchain.toml`, `deny.toml`, `clippy.toml`, `rustfmt.toml`, `scripts/install.sh` and `install.ps1`, `README.md`
   and `docs/library.md` (the last two are `include_str!`ed into the `obdcracker` doctests). Pushes to `main` always run
   everything. PRs are squash-merged, the only merge method the repo allows, so each PR becomes one commit on `main`.
+- **Test data from other projects must be permissively licensed.** Data copied into the repo (fixtures, golden frames,
+  test vectors) must be MIT, Apache, BSD, CC0 or CC-BY. Sources under the GPL or a non-commercial licence are reference
+  only, and so is anything share-alike: CC BY-SA (OBDb) isn't CC-BY. A source with no stated licence is reference
+  only too. Read those while developing, but copy nothing from them. List every source you do use, with its commit and
+  licence, in [`docs/third-party.md`](third-party.md), and add the licence's notice there where it requires one.
 - **Comments are for what the code can't say.** Reference material goes in `docs/`, not in code files. See
   [Comments](#comments).
 
