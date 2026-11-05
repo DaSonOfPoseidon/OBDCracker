@@ -27,8 +27,12 @@ if [ -z "$1" ]; then
 fi
 
 git fetch -q origin
+names=$(mktemp)
+trap 'rm -f "$names"' EXIT
+# -z: without it, git C-quotes a name with non-ASCII or special characters.
 # --no-renames lists a moved file at both its old and new paths, so both count.
-changed=$(git diff --name-only --no-renames "$base"...HEAD)
+git diff -z --name-only --no-renames "$base"...HEAD >"$names"
+changed=$(tr '\0' '\n' <"$names")
 
 # Issues the branch's commit subjects say they fix: the word "fixes" followed by a word that is
 # exactly #N. Splitting into words means "prefixes #3", "fixes #3rd" and "fixes #5_more" don't
