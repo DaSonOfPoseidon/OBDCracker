@@ -27,8 +27,11 @@ if [ -z "$1" ]; then
 fi
 
 git fetch -q origin
+names=$(mktemp)
+trap 'rm -f "$names"' EXIT
+# -z: without it, git C-quotes a name with non-ASCII or special characters.
 # --no-renames lists a moved file at both its old and new paths, so both count.
-changed=$(git diff --name-only --no-renames "$base"...HEAD)
+git diff -z --name-only --no-renames "$base"...HEAD >"$names"
 
 # Issues the branch's commit subjects say they fix: the word "fixes" followed by a word that is
 # exactly #N. Splitting into words means "prefixes #3", "fixes #3rd" and "fixes #5_more" don't
@@ -36,7 +39,7 @@ changed=$(git diff --name-only --no-renames "$base"...HEAD)
 fixed=$(git log --format=%s "$base"..HEAD | tr -c '[:alnum:]_#\n' ' ' |
 	awk '{ for (i = 1; i < NF; i++) if (tolower($i) == "fixes" && $(i + 1) ~ /^#[0-9]+$/) print substr($(i + 1), 2) }' |
 	sort -un | tr '\n' ',' | sed 's/,$//')
-echo "Files changed: $(echo "$changed" | grep -c .)${milestone:+; milestone M$milestone}${fixed:+; fixed here: #$(echo "$fixed" | sed "s/,/, #/g")}"
+echo "Files changed: $(tr -cd '\0' <"$names" | wc -c | tr -d ' ')${milestone:+; milestone M$milestone}${fixed:+; fixed here: #$(echo "$fixed" | sed "s/,/, #/g")}"
 
 blocked=$(for n in $(echo "$fixed" | tr ',' ' '); do
 	gh api --paginate "repos/$repo/issues/$n/dependencies/blocked_by?per_page=100" --jq "
@@ -55,9 +58,10 @@ done)
 # `:line` or full stop after it, or as the path in a link to this repository's `blob/<ref>/` or
 # `tree/<ref>/` page (a one-segment ref). Any other prefix, such as another directory's, doesn't count.
 related=
-if [ -n "$changed" ]; then
-	related=$(CHANGED=$changed gh api --paginate "repos/$repo/issues?state=open&per_page=100" --jq "
-		(\$ENV.CHANGED | split(\"\\n\")) as \$changed
+if [ -s "$names" ]; then
+	# A name can hold a newline, so the NUL-separated list goes to jq base64-encoded and is split on NUL there.
+	related=$(CHANGED=$(base64 <"$names" | tr -d '\n') gh api --paginate "repos/$repo/issues?state=open&per_page=100" --jq "
+		(\$ENV.CHANGED | @base64d | split(\"\\u0000\") | map(select(length > 0))) as \$changed
 		| ${milestone:-0} as \$m
 		| [${fixed}] as \$fixed
 		| .[]
@@ -67,7 +71,7 @@ if [ -n "$changed" ]; then
 		| select(\"status:blocked\" | IN(\$names[]) | not)
 		| ((.milestone.title // \"\") | capture(\"^M(?<n>[0-9]+) · \").n | tonumber) as \$due
 		| select(\$m == 0 or \$due <= \$m)
-		| ([(.body // \"\") | scan(\"[A-Za-z0-9_./-]+\") | sub(\"\\\\.+$\"; \"\")
+		| ([(.body // \"\") | scan(\"[\\\\p{L}\\\\p{N}_./-]+\") | sub(\"\\\\.+$\"; \"\")
 			| sub(\"^//github\\\\.com/$repo/(blob|tree)/[^/]+/\"; \"\") as \$word
 			| \$changed[] | select(. == \$word)] | unique) as \$cited
 		| select(\$cited | length > 0)

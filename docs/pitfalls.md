@@ -456,7 +456,9 @@ Each entry names the class, what to check, and where it bit us.
 - **`git diff --name-only` C-quotes a name with non-ASCII or special characters.** `"crates/x/\303\251.txt"` has a
   leading `"` and a trailing `"`, so an anchored filter (`^crates/`, `\.rs$`) misses it and a CI skip goes green
   falsely. Read names with `-z` and match with `grep -z`. `core.quotepath=off` isn't enough: it still quotes tabs,
-  newlines, quotes and backslashes (`ci.yml`, #237).
+  newlines, quotes and backslashes (`ci.yml`, #237). Scripts count too: `scripts/pr-gate.sh` matched quoted names
+  against issue bodies until #250. A name can also hold a newline, so don't turn the NUL list into newlines before
+  matching or counting: a `docs/a\nb.md` becomes two files (#250).
 - **`git diff --name-only` hides a rename's source.** Moving `README.md` to `docs/x.md` lists only the destination, so a
   path filter sees a docs file while the build lost an input. Pass `--no-renames` wherever changed paths decide what
   runs (`ci.yml`, #222).
