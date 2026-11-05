@@ -18,7 +18,7 @@ on the bus. The requirements come from other projects' field reports (#42).
   (service, DID) stays with the caller, as for every transport.
 - A request is sent as one frame or as a segmented transfer. A multi-frame request needs a known reply ID (the module
   that sends its flow control); without one it is refused before any frame goes out. A reply with no known reply ID
-  gets no flow control, and `recv` says so instead of timing out.
+  gets no flow control; `recv` times out as usual and the audit log gets a status line saying why.
 
 ## Separation time
 

@@ -76,7 +76,6 @@ pub(crate) struct RawCan<P> {
     ready: VecDeque<Response>,
     events: Vec<LinkEvent>,
     lost: usize,
-    needs_reply_id: Option<u32>,
     // When the last frame was confirmed sent, or a flow control frame arrived: STmin counts from it.
     last_frame: Option<Instant>,
 }
@@ -93,7 +92,6 @@ impl<P: CanPort> RawCan<P> {
             ready: VecDeque::new(),
             events: Vec::new(),
             lost: 0,
-            needs_reply_id: None,
             last_frame: None,
         }
     }
@@ -168,7 +166,6 @@ impl<P: CanPort> RawCan<P> {
     fn begin(&mut self, request: &Approved) -> Result<(), Error> {
         self.window = None;
         self.ready.clear();
-        self.needs_reply_id = None;
         self.last_frame = None;
         for _ in 0..MAX_STALE_FRAMES {
             let event = match self.port.read(Duration::ZERO) {
@@ -209,7 +206,9 @@ impl<P: CanPort> RawCan<P> {
             }
             Ok(FeedOutcome::SendFlowControl(token)) => Some(token),
             Ok(FeedOutcome::NoFlowControl { source }) => {
-                self.needs_reply_id = Some(source);
+                self.note(format!(
+                    "no flow control for the multi-frame reply from {source:03X}: the request has no known reply ID"
+                ));
                 None
             }
             Ok(FeedOutcome::Pending | FeedOutcome::Ignored) => None,
@@ -217,15 +216,6 @@ impl<P: CanPort> RawCan<P> {
                 self.note(format!("dropped a frame from {:03X}: {e}", frame.id));
                 None
             }
-        }
-    }
-
-    fn timed_out(&mut self) -> Error {
-        match self.needs_reply_id.take() {
-            Some(source) => Error::Adapter(format!(
-                "a multi-frame reply from {source:03X} needs a known reply ID to send flow control to"
-            )),
-            None => Error::Timeout,
         }
     }
 
@@ -373,14 +363,10 @@ impl<P: CanPort> Transport for RawCan<P> {
             }
             let left = deadline.saturating_duration_since(Instant::now());
             if polled && left.is_zero() {
-                return Err(self.timed_out());
+                return Err(Error::Timeout);
             }
             polled = true;
-            let event = match self.port.read(left) {
-                Ok(event) => event,
-                Err(Error::Timeout) => return Err(self.timed_out()),
-                Err(e) => return Err(e),
-            };
+            let event = self.port.read(left)?;
             let frame = self.frame_of(event)?;
             if let Some(token) = self.accept(&frame) {
                 before_send(&token)?;

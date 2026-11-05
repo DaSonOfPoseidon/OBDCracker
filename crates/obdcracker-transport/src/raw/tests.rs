@@ -882,18 +882,40 @@ fn a_reply_longer_than_4095_bytes_gets_no_flow_control() {
 }
 
 #[test]
-fn a_multi_frame_reply_with_no_known_reply_id_says_so_instead_of_timing_out() {
+fn a_multi_frame_reply_with_no_known_reply_id_gets_no_flow_control_and_is_noted() {
     let mut can = raw(Fake::default());
     can.send(&read_did(Target::Physical(0x710))).unwrap();
     can.port
         .inbox
         .push_back(frame(0x718, &[0x10, 20, 0x62, 0xF1, 0x87, 1, 2, 3]));
     let written = can.port.written().len();
-    match can.recv(SHORT) {
-        Err(Error::Adapter(message)) => assert!(message.contains("718"), "{message}"),
-        other => panic!("{other:?}"),
-    }
+    assert_eq!(can.recv(SHORT), Err(Error::Timeout));
     assert_eq!(can.port.written().len(), written);
+    let events = can.take_events();
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, LinkEvent::Status { line, .. }
+            if line.contains("718") && line.contains("reply ID"))),
+        "{events:?}"
+    );
+}
+
+#[test]
+fn a_stray_first_frame_does_not_turn_the_final_timeout_into_an_error() {
+    let mut can = raw(Fake::default());
+    can.send(&read_did(Target::Physical(0x710))).unwrap();
+    can.port
+        .inbox
+        .push_back(frame(0x718, &[0x10, 20, 0x62, 0xF1, 0x90, 1, 2, 3]));
+    can.port
+        .inbox
+        .push_back(frame(0x718, &[4, 0x62, 0xF1, 0x87, 0x42]));
+    assert_eq!(
+        can.recv(SHORT).unwrap().payload,
+        vec![0x62, 0xF1, 0x87, 0x42]
+    );
+    assert_eq!(can.recv(SHORT), Err(Error::Timeout));
 }
 
 #[test]
