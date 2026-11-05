@@ -197,13 +197,20 @@ fn a_missing_serial_port_is_an_error() {
 
 // A fake ELM327 on the A7's engine and transmission, served over TCP like a Wi-Fi adapter.
 fn wifi_adapter() -> SocketAddr {
-    const VIN: &[u8] = b"\x49\x02\x01WAUZZZ4G1EN000000";
-    wifi_adapter_answering(|header, request| {
-        if header == 0x7DF && request == [0x09, 0x02] {
-            vec![(0x7E8, VIN.to_vec()), (0x7E9, VIN.to_vec())]
-        } else {
-            Vec::new()
-        }
+    wifi_adapter_with_vins(|_| VIN.to_vec())
+}
+
+const VIN: &[u8] = b"\x49\x02\x01WAUZZZ4G1EN000000";
+
+// A plain ELM327 is paced, so `vin` asks `01 00` first, then each ECU by its own request ID. ECU
+// `n` (0 or 1) answers on 0x7E8 + n with `vin(n)`.
+fn wifi_adapter_with_vins(vin: impl Fn(u32) -> Vec<u8> + Send + 'static) -> SocketAddr {
+    wifi_adapter_answering(move |header, request| match (header, request) {
+        (0x7DF, [0x01, 0x00]) => (0x7E8..=0x7E9)
+            .map(|id| (id, vec![0x41, 0x00, 0x00, 0x00, 0x00, 0x00]))
+            .collect(),
+        (0x7E0..=0x7E1, [0x09, 0x02]) => vec![(header + 8, vin(header - 0x7E0))],
+        _ => Vec::new(),
     })
 }
 
@@ -266,9 +273,95 @@ fn tcp_vin_reads_through_an_elm_adapter_and_warns_about_wireless() {
         .skip(setup)
         .filter(|l| !l.contains(r#""dir":"cmd""#))
         .collect();
-    assert_eq!(lines.len(), 3, "{audit}");
-    assert!(lines[0].contains(r#""dir":"tx","id":"7DF","payload":"09 02","link":"tcp""#));
-    assert!(lines[1].contains(r#""dir":"rx","id":"7E8""#) && lines[1].contains(r#""link":"tcp""#));
+    // `01 00` names the ECUs, then each is asked by its own request ID (#242).
+    let shape: Vec<_> = lines
+        .iter()
+        .map(|l| {
+            let dir = if l.contains(r#""dir":"tx""#) {
+                "tx"
+            } else {
+                "rx"
+            };
+            let id = l
+                .split(r#""id":""#)
+                .nth(1)
+                .and_then(|r| r.get(..3))
+                .unwrap();
+            format!("{dir} {id}")
+        })
+        .collect();
+    assert_eq!(
+        shape,
+        [
+            "tx 7DF", "rx 7E8", "rx 7E9", "tx 7E0", "rx 7E8", "tx 7E1", "rx 7E9"
+        ],
+        "{audit}"
+    );
+    assert!(lines[0].contains(r#""payload":"01 00","link":"tcp""#));
+    assert!(lines[3].contains(r#""payload":"09 02","link":"tcp""#));
+    assert!(lines[5].contains(r#""payload":"09 02","link":"tcp""#));
+}
+
+fn vin_over_tcp(vin: impl Fn(u32) -> Vec<u8> + Send + 'static) -> (Output, String) {
+    let addr = wifi_adapter_with_vins(vin).to_string();
+    let out = obdcracker(&["--tcp", &addr, "vin"]);
+    let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+    (out, stderr)
+}
+
+#[test]
+fn a_refusal_beside_a_good_vin_still_succeeds() {
+    // An ECU with no VIN refuses a request of its own, where it stays silent for a broadcast.
+    let (out, stderr) = vin_over_tcp(|n| {
+        if n == 0 {
+            VIN.to_vec()
+        } else {
+            vec![0x7F, 0x09, 0x31]
+        }
+    });
+    assert_eq!(out.status.code(), Some(0), "{stderr}");
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout),
+        "7E8 WAUZZZ4G1EN000000\n"
+    );
+    assert!(stderr.contains("7E9 service 0x09 refused"), "{stderr}");
+}
+
+#[test]
+fn only_refusals_fail() {
+    let (out, stderr) = vin_over_tcp(|_| vec![0x7F, 0x09, 0x31]);
+    assert_eq!(out.status.code(), Some(1), "{stderr}");
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "");
+    assert!(stderr.contains("7E8 service 0x09 refused"), "{stderr}");
+}
+
+#[test]
+fn a_malformed_vin_beside_a_good_one_still_fails() {
+    let (out, stderr) = vin_over_tcp(|n| {
+        if n == 0 {
+            VIN.to_vec()
+        } else {
+            b"\x49\x02\x01WAUZZZ4G1EN00000!".to_vec()
+        }
+    });
+    assert_eq!(out.status.code(), Some(1), "{stderr}");
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout),
+        "7E8 WAUZZZ4G1EN000000\n"
+    );
+    assert!(stderr.contains("7E9 reply is malformed"), "{stderr}");
+}
+
+#[test]
+fn a_refusal_and_a_malformed_vin_fail_together() {
+    let (out, stderr) = vin_over_tcp(|n| {
+        if n == 0 {
+            vec![0x7F, 0x09, 0x31]
+        } else {
+            b"\x49\x02\x01WAUZZZ4G1EN00000!".to_vec()
+        }
+    });
+    assert_eq!(out.status.code(), Some(1), "{stderr}");
 }
 
 #[test]

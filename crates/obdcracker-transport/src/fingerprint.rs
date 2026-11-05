@@ -253,7 +253,7 @@ pub fn fingerprint<T: Transport + ?Sized>(
     };
     let calid_request = LongRead::approve(policy, &obd::vehicle_info(0x04))?;
     let cvn_request = LongRead::approve(policy, &obd::vehicle_info(0x06))?;
-    let ecu_list_request = approve(Target::ObdFunctional, &obd::current_data(0x00))?;
+    let ecu_list_request = approve_ecu_list(policy)?;
     let did_requests = modules
         .iter()
         .map(|module| {
@@ -269,15 +269,7 @@ pub fn fingerprint<T: Transport + ?Sized>(
         })
         .collect::<Result<Vec<_>, _>>()?;
 
-    // Where each ECU is asked in turn, the supported-PID bitmap they all answer says which.
-    let asked: Vec<u32> = if transport.broadcasts_can_overflow() {
-        broadcast(transport, &ecu_list_request, timing)?
-            .iter()
-            .map(|r| r.source)
-            .collect()
-    } else {
-        Vec::new()
-    };
+    let asked = ecus_to_ask(transport, &ecu_list_request, timing)?;
     let calids = calid_request.read(transport, &asked, timing)?;
     let cvns = cvn_request.read(transport, &asked, timing)?;
     let mut sources: Vec<u32> = calids.iter().chain(&cvns).map(|r| r.source).collect();
@@ -335,6 +327,63 @@ pub fn fingerprint<T: Transport + ?Sized>(
         ecus,
         modules: identified,
     })
+}
+
+/// Reads the VIN (OBD-II mode 09 PID 02) from every ECU that has one, and returns each reply
+/// undecoded, with the ECU's reply CAN ID.
+///
+/// Where eight ECUs' replies to one broadcast would overflow the adapter
+/// ([`Transport::broadcasts_can_overflow`], such as a plain ELM327), this first broadcasts mode 01
+/// PID 00 to learn which ECUs answer, then asks each of them in turn by its own request ID, in
+/// ascending reply ID order. If nothing answers `01 00`, or the policy allows no request of its
+/// own to one of those ECUs, `09 02` is broadcast after the `01 00`. On any other transport it
+/// sends the one `09 02` broadcast and nothing else. Every request is approved by `policy`
+/// before the first is sent.
+///
+/// An ECU that doesn't answer in time is left out. Replies aren't decoded: decode each on its own
+/// ([`obd::decode_vin`]), because an ECU with no VIN may answer a request of its own with a
+/// negative reply where it would have stayed silent for the broadcast.
+///
+/// # Errors
+///
+/// The policy refused a request, or the adapter failed. Nothing is returned from what was read
+/// before the failure; the audit log has it.
+pub fn read_vin<T: Transport + ?Sized>(
+    transport: &mut T,
+    policy: &Policy,
+    timing: Timing,
+) -> Result<Vec<Response>, FingerprintError> {
+    let vin_request = LongRead::approve(policy, &obd::vehicle_info(0x02))?;
+    let ecu_list_request = approve_ecu_list(policy)?;
+    let asked = ecus_to_ask(transport, &ecu_list_request, timing)?;
+    vin_request.read(transport, &asked, timing)
+}
+
+fn approve_ecu_list(policy: &Policy) -> Result<Approved, FingerprintError> {
+    policy
+        .approve(
+            Protocol::Uds,
+            Target::ObdFunctional,
+            &obd::current_data(0x00),
+        )
+        .map_err(FingerprintError::Rejected)
+}
+
+// The reply IDs of the ECUs to ask one at a time: those that answer `01 00` where a broadcast of a
+// long request can overflow the transport, and none elsewhere, where nothing extra is sent.
+fn ecus_to_ask<T: Transport + ?Sized>(
+    transport: &mut T,
+    ecu_list_request: &Approved,
+    timing: Timing,
+) -> Result<Vec<u32>, FingerprintError> {
+    if !transport.broadcasts_can_overflow() {
+        return Ok(Vec::new());
+    }
+    // The supported-PID bitmap every ECU answers says which ECUs there are.
+    Ok(broadcast(transport, ecu_list_request, timing)?
+        .iter()
+        .map(|r| r.source)
+        .collect())
 }
 
 pub(crate) fn decode_did_value(payload: &[u8], did: u16) -> Result<DidValue, response::Error> {

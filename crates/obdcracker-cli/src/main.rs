@@ -10,7 +10,7 @@ use obdcracker_core::obd;
 use obdcracker_core::response::{self, Error as ReplyError, Nrc};
 use obdcracker_core::uds::{DiagnosticSession, UdsDtc};
 use obdcracker_profile::{Decode, DidSession, Profile, Protocol};
-use obdcracker_safety::{ModuleIds, Policy, Target};
+use obdcracker_safety::{ModuleIds, Policy};
 use obdcracker_sim::SimBus;
 use obdcracker_transport::discover;
 use obdcracker_transport::dtc::{self, RecordData};
@@ -23,9 +23,7 @@ use obdcracker_transport::scan::{
 };
 use obdcracker_transport::sweep::{self, SweepOptions};
 use obdcracker_transport::tp20::{self, Answer, ChannelSession, Disconnect};
-use obdcracker_transport::{
-    Audited, DryRun, Expect, S3, Timing, Transport, exchange, hex, log_failure,
-};
+use obdcracker_transport::{Audited, DryRun, S3, Timing, Transport, hex, log_failure};
 
 const DEFAULT_BAUD: u32 = 115_200;
 const TCP_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
@@ -354,31 +352,30 @@ fn run<T: Transport>(cli: &Cli, transport: T, link: &str, timing: Timing) -> Exi
     {
         return run_dtc(cli, &mut transport, timing, module, *code, *record);
     }
-    let (target, payload, expect) = match cli.command {
-        Command::Vin => (
-            Target::ObdFunctional,
-            obd::vehicle_info(0x02),
-            Expect::ObdEcus,
-        ),
+    match cli.command {
+        Command::Vin => run_vin(cli, &mut transport, timing),
         // Handled before any transport is opened, or above.
         Command::Ports
         | Command::Adapter
         | Command::Fingerprint
         | Command::Scan { .. }
         | Command::Sweep { .. }
-        | Command::Dtc { .. } => {
-            unreachable!()
+        | Command::Dtc { .. } => unreachable!(),
+    }
+}
+
+// Each ECU's reply is decoded on its own, so one bad reply doesn't hide the others. An ECU with no
+// VIN commonly refuses a request of its own where it stays silent for a broadcast, so a refusal
+// doesn't fail the command when another ECU gave a VIN.
+fn run_vin<T: Transport>(cli: &Cli, transport: &mut T, timing: Timing) -> ExitCode {
+    let policy = match policy(cli) {
+        Ok(policy) => policy,
+        Err(e) => {
+            eprintln!("{e}");
+            return ExitCode::from(2);
         }
     };
-    let request =
-        match Policy::read_only().approve(obdcracker_safety::Protocol::Uds, target, &payload) {
-            Ok(request) => request,
-            Err(rejection) => {
-                eprintln!("safety policy {rejection}");
-                return ExitCode::FAILURE;
-            }
-        };
-    let replies = match exchange(&mut transport, &request, expect, timing) {
+    let replies = match fingerprint::read_vin(transport, &policy, timing) {
         Ok(replies) => replies,
         Err(e) => {
             eprintln!("{e}");
@@ -393,18 +390,24 @@ fn run<T: Transport>(cli: &Cli, transport: T, link: &str, timing: Timing) -> Exi
         eprintln!("no ECU answered");
         return ExitCode::FAILURE;
     }
-    // Each ECU's reply is decoded on its own, so one bad reply doesn't hide the others.
-    let mut status = ExitCode::SUCCESS;
+    let (mut found, mut failed) = (false, false);
     for reply in replies {
         match obd::decode_vin(&reply.payload) {
-            Ok(vin) => println!("{:03X} {vin}", reply.source),
+            Ok(vin) => {
+                println!("{:03X} {vin}", reply.source);
+                found = true;
+            }
             Err(e) => {
                 eprintln!("{:03X} {e}: {}", reply.source, hex(&reply.payload));
-                status = ExitCode::FAILURE;
+                failed |= !matches!(e, ReplyError::Negative(_));
             }
         }
     }
-    status
+    if found && !failed {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::FAILURE
+    }
 }
 
 // The read-only policy, narrowed to the profile's modules when there is one, so requests go only
