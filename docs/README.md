@@ -13,6 +13,7 @@
 - [Protocols](protocols.md): physical, transport and diagnostic protocol status
 - [Vehicle profiles](profiles.md): what a profile holds, and the profiles so far
 - [Scanning](scanning.md): module discovery, DID batching, the gateway list, the extended session and sweeps
+- [Raw CAN](raw-can.md): the ISO-TP transport shared by the `gsusb` and `socketcan` backends
 - [VW TP2.0](tp20.md): TP2.0 frames, ACKs, keep-alive, channel setup and disconnect
 - [Fixture files](fixtures.md): what a simulated module answers, field by field
 - [ELM327 notes](elm327.md): the adapter behaviour the `elm` driver relies on, with datasheet pages

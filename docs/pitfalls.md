@@ -277,6 +277,27 @@ Each entry names the class, what to check, and where it bit us.
 - **An early exit skips what else was asked for.** `scan` returned "nothing answered" before the TP2.0 pass when no
   ISO-TP module replied, which is when TP2.0 matters most. Run every requested pass, then decide the exit code
   (PR #149).
+- **A CAN ID means nothing without its width.** A 29-bit frame with ID `0x7E8` and an 11-bit one with `0x7E8` are
+  different frames, but `ReplyWindow::feed` takes a bare number. `RawCan` compares the frame's width with the request's
+  before feeding it (`docs/raw-can.md#frames`). Any code that matches received IDs against an expected one must carry
+  the width with it.
+- **A loop that waits on a flood needs its deadline checked after every frame it skips.** A receive loop that only
+  stops when the port times out never ends on a bus full of other modules' frames. The raw-CAN core checks the clock
+  after every frame, and its flood tests hang (the container must be killed) if that check is removed.
+- **A bounded drain that hits its bound hasn't drained.** `RawCan` reads stale frames before a request, up to 256; at
+  the limit it carried on, so a late reply further back in the queue could answer the new request. Fail when the bound
+  is hit, and read once more than the bound so a queue of exactly that size still passes (PR #261, Codex).
+- **Handle every event before a limit rejects it.** The drain counted the 257th stale event and failed before looking
+  at it, so a bus-off right behind 256 stale frames never latched, and the next send found an empty queue and wrote
+  into the faulted bus. Latch, then apply the limit; and when the event is the fault, report the fault (PR #261, Codex).
+- **A transfer ends on every path that leaves the peer able to go on.** An unconfirmed flow control, a `before_send`
+  that refuses, or a failing port read returned an error but kept the reply window open, so the module's consecutive
+  frames, sent after all, completed a reply from a transfer the caller was told had failed. Every error path out of a
+  receive drops the window; test it by delivering the rest of the transfer afterwards (PR #261, Codex).
+- **Don't delete saved evidence when a later event completes.** Frames of an unfinished reply are kept for the log. A
+  completing frame cleared everything kept for its source, though a single frame completes a *new* transfer and
+  abandons the old one, whose frames it then erased. Report what the new frame abandons first, whatever the frame
+  is (a malformed or empty one abandons too), and only then clear what the completion consumed (PR #261, Codex).
 
 ## Links and adapters
 
