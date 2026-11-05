@@ -8,10 +8,9 @@ recording what it sent the adapter and heard back.
 ## Connecting
 
 ```sh
-obdcracker adapter                                 # the one USB serial port plugged in is found for you
+obdcracker adapter                                 # the one USB serial port plugged in is found for you; what the adapter is and the battery voltage, sends nothing on the bus
 obdcracker ports                                   # list serial ports
-obdcracker --serial /dev/ttyUSB0 adapter           # what the adapter is, and the battery voltage; sends nothing on the bus
-obdcracker --serial /dev/ttyUSB0 vin               # 115200 baud by default; --baud 38400 for many clones
+obdcracker vin                                     # 115200 baud by default; --baud 38400 for many clones
 obdcracker --tcp 192.168.0.10:35000 vin            # a Wi-Fi adapter
 ```
 
@@ -39,7 +38,7 @@ Two options work with `vin`, `fingerprint`, `scan`, `sweep` and `dtc` (not `port
 ## `vin`
 
 ```sh
-obdcracker --serial <PORT> vin
+obdcracker vin
 ```
 
 Prints each ECU's VIN (OBD-II mode 09 PID 02), one `<reply ID> <VIN>` line per ECU. It is one broadcast, except on an
@@ -53,7 +52,7 @@ printed to stderr but isn't a failure if another ECU gave a VIN. A malformed VIN
 ## `fingerprint`
 
 ```sh
-obdcracker --serial <PORT> fingerprint
+obdcracker fingerprint
 ```
 
 Identifies the engine and transmission software: calibration IDs and CVNs (OBD-II mode 09), then part numbers and
@@ -68,7 +67,7 @@ broadcast that finds the ECUs, so that several ECUs' long replies don't overflow
 
 ```sh
 obdcracker --dry-run --profile a7 scan # what scan would send; opens no adapter
-obdcracker --serial <PORT> --profile a7 scan
+obdcracker --profile a7 scan
 ```
 
 Reads everything the default diagnostic session allows, without changing any module's session. From each emissions
@@ -108,7 +107,7 @@ which two reads a live scan adds.
 ### `--extended`
 
 ```sh
-obdcracker --serial <PORT> --profile a7 scan --extended  # also read the profile's extended-session DIDs
+obdcracker --profile a7 scan --extended  # also read the profile's extended-session DIDs
 ```
 
 Also reads the DIDs the profile marks `session = "extended"`. After a module's other reads it enters the extended
@@ -119,7 +118,7 @@ DIDs show as not read. A module that refuses the session loses only those DIDs.
 ### `--discover`
 
 ```sh
-obdcracker --serial <PORT> --profile a7 scan --discover  # also look for modules the profile doesn't list
+obdcracker --profile a7 scan --discover  # also look for modules the profile doesn't list
 ```
 
 First looks for modules the profile doesn't list. It reads the part number (`22 F1 87`) from each request ID in the
@@ -130,7 +129,7 @@ ID. A module whose request ID is past 0x769 isn't found by that pass.
 ### `--discover --patient-ids`
 
 ```sh
-obdcracker --serial <PORT> --profile a7 scan --discover --patient-ids 71D,755  # and ask these again, patiently
+obdcracker --profile a7 scan --discover --patient-ids 71D,755  # and ask these again, patiently
 ```
 
 After the first pass, asks each listed request ID that didn't answer again, waiting up to 5 s for each (about 1 s on
@@ -141,7 +140,7 @@ anything is sent. With `--wide`, the recheck before the wide pass skips the IDs 
 ### `--discover --wide`
 
 ```sh
-obdcracker --serial <PORT> --profile a7 scan --discover --wide  # and past the discovery range
+obdcracker --profile a7 scan --discover --wide  # and past the discovery range
 ```
 
 Then looks further, at 0x76A to 0x795 on the A7 (replies up to 0x7FF), where VW's MQB cars put the MMI (0x773). Those
@@ -157,7 +156,7 @@ some older MMIs may, doesn't answer any pass.
 ### `--discover-29bit`
 
 ```sh
-obdcracker --serial <PORT> --profile a7 scan --discover-29bit  # look on 29-bit IDs too
+obdcracker --profile a7 scan --discover-29bit  # look on 29-bit IDs too
 ```
 
 Looks on 29-bit CAN IDs, as `--discover` does on 11-bit ones: the part number (`22 F1 87`) from each request ID in the
@@ -168,7 +167,7 @@ back. It can run with `--discover` or alone. Whether the A7 has any module on th
 ### `--discover-tp20`
 
 ```sh
-obdcracker --serial <PORT> --profile a7 scan --discover-tp20  # then look for VW TP2.0 modules
+obdcracker --profile a7 scan --discover-tp20  # then look for VW TP2.0 modules
 ```
 
 After the scan, sends a VW TP2.0 channel setup (`<address> C0 00 10 00 03 01` on 0x200) to each address in the
@@ -188,7 +187,7 @@ an OBDLink ([why](elm327.md#vw-tp20-channel-frames)).
 ## `sweep`
 
 ```sh
-obdcracker --serial <PORT> --profile a7 sweep --module "head-up display" --range 0600-06FF  # DIDs it answers
+obdcracker --profile a7 sweep --module "head-up display" --range 0600-06FF  # DIDs it answers
 ```
 
 Looks for the DIDs one profile module has that no profile lists yet, such as the head-up display's adaptation values.
@@ -207,7 +206,7 @@ stops there (#171). Each read then takes up to the full wait, so give it a narro
 ## `dtc`
 
 ```sh
-obdcracker --serial <PORT> --profile a7 dtc --module gateway --code 0016A0  # one DTC's stored detail
+obdcracker --profile a7 dtc --module gateway --code 0016A0  # one DTC's stored detail
 ```
 
 Reads one DTC from one profile module: every snapshot record (`19 04 <DTC> FF`), what the module stored when the fault

@@ -210,8 +210,9 @@ function Install-ObdCracker {
 
         Say 'Done. Next, with the adapter plugged into the car and the ignition on:'
         Note 'obdcracker ports                      # find the adapter''s port, e.g. COM3'
-        Note 'obdcracker --serial COM3 adapter      # check the adapter; sends nothing to the car'
-        Note 'obdcracker --serial COM3 vin'
+        Note 'obdcracker adapter                    # check the adapter; sends nothing to the car'
+        Note 'obdcracker vin'
+        Note 'if it finds none or several ports, add --serial COM3 to these commands'
         if (-not $pathHadCargo) {
             if (([Environment]::GetEnvironmentVariable('Path', 'User') -split ';') -contains $cargoBin) {
                 Note "open a new terminal first, so $cargoBin is on your PATH"
