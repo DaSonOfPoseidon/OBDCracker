@@ -4,13 +4,14 @@ use std::io::{self, Write};
 use std::path::Path;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use obdcracker_safety::Approved;
+use obdcracker_safety::{Approved, ApprovedFlowControl};
 
 use crate::{Error, LinkEvent, Response, Transport, hex};
 
 /// Wraps a transport and appends every request, and every reply the transport returns, to a JSON
 /// Lines file. Requests are logged before they are sent, so a send that crashes the program is
-/// still on record. After every call it also logs the transport's [`LinkEvent`]s: commands to
+/// still on record, and so are the flow control frames a transport sends while it receives
+/// ([`Transport::recv_logged`]), as `"dir":"tx"`. After every call it also logs the transport's [`LinkEvent`]s: commands to
 /// the adapter (`"dir":"cmd"`), reply lines nobody read before the next request
 /// (`"dir":"unread"`), status lines that ended a request, such as `NO DATA` (`"dir":"status"`),
 /// and how many events were lost (`"dir":"lost"`). Each line's `ts_ms` is
@@ -50,11 +51,7 @@ impl<T: Transport> Audited<T> {
     }
 
     fn record(&mut self, dir: &str, id: u32, payload: &[u8]) -> Result<(), Error> {
-        let fields = format!(
-            r#""dir":"{dir}","id":"{id:03X}","payload":"{}""#,
-            hex(payload)
-        );
-        self.write(&fields)
+        self.write(&frame_fields(dir, id, payload))
     }
 
     // Logs `error` from the `op` call, then returns it. `id` is the request's CAN ID, for a send.
@@ -105,14 +102,21 @@ impl<T: Transport> Audited<T> {
     }
 
     fn write_at(&mut self, at: SystemTime, fields: &str) -> Result<(), Error> {
-        let ts_ms = at.duration_since(UNIX_EPOCH).map_or(0, |t| t.as_millis());
-        writeln!(
-            self.log,
-            r#"{{"ts_ms":{ts_ms},{fields},"link":"{}"}}"#,
-            self.link
-        )
-        .map_err(|e| Error::Adapter(format!("audit log: {e}")))
+        write_line(&mut self.log, &self.link, at, fields)
     }
+}
+
+fn frame_fields(dir: &str, id: u32, payload: &[u8]) -> String {
+    format!(
+        r#""dir":"{dir}","id":"{id:03X}","payload":"{}""#,
+        hex(payload)
+    )
+}
+
+fn write_line(log: &mut File, link: &str, at: SystemTime, fields: &str) -> Result<(), Error> {
+    let ts_ms = at.duration_since(UNIX_EPOCH).map_or(0, |t| t.as_millis());
+    writeln!(log, r#"{{"ts_ms":{ts_ms},{fields},"link":"{link}"}}"#)
+        .map_err(|e| Error::Adapter(format!("audit log: {e}")))
 }
 
 impl<T: Transport> Transport for Audited<T> {
@@ -129,8 +133,23 @@ impl<T: Transport> Transport for Audited<T> {
     }
 
     fn recv(&mut self, timeout: Duration) -> Result<Response, Error> {
+        self.recv_logged(timeout, &mut |_| Ok(()))
+    }
+
+    // A flow control frame the transport sends while it receives is logged before it goes out,
+    // as a request is: a log that can't take the record stops the frame.
+    fn recv_logged(
+        &mut self,
+        timeout: Duration,
+        before_send: &mut dyn FnMut(&ApprovedFlowControl) -> Result<(), Error>,
+    ) -> Result<Response, Error> {
         self.settled = false;
-        let received = self.inner.recv(timeout);
+        let (log, link) = (&mut self.log, &self.link);
+        let received = self.inner.recv_logged(timeout, &mut |token| {
+            let fields = frame_fields("tx", token.destination_id(), token.data());
+            write_line(log, link, SystemTime::now(), &fields)?;
+            before_send(token)
+        });
         let logged = self.record_events();
         let response = match received {
             Ok(response) => response,

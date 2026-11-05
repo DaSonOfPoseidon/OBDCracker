@@ -1,10 +1,12 @@
 //! The audit log wrapper.
 
+use std::cell::RefCell;
 use std::path::PathBuf;
+use std::rc::Rc;
 use std::time::Duration;
 
 use obdcracker_safety::Approved;
-use obdcracker_safety::{Policy, Protocol, Target};
+use obdcracker_safety::{ApprovedFlowControl, FeedOutcome, Policy, Protocol, ReplyWindow, Target};
 use obdcracker_transport::{Audited, Error, LinkEvent, Mock, Response, Transport, log_failure};
 
 fn temp_log(name: &str) -> PathBuf {
@@ -334,4 +336,169 @@ fn a_session_settled_already_is_not_settled_again_when_dropped() {
     audited.send(&rpm).unwrap();
     drop(audited);
     assert_eq!(settle_errors(&std::fs::read_to_string(&log).unwrap()), 2);
+}
+
+// A first frame, which calls for flow control.
+const FIRST_FRAME: [u8; 8] = [0x10, 0x14, 0x62, 0xF1, 0x87, 1, 2, 3];
+
+// One flow control token for each of `sources`, as a raw backend would get them.
+fn flow_controls(sources: &[u32]) -> Vec<ApprovedFlowControl> {
+    let request = Policy::read_only()
+        .approve(Protocol::Uds, Target::ObdFunctional, &[0x09, 0x02])
+        .unwrap();
+    let mut window = ReplyWindow::open(&request).unwrap();
+    sources
+        .iter()
+        .map(|&source| match window.feed(source, &FIRST_FRAME).unwrap() {
+            FeedOutcome::SendFlowControl(token) => token,
+            other => panic!("expected a token, got {other:?}"),
+        })
+        .collect()
+}
+
+type Sent = Rc<RefCell<Vec<(u32, Vec<u8>)>>>;
+type AtSend = Rc<RefCell<Vec<String>>>;
+
+// What a raw backend does under `recv`: reports each token, and sends it only if that succeeds.
+// `at_send` holds the audit log's content at the moment each frame went out.
+struct SendsFlowControl {
+    log: PathBuf,
+    tokens: Vec<ApprovedFlowControl>,
+    at_send: AtSend,
+    sent: Sent,
+}
+
+impl Transport for SendsFlowControl {
+    fn send(&mut self, _: &Approved) -> Result<(), Error> {
+        Ok(())
+    }
+
+    fn recv(&mut self, timeout: Duration) -> Result<Response, Error> {
+        self.recv_logged(timeout, &mut |_| Ok(()))
+    }
+
+    fn recv_logged(
+        &mut self,
+        _: Duration,
+        before_send: &mut dyn FnMut(&ApprovedFlowControl) -> Result<(), Error>,
+    ) -> Result<Response, Error> {
+        for token in std::mem::take(&mut self.tokens) {
+            before_send(&token)?;
+            let content = std::fs::read_to_string(&self.log).unwrap_or_default();
+            self.at_send.borrow_mut().push(content);
+            self.sent
+                .borrow_mut()
+                .push((token.destination_id(), token.data().to_vec()));
+        }
+        Ok(Response {
+            source: 0x7E8,
+            payload: vec![0x49, 0x02],
+        })
+    }
+}
+
+fn sends_flow_control(log: &std::path::Path, sources: &[u32]) -> (SendsFlowControl, AtSend, Sent) {
+    let at_send = AtSend::default();
+    let sent = Sent::default();
+    let transport = SendsFlowControl {
+        log: log.to_owned(),
+        tokens: flow_controls(sources),
+        at_send: Rc::clone(&at_send),
+        sent: Rc::clone(&sent),
+    };
+    (transport, at_send, sent)
+}
+
+#[test]
+fn flow_control_is_on_disk_before_it_is_sent() {
+    let log = temp_log("fc-before-send");
+    let (transport, at_send, sent) = sends_flow_control(&log, &[0x7E8]);
+    let mut audited = Audited::open(&log, transport, "mock").unwrap();
+    audited.recv(Duration::from_millis(10)).unwrap();
+
+    assert_eq!(*sent.borrow(), [(0x7E0, vec![0x30, 0x00, 0x00])]);
+    let seen = at_send.borrow();
+    assert_eq!(seen.len(), 1);
+    // Only the flow control: the reply it leads to hasn't arrived yet.
+    assert_eq!(seen[0].lines().count(), 1, "{}", seen[0]);
+    assert!(
+        seen[0].ends_with(
+            "\"dir\":\"tx\",\"id\":\"7E0\",\"payload\":\"30 00 00\",\"link\":\"mock\"}\n"
+        ),
+        "{}",
+        seen[0]
+    );
+    let audit = std::fs::read_to_string(&log).unwrap();
+    assert_eq!(audit.lines().count(), 2);
+    assert!(
+        audit
+            .lines()
+            .nth(1)
+            .unwrap()
+            .contains(r#""dir":"rx","id":"7E8""#),
+        "{audit}"
+    );
+}
+
+#[test]
+fn every_flow_control_in_one_receive_is_logged_before_its_own_send() {
+    let log = temp_log("fc-several");
+    let (transport, at_send, sent) = sends_flow_control(&log, &[0x7E8, 0x7E9]);
+    let mut audited = Audited::open(&log, transport, "mock").unwrap();
+    audited.recv(Duration::from_millis(10)).unwrap();
+
+    assert_eq!(sent.borrow().len(), 2);
+    let seen = at_send.borrow();
+    assert_eq!(seen[0].lines().count(), 1, "{}", seen[0]);
+    assert_eq!(seen[1].lines().count(), 2, "{}", seen[1]);
+    assert!(seen[1].lines().nth(1).unwrap().contains(r#""id":"7E1""#));
+    assert_eq!(std::fs::read_to_string(&log).unwrap().lines().count(), 3);
+}
+
+#[test]
+fn a_receive_that_sends_no_flow_control_logs_only_the_reply() {
+    let log = temp_log("fc-none");
+    let mut mock = Mock::default();
+    mock.queue(Response {
+        source: 0x7E8,
+        payload: vec![0x41, 0x0C, 0x1A, 0xF8],
+    });
+    let mut audited = Audited::open(&log, mock, "mock").unwrap();
+    audited.recv(Duration::from_millis(10)).unwrap();
+    let audit = std::fs::read_to_string(&log).unwrap();
+    assert_eq!(audit.lines().count(), 1, "{audit}");
+    assert!(audit.contains(r#""dir":"rx""#), "{audit}");
+}
+
+// Writing to /dev/full always fails, so the log can't take the record.
+#[cfg(target_os = "linux")]
+#[test]
+fn flow_control_is_not_sent_when_the_log_cannot_take_it() {
+    let log = temp_log("fc-unwritable");
+    let (transport, at_send, sent) = sends_flow_control(&log, &[0x7E8]);
+    let mut audited = Audited::open(std::path::Path::new("/dev/full"), transport, "mock").unwrap();
+    match audited.recv(Duration::from_millis(10)) {
+        Err(Error::Adapter(message)) => assert!(message.contains("audit log"), "{message}"),
+        other => panic!("expected the log's failure, got {other:?}"),
+    }
+    assert!(sent.borrow().is_empty());
+    assert!(at_send.borrow().is_empty());
+}
+
+#[test]
+fn flow_control_through_two_audited_wrappers_is_logged_by_both() {
+    let inner_log = temp_log("fc-nested-inner");
+    let outer_log = temp_log("fc-nested-outer");
+    let (transport, _, sent) = sends_flow_control(&inner_log, &[0x7E8]);
+    let inner = Audited::open(&inner_log, transport, "inner").unwrap();
+    let mut outer = Audited::open(&outer_log, inner, "outer").unwrap();
+    outer.recv(Duration::from_millis(10)).unwrap();
+    assert_eq!(sent.borrow().len(), 1);
+    for log in [&inner_log, &outer_log] {
+        let audit = std::fs::read_to_string(log).unwrap();
+        assert!(
+            audit.contains(r#""dir":"tx","id":"7E0","payload":"30 00 00""#),
+            "{audit}"
+        );
+    }
 }

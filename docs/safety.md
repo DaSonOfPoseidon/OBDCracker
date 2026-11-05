@@ -99,6 +99,13 @@ acknowledges its own frames.
 A reply of up to 4095 bytes fits a window. A first frame announcing more (the 32-bit length escape) is an overflow
 error and mints no token.
 
+**Logged before it is sent.** A backend that sends flow control while it receives implements `Transport::recv_logged`
+and calls its `before_send` argument with each token before putting the frame on the bus, sending only if that returns
+`Ok`. `Audited` writes the frame to the audit log there (`"dir":"tx"`, `id` the token's destination, payload `30 00 00`),
+so a log that can't be written stops the frame, as it does for a request, and a crash during the send still leaves it on
+record. `Transport::recv_logged`'s default ignores `before_send`, since no backend sends under `recv` yet (the ELM327
+adapter sends its own flow control); a backend that does must override it, and a wrapper must forward it.
+
 A window has no timer; the backend drops it when the transfer ends. It uses normal addressing and block size 0 with no
 separation time (extended addressing is #112).
 
@@ -123,7 +130,8 @@ adapter mishearing a request it may already have sent), every command to the ada
 `AT SH 7E0`, with its answer), every status line that ended a request instead of a reply (`"dir":"status"`, such as
 `NO DATA`), and every reply line the adapter printed after nothing read it any more (`"dir":"unread"`, such as a late
 reply). It holds only what the adapter hears through its receive filter, not the
-whole bus. Requests are logged before they are sent, and the log records which link a session used.
+whole bus. Requests and the flow control frames a backend sends while receiving are logged before they are sent, and the log
+records which link a session used.
 
 ## Known gap: ELM327/STN adapters that echo whole lines
 
