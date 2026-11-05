@@ -47,7 +47,13 @@ overrun does not latch.
 
 A reply that never completed (a first frame and then silence), and a reply that completed but nobody took, are reported
 as unread lines when the next request starts, the transfer fails, or the transport is settled (`Audited` does that when
-it is dropped). A failed `send` leaves no early answer to be returned by a later `recv`.
+it is dropped). A reply that the same module's next frame abandons (a new single or first frame, or a bad frame) is
+reported as soon as that frame arrives, so the reply that follows doesn't take its bytes with it. A failed `send`
+leaves no early answer to be returned by a later `recv`.
+
+A flow control that isn't confirmed, one the caller's `before_send` refuses, and a port read that fails (not a timeout)
+each end the transfer: the module may send the rest anyway, or frames may be lost, and neither can complete a reply the
+caller was told failed.
 
 ## Bus state
 
