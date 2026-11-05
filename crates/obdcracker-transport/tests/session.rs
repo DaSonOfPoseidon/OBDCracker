@@ -289,7 +289,7 @@ fn an_answer_that_left_the_bus_just_before_it_arrived_keeps_the_session() {
     // About 180 ms from the request to the answer, longer than the 80 ms the session is trusted,
     // but the transport says the answer left the bus 5 ms before it arrived.
     let sent = two_slow_reads(&[0x62, 0xF1, 0x87, 0x41], |arrived| {
-        Some(arrived - Duration::from_millis(5))
+        arrived.checked_sub(Duration::from_millis(5))
     });
     assert_eq!(sent, session_kept());
 }
@@ -320,7 +320,7 @@ fn a_bus_time_before_the_request_is_ignored() {
 fn a_refusal_doesnt_restart_the_clock_from_its_bus_time() {
     // The module refused the read, so what it said says nothing about the session.
     let sent = two_slow_reads(&[0x7F, 0x22, 0x31], |arrived| {
-        Some(arrived - Duration::from_millis(5))
+        arrived.checked_sub(Duration::from_millis(5))
     });
     assert_eq!(sent, session_entered_again());
 }
@@ -329,7 +329,7 @@ fn a_refusal_doesnt_restart_the_clock_from_its_bus_time() {
 fn a_slow_session_entry_that_left_the_bus_just_before_it_arrived_needs_no_new_entry() {
     let mut adapter = Stamped {
         inner: slow(&[(100, POSITIVE_ENTRY)]),
-        stamp: Box::new(|arrived| Some(arrived - Duration::from_millis(5))),
+        stamp: Box::new(|arrived| arrived.checked_sub(Duration::from_millis(5))),
     };
     let mut guard = ExtendedSession::enter(
         &mut adapter,

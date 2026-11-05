@@ -46,6 +46,23 @@ fn logs_requests_and_replies_with_the_link() {
 }
 
 #[test]
+fn a_reply_keeps_its_bus_time() {
+    let log = temp_log("bus-time");
+    let left = std::time::Instant::now();
+    let mut mock = Mock::default();
+    mock.queue(Response::new(0x7E8, vec![0x41, 0x0C, 0x1A, 0xF8]).at_bus_time(Some(left)));
+    let mut audited = Audited::open(&log, mock, "mock").unwrap();
+    let rpm = Policy::read_only()
+        .approve(Protocol::Uds, Target::ObdFunctional, &[0x01, 0x0C])
+        .unwrap();
+    audited.send(&rpm).unwrap();
+    assert_eq!(
+        audited.recv(Duration::from_millis(10)).unwrap().bus_time,
+        Some(left)
+    );
+}
+
+#[test]
 fn appends_to_an_existing_log() {
     let log = temp_log("append");
     let vin = Policy::read_only()

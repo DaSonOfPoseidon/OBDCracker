@@ -46,7 +46,8 @@ pub trait Link {
     /// How many bytes a second the link carries from the adapter, if known: a serial port's
     /// baud rate over 10 (8N1). `None` when it can't be known, such as a Wi-Fi adapter, whose
     /// chip may sit behind a slow serial line of its own. The ELM driver paces long replies to
-    /// it (see [`crate::elm::Elm`]).
+    /// it, and sets [`crate::Response::bus_time`] only where it is `Some` (see
+    /// [`crate::elm::Elm`]).
     fn byte_rate(&self) -> Option<u32> {
         None
     }

@@ -107,6 +107,14 @@ const INTERRUPT: &[u8] = b"X";
 // ID, `17 FE 00 76 21 41 41 41 41 41 41 41 \r`.
 const FRAME_LINE: u32 = 29;
 const FRAME_LINE_29: u32 = 37;
+// A reply's bus time assumes the adapter prints at half the link's byte rate, as it may leave gaps
+// between bytes, and subtracts this on top for USB latency timers and scheduling
+// (docs/elm327.md#when-a-reply-left-the-bus).
+const PRINT_RATE_SHARE: u32 = 2;
+const HOST_ALLOWANCE: Duration = Duration::from_millis(100);
+// A read that waited this long returned when its bytes arrived; a quicker one may have found them
+// waiting.
+const WAITED: Duration = Duration::from_millis(1);
 // 9600 baud, the slowest an ELM327 starts at, for a link whose rate can't be known.
 const SLOWEST_RATE: u32 = 9600 / 10;
 // From here an STN was seen to print a long reply with no `BUFFER FULL` (#49).
@@ -131,6 +139,10 @@ const STN_UNPACED_RATE: u32 = 115_200 / 10;
 /// request's asks for a gap between frames from the link's rate ([`Link::byte_rate`], 9600 baud
 /// when unknown).
 ///
+/// A reply's [`Response::bus_time`] is set where the link has a byte rate ([`Link::byte_rate`]), and
+/// is never later than the reply left the bus
+/// ([`docs/elm327.md#when-a-reply-left-the-bus`](https://github.com/DaSonOfPoseidon/OBDCracker/blob/main/docs/elm327.md#when-a-reply-left-the-bus)).
+///
 /// If the adapter does anything unexpected (it misechoes, resets, goes quiet, refuses a setting
 /// or the link fails), its state is unknown: every later call fails without writing anything,
 /// and the caller must connect again.
@@ -143,9 +155,18 @@ pub struct Elm<L> {
     link: L,
     splitter: LineSplitter,
     // What the adapter printed, read but not used yet, with when it was read.
-    events: VecDeque<(SystemTime, Event)>,
+    events: VecDeque<(Stamp, Event)>,
     // When the event last taken from `events` was read.
-    event_at: SystemTime,
+    event_at: Stamp,
+    // How many bytes the link has handed over, ever.
+    printed: u64,
+    // The bytes of the latest read can't have reached the host before this (`WAITED`).
+    arrived_after: Instant,
+    // When the link last had nothing left to hand over: the end of the latest read that didn't
+    // fill its buffer, or when the request in progress was sent.
+    drained: Instant,
+    // When the request in progress was sent, and what `printed` was then.
+    sent: Option<(Instant, u64)>,
     header: Option<u32>,
     // Whether the adapter is on 29-bit CAN (`ATSP7`) rather than 11-bit (`ATSP6`, the setup's).
     bits29: bool,
@@ -204,6 +225,25 @@ pub struct Elm<L> {
     // What it did besides requests and replies, until taken, and how many more were dropped.
     log: Vec<LinkEvent>,
     lost: usize,
+}
+
+// When a read from the link finished, and how many bytes the link had handed over by then.
+#[derive(Debug, Clone, Copy)]
+struct Stamp {
+    time: SystemTime,
+    // The bytes of the read can't have reached the host before this.
+    arrived_after: Instant,
+    printed: u64,
+}
+
+impl Default for Stamp {
+    fn default() -> Self {
+        Self {
+            time: SystemTime::UNIX_EPOCH,
+            arrived_after: Instant::now(),
+            printed: 0,
+        }
+    }
 }
 
 // A module answering the request in progress.
@@ -268,7 +308,11 @@ impl<L: Link> Elm<L> {
             link,
             splitter: LineSplitter::default(),
             events: VecDeque::new(),
-            event_at: SystemTime::UNIX_EPOCH,
+            event_at: Stamp::default(),
+            printed: 0,
+            arrived_after: Instant::now(),
+            drained: Instant::now(),
+            sent: None,
             header: None,
             bits29: false,
             raw: false,
@@ -718,7 +762,7 @@ impl<L: Link> Elm<L> {
         if self.monitoring && matches!(parse_line(&text), Line::Status(Status::BufferFull)) {
             self.monitor_overflow = true;
         }
-        self.note(left_over(self.event_at, text));
+        self.note(left_over(self.event_at.time, text));
     }
 
     fn take_overflow(&mut self) -> Result<(), Error> {
@@ -784,7 +828,7 @@ impl<L: Link> Elm<L> {
             };
             let n = self.read(&mut buf, left)?;
             self.splitter.push(&buf[..n], &mut events);
-            let now = SystemTime::now();
+            let now = self.stamp();
             self.events
                 .extend(events.drain(..).map(|event| (now, event)));
         }
@@ -913,9 +957,51 @@ impl<L: Link> Elm<L> {
 
     fn read(&mut self, buf: &mut [u8], timeout: Duration) -> Result<usize, Error> {
         let kind = self.link.kind().name();
-        self.link
+        let started = Instant::now();
+        let n = self
+            .link
             .read(buf, timeout, Driver::new())
-            .map_err(|e| self.break_down(format!("{kind} link: {e}")))
+            .map_err(|e| self.break_down(format!("{kind} link: {e}")))?;
+        let ended = Instant::now();
+        self.printed = self.printed.saturating_add(n as u64);
+        // Bytes found waiting could have come at any time since the link was last drained, and if
+        // that was long before this read began, the caller was away.
+        let waited = ended.saturating_duration_since(started) >= WAITED
+            && started.saturating_duration_since(self.drained) <= HOST_ALLOWANCE;
+        self.arrived_after = if waited { ended } else { self.drained };
+        if n < buf.len() {
+            self.drained = ended;
+        }
+        Ok(n)
+    }
+
+    fn stamp(&self) -> Stamp {
+        Stamp {
+            time: SystemTime::now(),
+            arrived_after: self.arrived_after,
+            printed: self.printed,
+        }
+    }
+
+    // A time no later than when the reply just taken from `events` left the bus
+    // (docs/elm327.md#when-a-reply-left-the-bus): the earliest its bytes can have reached the host,
+    // less the time to print every byte the request has brought at a share of the link's rate and
+    // less `HOST_ALLOWANCE`, but not before the request was sent. None where the link has no known
+    // byte rate.
+    fn bus_time(&self) -> Option<Instant> {
+        let rate = self.link.byte_rate().filter(|&rate| rate > 0)?;
+        let (sent, printed_then) = self.sent?;
+        let printed = self.event_at.printed.saturating_sub(printed_then);
+        let assumed = u128::from((rate / PRINT_RATE_SHARE).max(1));
+        let nanos = u128::from(printed) * 1_000_000_000 / assumed;
+        let behind = Duration::from_nanos(u64::try_from(nanos).unwrap_or(u64::MAX))
+            .saturating_add(HOST_ALLOWANCE);
+        Some(
+            self.event_at
+                .arrived_after
+                .checked_sub(behind)
+                .map_or(sent, |at| at.max(sent)),
+        )
     }
 
     // The next thing the adapter printed, or None once the deadline passes.
@@ -938,7 +1024,7 @@ impl<L: Link> Elm<L> {
                 self.last_byte = Some(Instant::now());
             }
             self.splitter.push(&buf[..n], &mut events);
-            let now = SystemTime::now();
+            let now = self.stamp();
             self.events
                 .extend(events.drain(..).map(|event| (now, event)));
         }
@@ -978,6 +1064,7 @@ impl<L: Link> Elm<L> {
     // completes. Lines that end up in no reply are reported as unread.
     fn feed(&mut self, source: u32, data: &[u8], line: &str) -> Option<Response> {
         let number = self.hear(line);
+        let bus_time = self.bus_time();
         let index = match self.senders.iter().position(|s| s.id == source) {
             Some(index) => index,
             None if self.senders.len() < MAX_SENDERS => {
@@ -1000,7 +1087,7 @@ impl<L: Link> Elm<L> {
         // A bad frame drops only its module's transfer.
         match sender.reassembler.feed(data) {
             Ok(Progress::Complete(payload)) => {
-                let reply = Response::new(source, payload.to_vec());
+                let reply = Response::new(source, payload.to_vec()).at_bus_time(bus_time);
                 let used = std::mem::take(&mut sender.lines);
                 let kept = self.heard.len();
                 self.heard.retain(|(number, ..)| !used.contains(number));
@@ -1022,7 +1109,8 @@ impl<L: Link> Elm<L> {
         let number = self.next_heard;
         self.next_heard += 1;
         if self.overflowed == 0 && self.heard.len() < MAX_EVENTS {
-            self.heard.push((number, self.event_at, line.to_owned()));
+            self.heard
+                .push((number, self.event_at.time, line.to_owned()));
         } else {
             self.overflowed += 1;
         }
@@ -1225,13 +1313,18 @@ impl<L: Link> Transport for Elm<L> {
         } else {
             digits
         };
+        let sent_at;
         if self.early_echo == Some(false) {
+            sent_at = Instant::now();
             self.write(format!("{line}\r").as_bytes())?;
         } else {
             self.write(line.as_bytes())?;
             self.check_early_echo(&line)?;
+            sent_at = Instant::now();
             self.write(b"\r")?;
         }
+        self.sent = Some((sent_at, self.printed));
+        self.drained = sent_at;
         self.quiet = Duration::ZERO;
         self.echo = Some(line);
         self.busy = true;
@@ -1328,7 +1421,8 @@ impl<L: Link> Transport for Elm<L> {
                 }
                 Some(Event::Line(text)) => match self.reply_line(&text)? {
                     Some(Line::Frame(frame)) if self.raw => {
-                        return Ok(Response::new(frame.id(), frame.data().to_vec()));
+                        return Ok(Response::new(frame.id(), frame.data().to_vec())
+                            .at_bus_time(self.bus_time()));
                     }
                     Some(Line::Frame(frame)) => {
                         if let Some(reply) = self.feed(frame.id(), frame.data(), &text) {
@@ -1382,7 +1476,7 @@ impl<L: Link> Elm<L> {
             // Its echo is checked again once the carriage return completes the line.
             let mut events = Vec::new();
             self.splitter.push(&echoed, &mut events);
-            let now = SystemTime::now();
+            let now = self.stamp();
             self.events
                 .extend(events.into_iter().map(|event| (now, event)));
             return Ok(());
