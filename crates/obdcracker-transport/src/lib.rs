@@ -2,7 +2,7 @@
 //! anything on the bus that the policy hasn't allowed.
 
 use std::fmt;
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 
 use obdcracker_safety::{Approved, ApprovedFlowControl};
 
@@ -28,12 +28,48 @@ pub use mock::Mock;
 pub use session::{ExtendedSession, Left, S3, SessionError};
 
 /// A reply from one module: the CAN ID it came from and its reassembled payload.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// Build one with [`Response::new`]; the struct is `#[non_exhaustive]` so it can gain fields.
+/// Two replies are equal when their `source` and `payload` are: [`Response::bus_time`] is a
+/// measurement of when the reply was heard, not part of what was said.
+#[derive(Debug, Clone, Eq)]
+#[non_exhaustive]
 pub struct Response {
     /// The CAN ID the reply came from.
     pub source: u32,
     /// The reassembled reply, service ID first.
     pub payload: Vec<u8>,
+    /// A time no later than when the reply's last frame left the bus, if the transport can bound
+    /// it, else `None`. Never later: a caller trusting a module's state from this time (such as
+    /// [`ExtendedSession`] timing S3) would otherwise trust it for too long. A transport that
+    /// only knows when the reply reached the host leaves it `None`. See
+    /// [`docs/elm327.md#when-a-reply-left-the-bus`](https://github.com/DaSonOfPoseidon/OBDCracker/blob/main/docs/elm327.md#when-a-reply-left-the-bus).
+    pub bus_time: Option<Instant>,
+}
+
+impl Response {
+    /// A reply with no bus time.
+    #[must_use]
+    pub fn new(source: u32, payload: Vec<u8>) -> Self {
+        Self {
+            source,
+            payload,
+            bus_time: None,
+        }
+    }
+
+    /// This reply with [`Response::bus_time`] set.
+    #[must_use]
+    pub fn at_bus_time(mut self, bus_time: Option<Instant>) -> Self {
+        self.bus_time = bus_time;
+        self
+    }
+}
+
+impl PartialEq for Response {
+    fn eq(&self, other: &Self) -> bool {
+        self.source == other.source && self.payload == other.payload
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -398,14 +398,8 @@ mod requests {
         assert_eq!(
             replies,
             [
-                Response {
-                    source: 0x7E8,
-                    payload: VIN.to_vec()
-                },
-                Response {
-                    source: 0x7E9,
-                    payload: VIN.to_vec()
-                },
+                Response::new(0x7E8, VIN.to_vec()),
+                Response::new(0x7E9, VIN.to_vec()),
             ]
         );
         assert_eq!(elm.link().elm.sent, [(0x7DF, vec![0x09, 0x02])]);
@@ -504,10 +498,7 @@ mod requests {
         let reply = elm.recv(Duration::from_secs(1)).unwrap();
         assert_eq!(
             reply,
-            Response {
-                source: 0x17FE_0076,
-                payload: b"\x62\xF1\x874G0907468AD".to_vec(),
-            }
+            Response::new(0x17FE_0076, b"\x62\xF1\x874G0907468AD".to_vec())
         );
         while elm.recv(Duration::from_secs(1)).is_ok() {}
         elm.send(&read(Target::Physical(0x710))).unwrap();
@@ -630,10 +621,7 @@ mod requests {
         elm.send(&setup).unwrap();
         assert_eq!(
             elm.recv(Duration::from_secs(1)).unwrap(),
-            Response {
-                source: 0x25F,
-                payload: vec![0x00, 0xD0, 0x00, 0x03, 0x40, 0x07, 0x01],
-            }
+            Response::new(0x25F, vec![0x00, 0xD0, 0x00, 0x03, 0x40, 0x07, 0x01])
         );
         while elm.recv(Duration::from_secs(1)).is_ok() {}
         let channel = policy
@@ -643,10 +631,7 @@ mod requests {
             .unwrap();
         assert_eq!(
             elm.recv(Duration::from_secs(1)).unwrap(),
-            Response {
-                source: 0x300,
-                payload: vec![0xA8],
-            }
+            Response::new(0x300, vec![0xA8])
         );
         while elm.recv(Duration::from_secs(1)).is_ok() {}
         elm.send(&approve(Target::Physical(0x7E0), &[0x09, 0x02]))

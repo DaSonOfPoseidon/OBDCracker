@@ -18,10 +18,7 @@ fn approve(target: Target, payload: &[u8]) -> Approved {
 }
 
 fn reply(source: u32, payload: &[u8]) -> Response {
-    Response {
-        source,
-        payload: payload.to_vec(),
-    }
+    Response::new(source, payload.to_vec())
 }
 
 fn mock(replies: &[Response]) -> Mock {

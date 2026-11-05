@@ -131,7 +131,7 @@ pub struct Left {
 ///
 /// let mut adapter = Mock::default();
 /// for payload in [&[0x50, 0x03, 0x00, 0x32, 0x01, 0xF4][..], &[0x62, 0x06, 0x00, 0x01]] {
-///     adapter.queue(Response { source: 0x7E8, payload: payload.to_vec() });
+///     adapter.queue(Response::new(0x7E8, payload.to_vec()));
 /// }
 /// let policy = Policy::read_only();
 /// let engine = Target::Physical(0x7E0);

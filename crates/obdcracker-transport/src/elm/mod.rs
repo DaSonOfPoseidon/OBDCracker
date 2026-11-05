@@ -1000,10 +1000,7 @@ impl<L: Link> Elm<L> {
         // A bad frame drops only its module's transfer.
         match sender.reassembler.feed(data) {
             Ok(Progress::Complete(payload)) => {
-                let reply = Response {
-                    source,
-                    payload: payload.to_vec(),
-                };
+                let reply = Response::new(source, payload.to_vec());
                 let used = std::mem::take(&mut sender.lines);
                 let kept = self.heard.len();
                 self.heard.retain(|(number, ..)| !used.contains(number));
@@ -1331,10 +1328,7 @@ impl<L: Link> Transport for Elm<L> {
                 }
                 Some(Event::Line(text)) => match self.reply_line(&text)? {
                     Some(Line::Frame(frame)) if self.raw => {
-                        return Ok(Response {
-                            source: frame.id(),
-                            payload: frame.data().to_vec(),
-                        });
+                        return Ok(Response::new(frame.id(), frame.data().to_vec()));
                     }
                     Some(Line::Frame(frame)) => {
                         if let Some(reply) = self.feed(frame.id(), frame.data(), &text) {

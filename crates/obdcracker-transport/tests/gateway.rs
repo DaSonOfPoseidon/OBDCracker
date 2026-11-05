@@ -80,10 +80,7 @@ fn policy() -> Policy {
 }
 
 fn reply(payload: &[u8]) -> Vec<Response> {
-    vec![Response {
-        source: 0x77A,
-        payload: payload.to_vec(),
-    }]
+    vec![Response::new(0x77A, payload.to_vec())]
 }
 
 fn a7_gateway() -> Car {

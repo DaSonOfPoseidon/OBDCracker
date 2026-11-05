@@ -50,10 +50,7 @@ const TIMING: Timing = Timing {
 };
 
 fn reply(source: u32, payload: &[u8]) -> Vec<Response> {
-    vec![Response {
-        source,
-        payload: payload.to_vec(),
-    }]
+    vec![Response::new(source, payload.to_vec())]
 }
 
 #[test]
@@ -190,10 +187,7 @@ fn channel_car(mut data: impl FnMut(&[u8]) -> Vec<Vec<u8>> + 'static) -> Car {
         (0x740, [0xA8]) => reply(0x300, &[0xA8]),
         (0x740, frame) => data(frame)
             .into_iter()
-            .map(|payload| Response {
-                source: 0x300,
-                payload,
-            })
+            .map(|payload| Response::new(0x300, payload))
             .collect(),
         _ => Vec::new(),
     })
@@ -598,14 +592,8 @@ fn t3_apart(a0_delay: Duration) {
         (0x200, _) => reply(0x25F, &SETUP_REPLY),
         (0x740, [0xA0, ..]) => reply(0x300, &[0xA1, 0x0F, 0x8A, 0xFF, 0x54, 0xFF]),
         (0x740, [0x10, ..]) => vec![
-            Response {
-                source: 0x300,
-                payload: vec![0xB1],
-            },
-            Response {
-                source: 0x300,
-                payload: vec![0x10, 0x00, 0x02, 0x5A, 0x9B],
-            },
+            Response::new(0x300, vec![0xB1]),
+            Response::new(0x300, vec![0x10, 0x00, 0x02, 0x5A, 0x9B]),
         ],
         (0x740, [0xA8]) => reply(0x300, &[0xA8]),
         _ => Vec::new(),
@@ -640,14 +628,8 @@ fn only_an_ack_cuts_the_module_s_t3_short_and_no_wait_passes_a_second() {
         (0x200, _) => reply(0x25F, &SETUP_REPLY),
         (0x740, [0xA0, ..]) => reply(0x300, &[0xA1, 0x0F, 0x14, 0xFF, 0xFE, 0xFF]),
         (0x740, [0x10, ..]) => vec![
-            Response {
-                source: 0x300,
-                payload: vec![0xB1],
-            },
-            Response {
-                source: 0x300,
-                payload: vec![0x10, 0x00, 0x02, 0x5A, 0x9B],
-            },
+            Response::new(0x300, vec![0xB1]),
+            Response::new(0x300, vec![0x10, 0x00, 0x02, 0x5A, 0x9B]),
         ],
         (0x740, [0xA8]) => reply(0x300, &[0xA8]),
         _ => Vec::new(),
@@ -779,10 +761,7 @@ impl Transport for Flood {
             return self.car.recv(timeout);
         }
         self.handed_out += 1;
-        Ok(Response {
-            source: self.source,
-            payload: self.frame.clone(),
-        })
+        Ok(Response::new(self.source, self.frame.clone()))
     }
 }
 

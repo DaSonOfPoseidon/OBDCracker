@@ -21,10 +21,7 @@
 //!
 //! // Decode the reply. Here a mock adapter plays the engine ECU.
 //! let mut adapter = Mock::default();
-//! adapter.queue(Response {
-//!     source: 0x7E8,
-//!     payload: b"\x49\x02\x01WAUZZZ4G1EN000000".to_vec(),
-//! });
+//! adapter.queue(Response::new(0x7E8, b"\x49\x02\x01WAUZZZ4G1EN000000".to_vec()));
 //! adapter.send(&vin).unwrap();
 //! let reply = adapter.recv(Duration::from_secs(1)).unwrap();
 //! assert_eq!(obd::decode_vin(&reply.payload).unwrap(), "WAUZZZ4G1EN000000");

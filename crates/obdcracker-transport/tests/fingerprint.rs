@@ -50,10 +50,7 @@ impl Transport for Car {
 }
 
 fn reply(source: u32, payload: &[u8]) -> Response {
-    Response {
-        source,
-        payload: payload.to_vec(),
-    }
+    Response::new(source, payload.to_vec())
 }
 
 const TIMING: Timing = Timing {

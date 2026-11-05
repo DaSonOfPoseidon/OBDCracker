@@ -21,10 +21,7 @@ const GUARD: S3 = S3 {
 fn mock(replies: &[&[u8]]) -> Mock {
     let mut mock = Mock::default();
     for payload in replies {
-        mock.queue(Response {
-            source: 0x7E8,
-            payload: payload.to_vec(),
-        });
+        mock.queue(Response::new(0x7E8, payload.to_vec()));
     }
     mock
 }
@@ -261,11 +258,11 @@ impl obdcracker_transport::Transport for LateLeave {
             [0x10, 0x01] if self.sent.len() == 2 => Vec::new(),
             _ => vec![vec![0x50, 0x01, 0x00, 0x32, 0x01, 0xF4]; 2],
         };
-        self.replies
-            .extend(answers.into_iter().map(|payload| Response {
-                source: 0x7E8,
-                payload,
-            }));
+        self.replies.extend(
+            answers
+                .into_iter()
+                .map(|payload| Response::new(0x7E8, payload)),
+        );
         Ok(())
     }
 
@@ -384,10 +381,10 @@ impl obdcracker_transport::Transport for FailsOnRetry {
         }
         self.sent.push(request.payload().to_vec());
         if request.payload() == [0x10, 0x03] {
-            self.replies.push(Response {
-                source: 0x7E8,
-                payload: vec![0x50, 0x03, 0x00, 0x32, 0x01, 0xF4],
-            });
+            self.replies.push(Response::new(
+                0x7E8,
+                vec![0x50, 0x03, 0x00, 0x32, 0x01, 0xF4],
+            ));
         }
         Ok(())
     }
@@ -437,10 +434,7 @@ impl obdcracker_transport::Transport for FailsOnce {
         }
         let mut payload = vec![0x50, request.payload()[1]];
         payload.extend([0x00, 0x32, 0x01, 0xF4]);
-        self.replies.push(Response {
-            source: 0x7E8,
-            payload,
-        });
+        self.replies.push(Response::new(0x7E8, payload));
         Ok(())
     }
 

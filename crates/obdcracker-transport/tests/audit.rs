@@ -22,10 +22,7 @@ fn temp_log(name: &str) -> PathBuf {
 fn logs_requests_and_replies_with_the_link() {
     let log = temp_log("roundtrip");
     let mut mock = Mock::default();
-    mock.queue(Response {
-        source: 0x7E8,
-        payload: vec![0x41, 0x0C, 0x1A, 0xF8],
-    });
+    mock.queue(Response::new(0x7E8, vec![0x41, 0x0C, 0x1A, 0xF8]));
     let mut audited = Audited::open(&log, mock, "mock").unwrap();
     let rpm = Policy::read_only()
         .approve(Protocol::Uds, Target::ObdFunctional, &[0x01, 0x0C])
@@ -80,10 +77,7 @@ fn every_line_is_valid_json_whatever_the_link_name() {
     for (i, link) in names.iter().enumerate() {
         let log = temp_log(&format!("escape-{i}"));
         let mut mock = Mock::default();
-        mock.queue(Response {
-            source: 0x7E8,
-            payload: vec![0x49, 0x02, 0x01],
-        });
+        mock.queue(Response::new(0x7E8, vec![0x49, 0x02, 0x01]));
         let mut audited = Audited::open(&log, mock, *link).unwrap();
         audited.send(&vin).unwrap();
         audited.recv(Duration::from_millis(10)).unwrap();
@@ -390,10 +384,7 @@ impl Transport for SendsFlowControl {
                 .borrow_mut()
                 .push((token.destination_id(), token.data().to_vec()));
         }
-        Ok(Response {
-            source: 0x7E8,
-            payload: vec![0x49, 0x02],
-        })
+        Ok(Response::new(0x7E8, vec![0x49, 0x02]))
     }
 }
 
@@ -459,10 +450,7 @@ fn every_flow_control_in_one_receive_is_logged_before_its_own_send() {
 fn a_receive_that_sends_no_flow_control_logs_only_the_reply() {
     let log = temp_log("fc-none");
     let mut mock = Mock::default();
-    mock.queue(Response {
-        source: 0x7E8,
-        payload: vec![0x41, 0x0C, 0x1A, 0xF8],
-    });
+    mock.queue(Response::new(0x7E8, vec![0x41, 0x0C, 0x1A, 0xF8]));
     let mut audited = Audited::open(&log, mock, "mock").unwrap();
     audited.recv(Duration::from_millis(10)).unwrap();
     let audit = std::fs::read_to_string(&log).unwrap();
