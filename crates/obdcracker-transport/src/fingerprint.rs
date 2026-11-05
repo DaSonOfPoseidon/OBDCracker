@@ -335,9 +335,10 @@ pub fn fingerprint<T: Transport + ?Sized>(
 /// Where eight ECUs' replies to one broadcast would overflow the adapter
 /// ([`Transport::broadcasts_can_overflow`], such as a plain ELM327), this first broadcasts mode 01
 /// PID 00 to learn which ECUs answer, then asks each of them in turn by its own request ID, in
-/// ascending reply ID order. Anywhere else, or if nothing answers `01 00`, or if the policy
-/// allows no request of its own to one of those ECUs, it sends the one broadcast alone and
-/// nothing else. Every request is approved by `policy` before the first is sent.
+/// ascending reply ID order. If nothing answers `01 00`, or the policy allows no request of its
+/// own to one of those ECUs, `09 02` is broadcast after the `01 00`. On any other transport it
+/// sends the one `09 02` broadcast and nothing else. Every request is approved by `policy`
+/// before the first is sent.
 ///
 /// An ECU that doesn't answer in time is left out. Replies aren't decoded: decode each on its own
 /// ([`obd::decode_vin`]), because an ECU with no VIN may answer a request of its own with a
