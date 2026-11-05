@@ -8,8 +8,8 @@ adapter's command set. The ELM driver takes any two-way byte stream, so serial, 
 | `mock` | none (tests) | — | all | done |
 | `sim` | none: a simulated car from a vehicle profile and a fixture (`--sim a7`) | — | all | done |
 | `elm` | ELM327 v2.0+ / STN (e.g. OBDLink EX, MX+, CX) | USB serial, Wi-Fi (TCP); Bluetooth LE and Classic planned | all | done for USB serial and TCP; three read-only sessions on the A7 over USB (OBDLink EX). Clones that refuse `AT CRA` with `X` digits are refused at connect ([clone policy](elm327.md#clones)). Multi-frame requests (`STPX`) on STN only, tested against the fake adapter, not yet on hardware |
-| `gsusb` | CANable / candleLight (USB-C) and an OBD2-to-DB9 cable | USB | all | planned, with listen-only mode |
-| `socketcan` | any SocketCAN interface | kernel | Linux | planned |
+| `gsusb` | CANable / candleLight (USB-C) and an OBD2-to-DB9 cable | USB | all | planned, with listen-only mode; the [shared ISO-TP core](raw-can.md) is done, tested against a fake port |
+| `socketcan` | any SocketCAN interface | kernel | Linux | planned; the [shared ISO-TP core](raw-can.md) is done |
 | `j2534` | J2534 pass-thru (Tactrix OpenPort, Toyota Mini VCI, VAS 5054A clones) | vendor DLL | Windows | later |
 | `dpdu` | ISO 22900 D-PDU API (what ODIS uses) | vendor DLL | Windows | maybe |
 

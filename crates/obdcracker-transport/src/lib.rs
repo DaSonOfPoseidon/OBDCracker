@@ -16,6 +16,14 @@ pub mod fingerprint;
 pub mod gateway;
 pub mod link;
 mod mock;
+/// The gs_usb and SocketCAN backends (M6) are its users. Crate-private, so no importer can put a
+/// frame on the bus:
+///
+/// ```compile_fail,E0603
+/// use obdcracker_transport::raw::CanPort;
+/// ```
+#[cfg_attr(not(test), expect(dead_code, reason = "no backend uses it yet"))]
+mod raw;
 pub mod scan;
 mod session;
 pub mod sweep;
