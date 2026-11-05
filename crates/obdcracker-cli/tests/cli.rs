@@ -83,7 +83,7 @@ fn refuses_to_run_without_an_adapter() {
     let out = obdcracker(&["--audit-log", log.to_str().unwrap(), "vin"]);
     assert_eq!(out.status.code(), Some(2));
     let stderr = String::from_utf8_lossy(&out.stderr);
-    for flag in ["--serial", "--tcp", "--dry-run", "--sim"] {
+    for flag in ["--serial", "--tcp", "--gsusb", "--dry-run", "--sim"] {
         assert!(stderr.contains(flag), "{stderr}");
     }
     assert!(!log.exists());
@@ -149,6 +149,62 @@ fn adapter_choices_are_exclusive() {
             "{args:?}"
         );
     }
+}
+
+#[test]
+fn gsusb_options_need_gsusb_and_exclude_the_other_adapters() {
+    for args in [
+        &["--listen-only", "vin"][..],
+        &["--bitrate", "500000", "vin"],
+        &["--gsusb", "--tcp", "127.0.0.1:1", "vin"],
+        &["--gsusb", "--sim", "a7", "vin"],
+        &["--gsusb", "--dry-run", "vin"],
+        &["--gsusb", "--baud", "38400", "vin"],
+        &["--gsusb", "--bitrate", "125000", "vin"],
+    ] {
+        let out = obdcracker(args);
+        assert!(!out.status.success(), "{args:?}");
+        assert_eq!(out.status.code(), Some(2), "{args:?}");
+    }
+}
+
+#[test]
+fn a_gsusb_bitrate_that_contradicts_the_profile_is_refused_before_any_usb() {
+    let log = temp_log("gsusb-bitrate");
+    let out = obdcracker(&[
+        "--gsusb",
+        "--profile",
+        "a7",
+        "--bitrate",
+        "250000",
+        "--audit-log",
+        log.to_str().unwrap(),
+        "vin",
+    ]);
+    assert_eq!(out.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("contradicts"));
+    assert!(!log.exists());
+}
+
+#[test]
+fn adapter_is_for_elm_adapters_only() {
+    let out = obdcracker(&["--gsusb", "adapter"]);
+    assert_eq!(out.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("ELM327"));
+}
+
+// Whatever USB is plugged into the machine running the test, a serial number that no device has
+// opens nothing: the run stops before anything is written to a device.
+#[test]
+fn a_gsusb_serial_that_matches_no_device_stops_before_anything_is_sent() {
+    let out = obdcracker(&["--gsusb=no-such-serial-0", "--listen-only", "vin"]);
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(!stderr.contains("using a gs_usb adapter"), "{stderr}");
+    assert!(
+        stderr.contains("gs_usb adapter") || stderr.contains("USB devices"),
+        "{stderr}"
+    );
 }
 
 #[test]
