@@ -4074,6 +4074,8 @@ mod bus_time {
         declared: Option<u32>,
         rate: u32,
         host_delay: Duration,
+        // The most bytes one read hands over.
+        chunk: usize,
         slow: Vec<(Vec<u8>, Duration)>,
         line: Vec<u8>,
         queue: VecDeque<(Instant, u8)>,
@@ -4087,6 +4089,7 @@ mod bus_time {
                 declared,
                 rate,
                 host_delay: Duration::ZERO,
+                chunk: usize::MAX,
                 slow: Vec::new(),
                 line: Vec::new(),
                 queue: VecDeque::new(),
@@ -4142,7 +4145,9 @@ mod bus_time {
             loop {
                 let now = Instant::now();
                 let mut n = 0;
-                while n < buf.len() && self.queue.front().is_some_and(|&(at, _)| at <= now) {
+                while n < buf.len().min(self.chunk)
+                    && self.queue.front().is_some_and(|&(at, _)| at <= now)
+                {
                     buf[n] = self.queue.pop_front().unwrap().1;
                     n += 1;
                 }
@@ -4348,6 +4353,24 @@ mod bus_time {
         // port's buffer, so when they were read says nothing about when they arrived.
         let link = Throttled::new(engine(8, false), Some(11_520), 11_520)
             .answering_after(SLOW_READ, Duration::from_millis(1));
+        let mut elm = connect_throttled(link);
+        let sent = Instant::now();
+        elm.send(&approve(ENGINE, SLOW_READ)).unwrap();
+        std::thread::sleep(Duration::from_millis(600));
+        let reply = elm.recv(Duration::from_secs(5)).unwrap();
+        let left = elm.link().bus_left.unwrap();
+        let bus_time = reply.bus_time.unwrap();
+        assert!(bus_time <= left, "after it left the bus");
+        assert!(bus_time >= sent);
+    }
+
+    #[test]
+    fn a_reply_read_late_in_small_pieces_is_timed_from_when_it_could_have_arrived() {
+        // Every read hands over 16 bytes, so the first read of the late caller leaves older bytes
+        // in the buffer: it doesn't show that nothing is left.
+        let mut link = Throttled::new(engine(100, false), Some(11_520), 11_520)
+            .answering_after(SLOW_READ, Duration::from_millis(1));
+        link.chunk = 16;
         let mut elm = connect_throttled(link);
         let sent = Instant::now();
         elm.send(&approve(ENGINE, SLOW_READ)).unwrap();

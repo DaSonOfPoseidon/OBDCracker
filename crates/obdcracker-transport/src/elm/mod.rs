@@ -162,8 +162,8 @@ pub struct Elm<L> {
     printed: u64,
     // The bytes of the latest read can't have reached the host before this (`WAITED`).
     arrived_after: Instant,
-    // When the link last had nothing left to hand over: the end of the latest read that didn't
-    // fill its buffer, or when the request in progress was sent.
+    // A time the link's buffer was last known to hold only bytes that arrived later: the end of the
+    // latest read that got nothing or waited (`WAITED`), or when the request in progress was sent.
     drained: Instant,
     // When the request in progress was sent, and what `printed` was then.
     sent: Option<(Instant, u64)>,
@@ -969,7 +969,9 @@ impl<L: Link> Elm<L> {
         let waited = ended.saturating_duration_since(started) >= WAITED
             && started.saturating_duration_since(self.drained) <= HOST_ALLOWANCE;
         self.arrived_after = if waited { ended } else { self.drained };
-        if n < buf.len() {
+        // A short read that got bytes doesn't show that none are left: `Link::read` may return
+        // part of what has arrived.
+        if n == 0 || waited {
             self.drained = ended;
         }
         Ok(n)
