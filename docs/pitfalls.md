@@ -277,6 +277,13 @@ Each entry names the class, what to check, and where it bit us.
 - **An early exit skips what else was asked for.** `scan` returned "nothing answered" before the TP2.0 pass when no
   ISO-TP module replied, which is when TP2.0 matters most. Run every requested pass, then decide the exit code
   (PR #149).
+- **A CAN ID means nothing without its width.** A 29-bit frame with ID `0x7E8` and an 11-bit one with `0x7E8` are
+  different frames, but `ReplyWindow::feed` takes a bare number. `RawCan` compares the frame's width with the request's
+  before feeding it (`docs/raw-can.md#frames`). Any code that matches received IDs against an expected one must carry
+  the width with it.
+- **A loop that waits on a flood needs its deadline checked after every frame it skips.** A receive loop that only
+  stops when the port times out never ends on a bus full of other modules' frames. The raw-CAN core checks the clock
+  after every frame, and its flood tests hang (the container must be killed) if that check is removed.
 
 ## Links and adapters
 
