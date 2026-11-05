@@ -203,19 +203,20 @@ impl<P: CanPort> RawCan<P> {
             // Whatever is still queued past the limit could be a late reply, which would read as
             // this request's.
             stale += 1;
-            // A bus fault past the limit still latches, so the event is handled before the limit.
+            // Every frame is recorded, the one past the limit too, and a bus fault past the limit
+            // still latches: the event is handled before the limit.
             match self.frame_of(event) {
                 Err(e) if self.fault.is_some() => return Err(e),
-                _ if stale > MAX_STALE_FRAMES => {
-                    return Err(Error::Adapter(format!(
-                        "more than {MAX_STALE_FRAMES} stale frames are queued on the CAN port"
-                    )));
-                }
                 Ok(frame) => self.push_event(LinkEvent::Unread {
                     at: SystemTime::now(),
                     line: frame_line(&frame),
                 }),
                 Err(e) => self.note(e.to_string()),
+            }
+            if stale > MAX_STALE_FRAMES {
+                return Err(Error::Adapter(format!(
+                    "more than {MAX_STALE_FRAMES} stale frames are queued on the CAN port"
+                )));
             }
         }
         let filters = filters_for(request);
@@ -272,6 +273,8 @@ impl<P: CanPort> RawCan<P> {
             Err(e) => {
                 self.keep(frame);
                 self.note(format!("dropped a frame from {:03X}: {e}", frame.id));
+                // The bad frame ends the source's transfer, so what it kept is reported now.
+                self.report_partial(frame.id);
                 None
             }
         }
