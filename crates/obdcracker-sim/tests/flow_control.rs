@@ -33,7 +33,8 @@ fn the_sims_vin_reply_is_paced_by_a_token_for_the_request_that_asked() {
     let mut window = ReplyWindow::open(&approved).unwrap();
     let mut tokens = Vec::new();
     let mut completed = None;
-    // The sim answers with whole payloads, so the core segmenter plays the module: feed each frame the segmenter sends; hand back what the window mints.
+    // The sim answers with whole payloads, so the core segmenter plays the module: feed each
+    // frame the segmenter sends, and hand back what the window mints.
     let mut segmenter = Segmenter::new(&reply.payload, Addressing::Normal).unwrap();
     loop {
         match segmenter.step() {
