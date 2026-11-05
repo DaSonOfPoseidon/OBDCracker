@@ -10,11 +10,14 @@ publish.workspace = true
 [features]
 # USB serial adapters, such as the OBDLink EX
 serial = ["dep:serial2"]
+# gs_usb adapters (CANable, candleLight), over USB with no driver on Linux, Windows or macOS
+gsusb = ["dep:nusb"]
 
 [dependencies]
 obdcracker-core.workspace = true
 obdcracker-safety.workspace = true
 serial2 = { version = "0.2.38", optional = true }
+nusb = { version = "0.2.9", optional = true }
 
 [lints]
 workspace = true

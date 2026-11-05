@@ -13,6 +13,8 @@ use obdcracker_safety::{
 use crate::{Error, LinkEvent, Response, Transport, hex};
 use port::{CanPort, Filter, PortEvent, RxFrame, TxFrame};
 
+#[cfg(feature = "gsusb")]
+pub mod gsusb;
 mod pace;
 mod port;
 #[cfg(test)]
