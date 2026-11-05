@@ -138,8 +138,11 @@ fn listen_only_never_leaves_listen_only() {
                 [(wire::MODE_RESET, 0), (wire::MODE_START, LISTEN)]
             );
             assert!(!started_active(&fake.modes()));
-            // Not even a request that the policy approves is written, or its flow control.
+            // Not even a request that the policy approves is written, or its flow control, and the
+            // device isn't touched to find that out.
+            let reads = fake.0.borrow().bulk_in_calls;
             let err = session.send(&read_did()).unwrap_err();
+            assert_eq!(fake.0.borrow().bulk_in_calls, reads);
             assert!(err.to_string().contains("listen-only"), "{err}");
             let broadcast = Policy::read_only()
                 .approve(
@@ -169,6 +172,8 @@ fn a_listen_only_session_can_receive_and_still_writes_nothing() {
 fn frames_heard_in_the_window_cannot_answer_a_request() {
     let fake = FakeUsb::new();
     busy_bus(&fake);
+    // A reply-shaped frame is still on its way when the window ends.
+    fake.0.borrow_mut().late_on_reset = vec![heard(0x7E8, &[0x04, 0x62, 0xF1, 0x87, 0x99])];
     fake.on_write(|_, can_id, data| {
         assert_eq!(
             (can_id, data[..4].to_vec()),
@@ -177,6 +182,8 @@ fn frames_heard_in_the_window_cannot_answer_a_request() {
         Reaction::reply(vec![heard(0x7E8, &[0x05, 0x62, 0xF1, 0x87, 0x11, 0x22])])
     });
     let mut session = open(&fake, &options(Mode::Active)).unwrap();
+    // The device's queue was emptied when the window ended, not left for the first request.
+    assert_eq!(fake.0.borrow().inbox.len(), 0);
     let replies = exchange(
         &mut session,
         &read_did(),

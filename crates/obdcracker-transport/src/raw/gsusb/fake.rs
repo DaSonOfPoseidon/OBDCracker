@@ -74,6 +74,8 @@ pub(super) struct State {
     pub(super) fail_bulk_in: bool,
     /// Every read finds this packet.
     pub(super) flood: Option<Vec<u8>>,
+    /// Frames still on their way when the controller is reset: they arrive just after it.
+    pub(super) late_on_reset: Vec<Vec<u8>>,
     /// Frames written while the controller was in reset.
     pub(super) written_while_stopped: usize,
     /// Frames written while an earlier one was still unconfirmed.
@@ -118,6 +120,7 @@ impl FakeUsb {
             fail_bulk_out: false,
             fail_bulk_in: false,
             flood: None,
+            late_on_reset: vec![],
             written_while_stopped: 0,
             overlapped: 0,
             unconfirmed: 0,
@@ -211,8 +214,12 @@ impl Usb for FakeUsb {
                     s.on_start = Some(on_start);
                 }
             } else {
-                s.started = None;
+                let was_running = s.started.take().is_some();
                 s.unconfirmed = 0;
+                if was_running {
+                    let late = std::mem::take(&mut s.late_on_reset);
+                    s.inbox.extend(late);
+                }
             }
         }
         Ok(())

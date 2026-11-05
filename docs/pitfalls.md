@@ -194,7 +194,9 @@ Each entry names the class, what to check, and where it bit us.
   0x7F to a functionally addressed request; it stays silent. A simulated module must too.
 - **What an adapter prints is untrusted text that reaches a terminal.** Anyone in range of a Wi-Fi adapter can make
   it print escape sequences. Replace control and non-ASCII characters where the text comes in
-  (`elm::codec::LineSplitter`), not at each place that prints it (M3 branch, security review).
+  (`elm::codec::LineSplitter`), not at each place that prints it (M3 branch, security review). A USB device's product
+  and serial strings are the same: the gs_usb device list shows only printable ASCII, and the serial a user types is
+  compared in that form (`gsusb::select::printable`, #246).
 - **An adapter can lose its settings mid-session** (brownout, internal error). Cached state, such as the header or
   "protocol already set", is then wrong, and a request could make it search for a protocol. Treat any sign of a reset
   as unknown state and stop, **everywhere output is read**: replies, answers to setup commands, and output you're
@@ -422,6 +424,9 @@ Each entry names the class, what to check, and where it bit us.
   `scripts/cargo.sh` sets its own limit; look for `signal: 9` in the output before calling a run hung.
 - **`timeout` around `scripts/cargo.sh` stops only the Docker client.** The container goes on running the hung test.
   Kill it with `docker kill` (find it with `docker ps --filter ancestor=rust:1-slim`).
+- **A second guard hides the first.** `GsUsb::send` refuses in listen-only mode, and so does the port under it, so
+  deleting either check left every test green. Assert something only the outer guard prevents (here, that the refused
+  send never read from the device), and mutate each guard away to see a test fail (#246).
 - **Termination needs an adversarial transport**: one that repeats forever, sends pending forever, or sleeps through
   each wait. `Mock` returns `Timeout` as soon as it's empty, so it can't show a hang, and a test that expects
   `Timeout` from it passes whether or not the limit works. Count what the transport handed out, and check that
@@ -460,7 +465,8 @@ Each entry names the class, what to check, and where it bit us.
 - **clap skips `requires` when the required argument conflicts with one that's present.** `--baud` once required
   `--serial`, but with `--tcp` given (same group as `--serial`) clap accepted it silently. Add `conflicts_with` too,
   and test every combination. (`--baud` has since dropped the `requires`: without `--serial`, the adapter found
-  automatically takes it.)
+  automatically takes it.) `--listen-only` and `--bitrate` (which require `--gsusb`) did the same with `--tcp`
+  until they got `conflicts_with_all` too (#246).
 - **Keep commit subjects under 72 characters.** Check before committing: once a commit is pushed, fixing its subject
   means rewriting shared history.
 - **Run clippy before committing.** Pedantic lints that caught us: `manual_is_multiple_of`, `assert!(x.is_empty())`,
