@@ -23,8 +23,24 @@ or macOS. On Linux those names also match other USB serial devices (Arduinos, mo
 one is picked and gets AT commands written to it, so pass `--serial` when one is plugged in. Windows can't tell USB
 from built-in ports, so every COM port counts there, and a lone built-in COM port would be picked and the connection
 would fail as "not an ELM"; give `--serial` on a PC with one. Other systems count every port too.
-`--serial`, `--tcp`, `--sim` and `--dry-run` skip the search, and `ports` still lists
+`--serial`, `--tcp`, `--gsusb`, `--sim` and `--dry-run` skip the search, and `ports` still lists
 every port.
+
+### A CANable or candleLight (`--gsusb`)
+
+```sh
+obdcracker --gsusb --profile a7 vin                 # the one gs_usb adapter plugged in, at the profile's bitrate
+obdcracker --gsusb=3A9F20 --bitrate 500000 vin      # one of several, picked by serial number
+obdcracker --gsusb --listen-only --bitrate 500000 vin  # never transmits: every request fails
+```
+
+The adapter carries ISO-TP over USB with no ELM327 in between ([details](gsusb.md)). `--gsusb=SERIAL` needs the `=`,
+or the serial would be taken for the command. With several adapters and no serial the CLI lists them and exits with
+status 2 without writing to any. The bitrate (250000 or 500000) comes from `--bitrate` or the `--profile`; if both are
+given they must agree. Before the adapter goes on the bus it listens at that bitrate: frames confirm it; error frames
+refuse; silence goes active with a warning when the bitrate was given and is refused when it was only the default
+(500000). `--listen-only` never goes on the bus at all. The audit log's link names the mode and bitrate
+(`gsusb:active:500000`). `adapter` is for ELM327/STN adapters only. Setup per OS is in [install](install.md#gs_usb-adapters).
 
 On macOS use the `/dev/cu.*` port. Leaving a wireless adapter plugged in drains the battery and lets anyone in range
 connect, so the CLI warns about it, and the audit log records which link a session used. See

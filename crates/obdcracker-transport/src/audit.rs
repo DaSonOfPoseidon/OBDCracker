@@ -203,6 +203,16 @@ impl<T: Transport> Drop for Audited<T> {
     }
 }
 
+/// Appends `events` to the audit log at `path`, as [`Audited`] would have: for what a transport
+/// did after it was taken out of its wrapper, such as a `gs_usb` adapter's final reset.
+///
+/// # Errors
+///
+/// The log can't be opened or written.
+pub fn log_events(path: &Path, link: impl Into<String>, events: Vec<LinkEvent>) -> io::Result<()> {
+    Audited::open(path, Replay(events), link).map(|_| ())
+}
+
 /// Appends `events`, then `error` from the `op` call, to the audit log at `path`, as
 /// [`Audited`] would have: for a transport that failed before it could be wrapped, such as an
 /// adapter whose setup failed ([`crate::elm::Elm::connect_reporting`]).

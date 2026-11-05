@@ -17,15 +17,18 @@ use obdcracker_transport::dtc::{self, RecordData};
 use obdcracker_transport::elm::Elm;
 use obdcracker_transport::fingerprint::{self, DidValue, Fingerprint, ReadError, UdsModule};
 use obdcracker_transport::gateway::{self, Compared, GatewayTables, ListedAs, Tried};
+use obdcracker_transport::gsusb::{self, BitrateCheck, BitrateSource, ConnectError, GsUsb};
 use obdcracker_transport::link::{self, FindAdapterError, Link, SerialLink, TcpLink};
 use obdcracker_transport::scan::{
     self, DidFormat, ExtraDid, PidValue, Scan, ScanModule, ScanOptions,
 };
 use obdcracker_transport::sweep::{self, SweepOptions};
 use obdcracker_transport::tp20::{self, Answer, ChannelSession, Disconnect};
-use obdcracker_transport::{Audited, DryRun, S3, Timing, Transport, hex, log_failure};
+use obdcracker_transport::{Audited, DryRun, S3, Timing, Transport, hex, log_events, log_failure};
 
 const DEFAULT_BAUD: u32 = 115_200;
+// ISO 15765-4 allows 250 or 500 kbit/s; nearly every car's OBD port is on 500.
+const DEFAULT_BITRATE: u32 = 500_000;
 const TCP_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Debug, Parser)]
@@ -41,12 +44,29 @@ struct Cli {
 
     /// The serial port's baud rate [default: 115200, for `OBDLink` adapters; ELM327 clones use
     /// 38400, 9600, 230400 or 500000]
-    #[arg(long, conflicts_with_all = ["tcp", "dry_run", "sim"])]
+    #[arg(long, conflicts_with_all = ["tcp", "dry_run", "sim", "gsusb"])]
     baud: Option<u32>,
 
     /// Use a Wi-Fi ELM327/STN adapter at this address (e.g. 192.168.0.10:35000)
     #[arg(long, value_name = "HOST:PORT", group = "adapter")]
     tcp: Option<String>,
+
+    /// Use a CANable/candleLight (`gs_usb`) adapter on USB, on the one plugged in or the one with
+    /// this serial number (written `--gsusb=SERIAL`, with the `=`). Checks the bitrate listening
+    /// before it goes on the bus
+    #[arg(long, value_name = "SERIAL", group = "adapter", num_args = 0..=1,
+          require_equals = true, default_missing_value = "")]
+    gsusb: Option<String>,
+
+    /// With --gsusb: only listen. The controller never transmits, so every request fails
+    #[arg(long, requires = "gsusb", conflicts_with_all = ["serial", "tcp", "dry_run", "sim"])]
+    listen_only: bool,
+
+    /// With --gsusb: the bus's bitrate, 250000 or 500000 [default: the --profile's, else 500000,
+    /// which needs frames on the bus to be confirmed]
+    #[arg(long, value_name = "BIT/S", requires = "gsusb", value_parser = parse_bitrate,
+          conflicts_with_all = ["serial", "tcp", "dry_run", "sim"])]
+    bitrate: Option<u32>,
 
     /// Print the frames that would be sent without opening any adapter
     #[arg(long, group = "adapter")]
@@ -178,6 +198,8 @@ fn main() -> ExitCode {
                 ExitCode::FAILURE
             }
         }
+    } else if let Some(serial) = &cli.gsusb {
+        open_gsusb(&cli, serial)
     } else if (cli.sim.is_some() || cli.dry_run) && matches!(cli.command, Command::Adapter) {
         eprintln!("`adapter` needs a real adapter: use --serial <PORT> or --tcp <HOST:PORT>");
         ExitCode::from(2)
@@ -204,8 +226,8 @@ fn main() -> ExitCode {
             }
             Err(FindAdapterError::NotFound) => {
                 eprintln!(
-                    "no adapter found; plug one in, or use --serial <PORT> or --tcp <HOST:PORT>, \
-                     or try --dry-run or --sim <PROFILE>"
+                    "no adapter found; plug one in, or use --serial <PORT>, --tcp <HOST:PORT> or \
+                     --gsusb, or try --dry-run or --sim <PROFILE>"
                 );
                 ExitCode::from(2)
             }
@@ -218,6 +240,163 @@ fn main() -> ExitCode {
                 ExitCode::from(2)
             }
         }
+    }
+}
+
+// The bitrate to listen at and where it came from: `--bitrate`, else the profile's, else the usual
+// 500000, which only counts once frames on the bus confirm it. Both given must agree: a bitrate that
+// differs from the car's profile floods its bus with errors.
+fn gsusb_bitrate(cli: &Cli) -> Result<(u32, BitrateSource), String> {
+    let profile = match cli.profile.as_ref() {
+        Some(name) => Some(
+            Profile::builtin(name)
+                .map_err(|e| format!("profile {name}: {e}"))?
+                .bitrate,
+        ),
+        None => None,
+    };
+    match (cli.bitrate, profile) {
+        (Some(given), Some(profile)) if given != profile => Err(format!(
+            "--bitrate {given} contradicts the profile, whose bus runs at {profile} bit/s"
+        )),
+        (Some(bitrate), _) | (None, Some(bitrate)) => Ok((bitrate, BitrateSource::Configured)),
+        (None, None) => Ok((DEFAULT_BITRATE, BitrateSource::Assumed)),
+    }
+}
+
+fn open_gsusb(cli: &Cli, serial: &str) -> ExitCode {
+    if let Command::Adapter = cli.command {
+        eprintln!("`adapter` is for ELM327/STN adapters; a gs_usb adapter has nothing to report");
+        return ExitCode::from(2);
+    }
+    let (bitrate, source) = match gsusb_bitrate(cli) {
+        Ok(chosen) => chosen,
+        Err(e) => {
+            eprintln!("{e}");
+            return ExitCode::from(2);
+        }
+    };
+    let mut options = gsusb::Options::new(bitrate);
+    options.bitrate_source = source;
+    options.serial = (!serial.is_empty()).then(|| serial.to_owned());
+    if cli.listen_only {
+        options.mode = gsusb::Mode::ListenOnly;
+    }
+    let link = options.link_name();
+    let adapter = match GsUsb::open(&options) {
+        Ok(adapter) => adapter,
+        Err(e) => {
+            if let ConnectError::Failed(failed) = &e {
+                // What the adapter was sent and said before it failed is evidence too.
+                if let Err(log) = log_failure(
+                    &cli.audit_log,
+                    link.as_str(),
+                    failed.events.clone(),
+                    "connect",
+                    &failed.error,
+                ) {
+                    eprintln!("can't write audit log {}: {log}", cli.audit_log.display());
+                }
+            }
+            eprintln!("{e}");
+            return match e {
+                ConnectError::Failed(_) => ExitCode::FAILURE,
+                _ => ExitCode::from(2),
+            };
+        }
+    };
+    match adapter.bitrate_check() {
+        BitrateCheck::Confirmed => {
+            eprintln!("using a gs_usb adapter at {bitrate} bit/s: frames were heard at that rate");
+        }
+        BitrateCheck::Unconfirmed => eprintln!(
+            "warning: no frames were heard at {bitrate} bit/s, so that bitrate is unconfirmed. \
+             The adapter went on the bus at the rate you gave; if the car runs at another, it \
+             disrupts the bus. Switch the ignition on and check --bitrate"
+        ),
+        BitrateCheck::NotChecked => eprintln!(
+            "using a gs_usb adapter at {bitrate} bit/s, listen-only: nothing will be sent, so \
+             every request fails"
+        ),
+        _ => {}
+    }
+    run_gsusb(cli, adapter, &link)
+}
+
+// Runs the command, then takes the controller off the bus explicitly, so a reset that fails is
+// reported: a controller left on the bus keeps acknowledging frames.
+fn run_gsusb(cli: &Cli, mut adapter: GsUsb, link: &str) -> ExitCode {
+    let code = run(cli, Borrowed(&mut adapter), link, Timing::default());
+    match adapter.close() {
+        Ok(events) => {
+            // The reset is a command to the adapter, so it is logged like the rest.
+            if let Err(log) = log_events(&cli.audit_log, link, events) {
+                eprintln!("can't write audit log {}: {log}", cli.audit_log.display());
+            }
+            code
+        }
+        Err(failed) => {
+            eprintln!(
+                "can't reset the CAN controller: {}. Unplug the adapter so it stops acknowledging \
+                 frames on the car's bus",
+                failed.error
+            );
+            if let Err(log) =
+                log_failure(&cli.audit_log, link, failed.events, "close", &failed.error)
+            {
+                eprintln!("can't write audit log {}: {log}", cli.audit_log.display());
+            }
+            ExitCode::FAILURE
+        }
+    }
+}
+
+// Lends the adapter to `run`, which wants to own its transport. Forwards every method, the ones
+// with defaults too.
+struct Borrowed<'a>(&'a mut GsUsb);
+
+impl Transport for Borrowed<'_> {
+    fn send(
+        &mut self,
+        request: &obdcracker_safety::Approved,
+    ) -> Result<(), obdcracker_transport::Error> {
+        self.0.send(request)
+    }
+
+    fn recv(
+        &mut self,
+        timeout: Duration,
+    ) -> Result<obdcracker_transport::Response, obdcracker_transport::Error> {
+        self.0.recv(timeout)
+    }
+
+    fn recv_logged(
+        &mut self,
+        timeout: Duration,
+        before_send: &mut dyn FnMut(
+            &obdcracker_safety::ApprovedFlowControl,
+        ) -> Result<(), obdcracker_transport::Error>,
+    ) -> Result<obdcracker_transport::Response, obdcracker_transport::Error> {
+        self.0.recv_logged(timeout, before_send)
+    }
+
+    fn patient(
+        &mut self,
+        wait: Option<Duration>,
+    ) -> Result<Option<Duration>, obdcracker_transport::Error> {
+        self.0.patient(wait)
+    }
+
+    fn broadcasts_can_overflow(&self) -> bool {
+        self.0.broadcasts_can_overflow()
+    }
+
+    fn take_events(&mut self) -> Vec<obdcracker_transport::LinkEvent> {
+        self.0.take_events()
+    }
+
+    fn settle(&mut self) -> Result<(), obdcracker_transport::Error> {
+        self.0.settle()
     }
 }
 
@@ -569,6 +748,16 @@ fn parse_record(text: &str) -> Result<u8, String> {
 }
 
 // Exactly three hex digits. `from_str_radix` alone would also take `+1D`.
+fn parse_bitrate(text: &str) -> Result<u32, String> {
+    match text {
+        "250000" => Ok(250_000),
+        "500000" => Ok(500_000),
+        _ => Err(format!(
+            "{text:?} isn't a diagnostic CAN bitrate: give 250000 or 500000"
+        )),
+    }
+}
+
 fn parse_request_id(text: &str) -> Result<u32, String> {
     if text.len() == 3 && text.bytes().all(|b| b.is_ascii_hexdigit()) {
         u32::from_str_radix(text, 16).map_err(|e| e.to_string())
@@ -1709,9 +1898,11 @@ mod tests {
     use obdcracker_transport::gateway::{Compared, Installed, ListedAs};
     use obdcracker_transport::{Error, Response, Timing, Transport};
 
+    use obdcracker_transport::gsusb::BitrateSource;
+
     use super::{
-        Cli, Discovery, dtc_out_of_step_note, gateway_list_lines, resume_command, run_scan,
-        sweep_out_of_step_note, tp20_identification,
+        Cli, Discovery, dtc_out_of_step_note, gateway_list_lines, gsusb_bitrate, resume_command,
+        run_scan, sweep_out_of_step_note, tp20_identification,
     };
 
     fn compared(address: u8, request_id: Option<u16>, status: ListedAs) -> Compared {
@@ -2009,5 +2200,92 @@ mod tests {
             "note: a request went without a definite answer, so a late answer may still arrive; \
              connect again before reading from gateway again"
         );
+    }
+
+    fn parse(words: &[&str]) -> Result<Cli, clap::Error> {
+        Cli::try_parse_from(words)
+    }
+
+    #[test]
+    fn gsusb_takes_a_serial_only_with_an_equals_sign() {
+        let cli = parse(&["obdcracker", "--gsusb", "vin"]).unwrap();
+        assert_eq!(cli.gsusb.as_deref(), Some(""));
+        let cli = parse(&["obdcracker", "--gsusb=ABC123", "vin"]).unwrap();
+        assert_eq!(cli.gsusb.as_deref(), Some("ABC123"));
+        // Without the `=`, `ABC123` would be taken for the command.
+        assert!(parse(&["obdcracker", "--gsusb", "ABC123", "vin"]).is_err());
+        assert_eq!(parse(&["obdcracker", "vin"]).unwrap().gsusb, None);
+    }
+
+    #[test]
+    fn the_gsusb_options_need_gsusb_and_exclude_the_other_adapters() {
+        for words in [
+            &["obdcracker", "--listen-only", "vin"][..],
+            &["obdcracker", "--bitrate", "500000", "vin"],
+            &["obdcracker", "--tcp", "x:1", "--listen-only", "vin"],
+            &["obdcracker", "--sim", "a7", "--bitrate", "500000", "vin"],
+            &["obdcracker", "--gsusb", "--tcp", "x:1", "vin"],
+            &["obdcracker", "--gsusb", "--serial", "/dev/null", "vin"],
+            &["obdcracker", "--gsusb", "--sim", "a7", "vin"],
+            &["obdcracker", "--gsusb", "--dry-run", "vin"],
+            &["obdcracker", "--gsusb", "--baud", "38400", "vin"],
+            &["obdcracker", "--gsusb", "--bitrate", "125000", "vin"],
+            &["obdcracker", "--gsusb", "--bitrate", "500001", "vin"],
+            &["obdcracker", "--gsusb", "--bitrate", "", "vin"],
+        ] {
+            assert!(parse(words).is_err(), "{words:?}");
+        }
+        let cli = parse(&[
+            "obdcracker",
+            "--gsusb",
+            "--listen-only",
+            "--bitrate",
+            "250000",
+            "vin",
+        ])
+        .unwrap();
+        assert!(cli.listen_only);
+        assert_eq!(cli.bitrate, Some(250_000));
+    }
+
+    #[test]
+    fn the_gsusb_bitrate_comes_from_the_flag_or_the_profile_or_is_a_guess() {
+        let bitrate = |words: &[&str]| gsusb_bitrate(&parse(words).unwrap());
+        assert_eq!(
+            bitrate(&["obdcracker", "--gsusb", "--bitrate", "250000", "vin"]),
+            Ok((250_000, BitrateSource::Configured))
+        );
+        assert_eq!(
+            bitrate(&["obdcracker", "--gsusb", "--profile", "a7", "vin"]),
+            Ok((500_000, BitrateSource::Configured))
+        );
+        assert_eq!(
+            bitrate(&[
+                "obdcracker",
+                "--gsusb",
+                "--profile",
+                "a7",
+                "--bitrate",
+                "500000",
+                "vin"
+            ]),
+            Ok((500_000, BitrateSource::Configured))
+        );
+        assert_eq!(
+            bitrate(&["obdcracker", "--gsusb", "vin"]),
+            Ok((500_000, BitrateSource::Assumed))
+        );
+        // A flag that contradicts the car's profile is refused, not obeyed.
+        let err = bitrate(&[
+            "obdcracker",
+            "--gsusb",
+            "--profile",
+            "a7",
+            "--bitrate",
+            "250000",
+            "vin",
+        ])
+        .unwrap_err();
+        assert!(err.contains("contradicts"), "{err}");
     }
 }

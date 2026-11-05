@@ -7,7 +7,9 @@ use std::time::Duration;
 
 use obdcracker_safety::Approved;
 use obdcracker_safety::{ApprovedFlowControl, FeedOutcome, Policy, Protocol, ReplyWindow, Target};
-use obdcracker_transport::{Audited, Error, LinkEvent, Mock, Response, Transport, log_failure};
+use obdcracker_transport::{
+    Audited, Error, LinkEvent, Mock, Response, Transport, log_events, log_failure,
+};
 
 fn temp_log(name: &str) -> PathBuf {
     let path = std::env::temp_dir().join(format!(
@@ -278,6 +280,25 @@ fn a_transport_that_failed_before_it_could_be_wrapped_is_logged() {
     );
     assert!(
         lines[1].contains(r#""dir":"err","op":"connect","error":"adapter error: the adapter doesn't support ATSP6""#),
+        "{audit}"
+    );
+}
+
+#[test]
+fn events_left_after_the_wrapper_is_gone_can_be_logged_alone() {
+    let log = temp_log("events-only");
+    let events = vec![LinkEvent::Command {
+        at: std::time::UNIX_EPOCH,
+        command: "MODE RESET".to_owned(),
+        answer: vec!["ok".to_owned()],
+    }];
+    log_events(&log, "gsusb:active:500000", events).unwrap();
+    let audit = std::fs::read_to_string(&log).unwrap();
+    assert_eq!(audit.lines().count(), 1, "{audit}");
+    assert!(
+        audit.contains(
+            r#""dir":"cmd","cmd":"MODE RESET","answer":"ok","link":"gsusb:active:500000""#
+        ),
         "{audit}"
     );
 }

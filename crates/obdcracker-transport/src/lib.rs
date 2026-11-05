@@ -22,17 +22,22 @@ mod mock;
 /// ```compile_fail,E0603
 /// use obdcracker_transport::raw::CanPort;
 /// ```
-#[cfg_attr(not(test), expect(dead_code, reason = "no backend uses it yet"))]
+#[cfg_attr(
+    not(any(test, feature = "gsusb")),
+    expect(dead_code, reason = "no backend uses it without a feature")
+)]
 mod raw;
 pub mod scan;
 mod session;
 pub mod sweep;
 pub mod tp20;
 
-pub use audit::{Audited, log_failure};
+pub use audit::{Audited, log_events, log_failure};
 pub use dry_run::DryRun;
 pub use exchange::{Expect, Timing, exchange};
 pub use mock::Mock;
+#[cfg(feature = "gsusb")]
+pub use raw::gsusb;
 pub use session::{ExtendedSession, Left, S3, SessionError};
 
 /// A reply from one module: the CAN ID it came from and its reassembled payload.

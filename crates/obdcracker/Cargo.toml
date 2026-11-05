@@ -13,6 +13,8 @@ publish.workspace = true
 sim = ["dep:obdcracker-sim"]
 # USB serial adapters (`transport::link::SerialLink`). TCP needs no feature.
 serial = ["obdcracker-transport/serial"]
+# gs_usb adapters (`transport::gsusb::GsUsb`): CANable and candleLight, over USB
+gsusb = ["obdcracker-transport/gsusb"]
 
 [dependencies]
 obdcracker-core.workspace = true
