@@ -284,6 +284,9 @@ Each entry names the class, what to check, and where it bit us.
 - **A loop that waits on a flood needs its deadline checked after every frame it skips.** A receive loop that only
   stops when the port times out never ends on a bus full of other modules' frames. The raw-CAN core checks the clock
   after every frame, and its flood tests hang (the container must be killed) if that check is removed.
+- **A bounded drain that hits its bound hasn't drained.** `RawCan` reads stale frames before a request, up to 256; at
+  the limit it carried on, so a late reply further back in the queue could answer the new request. Fail when the bound
+  is hit, and read once more than the bound so a queue of exactly that size still passes (PR #261, Codex).
 
 ## Links and adapters
 

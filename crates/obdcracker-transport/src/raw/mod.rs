@@ -74,6 +74,8 @@ pub(crate) struct RawCan<P> {
     filters: Vec<Filter>,
     window: Option<Open>,
     ready: VecDeque<Response>,
+    // Frames of replies not yet complete, for the log if they never are: (source, when, line).
+    partial: Vec<(u32, SystemTime, String)>,
     events: Vec<LinkEvent>,
     lost: usize,
     // When the last frame was confirmed sent, or a flow control frame arrived: STmin counts from it.
@@ -90,6 +92,7 @@ impl<P: CanPort> RawCan<P> {
             filters: Vec::new(),
             window: None,
             ready: VecDeque::new(),
+            partial: Vec::new(),
             events: Vec::new(),
             lost: 0,
             last_frame: None,
@@ -117,10 +120,25 @@ impl<P: CanPort> RawCan<P> {
 
     // Latches: nothing is sent on a bus the controller says is faulted.
     fn fail(&mut self, fault: &str) -> Error {
-        self.window = None;
-        self.ready.clear();
+        self.abandon();
         self.fault = Some(fault.to_owned());
         Error::Adapter(fault.to_owned())
+    }
+
+    // Ends the transfer in progress. What it received but nobody took is reported as unread, as
+    // the log would otherwise never show it.
+    fn abandon(&mut self) {
+        self.window = None;
+        for reply in std::mem::take(&mut self.ready) {
+            let line = format!("{:03X} {}", reply.source, hex(&reply.payload));
+            self.push_event(LinkEvent::Unread {
+                at: SystemTime::now(),
+                line,
+            });
+        }
+        for (_, at, line) in std::mem::take(&mut self.partial) {
+            self.push_event(LinkEvent::Unread { at, line });
+        }
     }
 
     fn push_event(&mut self, event: LinkEvent) {
@@ -146,8 +164,7 @@ impl<P: CanPort> RawCan<P> {
             PortEvent::ErrorFrame => Err(self.fail("an error frame was seen on the CAN bus")),
             PortEvent::Overrun => {
                 // What is half-received can't be trusted.
-                self.window = None;
-                self.ready.clear();
+                self.abandon();
                 Err(Error::Adapter(
                     "the CAN port dropped received frames (receive overrun)".to_owned(),
                 ))
@@ -164,19 +181,27 @@ impl<P: CanPort> RawCan<P> {
 
     // Drops what the last request left, and listens only for this one's replies.
     fn begin(&mut self, request: &Approved) -> Result<(), Error> {
-        self.window = None;
-        self.ready.clear();
+        self.abandon();
         self.last_frame = None;
-        for _ in 0..MAX_STALE_FRAMES {
+        let mut stale = 0;
+        loop {
             let event = match self.port.read(Duration::ZERO) {
                 Ok(event) => event,
                 Err(Error::Timeout) => break,
                 Err(e) => return Err(e),
             };
+            // Whatever is still queued past the limit could be a late reply, which would read as
+            // this request's.
+            stale += 1;
+            if stale > MAX_STALE_FRAMES {
+                return Err(Error::Adapter(format!(
+                    "more than {MAX_STALE_FRAMES} stale frames are queued on the CAN port"
+                )));
+            }
             match self.frame_of(event) {
                 Ok(frame) => self.push_event(LinkEvent::Unread {
                     at: SystemTime::now(),
-                    line: format!("{:03X} {}", frame.id, hex(&frame.data)),
+                    line: frame_line(&frame),
                 }),
                 Err(e) if self.fault.is_some() => return Err(e),
                 Err(e) => self.note(e.to_string()),
@@ -200,22 +225,42 @@ impl<P: CanPort> RawCan<P> {
         let outcome = open.window.feed(frame.id, &frame.data);
         match outcome {
             Ok(FeedOutcome::Complete { source, payload }) => {
+                // The response is logged when it is returned.
+                self.partial.retain(|(from, ..)| *from != source);
                 self.ready
                     .push_back(Response::new(source, payload).at_bus_time(frame.time));
                 None
             }
-            Ok(FeedOutcome::SendFlowControl(token)) => Some(token),
+            Ok(FeedOutcome::SendFlowControl(token)) => {
+                self.keep(frame);
+                Some(token)
+            }
+            Ok(FeedOutcome::Pending) => {
+                self.keep(frame);
+                None
+            }
             Ok(FeedOutcome::NoFlowControl { source }) => {
+                self.keep(frame);
                 self.note(format!(
                     "no flow control for the multi-frame reply from {source:03X}: the request has no known reply ID"
                 ));
                 None
             }
-            Ok(FeedOutcome::Pending | FeedOutcome::Ignored) => None,
+            Ok(FeedOutcome::Ignored) => None,
             Err(e) => {
+                self.keep(frame);
                 self.note(format!("dropped a frame from {:03X}: {e}", frame.id));
                 None
             }
+        }
+    }
+
+    fn keep(&mut self, frame: &RxFrame) {
+        if self.partial.len() >= MAX_EVENTS {
+            self.lost += 1;
+        } else {
+            self.partial
+                .push((frame.id, SystemTime::now(), frame_line(frame)));
         }
     }
 
@@ -338,7 +383,7 @@ impl<P: CanPort> Transport for RawCan<P> {
         });
         let sent = self.transmit(request);
         if sent.is_err() {
-            self.window = None;
+            self.abandon();
         }
         sent
     }
@@ -375,6 +420,11 @@ impl<P: CanPort> Transport for RawCan<P> {
         }
     }
 
+    fn settle(&mut self) -> Result<(), Error> {
+        self.abandon();
+        Ok(())
+    }
+
     fn take_events(&mut self) -> Vec<LinkEvent> {
         let mut events = std::mem::take(&mut self.events);
         if self.lost > 0 {
@@ -382,6 +432,10 @@ impl<P: CanPort> Transport for RawCan<P> {
         }
         events
     }
+}
+
+fn frame_line(frame: &RxFrame) -> String {
+    format!("{:03X} {}", frame.id, hex(&frame.data))
 }
 
 // What a port should hand over for this request's replies. The window checks every frame again.

@@ -21,6 +21,8 @@ struct Fake {
     fail_write: Option<usize>,
     // Hand this frame over for ever.
     flood: Option<RxFrame>,
+    // Start the flood after the first frame is written.
+    flood_after_write: Option<RxFrame>,
     // Every write must find this set: the caller has to have said it was about to send.
     announced: Option<Rc<Cell<bool>>>,
 }
@@ -81,6 +83,9 @@ impl CanPort for Fake {
             return Err(Error::Adapter("no TX confirmation".to_owned()));
         }
         self.log.push(Logged::Write(*frame, Instant::now()));
+        if let Some(flood) = self.flood_after_write.take() {
+            self.flood = Some(flood);
+        }
         if let Some(responder) = self.responder.as_mut() {
             self.inbox.extend(responder(frame));
         }
@@ -975,7 +980,7 @@ fn a_bus_fault_among_stale_frames_latches_before_any_frame_is_sent() {
 #[test]
 fn a_flood_of_foreign_frames_cannot_hold_recv_past_its_timeout() {
     let mut can = raw(Fake {
-        flood: Some(rx(0x123, false, &[1, 2, 3])),
+        flood_after_write: Some(rx(0x123, false, &[1, 2, 3])),
         ..Fake::default()
     });
     let start = Instant::now();
@@ -987,7 +992,7 @@ fn a_flood_of_foreign_frames_cannot_hold_recv_past_its_timeout() {
 #[test]
 fn a_flood_while_waiting_for_flow_control_cannot_hold_send_past_its_limit() {
     let mut can = raw(Fake {
-        flood: Some(rx(0x123, false, &[1, 2, 3])),
+        flood_after_write: Some(rx(0x123, false, &[1, 2, 3])),
         ..Fake::default()
     });
     let start = Instant::now();
@@ -1042,12 +1047,15 @@ proptest! {
         for (id, extended, data) in frames {
             can.port.inbox.push_back(PortEvent::Frame(rx(id, extended, &data)));
         }
-        while can.recv(Duration::ZERO).is_ok() {}
+        while !can.port.inbox.is_empty() {
+            let _ = can.recv(Duration::ZERO);
+        }
         for written in &can.port.written()[before..] {
             prop_assert_eq!(written.data, [0x30, 0, 0, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA]);
             prop_assert!(!written.extended);
             prop_assert!(written.id == 0x7E0 || (broadcast && written.id == 0x7E1));
         }
+        prop_assert_eq!(can.port.inbox.len(), 0);
     }
 }
 
@@ -1079,4 +1087,155 @@ fn a_reply_from_the_last_request_is_not_the_next_ones() {
         .unwrap();
     can.send(&read_did(Target::Physical(0x7E0))).unwrap();
     assert_eq!(can.recv(SHORT), Err(Error::Timeout));
+}
+
+#[test]
+fn a_drain_that_hits_its_limit_fails_the_send_instead_of_trusting_the_queue() {
+    let mut can = raw(Fake::default());
+    for _ in 0..256 {
+        can.port.inbox.push_back(frame(0x123, &[1, 2, 3]));
+    }
+    can.port
+        .inbox
+        .push_back(frame(0x7E8, &[3, 0x62, 0xF1, 0x87]));
+    let result = can.send(&read_did(Target::Physical(0x7E0)));
+    assert!(matches!(result, Err(Error::Adapter(m)) if m.contains("stale")));
+    assert_eq!(can.port.log.len(), 0);
+    assert_eq!(can.recv(SHORT), Err(Error::Timeout));
+}
+
+#[test]
+fn a_queue_of_exactly_the_limit_is_drained() {
+    let mut can = raw(Fake::default());
+    for _ in 0..255 {
+        can.port.inbox.push_back(frame(0x123, &[1, 2, 3]));
+    }
+    can.port
+        .inbox
+        .push_back(frame(0x7E8, &[3, 0x62, 0xF1, 0x87]));
+    can.send(&read_did(Target::Physical(0x7E0))).unwrap();
+    assert_eq!(can.recv(SHORT), Err(Error::Timeout));
+}
+
+#[test]
+fn a_failed_send_leaves_no_early_answer_to_consume() {
+    // The module answers early, then never sends flow control.
+    let mut can = raw(Fake::answering(|sent| {
+        if sent.data[0] >> 4 == 1 {
+            vec![frame(0x7E8, &[3, 0x7F, 0x19, 0x31])]
+        } else {
+            Vec::new()
+        }
+    }));
+    can.send(&long_request(Target::Physical(0x7E0), 21))
+        .unwrap_err();
+    assert_eq!(can.recv(SHORT), Err(Error::Timeout));
+    let events = can.take_events();
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, LinkEvent::Unread { line, .. } if line.contains("7F 19 31"))),
+        "{events:?}"
+    );
+}
+
+#[test]
+fn an_unfinished_reply_is_reported_when_settled() {
+    let mut can = raw(Fake::default());
+    can.send(&read_did(Target::Physical(0x7E0))).unwrap();
+    can.port
+        .inbox
+        .push_back(frame(0x7E8, &[0x10, 20, 0, 1, 2, 3, 4, 5]));
+    can.port
+        .inbox
+        .push_back(frame(0x7E8, &[0x21, 6, 7, 8, 9, 10, 11, 12]));
+    assert_eq!(can.recv(SHORT), Err(Error::Timeout));
+    can.settle().unwrap();
+    let lines: Vec<String> = can
+        .take_events()
+        .into_iter()
+        .filter_map(|e| match e {
+            LinkEvent::Unread { line, .. } => Some(line),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        lines,
+        vec!["7E8 10 14 00 01 02 03 04 05", "7E8 21 06 07 08 09 0A 0B 0C"]
+    );
+    // Reported once.
+    can.settle().unwrap();
+    assert_eq!(can.take_events().len(), 0);
+}
+
+#[test]
+fn an_unfinished_reply_is_reported_when_the_next_request_starts() {
+    let mut can = raw(Fake::default());
+    can.send(&read_did(Target::Physical(0x7E0))).unwrap();
+    can.port
+        .inbox
+        .push_back(frame(0x7E8, &[0x10, 20, 0, 1, 2, 3, 4, 5]));
+    assert_eq!(can.recv(SHORT), Err(Error::Timeout));
+    can.send(&read_did(Target::Physical(0x7E0))).unwrap();
+    let events = can.take_events();
+    assert!(
+        events.iter().any(
+            |e| matches!(e, LinkEvent::Unread { line, .. } if line == "7E8 10 14 00 01 02 03 04 05")
+        ),
+        "{events:?}"
+    );
+}
+
+#[test]
+fn a_finished_reply_is_not_reported_as_unread() {
+    let mut can = raw(ecus(vec![Ecu::obd(0x7E0, &payload_of(20))]));
+    can.send(&read_did(Target::Physical(0x7E0))).unwrap();
+    can.recv(SHORT).unwrap();
+    can.settle().unwrap();
+    assert_eq!(can.take_events().len(), 0);
+}
+
+#[test]
+fn a_reply_nobody_took_is_reported_when_settled() {
+    let mut can = raw(answers_early_then_allows());
+    can.send(&long_request(Target::Physical(0x7E0), 21))
+        .unwrap();
+    can.settle().unwrap();
+    let events = can.take_events();
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, LinkEvent::Unread { line, .. } if line.contains("7F 19 31"))),
+        "{events:?}"
+    );
+    assert_eq!(can.recv(SHORT), Err(Error::Timeout));
+}
+
+#[test]
+fn unfinished_frames_kept_for_the_log_are_bounded() {
+    let mut can = raw(Fake::default());
+    can.send(&read_did(Target::Physical(0x7E0))).unwrap();
+    can.port
+        .inbox
+        .push_back(frame(0x7E8, &[0x10, 0xFF, 0, 1, 2, 3, 4, 5]));
+    for i in 0..300u32 {
+        can.port.inbox.push_back(frame(
+            0x7E8,
+            &[
+                0x20 | (u8::try_from(i % 15).unwrap() + 1),
+                1,
+                2,
+                3,
+                4,
+                5,
+                6,
+                7,
+            ],
+        ));
+    }
+    assert_eq!(can.recv(Duration::from_millis(50)), Err(Error::Timeout));
+    can.settle().unwrap();
+    let events = can.take_events();
+    assert!(events.len() <= 65, "{}", events.len());
+    assert!(matches!(events.last(), Some(LinkEvent::Lost(n)) if *n > 0));
 }

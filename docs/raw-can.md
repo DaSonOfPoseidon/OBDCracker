@@ -39,10 +39,15 @@ Before each request is written, `RawCan` sets the port's filters from the approv
 `0x7E8..=0x7EF`; a physical target its reply ID, at its width; a physical target with no known reply ID the 11-bit
 diagnostic range `0x700..=0x7FF` (or any 29-bit ID). A port with no hardware filtering may hand over more, as
 `RawCan` checks every frame itself. Frames left over from the last request are read and dropped first (and logged as
-unread lines), so a late reply can't answer the next request.
+unread lines), so a late reply can't answer the next request. If more than 256 are queued, the send fails instead:
+what is left could be a late reply.
 
 A receive overrun is an adapter error, and what was half-received is dropped: it never reads as a short reply. The
 overrun does not latch.
+
+A reply that never completed (a first frame and then silence), and a reply that completed but nobody took, are reported
+as unread lines when the next request starts, the transfer fails, or the transport is settled (`Audited` does that when
+it is dropped). A failed `send` leaves no early answer to be returned by a later `recv`.
 
 ## Bus state
 
