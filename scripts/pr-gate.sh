@@ -71,7 +71,7 @@ if [ -s "$names" ]; then
 		| select(\"status:blocked\" | IN(\$names[]) | not)
 		| ((.milestone.title // \"\") | capture(\"^M(?<n>[0-9]+) · \").n | tonumber) as \$due
 		| select(\$m == 0 or \$due <= \$m)
-		| ([(.body // \"\") | scan(\"[A-Za-z0-9_./-]+\") | sub(\"\\\\.+$\"; \"\")
+		| ([(.body // \"\") | scan(\"[\\\\p{L}\\\\p{N}_./-]+\") | sub(\"\\\\.+$\"; \"\")
 			| sub(\"^//github\\\\.com/$repo/(blob|tree)/[^/]+/\"; \"\") as \$word
 			| \$changed[] | select(. == \$word)] | unique) as \$cited
 		| select(\$cited | length > 0)
