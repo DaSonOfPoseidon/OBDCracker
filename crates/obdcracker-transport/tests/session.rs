@@ -2,7 +2,7 @@
 //! (`obdcracker-sim/tests/session.rs`) cover S3 itself.
 
 use std::thread::sleep;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use obdcracker_safety::{Policy, Protocol, Target};
 use obdcracker_transport::{ExtendedSession, Mock, Response, S3, SessionError, Timing};
@@ -200,6 +200,151 @@ fn a_wait_longer_than_the_margin_is_followed_by_a_new_10_03() {
             vec![0x22, 0xF1, 0x87],
             vec![0x10, 0x01]
         ]
+    );
+}
+
+// Like `Slow`, with the time each answer left the bus: `stamp` is given the instant the answer
+// reached the host.
+struct Stamped {
+    inner: Slow,
+    stamp: Box<dyn Fn(Instant) -> Option<Instant>>,
+}
+
+impl obdcracker_transport::Transport for Stamped {
+    fn send(
+        &mut self,
+        request: &obdcracker_safety::Approved,
+    ) -> Result<(), obdcracker_transport::Error> {
+        self.inner.send(request)
+    }
+
+    fn recv(&mut self, timeout: Duration) -> Result<Response, obdcracker_transport::Error> {
+        let reply = self.inner.recv(timeout)?;
+        let bus_time = (self.stamp)(Instant::now());
+        Ok(reply.at_bus_time(bus_time))
+    }
+}
+
+const SHORT_S3: S3 = S3 {
+    keepalive: Duration::from_millis(40),
+    timeout: Duration::from_millis(120),
+};
+const POSITIVE_ENTRY: &[u8] = &[0x50, 0x03, 0x00, 0x32, 0x01, 0xF4];
+
+// Enters the session, reads twice through a transport whose answers to the first read take about
+// 180 ms to arrive and are stamped by `stamp`, and returns what was sent.
+fn two_slow_reads(
+    third: &'static [u8],
+    stamp: impl Fn(Instant) -> Option<Instant> + 'static,
+) -> Vec<Vec<u8>> {
+    let mut adapter = Stamped {
+        inner: slow(&[
+            (0, POSITIVE_ENTRY),
+            (60, &[0x7F, 0x22, 0x78]),
+            (60, &[0x7F, 0x22, 0x78]),
+            (60, third),
+            (0, POSITIVE_ENTRY),
+            (0, &[0x62, 0xF1, 0x87, 0x41]),
+        ]),
+        stamp: Box::new(stamp),
+    };
+    let read = Policy::read_only()
+        .approve(Protocol::Uds, ENGINE, &[0x22, 0xF1, 0x87])
+        .unwrap();
+    let mut guard = ExtendedSession::enter(
+        &mut adapter,
+        &Policy::read_only(),
+        ENGINE,
+        PATIENT,
+        SHORT_S3,
+    )
+    .unwrap();
+    let _ = guard.exchange(&read);
+    guard.exchange(&read).unwrap();
+    drop(guard);
+    sent(&adapter.inner.inner)
+}
+
+fn session_kept() -> Vec<Vec<u8>> {
+    vec![
+        vec![0x10, 0x03],
+        vec![0x22, 0xF1, 0x87],
+        vec![0x22, 0xF1, 0x87],
+        vec![0x10, 0x01],
+    ]
+}
+
+fn session_entered_again() -> Vec<Vec<u8>> {
+    vec![
+        vec![0x10, 0x03],
+        vec![0x22, 0xF1, 0x87],
+        vec![0x10, 0x03],
+        vec![0x22, 0xF1, 0x87],
+        vec![0x10, 0x01],
+    ]
+}
+
+#[test]
+fn an_answer_that_left_the_bus_just_before_it_arrived_keeps_the_session() {
+    // About 180 ms from the request to the answer, longer than the 80 ms the session is trusted,
+    // but the transport says the answer left the bus 5 ms before it arrived.
+    let sent = two_slow_reads(&[0x62, 0xF1, 0x87, 0x41], |arrived| {
+        Some(arrived - Duration::from_millis(5))
+    });
+    assert_eq!(sent, session_kept());
+}
+
+#[test]
+fn an_answer_with_no_bus_time_is_timed_from_the_request() {
+    let sent = two_slow_reads(&[0x62, 0xF1, 0x87, 0x41], |_| None);
+    assert_eq!(sent, session_entered_again());
+}
+
+#[test]
+fn a_bus_time_in_the_future_is_ignored() {
+    let sent = two_slow_reads(&[0x62, 0xF1, 0x87, 0x41], |arrived| {
+        Some(arrived + Duration::from_secs(3600))
+    });
+    assert_eq!(sent, session_entered_again());
+}
+
+#[test]
+fn a_bus_time_before_the_request_is_ignored() {
+    let sent = two_slow_reads(&[0x62, 0xF1, 0x87, 0x41], |arrived| {
+        arrived.checked_sub(Duration::from_secs(2))
+    });
+    assert_eq!(sent, session_entered_again());
+}
+
+#[test]
+fn a_refusal_doesnt_restart_the_clock_from_its_bus_time() {
+    // The module refused the read, so what it said says nothing about the session.
+    let sent = two_slow_reads(&[0x7F, 0x22, 0x31], |arrived| {
+        Some(arrived - Duration::from_millis(5))
+    });
+    assert_eq!(sent, session_entered_again());
+}
+
+#[test]
+fn a_slow_session_entry_that_left_the_bus_just_before_it_arrived_needs_no_new_entry() {
+    let mut adapter = Stamped {
+        inner: slow(&[(100, POSITIVE_ENTRY)]),
+        stamp: Box::new(|arrived| Some(arrived - Duration::from_millis(5))),
+    };
+    let mut guard = ExtendedSession::enter(
+        &mut adapter,
+        &Policy::read_only(),
+        ENGINE,
+        PATIENT,
+        SHORT_S3,
+    )
+    .unwrap();
+    // The entry took 100 ms, longer than the 80 ms the session is trusted.
+    guard.keep_alive().unwrap();
+    drop(guard);
+    assert_eq!(
+        sent(&adapter.inner.inner),
+        [vec![0x10, 0x03], vec![0x10, 0x01]]
     );
 }
 
