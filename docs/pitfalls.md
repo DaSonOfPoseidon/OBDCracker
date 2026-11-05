@@ -290,6 +290,8 @@ Each entry names the class, what to check, and where it bit us.
 - **Handle every event before a limit rejects it.** The drain counted the 257th stale event and failed before looking
   at it, so a bus-off right behind 256 stale frames never latched, and the next send found an empty queue and wrote
   into the faulted bus. Latch, then apply the limit; and when the event is the fault, report the fault (PR #261, Codex).
+  Record the event too: the frame that trips the limit was read and is gone, so it goes into the log (or the `lost`
+  count) before the error returns (#264).
 - **A transfer ends on every path that leaves the peer able to go on.** An unconfirmed flow control, a `before_send`
   that refuses, or a failing port read returned an error but kept the reply window open, so the module's consecutive
   frames, sent after all, completed a reply from a transfer the caller was told had failed. Every error path out of a
@@ -298,6 +300,8 @@ Each entry names the class, what to check, and where it bit us.
   completing frame cleared everything kept for its source, though a single frame completes a *new* transfer and
   abandons the old one, whose frames it then erased. Report what the new frame abandons first, whatever the frame
   is (a malformed or empty one abandons too), and only then clear what the completion consumed (PR #261, Codex).
+  A bad frame that parses as a consecutive frame (wrong sequence number) ends its transfer too: report it and what it
+  ended as it arrives, not at the next request, as `docs/raw-can.md` promises (#263).
 
 ## Links and adapters
 

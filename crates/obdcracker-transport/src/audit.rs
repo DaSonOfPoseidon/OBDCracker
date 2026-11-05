@@ -11,10 +11,10 @@ use crate::{Error, LinkEvent, Response, Transport, hex};
 /// Wraps a transport and appends every request, and every reply the transport returns, to a JSON
 /// Lines file. Requests are logged before they are sent, so a send that crashes the program is
 /// still on record, and so are the flow control frames a transport sends while it receives
-/// ([`Transport::recv_logged`]), as `"dir":"tx"`. After every call it also logs the transport's [`LinkEvent`]s: commands to
-/// the adapter (`"dir":"cmd"`), reply lines nobody read before the next request
-/// (`"dir":"unread"`), status lines that ended a request, such as `NO DATA` (`"dir":"status"`),
-/// and how many events were lost (`"dir":"lost"`). Each line's `ts_ms` is
+/// ([`Transport::recv_logged`]), as `"dir":"tx"`. After every call it also logs the transport's
+/// [`LinkEvent`]s: commands to the adapter (`"dir":"cmd"`), reply lines nobody read before the
+/// next request (`"dir":"unread"`), status lines that ended a request, such as `NO DATA`
+/// (`"dir":"status"`), and how many events were lost (`"dir":"lost"`). Each line's `ts_ms` is
 /// when it happened (for a reply line, when the driver read it from the link), so an event can
 /// be logged after a later request. When dropped, it has the transport read what's left of the
 /// last request ([`Transport::settle`]) and logs that too, unless it was settled since.

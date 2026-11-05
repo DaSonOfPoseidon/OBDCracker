@@ -39,16 +39,19 @@ Before each request is written, `RawCan` sets the port's filters from the approv
 `0x7E8..=0x7EF`; a physical target its reply ID, at its width; a physical target with no known reply ID the 11-bit
 diagnostic range `0x700..=0x7FF` (or any 29-bit ID). A port with no hardware filtering may hand over more, as
 `RawCan` checks every frame itself. Frames left over from the last request are read and dropped first (and logged as
-unread lines), so a late reply can't answer the next request. If more than 256 are queued, the send fails instead:
-what is left could be a late reply.
+unread lines), so a late reply can't answer the next request. The drain reads at most 256 frames, then one more to see
+whether the queue is empty. If that 257th frame exists, the send fails with an adapter error and writes nothing,
+because what is left could be a late reply. The 257th frame is logged like the others. The frames behind it stay
+queued, and the next send drains them, so none of them answers a request.
 
 A receive overrun is an adapter error, and what was half-received is dropped: it never reads as a short reply. The
 overrun does not latch.
 
 A reply that never completed (a first frame and then silence), and a reply that completed but nobody took, are reported
 as unread lines when the next request starts, the transfer fails, or the transport is settled (`Audited` does that when
-it is dropped). A reply that the same module's next frame abandons (a new single or first frame, or a bad frame) is
-reported as soon as that frame arrives, so the reply that follows doesn't take its bytes with it. A failed `send`
+it is dropped). A reply that the same module's next frame abandons (a new single or first frame, or a bad frame, such as a
+consecutive frame with the wrong sequence number) is reported as soon as that frame arrives, together with the bad
+frame itself, so the reply that follows doesn't take its bytes with it. Frames kept from other modules stay kept. A failed `send`
 leaves no early answer to be returned by a later `recv`.
 
 A flow control that isn't confirmed, one the caller's `before_send` refuses, and a port read that fails (not a timeout)
