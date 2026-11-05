@@ -141,6 +141,16 @@ impl<P: CanPort> RawCan<P> {
         }
     }
 
+    fn report_partial(&mut self, source: u32) {
+        let (abandoned, kept): (Vec<_>, Vec<_>) = std::mem::take(&mut self.partial)
+            .into_iter()
+            .partition(|(from, ..)| *from == source);
+        self.partial = kept;
+        for (_, at, line) in abandoned {
+            self.push_event(LinkEvent::Unread { at, line });
+        }
+    }
+
     fn push_event(&mut self, event: LinkEvent) {
         if self.events.len() >= MAX_EVENTS {
             self.lost += 1;
@@ -193,12 +203,14 @@ impl<P: CanPort> RawCan<P> {
             // Whatever is still queued past the limit could be a late reply, which would read as
             // this request's.
             stale += 1;
+            // A bus fault past the limit still latches.
+            let seen = self.frame_of(event);
             if stale > MAX_STALE_FRAMES {
                 return Err(Error::Adapter(format!(
                     "more than {MAX_STALE_FRAMES} stale frames are queued on the CAN port"
                 )));
             }
-            match self.frame_of(event) {
+            match seen {
                 Ok(frame) => self.push_event(LinkEvent::Unread {
                     at: SystemTime::now(),
                     line: frame_line(&frame),
@@ -223,6 +235,13 @@ impl<P: CanPort> RawCan<P> {
             return None;
         }
         let outcome = open.window.feed(frame.id, &frame.data);
+        // A single or first frame abandons what the source had half-sent: that is reported now,
+        // or the completed reply would take its evidence with it.
+        if !matches!(outcome, Ok(FeedOutcome::Ignored))
+            && frame.data.first().is_some_and(|pci| pci >> 4 <= 1)
+        {
+            self.report_partial(frame.id);
+        }
         match outcome {
             Ok(FeedOutcome::Complete { source, payload }) => {
                 // The response is logged when it is returned.
@@ -414,8 +433,15 @@ impl<P: CanPort> Transport for RawCan<P> {
             let event = self.port.read(left)?;
             let frame = self.frame_of(event)?;
             if let Some(token) = self.accept(&frame) {
-                before_send(&token)?;
-                self.write(token.destination_id(), token.is_29_bit(), token.data())?;
+                // Without its flow control the module won't send the rest, and if the frame did
+                // go out, what follows isn't a transfer we can vouch for.
+                let sent = before_send(&token).and_then(|()| {
+                    self.write(token.destination_id(), token.is_29_bit(), token.data())
+                });
+                if let Err(e) = sent {
+                    self.abandon();
+                    return Err(e);
+                }
             }
         }
     }

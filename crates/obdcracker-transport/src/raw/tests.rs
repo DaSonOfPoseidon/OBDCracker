@@ -1239,3 +1239,67 @@ fn unfinished_frames_kept_for_the_log_are_bounded() {
     assert!(events.len() <= 65, "{}", events.len());
     assert!(matches!(events.last(), Some(LinkEvent::Lost(n)) if *n > 0));
 }
+
+#[test]
+fn a_bus_fault_past_the_stale_limit_still_latches() {
+    let mut can = raw(Fake::default());
+    for _ in 0..256 {
+        can.port.inbox.push_back(frame(0x123, &[1, 2, 3]));
+    }
+    can.port.inbox.push_back(PortEvent::BusOff);
+    let request = read_did(Target::Physical(0x7E0));
+    can.send(&request).unwrap_err();
+    can.send(&request).unwrap_err();
+    assert_eq!(can.port.log.len(), 0);
+}
+
+#[test]
+fn a_single_frame_after_a_first_frame_keeps_the_abandoned_bytes_for_the_log() {
+    let mut can = raw(Fake::default());
+    can.send(&read_did(Target::Physical(0x7E0))).unwrap();
+    can.port
+        .inbox
+        .push_back(frame(0x7E8, &[0x10, 20, 0, 1, 2, 3, 4, 5]));
+    can.port
+        .inbox
+        .push_back(frame(0x7E8, &[3, 0x62, 0xF1, 0x87]));
+    assert_eq!(can.recv(SHORT).unwrap().payload, vec![0x62, 0xF1, 0x87]);
+    let events = can.take_events();
+    assert!(
+        events.iter().any(
+            |e| matches!(e, LinkEvent::Unread { line, .. } if line == "7E8 10 14 00 01 02 03 04 05")
+        ),
+        "{events:?}"
+    );
+}
+
+#[test]
+fn a_failed_flow_control_write_ends_the_transfer() {
+    let mut fake = Fake::default();
+    // The request is write 0; the flow control is write 1.
+    fake.fail_write = Some(1);
+    let mut can = raw(fake);
+    can.send(&read_did(Target::Physical(0x7E0))).unwrap();
+    let (first, rest) = first_and_consecutive(&payload_of(20));
+    can.port.inbox.push_back(frame(0x7E8, &first));
+    can.recv(SHORT).unwrap_err();
+    // The module got the flow control after all and sends the rest.
+    for data in rest {
+        can.port.inbox.push_back(frame(0x7E8, &data));
+    }
+    assert_eq!(can.recv(SHORT), Err(Error::Timeout));
+}
+
+#[test]
+fn a_refused_before_send_ends_the_transfer() {
+    let mut can = raw(Fake::default());
+    can.send(&read_did(Target::Physical(0x7E0))).unwrap();
+    let (first, rest) = first_and_consecutive(&payload_of(20));
+    can.port.inbox.push_back(frame(0x7E8, &first));
+    can.recv_logged(SHORT, &mut |_| Err(Error::Adapter("log full".to_owned())))
+        .unwrap_err();
+    for data in rest {
+        can.port.inbox.push_back(frame(0x7E8, &data));
+    }
+    assert_eq!(can.recv(SHORT), Err(Error::Timeout));
+}
