@@ -238,8 +238,9 @@ impl std::error::Error for FingerprintError {}
 /// Where eight ECUs' long replies to one broadcast would overflow the adapter
 /// ([`Transport::broadcasts_can_overflow`], such as a plain ELM327), it first broadcasts mode 01
 /// PID 00 to learn which ECUs answer, then reads PIDs 04 and 06 from each of them in turn, by its
-/// own request ID, in ascending reply ID order. If the policy allows no request of its own to one
-/// of those ECUs, both are broadcast instead.
+/// own request ID, in ascending reply ID order. If nothing answers `01 00`, or the policy gives one
+/// of those ECUs no request of its own on its ISO 15765-4 reply ID (a vehicle profile leaves out
+/// its request ID, or gives it another reply ID), both are broadcast instead.
 pub fn fingerprint<T: Transport + ?Sized>(
     transport: &mut T,
     policy: &Policy,
@@ -335,8 +336,9 @@ pub fn fingerprint<T: Transport + ?Sized>(
 /// Where eight ECUs' replies to one broadcast would overflow the adapter
 /// ([`Transport::broadcasts_can_overflow`], such as a plain ELM327), this first broadcasts mode 01
 /// PID 00 to learn which ECUs answer, then asks each of them in turn by its own request ID, in
-/// ascending reply ID order. If nothing answers `01 00`, or the policy allows no request of its
-/// own to one of those ECUs, `09 02` is broadcast after the `01 00`. On any other transport it
+/// ascending reply ID order. If nothing answers `01 00`, or the policy gives one of those ECUs no
+/// request of its own on its ISO 15765-4 reply ID (a vehicle profile leaves out its request ID, or
+/// gives it another reply ID), `09 02` is broadcast after the `01 00`. On any other transport it
 /// sends the one `09 02` broadcast and nothing else. Every request is approved by `policy`
 /// before the first is sent.
 ///
@@ -458,8 +460,9 @@ impl LongRead {
     // The request's replies. `ecus` are the reply IDs of the ECUs known to answer.
     //
     // It is broadcast unless the transport can overflow on that, `ecus` isn't empty, and each ECU
-    // in it has an approved request of its own. Then each is asked in turn, in ascending reply ID
-    // order, and one that doesn't answer in time is left out, as in a broadcast.
+    // in it has an approved request of its own on its ISO 15765-4 reply ID. Then each is asked in
+    // turn, in ascending reply ID order, and one that doesn't answer in time is left out, as in a
+    // broadcast.
     pub(crate) fn read<T: Transport + ?Sized>(
         &self,
         transport: &mut T,

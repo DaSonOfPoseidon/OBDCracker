@@ -174,8 +174,9 @@ pub struct ModuleScan {
 /// Where eight ECUs' long replies to one broadcast would overflow the adapter
 /// ([`Transport::broadcasts_can_overflow`], such as a plain ELM327), mode 09 PID 0A and mode 03
 /// are read from each ECU that has answered so far in turn, by its own request ID, in ascending
-/// reply ID order. If the policy allows no request of its own to one of them, that read is
-/// the broadcast.
+/// reply ID order. If no ECU has answered, or the policy gives one of them no request of its own
+/// on its ISO 15765-4 reply ID (a vehicle profile leaves out its request ID, or gives it another
+/// reply ID), that read is the broadcast.
 pub fn scan<T: Transport + ?Sized>(
     transport: &mut T,
     policy: &Policy,
