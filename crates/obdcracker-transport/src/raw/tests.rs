@@ -1399,3 +1399,110 @@ fn a_failing_port_ends_the_transfer() {
     }
     assert_eq!(can.recv(SHORT), Err(Error::Timeout));
 }
+
+#[test]
+fn a_bad_consecutive_frame_reports_the_transfer_it_ends_right_away() {
+    let mut can = raw(Fake::default());
+    can.send(&read_did(Target::Physical(0x7E0))).unwrap();
+    can.port
+        .inbox
+        .push_back(frame(0x7E8, &[0x10, 20, 0, 1, 2, 3, 4, 5]));
+    // The wrong sequence number ends the transfer.
+    can.port
+        .inbox
+        .push_back(frame(0x7E8, &[0x23, 6, 7, 8, 9, 10, 11, 12]));
+    assert_eq!(can.recv(SHORT), Err(Error::Timeout));
+    // No later request and no settle: the log must have it now.
+    assert_eq!(
+        unread_lines(&mut can),
+        vec!["7E8 10 14 00 01 02 03 04 05", "7E8 23 06 07 08 09 0A 0B 0C"]
+    );
+    can.settle().unwrap();
+    assert_eq!(unread_lines(&mut can), Vec::<String>::new());
+}
+
+#[test]
+fn a_bad_frame_leaves_another_sources_kept_frames_alone() {
+    let mut can = raw(Fake::default());
+    can.send(&approve(Target::ObdFunctional, &[0x01, 0x00]))
+        .unwrap();
+    can.port
+        .inbox
+        .push_back(frame(0x7E9, &[0x10, 20, 0, 1, 2, 3, 4, 5]));
+    can.port
+        .inbox
+        .push_back(frame(0x7E8, &[0x10, 20, 0, 1, 2, 3, 4, 5]));
+    can.port
+        .inbox
+        .push_back(frame(0x7E8, &[0x23, 6, 7, 8, 9, 10, 11, 12]));
+    assert_eq!(can.recv(SHORT), Err(Error::Timeout));
+    assert_eq!(
+        unread_lines(&mut can),
+        vec!["7E8 10 14 00 01 02 03 04 05", "7E8 23 06 07 08 09 0A 0B 0C"]
+    );
+    can.settle().unwrap();
+    assert_eq!(unread_lines(&mut can), vec!["7E9 10 14 00 01 02 03 04 05"]);
+}
+
+#[test]
+fn a_stray_consecutive_frame_then_a_single_frame_keeps_the_stray_for_the_log() {
+    let mut can = raw(Fake::default());
+    can.send(&read_did(Target::Physical(0x7E0))).unwrap();
+    can.port
+        .inbox
+        .push_back(frame(0x7E8, &[0x21, 6, 7, 8, 9, 10, 11, 12]));
+    can.port
+        .inbox
+        .push_back(frame(0x7E8, &[3, 0x62, 0xF1, 0x87]));
+    assert_eq!(can.recv(SHORT).unwrap().payload, vec![0x62, 0xF1, 0x87]);
+    can.settle().unwrap();
+    assert_eq!(unread_lines(&mut can), vec!["7E8 21 06 07 08 09 0A 0B 0C"]);
+}
+
+#[test]
+fn every_stale_frame_is_accounted_for_when_the_drain_fails() {
+    let mut can = raw(Fake::default());
+    for _ in 0..257 {
+        can.port.inbox.push_back(frame(0x123, &[1, 2, 3]));
+    }
+    let result = can.send(&read_did(Target::Physical(0x7E0)));
+    assert!(matches!(result, Err(Error::Adapter(m)) if m.contains("stale")));
+    let events = can.take_events();
+    let unread = events
+        .iter()
+        .filter(|e| matches!(e, LinkEvent::Unread { .. }))
+        .count();
+    let lost = events
+        .iter()
+        .map(|e| match e {
+            LinkEvent::Lost(n) => *n,
+            _ => 0,
+        })
+        .sum::<usize>();
+    assert_eq!(unread + lost, 257);
+    // The frame behind the limit is still in the queue for the next attempt.
+    assert_eq!(can.port.inbox.len(), 0);
+}
+
+#[test]
+fn a_leftover_reply_past_the_limit_cannot_answer_the_next_request() {
+    let mut can = raw(Fake::default());
+    for _ in 0..300 {
+        can.port.inbox.push_back(frame(0x123, &[1, 2, 3]));
+    }
+    can.port
+        .inbox
+        .push_back(frame(0x7E8, &[3, 0x62, 0xF1, 0x87]));
+    let request = read_did(Target::Physical(0x7E0));
+    assert!(can.send(&request).is_err());
+    assert_eq!(can.port.log.len(), 0);
+    can.take_events();
+    // The retry drains the rest, the late reply included, instead of returning it.
+    can.send(&request).unwrap();
+    assert_eq!(can.recv(SHORT), Err(Error::Timeout));
+    assert!(
+        unread_lines(&mut can)
+            .iter()
+            .any(|line| line == "7E8 03 62 F1 87"),
+    );
+}
