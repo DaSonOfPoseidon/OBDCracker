@@ -4,7 +4,7 @@
 use std::fmt;
 use std::time::{Duration, SystemTime};
 
-use obdcracker_safety::Approved;
+use obdcracker_safety::{Approved, ApprovedFlowControl};
 
 mod audit;
 pub mod discover;
@@ -69,6 +69,28 @@ pub trait Transport {
     fn send(&mut self, request: &Approved) -> Result<(), Error>;
     /// Waits up to `timeout` for the next reply.
     fn recv(&mut self, timeout: Duration) -> Result<Response, Error>;
+    /// Like [`Transport::recv`], for a backend that puts frames on the bus while it receives:
+    /// the ISO-TP flow control frames that a multi-frame reply needs ([`ApprovedFlowControl`]).
+    /// The backend **must** call `before_send` with each token before it sends that frame, and
+    /// send it only if that returns `Ok`. [`Audited`] logs the frame there, so an
+    /// unwritable log stops it, as for a request. Whatever `before_send` returns as an error
+    /// must be returned as the error of this call.
+    ///
+    /// The default ignores `before_send` and calls [`Transport::recv`], for a transport that
+    /// sends nothing under `recv`, such as the ELM327 driver, whose adapter sends its own flow
+    /// control. A transport that wraps another must forward this to it.
+    ///
+    /// # Errors
+    ///
+    /// As for [`Transport::recv`], or the error `before_send` returned.
+    fn recv_logged(
+        &mut self,
+        timeout: Duration,
+        before_send: &mut dyn FnMut(&ApprovedFlowControl) -> Result<(), Error>,
+    ) -> Result<Response, Error> {
+        let _ = before_send;
+        self.recv(timeout)
+    }
     /// With `Some(wait)`, waits up to `wait` for each reply, or as near to it as the adapter
     /// can, until called again with `None`, which restores the usual wait. An adapter that
     /// learns shorter waits from how fast modules answer (the ELM327's adaptive timing) stops
