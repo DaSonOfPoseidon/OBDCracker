@@ -373,7 +373,30 @@ fn a_flood_of_other_ids_cannot_hold_a_read_past_its_deadline() {
     let began = Instant::now();
     assert_eq!(port.read(Duration::from_millis(30)), Err(Error::Timeout));
     assert!(began.elapsed() < Duration::from_secs(2));
-    // A read that must not wait still comes back.
+    // A read that must not wait still comes back, but not as an empty queue: it hasn't run dry.
+    let err = port.read(Duration::ZERO).unwrap_err();
+    assert!(matches!(err, Error::Adapter(_)), "{err}");
+}
+
+#[test]
+fn a_drain_that_gives_up_is_not_an_empty_queue() {
+    let fake = FakeUsb::new();
+    let mut port = open_port(&fake);
+    port.set_filters(&[Filter {
+        id: 0x7E8,
+        mask: 0x7FF,
+        extended: false,
+    }])
+    .unwrap();
+    // More other-ID frames than a read polls, then a stale reply behind them.
+    for _ in 0..5000 {
+        fake.queue(heard(0x123, &[1]));
+    }
+    fake.queue(heard(0x7E8, &[0x62]));
+    let err = port.read(Duration::ZERO).unwrap_err();
+    assert!(matches!(err, Error::Adapter(_)), "{err}");
+    // The port isn't broken; the next drain goes on and reaches the stale frame.
+    assert_eq!(port.read(Duration::ZERO).unwrap(), frame(0x7E8, &[0x62]));
     assert_eq!(port.read(Duration::ZERO), Err(Error::Timeout));
 }
 

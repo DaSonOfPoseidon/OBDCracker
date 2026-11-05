@@ -110,6 +110,9 @@ any path, and its session sends nothing at all, flow control included.
   receive overrun is reported. The device's own overflow flag (on any frame) is a receive overrun too, delivered before
   the frame it rode on. 16 USB reads are kept submitted, so the OS queues frames while the host is busy.
 - Every read checks its deadline after each frame, so a flood of other IDs can't hold it past the deadline.
+  A read that must not wait polls at most 4096 packets past its deadline; if the device hasn't run dry by then it fails
+  with an adapter error instead of reporting an empty queue, so a request is never sent while a stale reply may still sit
+  behind a flood (the next drain goes on from there).
 - A read that must not wait (the drain before a request) takes what the OS has already handed over. A frame that
   reached the USB host controller a moment before may be handed over a moment after, so the drain can miss it: that is the
   one late-reply window it can't close, and the transport's reply window still checks its ID, width and shape.

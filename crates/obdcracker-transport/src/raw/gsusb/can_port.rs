@@ -389,7 +389,18 @@ impl<U: Usb> CanPort for GsUsbPort<U> {
             if left.is_zero() {
                 polled_past += 1;
                 if polled_past > MAX_POLLED_PAST_DEADLINE {
-                    return Err(Error::Timeout);
+                    // A read that was never to wait is a drain: giving up before the device
+                    // ran dry must not read as an empty queue, or a stale reply behind the
+                    // flood could answer the next request. Not a fault of the port: the next
+                    // drain goes on from here.
+                    return Err(if timeout.is_zero() {
+                        Error::Adapter(format!(
+                            "more than {MAX_POLLED_PAST_DEADLINE} frames from other IDs are queued \
+                             on the CAN port: it can't be drained"
+                        ))
+                    } else {
+                        Error::Timeout
+                    });
                 }
             }
             if !self.pump(left)? {

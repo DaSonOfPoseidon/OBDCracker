@@ -622,6 +622,24 @@ fn a_multi_frame_request_sends_each_frame_after_the_last_was_confirmed() {
 }
 
 #[test]
+fn a_request_is_not_sent_while_a_stale_reply_hides_behind_a_flood() {
+    let fake = FakeUsb::new();
+    busy_bus(&fake);
+    let mut session = open(&fake, &options(Mode::Active)).unwrap();
+    // The first request leaves its filter on the reply ID; then other IDs flood in ahead of a
+    // late reply to it.
+    session.send(&read_did()).unwrap();
+    let written = fake.bulk_out().len();
+    for _ in 0..5000 {
+        fake.queue(heard(0x123, &[1]));
+    }
+    fake.queue(heard(0x7E8, &[0x05, 0x62, 0xF1, 0x87, 0x99, 0x99]));
+    let err = session.send(&read_did()).unwrap_err();
+    assert!(err.to_string().contains("drained"), "{err}");
+    assert_eq!(fake.bulk_out().len(), written, "nothing was sent");
+}
+
+#[test]
 fn an_unacknowledged_request_is_an_error_that_stops_later_sends() {
     let fake = FakeUsb::new();
     busy_bus(&fake);
