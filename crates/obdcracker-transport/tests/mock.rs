@@ -25,14 +25,8 @@ fn records_each_sent_request() {
 #[test]
 fn returns_queued_responses_in_order_then_times_out() {
     let mut mock = Mock::default();
-    let first = Response {
-        source: 0x7E8,
-        payload: vec![0x41, 0x0C, 0x1A, 0xF8],
-    };
-    let second = Response {
-        source: 0x7E9,
-        payload: vec![0x41, 0x0C, 0x00, 0x00],
-    };
+    let first = Response::new(0x7E8, vec![0x41, 0x0C, 0x1A, 0xF8]);
+    let second = Response::new(0x7E9, vec![0x41, 0x0C, 0x00, 0x00]);
     mock.queue(first.clone());
     mock.queue(second.clone());
     assert_eq!(mock.recv(WAIT), Ok(first));

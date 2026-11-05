@@ -398,14 +398,8 @@ mod requests {
         assert_eq!(
             replies,
             [
-                Response {
-                    source: 0x7E8,
-                    payload: VIN.to_vec()
-                },
-                Response {
-                    source: 0x7E9,
-                    payload: VIN.to_vec()
-                },
+                Response::new(0x7E8, VIN.to_vec()),
+                Response::new(0x7E9, VIN.to_vec()),
             ]
         );
         assert_eq!(elm.link().elm.sent, [(0x7DF, vec![0x09, 0x02])]);
@@ -504,10 +498,7 @@ mod requests {
         let reply = elm.recv(Duration::from_secs(1)).unwrap();
         assert_eq!(
             reply,
-            Response {
-                source: 0x17FE_0076,
-                payload: b"\x62\xF1\x874G0907468AD".to_vec(),
-            }
+            Response::new(0x17FE_0076, b"\x62\xF1\x874G0907468AD".to_vec())
         );
         while elm.recv(Duration::from_secs(1)).is_ok() {}
         elm.send(&read(Target::Physical(0x710))).unwrap();
@@ -630,10 +621,7 @@ mod requests {
         elm.send(&setup).unwrap();
         assert_eq!(
             elm.recv(Duration::from_secs(1)).unwrap(),
-            Response {
-                source: 0x25F,
-                payload: vec![0x00, 0xD0, 0x00, 0x03, 0x40, 0x07, 0x01],
-            }
+            Response::new(0x25F, vec![0x00, 0xD0, 0x00, 0x03, 0x40, 0x07, 0x01])
         );
         while elm.recv(Duration::from_secs(1)).is_ok() {}
         let channel = policy
@@ -643,10 +631,7 @@ mod requests {
             .unwrap();
         assert_eq!(
             elm.recv(Duration::from_secs(1)).unwrap(),
-            Response {
-                source: 0x300,
-                payload: vec![0xA8],
-            }
+            Response::new(0x300, vec![0xA8])
         );
         while elm.recv(Duration::from_secs(1)).is_ok() {}
         elm.send(&approve(Target::Physical(0x7E0), &[0x09, 0x02]))
@@ -4064,5 +4049,375 @@ mod paced_reads {
             }
         };
         assert!(err.contains("BUFFER FULL"), "{err}");
+    }
+}
+
+// When a reply left the bus, bounded from when the adapter finished printing it
+// (docs/elm327.md#when-a-reply-left-the-bus).
+mod bus_time {
+    use std::collections::VecDeque;
+
+    use obdcracker_transport::{ExtendedSession, S3};
+
+    use super::*;
+
+    const ENGINE: Target = Target::Physical(0x7E0);
+    const SLOW_READ: &[u8] = &[0x22, 0xF1, 0x87];
+    const QUICK_READ: &[u8] = &[0x22, 0xF1, 0x88];
+
+    // A link that prints at `rate` bytes a second, as a serial line does, and says its byte rate
+    // is `declared`. The adapter's modules put their answer to a request in `slow` on the bus
+    // `delay` after it was sent; every other request is answered at once. `host_delay` is added
+    // to every byte, as USB latency would.
+    struct Throttled {
+        inner: FakeLink,
+        declared: Option<u32>,
+        rate: u32,
+        host_delay: Duration,
+        // The most bytes one read hands over.
+        chunk: usize,
+        slow: Vec<(Vec<u8>, Duration)>,
+        line: Vec<u8>,
+        queue: VecDeque<(Instant, u8)>,
+        bus_left: Option<Instant>,
+    }
+
+    impl Throttled {
+        fn new(elm: FakeElm, declared: Option<u32>, rate: u32) -> Self {
+            Self {
+                inner: FakeLink::new(elm),
+                declared,
+                rate,
+                host_delay: Duration::ZERO,
+                chunk: usize::MAX,
+                slow: Vec::new(),
+                line: Vec::new(),
+                queue: VecDeque::new(),
+                bus_left: None,
+            }
+        }
+
+        // The answer to `request` leaves the bus `delay` after it is sent.
+        fn answering_after(mut self, request: &[u8], delay: Duration) -> Self {
+            self.slow
+                .push((hex(request).replace(' ', "").into_bytes(), delay));
+            self
+        }
+    }
+
+    impl Link for Throttled {
+        fn write_all(&mut self, bytes: &[u8], driver: Driver) -> io::Result<()> {
+            self.inner.write_all(bytes, driver)?;
+            let now = Instant::now();
+            let printed = self.inner.elm.read(usize::MAX);
+            self.line.extend_from_slice(bytes);
+            if !bytes.contains(&b'\r') {
+                self.queue
+                    .extend(printed.into_iter().map(|byte| (now, byte)));
+                return Ok(());
+            }
+            let line = std::mem::take(&mut self.line);
+            let delay = self
+                .slow
+                .iter()
+                .find(|(request, _)| line.strip_suffix(b"\r") == Some(request))
+                .map(|&(_, delay)| delay);
+            let left = now + delay.unwrap_or_default();
+            if delay.is_some() {
+                self.bus_left = Some(left);
+            }
+            for (n, byte) in printed.into_iter().enumerate() {
+                let bytes = u64::try_from(n + 1).unwrap();
+                let print_time = Duration::from_nanos(1_000_000_000 * bytes / u64::from(self.rate));
+                self.queue
+                    .push_back((left + self.host_delay + print_time, byte));
+            }
+            Ok(())
+        }
+
+        fn read(
+            &mut self,
+            buf: &mut [u8],
+            timeout: Duration,
+            _driver: Driver,
+        ) -> io::Result<usize> {
+            let give_up = Instant::now() + timeout;
+            loop {
+                let now = Instant::now();
+                let mut n = 0;
+                while n < buf.len().min(self.chunk)
+                    && self.queue.front().is_some_and(|&(at, _)| at <= now)
+                {
+                    buf[n] = self.queue.pop_front().unwrap().1;
+                    n += 1;
+                }
+                if n > 0 || now >= give_up {
+                    return Ok(n);
+                }
+                let next = self
+                    .queue
+                    .front()
+                    .map_or(give_up, |&(at, _)| at.min(give_up));
+                std::thread::sleep(
+                    next.saturating_duration_since(now)
+                        .max(Duration::from_millis(1)),
+                );
+            }
+        }
+
+        fn kind(&self) -> LinkKind {
+            LinkKind::UsbSerial
+        }
+
+        fn byte_rate(&self) -> Option<u32> {
+            self.declared
+        }
+    }
+
+    impl std::fmt::Debug for Throttled {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.debug_struct("Throttled").finish_non_exhaustive()
+        }
+    }
+
+    // An engine that answers a read of F187 with `answer` filler bytes, after response-pending
+    // if `pending`.
+    fn engine(answer: usize, pending: bool) -> FakeElm {
+        FakeElm::new(Box::new(move |header, request| {
+            if header != 0x7E0 {
+                return Vec::new();
+            }
+            let reply = match request {
+                [0x10, 0x03] => vec![0x50, 0x03, 0x00, 0x32, 0x01, 0xF4],
+                [0x10, 0x01] => vec![0x50, 0x01, 0x00, 0x32, 0x01, 0xF4],
+                [0x3E, 0x00] => vec![0x7E, 0x00],
+                [0x22, 0xF1, 0x87] => {
+                    let mut reply = vec![0x62, 0xF1, 0x87];
+                    reply.extend(std::iter::repeat_n(0x41, answer));
+                    let mut replies = Vec::new();
+                    if pending {
+                        replies.push((0x7E8, vec![0x7F, 0x22, 0x78]));
+                    }
+                    replies.push((0x7E8, reply));
+                    return replies;
+                }
+                [0x22, 0xF1, 0x88] => vec![0x62, 0xF1, 0x88, 0x42],
+                _ => return Vec::new(),
+            };
+            vec![(0x7E8, reply)]
+        }))
+    }
+
+    // Connects at full speed, so setup doesn't take as long as the test's replies, then prints at
+    // the link's rate.
+    fn connect_throttled(mut link: Throttled) -> Elm<Throttled> {
+        let rate = std::mem::replace(&mut link.rate, 1_000_000);
+        let mut elm = Elm::connect(link).unwrap();
+        elm.link_mut().rate = rate;
+        elm
+    }
+
+    // The answer to a read of F187, when the request was sent, and when the answer left the bus.
+    fn one_read(link: Throttled) -> (Response, Instant, Instant) {
+        let mut elm = connect_throttled(link);
+        let sent = Instant::now();
+        let replies = exchange(
+            &mut elm,
+            &approve(ENGINE, SLOW_READ),
+            Expect::Module(0x7E8),
+            Elm::<Throttled>::timing(),
+        )
+        .unwrap();
+        let left = elm.link().bus_left.unwrap();
+        (replies.into_iter().next().unwrap(), sent, left)
+    }
+
+    const S3_BOUNDS: S3 = S3 {
+        keepalive: Duration::from_millis(500),
+        timeout: Duration::from_millis(1500),
+    };
+
+    // Reads F187, then F188 straight after, through a session that trusts the module for 1 s, and
+    // returns what was sent.
+    fn reads_in_a_session(link: Throttled) -> Vec<Vec<u8>> {
+        let mut elm = connect_throttled(link);
+        let mut session = ExtendedSession::enter(
+            &mut elm,
+            &Policy::read_only(),
+            ENGINE,
+            Elm::<Throttled>::timing(),
+            S3_BOUNDS,
+        )
+        .unwrap();
+        session.exchange(&approve(ENGINE, SLOW_READ)).unwrap();
+        session.exchange(&approve(ENGINE, QUICK_READ)).unwrap();
+        drop(session);
+        elm.link()
+            .inner
+            .elm
+            .sent
+            .iter()
+            .map(|(_, payload)| payload.clone())
+            .collect()
+    }
+
+    #[test]
+    fn a_slow_module_on_a_fast_link_keeps_the_session() {
+        // The answer left the bus 1.4 s after the request and printed within milliseconds: the
+        // session was restarted a moment ago, not 1.4 s ago.
+        let link = Throttled::new(engine(8, false), Some(11_520), 11_520)
+            .answering_after(SLOW_READ, Duration::from_millis(1400));
+        assert_eq!(
+            reads_in_a_session(link),
+            [
+                vec![0x10, 0x03],
+                SLOW_READ.to_vec(),
+                QUICK_READ.to_vec(),
+                vec![0x10, 0x01]
+            ]
+        );
+    }
+
+    #[test]
+    fn a_long_answer_printed_at_the_links_full_speed_enters_the_session_again() {
+        // The answer left the bus at once and took 1.4 s to print: the module's S3 ran from the
+        // start, so trusting it from the end of the print would be wrong.
+        let link = Throttled::new(engine(700, false), Some(2000), 2000)
+            .answering_after(SLOW_READ, Duration::from_millis(1));
+        assert_eq!(
+            reads_in_a_session(link),
+            [
+                vec![0x10, 0x03],
+                SLOW_READ.to_vec(),
+                vec![0x10, 0x03],
+                QUICK_READ.to_vec(),
+                vec![0x10, 0x01]
+            ]
+        );
+    }
+
+    // A read of F187 whose answer has `filler` bytes, left the bus `wait_ms` after the request,
+    // and is printed at `rate` bytes a second by a link that says it carries `declared`, with
+    // `host_ms` of USB latency: the bus time is between the request and the answer leaving.
+    fn assert_bus_time_bounded(
+        declared: u32,
+        rate: u32,
+        host_ms: u64,
+        filler: usize,
+        wait_ms: u64,
+    ) {
+        let mut link = Throttled::new(engine(filler, false), Some(declared), rate)
+            .answering_after(SLOW_READ, Duration::from_millis(wait_ms));
+        link.host_delay = Duration::from_millis(host_ms);
+        let (reply, sent, left) = one_read(link);
+        let bus_time = reply.bus_time.unwrap();
+        assert!(bus_time <= left, "after it left the bus");
+        assert!(bus_time >= sent, "before the request was sent");
+    }
+
+    #[test]
+    fn a_slow_module_on_a_fast_link_is_timed_before_it_left_the_bus() {
+        assert_bus_time_bounded(11_520, 11_520, 0, 8, 300);
+    }
+
+    #[test]
+    fn usb_latency_doesnt_push_the_bus_time_past_when_it_left() {
+        assert_bus_time_bounded(11_520, 11_520, 60, 8, 300);
+        assert_bus_time_bounded(11_520, 11_520, 60, 8, 1);
+    }
+
+    #[test]
+    fn a_long_answer_printed_at_full_speed_is_timed_no_earlier_than_the_request() {
+        assert_bus_time_bounded(2000, 2000, 0, 300, 1);
+    }
+
+    #[test]
+    fn an_adapter_printing_at_half_its_rate_is_still_timed_before_it_left_the_bus() {
+        assert_bus_time_bounded(2000, 1000, 0, 300, 1);
+        assert_bus_time_bounded(2000, 1000, 0, 300, 300);
+    }
+
+    #[test]
+    fn a_short_answer_on_a_slow_link_is_timed_before_it_left_the_bus() {
+        assert_bus_time_bounded(960, 960, 0, 8, 1);
+    }
+
+    #[test]
+    fn a_byte_rate_of_one_is_timed_no_earlier_than_the_request() {
+        assert_bus_time_bounded(1, 11_520, 0, 8, 1);
+    }
+
+    #[test]
+    fn a_reply_read_late_is_timed_from_when_it_could_have_arrived() {
+        // The module answered at once, but nothing read the link for 600 ms: the bytes sat in the
+        // port's buffer, so when they were read says nothing about when they arrived.
+        let link = Throttled::new(engine(8, false), Some(11_520), 11_520)
+            .answering_after(SLOW_READ, Duration::from_millis(1));
+        let mut elm = connect_throttled(link);
+        let sent = Instant::now();
+        elm.send(&approve(ENGINE, SLOW_READ)).unwrap();
+        std::thread::sleep(Duration::from_millis(600));
+        let reply = elm.recv(Duration::from_secs(5)).unwrap();
+        let left = elm.link().bus_left.unwrap();
+        let bus_time = reply.bus_time.unwrap();
+        assert!(bus_time <= left, "after it left the bus");
+        assert!(bus_time >= sent);
+    }
+
+    #[test]
+    fn a_reply_read_late_in_small_pieces_is_timed_from_when_it_could_have_arrived() {
+        // Every read hands over 16 bytes, so the first read of the late caller leaves older bytes
+        // in the buffer: it doesn't show that nothing is left.
+        let mut link = Throttled::new(engine(100, false), Some(11_520), 11_520)
+            .answering_after(SLOW_READ, Duration::from_millis(1));
+        link.chunk = 16;
+        let mut elm = connect_throttled(link);
+        let sent = Instant::now();
+        elm.send(&approve(ENGINE, SLOW_READ)).unwrap();
+        std::thread::sleep(Duration::from_millis(600));
+        let reply = elm.recv(Duration::from_secs(5)).unwrap();
+        let left = elm.link().bus_left.unwrap();
+        let bus_time = reply.bus_time.unwrap();
+        assert!(bus_time <= left, "after it left the bus");
+        assert!(bus_time >= sent);
+    }
+
+    #[test]
+    fn a_short_answer_is_timed_close_to_when_it_left_the_bus() {
+        let link = Throttled::new(engine(8, false), Some(11_520), 11_520)
+            .answering_after(SLOW_READ, Duration::from_millis(600));
+        let (reply, _, left) = one_read(link);
+        let bus_time = reply.bus_time.unwrap();
+        assert!(bus_time <= left);
+        assert!(
+            left - bus_time < Duration::from_millis(400),
+            "{:?}",
+            left - bus_time
+        );
+    }
+
+    #[test]
+    fn the_answer_after_response_pending_is_the_one_timed() {
+        let link = Throttled::new(engine(8, true), Some(11_520), 11_520)
+            .answering_after(SLOW_READ, Duration::from_millis(600));
+        let (reply, _, left) = one_read(link);
+        assert_eq!(reply.payload[0], 0x62);
+        assert!(reply.bus_time.unwrap() <= left);
+    }
+
+    #[test]
+    fn a_link_with_no_known_byte_rate_gives_no_bus_time() {
+        let link = Throttled::new(engine(8, false), None, 11_520)
+            .answering_after(SLOW_READ, Duration::from_millis(1));
+        let (reply, _, _) = one_read(link);
+        assert_eq!(reply.bus_time, None);
+    }
+
+    #[test]
+    fn a_zero_byte_rate_gives_no_bus_time() {
+        let link = Throttled::new(engine(8, false), Some(0), 11_520)
+            .answering_after(SLOW_READ, Duration::from_millis(1));
+        let (reply, _, _) = one_read(link);
+        assert_eq!(reply.bus_time, None);
     }
 }

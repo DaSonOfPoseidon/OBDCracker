@@ -7,7 +7,7 @@ mod fake_elm;
 use obdcracker_safety::{Policy, Protocol, Target};
 use obdcracker_sim::SimBus;
 use obdcracker_transport::elm::Elm;
-use obdcracker_transport::{Error, Expect, Response, Transport, exchange};
+use obdcracker_transport::{Error, Expect, Transport, exchange};
 
 use fake_elm::{FakeElm, FakeLink};
 
@@ -29,8 +29,8 @@ fn a7_behind_an_elm() -> Elm<FakeLink> {
             .unwrap();
         car.send(&request).unwrap();
         let mut replies = Vec::new();
-        while let Ok(Response { source, payload }) = car.recv(std::time::Duration::ZERO) {
-            replies.push((source, payload));
+        while let Ok(reply) = car.recv(std::time::Duration::ZERO) {
+            replies.push((reply.source, reply.payload));
         }
         replies
     }));

@@ -87,10 +87,7 @@ fn engine() -> UdsModule {
 }
 
 fn reply(payload: &[u8]) -> Vec<Response> {
-    vec![Response {
-        source: 0x7E8,
-        payload: payload.to_vec(),
-    }]
+    vec![Response::new(0x7E8, payload.to_vec())]
 }
 
 // An engine with 0600 (any session), 0601 (extended only) and 0602 (security access needed);

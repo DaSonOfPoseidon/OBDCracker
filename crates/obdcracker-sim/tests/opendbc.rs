@@ -149,10 +149,7 @@ fn fingerprint_reads_real_part_numbers() {
                     did::SOFTWARE_VERSION => single(did::SOFTWARE_VERSION, &payload[16..20]),
                     _ => vec![0x7F, 0x22, 0x31],
                 };
-                Some(Response {
-                    source: response_id,
-                    payload,
-                })
+                Some(Response::new(response_id, payload))
             },
             replies: VecDeque::new(),
         };
@@ -516,10 +513,7 @@ fn fingerprint_reads_real_ford_software_numbers() {
                 } else {
                     vec![0x7F, 0x22, 0x31]
                 };
-                Some(Response {
-                    source: response_id,
-                    payload,
-                })
+                Some(Response::new(response_id, payload))
             },
             replies: VecDeque::new(),
         };
@@ -576,10 +570,8 @@ impl Transport for Refuser {
         self.sent
             .push((request.target(), request.payload().to_vec()));
         if request.payload().first() == Some(&0x22) {
-            self.replies.push_back(Response {
-                source: self.response_id,
-                payload: vec![0x7F, 0x22, 0x31],
-            });
+            self.replies
+                .push_back(Response::new(self.response_id, vec![0x7F, 0x22, 0x31]));
         }
         Ok(())
     }

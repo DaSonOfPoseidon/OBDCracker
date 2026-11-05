@@ -96,12 +96,16 @@ values are safe, they only change what's sent: with `keepalive` at or above `tim
 and the session is entered again once `timeout` has passed; a zero `keepalive` sends `TesterPresent` on every call; a
 zero `timeout` enters the session again before every request.
 
-Time is measured from just before each request the module accepted was sent. The module restarts S3 when it has sent
-its answer, which is somewhere between then and when the answer arrives, and an ELM adapter can take seconds to print
-a long one. So an answer that took longer than the margin is followed by a new `10 03` before the next request, even
-though response-pending replies kept the session alive meanwhile. That costs session state, never a read sent into the
-default session. A refused or unanswered request doesn't restart the clock: after a refused `10 03` the module is
-still in the default session, and a `3E 00` would keep it there. Only a positive answer counts.
+Time is measured from just before each request the module accepted was sent, or from later if the transport can
+bound when the answer left the bus (`Response::bus_time`). The module restarts S3 when it has sent its answer, which is
+somewhere between the request and when the answer arrives, and an ELM adapter can take seconds to print a long one.
+Without a bus time, an answer that took longer than the margin is followed by a new `10 03` before the next request,
+even though response-pending replies kept the session alive meanwhile. The ELM driver gives a bus time on a serial
+link, a lower bound that is never later than the answer left the bus
+([`docs/elm327.md#when-a-reply-left-the-bus`](elm327.md#when-a-reply-left-the-bus)). The session ignores a bus time
+before the request or after now. A late `10 03` costs session state, never a read sent into the default session. A
+refused or unanswered request doesn't restart the clock: after a refused `10 03` the module is still in the default
+session, and a `3E 00` would keep it there. Only a positive answer counts.
 
 The module's positive answer to `10 03` gives its P2 and P2* for the session. Where they're longer than ISO 14229-2's
 defaults (50 ms, 5 s), the session adds the difference to the caller's `Timing`, keeping any allowance the caller made

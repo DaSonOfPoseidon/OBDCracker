@@ -69,10 +69,7 @@ const TIMING: Timing = Timing {
 };
 
 fn reply(source: u32, payload: &[u8]) -> Response {
-    Response {
-        source,
-        payload: payload.to_vec(),
-    }
+    Response::new(source, payload.to_vec())
 }
 
 // 0x70E..=0x712, replies at +0x6A.

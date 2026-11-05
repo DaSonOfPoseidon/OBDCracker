@@ -329,10 +329,10 @@ impl Transport for SimBus {
             Target::Tp20Setup(address) => {
                 if let Some(module) = self.tp20.iter_mut().find(|m| m.address == address) {
                     module.open();
-                    self.replies.push_back(Response {
-                        source: tp20::setup_reply_id(address),
-                        payload: setup_reply(module.channel).to_vec(),
-                    });
+                    self.replies.push_back(Response::new(
+                        tp20::setup_reply_id(address),
+                        setup_reply(module.channel).to_vec(),
+                    ));
                 }
                 return Ok(());
             }
@@ -344,7 +344,7 @@ impl Transport for SimBus {
                 if let Some(module) = module {
                     let source = module.channel.receive_id;
                     for payload in module.hear(request.payload()) {
-                        self.replies.push_back(Response { source, payload });
+                        self.replies.push_back(Response::new(source, payload));
                     }
                 }
                 return Ok(());
@@ -363,10 +363,8 @@ impl Transport for SimBus {
                 continue;
             }
             for payload in ecu.answer(request.payload(), functional) {
-                self.replies.push_back(Response {
-                    source: ecu.response_id,
-                    payload,
-                });
+                self.replies
+                    .push_back(Response::new(ecu.response_id, payload));
             }
         }
         Ok(())

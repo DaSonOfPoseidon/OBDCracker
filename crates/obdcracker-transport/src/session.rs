@@ -131,7 +131,7 @@ pub struct Left {
 ///
 /// let mut adapter = Mock::default();
 /// for payload in [&[0x50, 0x03, 0x00, 0x32, 0x01, 0xF4][..], &[0x62, 0x06, 0x00, 0x01]] {
-///     adapter.queue(Response { source: 0x7E8, payload: payload.to_vec() });
+///     adapter.queue(Response::new(0x7E8, payload.to_vec()));
 /// }
 /// let policy = Policy::read_only();
 /// let engine = Target::Physical(0x7E0);
@@ -154,7 +154,8 @@ pub struct ExtendedSession<'a, T: Transport + ?Sized> {
     base: Timing,
     timing: Timing,
     s3: S3,
-    // Just before the last request the module accepted was sent.
+    // When the module restarted S3 for the last request it accepted: no later than the answer left
+    // the bus, and no earlier than just before the request was sent.
     last: Instant,
     ended: bool,
 }
@@ -276,7 +277,7 @@ impl<'a, T: Transport + ?Sized> ExtendedSession<'a, T> {
         let (started, reply) = self.send(request)?;
         // Only a positive answer counts: at worst the next request re-enters needlessly.
         if response::positive(request.payload()[0], &reply.payload).is_ok() {
-            self.last = started;
+            self.last = restarted(started, reply.bus_time);
         }
         Ok(reply)
     }
@@ -327,7 +328,7 @@ impl<'a, T: Transport + ?Sized> ExtendedSession<'a, T> {
                         Err(_) => return Err(SessionError::Refused(reply.payload)),
                     }
                 }
-                self.last = started;
+                self.last = restarted(started, reply.bus_time);
                 Ok(())
             }
             Err(_) => Err(SessionError::Refused(reply.payload)),
@@ -347,6 +348,16 @@ impl<'a, T: Transport + ?Sized> ExtendedSession<'a, T> {
             self.timing,
         )?;
         Ok((started, replies.remove(0)))
+    }
+}
+
+// When the module restarted S3 for a request sent at `started`: when the answer left the bus if
+// the transport bounds that (`Response::bus_time`), else the request. A time before the
+// request or after now can't be right, and is ignored.
+fn restarted(started: Instant, bus_time: Option<Instant>) -> Instant {
+    match bus_time {
+        Some(at) if at > started && at <= Instant::now() => at,
+        _ => started,
     }
 }
 
