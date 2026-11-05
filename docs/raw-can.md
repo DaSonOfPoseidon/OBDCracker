@@ -1,6 +1,6 @@
 # Raw CAN
 
-The `gsusb` and `socketcan` backends put ISO-TP frames on the bus themselves, with no adapter doing the framing. They
+The [`gsusb`](gsusb.md) and `socketcan` backends put ISO-TP frames on the bus themselves, with no adapter doing the framing. They
 share one transport, `RawCan`, in `crates/obdcracker-transport/src/raw/`, over a crate-private `CanPort` trait (set
 filters, write one frame, read a frame or bus event). Only `RawCan` calls `CanPort::write`, and it writes only the
 frames of an approved request and the flow control frames `obdcracker-safety` mints, so no importer can put a raw frame
@@ -67,5 +67,6 @@ disrupting is the main way a diagnostic tool affects a running car. Only a new c
 ## Not here yet
 
 - Checking the bitrate listen-only before going active (#42, requirement 5) belongs to each backend's connect step.
+  `gsusb` does it ([details](gsusb.md#the-bitrate-check)); `socketcan` doesn't exist yet.
 - VW TP2.0: a TP2.0 request, setup or channel frame is refused with an adapter error naming #259.
-- The public backends (`gsusb`, `socketcan`) with their own `compile_fail` doctests that no importer can write a frame.
+- The `socketcan` backend, with its own `compile_fail` doctest that no importer can write a frame. `GsUsb` has its own.

@@ -21,6 +21,27 @@ curl -fsSL https://raw.githubusercontent.com/DaSonOfPoseidon/OBDCracker/main/scr
   done. Use the `/dev/cu.*` port.
 - **Linux:** the script adds you to the serial ports' group (`dialout` or `uucp`); log out and back in once.
 
+## `gs_usb` adapters
+
+A CANable or candleLight (`obdcracker --gsusb`) needs no driver on macOS. Elsewhere the program must be allowed to open
+the USB device ([details](gsusb.md#platforms)):
+
+- **Linux:** put the rules below in `/etc/udev/rules.d/70-gsusb.rules` and run `sudo udevadm control --reload` then
+  replug the adapter. If the kernel's `gs_usb` module is loaded it holds the device, and `obdcracker` refuses (it never
+  detaches a kernel driver): use the `can0` interface it makes with `--socketcan` once that exists, or unload the module
+  with `sudo rmmod gs_usb`.
+- **Windows:** install the WinUSB driver for the adapter (for example with [Zadig](https://zadig.akeo.ie/), choosing
+  the adapter's interface 0).
+
+```
+SUBSYSTEM=="usb", ATTRS{idVendor}=="1d50", ATTRS{idProduct}=="606f", MODE="0660", TAG+="uaccess"
+SUBSYSTEM=="usb", ATTRS{idVendor}=="1209", ATTRS{idProduct}=="2323", MODE="0660", TAG+="uaccess"
+SUBSYSTEM=="usb", ATTRS{idVendor}=="1cd2", ATTRS{idProduct}=="606f", MODE="0660", TAG+="uaccess"
+SUBSYSTEM=="usb", ATTRS{idVendor}=="16d0", ATTRS{idProduct}=="10b8", MODE="0660", TAG+="uaccess"
+SUBSYSTEM=="usb", ATTRS{idVendor}=="16d0", ATTRS{idProduct}=="0f30", MODE="0660", TAG+="uaccess"
+SUBSYSTEM=="usb", ATTRS{idVendor}=="1209", ATTRS{idProduct}=="ca01", MODE="0660", TAG+="uaccess"
+```
+
 ## Building a branch or a checkout
 
 - A branch: `-Ref <branch>` on Windows (`& ([scriptblock]::Create((irm <url>))) -Ref <branch>`), or

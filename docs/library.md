@@ -32,6 +32,33 @@ fn main() -> Result<(), Box<dyn Error>> {
 }
 ```
 
+## A `gs_usb` adapter
+
+With the `gsusb` feature, `transport::gsusb::GsUsb` is a transport over a CANable or candleLight. It checks the bitrate
+listening before it goes active, and has no way to write a frame of your own ([details](gsusb.md)).
+
+```rust,no_run
+# #[cfg(feature = "gsusb")]
+# fn main() -> Result<(), Box<dyn std::error::Error>> {
+use obdcracker::core::obd;
+use obdcracker::safety::Policy;
+use obdcracker::transport::fingerprint::read_vin;
+use obdcracker::transport::gsusb::{GsUsb, Options};
+use obdcracker::transport::{Audited, Timing};
+
+// The bitrate is the car's (a profile's `bitrate`); `Options::new` takes it as chosen by you.
+let adapter = GsUsb::open(&Options::new(500_000))?;
+let link = adapter.link_name();
+let mut adapter = Audited::open("session.audit.jsonl".as_ref(), adapter, link)?;
+for reply in read_vin(&mut adapter, &Policy::read_only(), Timing::default())? {
+    println!("{:03X} {}", reply.source, obd::decode_vin(&reply.payload)?);
+}
+# Ok(())
+# }
+# #[cfg(not(feature = "gsusb"))]
+# fn main() {}
+```
+
 ## The policy applies to you too
 
 Every transport takes only `Approved` requests, and there is no raw-frame escape hatch, so no program built on these
