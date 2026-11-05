@@ -203,19 +203,18 @@ impl<P: CanPort> RawCan<P> {
             // Whatever is still queued past the limit could be a late reply, which would read as
             // this request's.
             stale += 1;
-            // A bus fault past the limit still latches.
-            let seen = self.frame_of(event);
-            if stale > MAX_STALE_FRAMES {
-                return Err(Error::Adapter(format!(
-                    "more than {MAX_STALE_FRAMES} stale frames are queued on the CAN port"
-                )));
-            }
-            match seen {
+            // A bus fault past the limit still latches, so the event is handled before the limit.
+            match self.frame_of(event) {
+                Err(e) if self.fault.is_some() => return Err(e),
+                _ if stale > MAX_STALE_FRAMES => {
+                    return Err(Error::Adapter(format!(
+                        "more than {MAX_STALE_FRAMES} stale frames are queued on the CAN port"
+                    )));
+                }
                 Ok(frame) => self.push_event(LinkEvent::Unread {
                     at: SystemTime::now(),
                     line: frame_line(&frame),
                 }),
-                Err(e) if self.fault.is_some() => return Err(e),
                 Err(e) => self.note(e.to_string()),
             }
         }
@@ -235,10 +234,14 @@ impl<P: CanPort> RawCan<P> {
             return None;
         }
         let outcome = open.window.feed(frame.id, &frame.data);
-        // A single or first frame abandons what the source had half-sent: that is reported now,
-        // or the completed reply would take its evidence with it.
+        // Anything but a consecutive frame that fits ends the transfer the source had half-sent
+        // (a single or first frame starts another, and a bad frame leaves the receiver idle).
+        // That is reported now, or a reply that completes would take its evidence with it.
         if !matches!(outcome, Ok(FeedOutcome::Ignored))
-            && frame.data.first().is_some_and(|pci| pci >> 4 <= 1)
+            && !matches!(
+                Frame::parse(&frame.data, Addressing::Normal),
+                Ok(Frame::Consecutive { .. })
+            )
         {
             self.report_partial(frame.id);
         }
@@ -430,7 +433,15 @@ impl<P: CanPort> Transport for RawCan<P> {
                 return Err(Error::Timeout);
             }
             polled = true;
-            let event = self.port.read(left)?;
+            let event = match self.port.read(left) {
+                Ok(event) => event,
+                Err(Error::Timeout) => return Err(Error::Timeout),
+                Err(e) => {
+                    // A failing port may have lost frames the transfer needs.
+                    self.abandon();
+                    return Err(e);
+                }
+            };
             let frame = self.frame_of(event)?;
             if let Some(token) = self.accept(&frame) {
                 // Without its flow control the module won't send the rest, and if the frame did
