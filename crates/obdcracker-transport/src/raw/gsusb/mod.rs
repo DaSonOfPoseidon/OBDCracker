@@ -97,7 +97,7 @@ pub struct Options {
     pub bitrate_source: BitrateSource,
     /// Whether the controller may transmit.
     pub mode: Mode,
-    /// How long to listen at `bitrate` before going active.
+    /// How long to listen at `bitrate` before going active: at most 60 s.
     pub listen_window: Duration,
 }
 
@@ -140,8 +140,14 @@ impl<U: Usb> Session<U> {
         format!("gsusb:{}:{}", self.mode.name(), self.bitrate)
     }
 
-    fn close(mut self) -> Result<(), Error> {
-        self.can.port.close()
+    fn close(mut self) -> Result<Vec<LinkEvent>, ConnectFailure> {
+        let closed = self.can.port.close();
+        let mut events = self.can.port.take_events();
+        events.extend(self.can.take_events());
+        match closed {
+            Ok(()) => Ok(events),
+            Err(error) => Err(ConnectFailure { error, events }),
+        }
     }
 }
 
@@ -273,7 +279,7 @@ impl GsUsb {
     ///
     /// [`ConnectError`]. Nothing is written to a device unless exactly one known device fits.
     pub fn open(options: &Options) -> Result<Self, ConnectError> {
-        connect::check_bitrate(options).map_err(ConnectError::Failed)?;
+        connect::check_options(options).map_err(ConnectError::Failed)?;
         let devices = nusb::list_devices().wait().map_err(|e| {
             ConnectError::Failed(ConnectFailure::before_usb(format!(
                 "can't list the USB devices: {e}"
@@ -334,12 +340,13 @@ impl GsUsb {
 
     /// Takes the controller off the bus, and reports it if that failed. A controller that is
     /// still on the bus keeps acknowledging frames, so a caller that can't be sure should unplug
-    /// the adapter.
+    /// the adapter. Returns the control transfers it sent that nobody has taken yet
+    /// ([`Transport::take_events`]), for the audit log ([`crate::log_events`]).
     ///
     /// # Errors
     ///
-    /// The reset didn't reach the device.
-    pub fn close(self) -> Result<(), Error> {
+    /// The reset didn't reach the device. The failure carries the same events.
+    pub fn close(self) -> Result<Vec<LinkEvent>, ConnectFailure> {
         self.0.close()
     }
 }

@@ -72,7 +72,7 @@ Every control transfer is logged as a `cmd` line in the audit log, including tho
 ### The bitrate check
 
 A wrong bitrate on an active controller destroys the frames on the car's bus with error frames, so the controller first
-starts **listen-only** at the bitrate, for a window (1 s), then goes back to reset, and only then, if the check passes,
+starts **listen-only** at the bitrate, for a window (1 s by default; a library caller may set up to 60 s, and more is refused before anything is sent), then goes back to reset, and only then, if the check passes,
 is started active. The OBD port is silent behind a gateway until something asks, so silence alone can't be told from a
 wrong bitrate:
 
@@ -121,8 +121,8 @@ any path, and its session sends nothing at all, flow control included.
 
 The controller is put in reset when the adapter is dropped, when connecting fails, and when the port stops, so it
 doesn't go on acknowledging frames after the tool exits. Dropping writes nothing but that one control transfer, also
-while unwinding from a panic. A library caller can use `GsUsb::close` to learn whether the reset reached the device; the
-CLI does, and says so if it didn't (unplug the adapter then).
+while unwinding from a panic. A library caller can use `GsUsb::close` to learn whether the reset reached the device and to get its
+control transfer for the audit log; the CLI does both, and says so if the reset failed (unplug the adapter then).
 
 ## Not yet checked on hardware
 

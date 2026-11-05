@@ -458,6 +458,58 @@ fn dropping_a_session_takes_the_controller_off_the_bus() {
 }
 
 #[test]
+fn a_listen_window_too_long_to_be_one_is_refused_before_any_usb() {
+    for window in [
+        Duration::MAX,
+        Duration::from_secs(61),
+        Duration::from_secs(60) + Duration::from_nanos(1),
+    ] {
+        let fake = FakeUsb::new();
+        let mut options = options(Mode::Active);
+        options.listen_window = window;
+        let failure = open(&fake, &options).unwrap_err();
+        assert!(
+            failure.error.to_string().contains("listen window"),
+            "{}",
+            failure.error
+        );
+        assert_eq!(fake.requests().len(), 0, "{window:?}");
+    }
+    for window in [Duration::ZERO, Duration::from_secs(60)] {
+        let fake = FakeUsb::new();
+        busy_bus(&fake);
+        let mut options = options(Mode::Active);
+        options.listen_window = window;
+        assert!(open(&fake, &options).is_ok(), "{window:?}");
+    }
+}
+
+#[test]
+fn closing_hands_back_the_reset_for_the_audit_log() {
+    let fake = FakeUsb::new();
+    busy_bus(&fake);
+    let mut session = open(&fake, &options(Mode::Active)).unwrap();
+    let _ = session.take_events();
+    let events = session.close().unwrap();
+    assert!(events.iter().any(|e| matches!(
+        e,
+        LinkEvent::Command { command, answer, .. } if command.contains("MODE RESET") && answer == &["ok"]
+    )));
+    // A reset that failed is in the failure's events too.
+    let fake = FakeUsb::new();
+    busy_bus(&fake);
+    let mut session = open(&fake, &options(Mode::Active)).unwrap();
+    let _ = session.take_events();
+    fake.0.borrow_mut().fail_control = Some((wire::BREQ_MODE, 0));
+    let failure = session.close().unwrap_err();
+    assert!(failure.events.iter().any(|e| matches!(
+        e,
+        LinkEvent::Command { command, answer, .. }
+            if command.contains("MODE RESET") && answer[0].contains("failed")
+    )));
+}
+
+#[test]
 fn closing_reports_whether_the_reset_worked() {
     let fake = FakeUsb::new();
     busy_bus(&fake);

@@ -24,7 +24,7 @@ use obdcracker_transport::scan::{
 };
 use obdcracker_transport::sweep::{self, SweepOptions};
 use obdcracker_transport::tp20::{self, Answer, ChannelSession, Disconnect};
-use obdcracker_transport::{Audited, DryRun, S3, Timing, Transport, hex, log_failure};
+use obdcracker_transport::{Audited, DryRun, S3, Timing, Transport, hex, log_events, log_failure};
 
 const DEFAULT_BAUD: u32 = 115_200;
 // ISO 15765-4 allows 250 or 500 kbit/s; nearly every car's OBD port is on 500.
@@ -328,13 +328,22 @@ fn open_gsusb(cli: &Cli, serial: &str) -> ExitCode {
 fn run_gsusb(cli: &Cli, mut adapter: GsUsb, link: &str) -> ExitCode {
     let code = run(cli, Borrowed(&mut adapter), link, Timing::default());
     match adapter.close() {
-        Ok(()) => code,
-        Err(e) => {
+        Ok(events) => {
+            // The reset is a command to the adapter, so it is logged like the rest.
+            if let Err(log) = log_events(&cli.audit_log, link, events) {
+                eprintln!("can't write audit log {}: {log}", cli.audit_log.display());
+            }
+            code
+        }
+        Err(failed) => {
             eprintln!(
-                "can't reset the CAN controller: {e}. Unplug the adapter so it stops acknowledging \
-                 frames on the car's bus"
+                "can't reset the CAN controller: {}. Unplug the adapter so it stops acknowledging \
+                 frames on the car's bus",
+                failed.error
             );
-            if let Err(log) = log_failure(&cli.audit_log, link, Vec::new(), "close", &e) {
+            if let Err(log) =
+                log_failure(&cli.audit_log, link, failed.events, "close", &failed.error)
+            {
                 eprintln!("can't write audit log {}: {log}", cli.audit_log.display());
             }
             ExitCode::FAILURE

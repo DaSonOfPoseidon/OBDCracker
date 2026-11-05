@@ -15,8 +15,8 @@ use crate::{Error, LinkEvent};
 /// The only bitrates a car's diagnostic bus uses (ISO 15765-4), and the profiles' too.
 pub(super) const BITRATES: [u32; 2] = [250_000, 500_000];
 
-/// Why bringing a controller up failed, and what was sent to the device on the way: evidence
-/// for the audit log ([`crate::log_failure`]).
+/// Why bringing a controller up or taking it down failed, and what was sent to the device on the
+/// way: evidence for the audit log ([`crate::log_failure`]).
 #[derive(Debug)]
 pub struct ConnectFailure {
     /// What went wrong.
@@ -34,21 +34,30 @@ impl ConnectFailure {
     }
 }
 
-/// Refuses a bitrate that no car's diagnostic bus uses, before anything is sent.
-pub(super) fn check_bitrate(options: &Options) -> Result<(), ConnectFailure> {
-    if BITRATES.contains(&options.bitrate) {
-        Ok(())
-    } else {
-        Err(ConnectFailure::before_usb(format!(
+/// The longest listen window accepted: a bus that is up shows frames in well under a second.
+pub(super) const MAX_LISTEN_WINDOW: Duration = Duration::from_secs(60);
+
+/// Refuses options that can't be right, before anything is sent: a bitrate that no car's
+/// diagnostic bus uses, or a listen window too long to be one.
+pub(super) fn check_options(options: &Options) -> Result<(), ConnectFailure> {
+    if !BITRATES.contains(&options.bitrate) {
+        return Err(ConnectFailure::before_usb(format!(
             "{} bit/s isn't a diagnostic CAN bitrate: use 250000 or 500000",
             options.bitrate
-        )))
+        )));
     }
+    if options.listen_window > MAX_LISTEN_WINDOW {
+        return Err(ConnectFailure::before_usb(format!(
+            "a listen window of {:?} is over the limit of {MAX_LISTEN_WINDOW:?}",
+            options.listen_window
+        )));
+    }
+    Ok(())
 }
 
 /// Brings the device up, reset on any failure.
 pub(super) fn connect<U: Usb>(usb: U, options: &Options) -> Result<Session<U>, ConnectFailure> {
-    check_bitrate(options)?;
+    check_options(options)?;
     let mut port = GsUsbPort::new(usb, options.mode == Mode::ListenOnly);
     match bring_up(&mut port, options) {
         Ok(check) => Ok(Session {
