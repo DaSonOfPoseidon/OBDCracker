@@ -156,6 +156,13 @@ Each entry names the class, what to check, and where it bit us.
   see when the other side acted, take the earliest moment it could have (the request), and stop trusting the
   deadline early enough for the next message to get there. Pick the failure that costs least: a needless `10 03`,
   not a read sent into the default session (#68, three Codex rounds).
+- **A host timestamp is not when the other side acted, and a bound must hold in the dangerous direction only.**
+  Timing the module's S3 from when a reply was read, or from the read less the print time at the link's nominal
+  rate, trusts a session that may have lapsed: an adapter prints slower than its baud rate, USB adds latency, and a
+  caller that reads late finds bytes that arrived long before the read. `Response::bus_time` assumes half the rate, adds
+  a fixed allowance, never goes before the request, and falls back to the last time the link was drained when a read
+  may have found data waiting (`docs/elm327.md#when-a-reply-left-the-bus`). Test both directions: a slow module on a
+  fast link keeps the session, and a long answer printed at the link's full speed doesn't (#69).
 - **Use the limits the other side declares.** A module's `50 03` gives its own P2 and P2*; ignoring them timed
   out a module that said it needs 100 ms. Extend the caller's timing by the excess over the standard defaults,
   so an adapter's allowance stays on top (#68, Codex). The same holds for a gap it asks for: the TP2.0 session kept
