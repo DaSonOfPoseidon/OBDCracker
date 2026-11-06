@@ -85,7 +85,8 @@ the vcan test checks the kernel takes them at those lengths.
   waits its whole timeout, so the session never sees the early timeout an ELM327's prompt gives.
 - **A module that pads its frames** (an ACK `B1 AA AA AA AA AA AA AA`, a setup answer of 8 bytes) is not understood: the
   decoders check every length, as they do over the ELM driver, so the session closes the channel (`Framing`,
-  `Undecodable`). Modules seen so far (the passenger door, session 6) send exact lengths.
+  `Undecodable`). The passenger door's setup answer and disconnect (session 6) were exact lengths; whether its other
+  frames are is for the next car session to confirm.
 - **Filters:** the setup answer's ID only, then the channel's receive ID only, then the ISO-TP reply IDs again when an
   ISO-TP request follows, each set when it changes.
 - **What is dropped and what is kept.** A *setup* starts a conversation like an ISO-TP request does: the frames the last

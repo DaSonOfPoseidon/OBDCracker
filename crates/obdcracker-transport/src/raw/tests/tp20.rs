@@ -832,6 +832,7 @@ fn an_answer_that_takes_its_time_after_response_pending_needs_no_keep_alive() {
     ]));
     let policy = policy();
     let timing = Timing {
+        p2: MS(500),
         p2_star: Duration::from_secs(1),
         ..Timing::default()
     };
@@ -862,9 +863,9 @@ fn an_answer_that_never_comes_after_response_pending_ends_after_the_whole_wait()
     )]));
     let policy = policy();
     let timing = Timing {
+        p2: MS(500),
         p2_star: MS(120),
         max_pending: 3,
-        ..Timing::default()
     };
     let mut session = ChannelSession::open(&mut can, &policy, 0x01, timing).unwrap();
     let began = Instant::now();
@@ -882,15 +883,15 @@ fn an_answer_that_never_comes_after_response_pending_ends_after_the_whole_wait()
 }
 
 #[test]
-fn a_module_that_answers_after_the_default_p2_is_heard_when_the_session_allows_it() {
-    // The session's wait is the longer of P2 and the module's T1; the port waits all of it.
+fn a_module_that_answers_within_the_sessions_wait_is_heard_however_late_it_is_in_it() {
+    // The port waits the whole time it is asked to, so an answer at 80 ms of a 1 s wait is read.
     let mut can = RawCan::new(slow_module(vec![(
         MS(80),
         vec![0x10, 0x00, 0x04, 0x5A, 0x9B, 0x01, 0x02],
     )]));
     let policy = policy();
     let timing = Timing {
-        p2: MS(200),
+        p2: Duration::from_secs(1),
         ..Timing::default()
     };
     let mut session = ChannelSession::open(&mut can, &policy, 0x01, timing).unwrap();
