@@ -2,6 +2,8 @@
 
 use std::fmt;
 
+pub(super) use crate::raw::printable;
+
 /// Vendor and product IDs of devices that speak `gs_usb`: Geschwister Schneider and candleLight
 /// (`CANable`), and boards with the same firmware. A device not on the list is never opened.
 pub(super) const KNOWN: [(u16, u16); 6] = [
@@ -55,24 +57,6 @@ impl fmt::Display for DeviceSummary {
             None => f.write_str(" (no serial number)"),
         }
     }
-}
-
-// The longest a device-supplied string is shown.
-const MAX_SHOWN: usize = 64;
-
-/// A string a device wrote, made safe to print on a terminal: anything but printable ASCII is
-/// replaced (an escape sequence in a product string must not reach the user's screen).
-pub(super) fn printable(text: &str) -> String {
-    text.chars()
-        .take(MAX_SHOWN)
-        .map(|c| {
-            if c.is_ascii_graphic() || c == ' ' {
-                c
-            } else {
-                '?'
-            }
-        })
-        .collect()
 }
 
 /// Why no single device was chosen.

@@ -59,6 +59,37 @@ for reply in read_vin(&mut adapter, &Policy::read_only(), Timing::default())? {
 # fn main() {}
 ```
 
+## A SocketCAN interface
+
+On Linux, with the `socketcan` feature, `transport::socketcan::SocketCan` is a transport over any CAN interface the
+kernel has a driver for, and likewise has no way to write a frame of your own. It reads the interface (up, not faulted,
+not in a mode that drops what is sent, the bitrate you ask for) and never sets its bitrate or mode
+([details](socketcan.md)).
+
+```rust,no_run
+# #[cfg(all(feature = "socketcan", target_os = "linux"))]
+# fn main() -> Result<(), Box<dyn std::error::Error>> {
+use obdcracker::core::obd;
+use obdcracker::safety::Policy;
+use obdcracker::transport::fingerprint::read_vin;
+use obdcracker::transport::socketcan::{Options, SocketCan};
+use obdcracker::transport::{Audited, Timing};
+
+// The interface must already be up at the car's bitrate; `bitrate` makes the check refuse another.
+let mut options = Options::new("can0");
+options.bitrate = Some(500_000);
+let interface = SocketCan::open(&options).map_err(|failed| failed.error)?;
+let link = interface.link_name();
+let mut interface = Audited::open("session.audit.jsonl".as_ref(), interface, link)?;
+for reply in read_vin(&mut interface, &Policy::read_only(), Timing::default())? {
+    println!("{:03X} {}", reply.source, obd::decode_vin(&reply.payload)?);
+}
+# Ok(())
+# }
+# #[cfg(not(all(feature = "socketcan", target_os = "linux")))]
+# fn main() {}
+```
+
 ## The policy applies to you too
 
 Every transport takes only `Approved` requests, and there is no raw-frame escape hatch, so no program built on these

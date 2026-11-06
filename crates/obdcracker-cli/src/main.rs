@@ -5,7 +5,7 @@ use std::process::ExitCode;
 use std::time::Duration;
 
 use clap::builder::PossibleValuesParser;
-use clap::{Parser, Subcommand};
+use clap::{ArgGroup, Parser, Subcommand};
 use obdcracker_core::obd;
 use obdcracker_core::response::{self, Error as ReplyError, Nrc};
 use obdcracker_core::uds::{DiagnosticSession, UdsDtc};
@@ -34,7 +34,10 @@ const TCP_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 #[derive(Debug, Parser)]
 #[command(
     version,
-    about = "Talk to a car's diagnostic bus through an OBD2 adapter"
+    about = "Talk to a car's diagnostic bus through an OBD2 adapter",
+    // The adapters that put CAN frames on the bus themselves, which --listen-only and --bitrate
+    // are for.
+    group(ArgGroup::new("can").args(["gsusb", "socketcan"]))
 )]
 struct Cli {
     /// Use an ELM327/STN adapter on this serial port (e.g. /dev/ttyUSB0, COM3); found
@@ -44,7 +47,7 @@ struct Cli {
 
     /// The serial port's baud rate [default: 115200, for `OBDLink` adapters; ELM327 clones use
     /// 38400, 9600, 230400 or 500000]
-    #[arg(long, conflicts_with_all = ["tcp", "dry_run", "sim", "gsusb"])]
+    #[arg(long, conflicts_with_all = ["tcp", "dry_run", "sim", "gsusb", "socketcan"])]
     baud: Option<u32>,
 
     /// Use a Wi-Fi ELM327/STN adapter at this address (e.g. 192.168.0.10:35000)
@@ -58,13 +61,22 @@ struct Cli {
           require_equals = true, default_missing_value = "")]
     gsusb: Option<String>,
 
-    /// With --gsusb: only listen. The controller never transmits, so every request fails
-    #[arg(long, requires = "gsusb", conflicts_with_all = ["serial", "tcp", "dry_run", "sim"])]
+    /// Use a SocketCAN interface (Linux), such as can0, whatever adapter is behind it. Never
+    /// changes the interface's bitrate or mode: set it up first (`ip link set can0 up type can
+    /// bitrate 500000`)
+    #[arg(long, value_name = "IFACE", group = "adapter")]
+    socketcan: Option<String>,
+
+    /// With --gsusb or --socketcan: only listen. Nothing is ever transmitted, so every request
+    /// fails
+    #[arg(long, requires = "can", conflicts_with_all = ["serial", "tcp", "dry_run", "sim"])]
     listen_only: bool,
 
-    /// With --gsusb: the bus's bitrate, 250000 or 500000 [default: the --profile's, else 500000,
-    /// which needs frames on the bus to be confirmed]
-    #[arg(long, value_name = "BIT/S", requires = "gsusb", value_parser = parse_bitrate,
+    /// With --gsusb or --socketcan: the bus's bitrate, 250000 or 500000. With --gsusb [default:
+    /// the --profile's, else 500000, which needs frames on the bus to be confirmed]; it sets the
+    /// adapter's rate. With --socketcan [default: the --profile's, else none]; it is only checked
+    /// against the interface's own, and a difference is refused
+    #[arg(long, value_name = "BIT/S", requires = "can", value_parser = parse_bitrate,
           conflicts_with_all = ["serial", "tcp", "dry_run", "sim"])]
     bitrate: Option<u32>,
 
@@ -200,6 +212,8 @@ fn main() -> ExitCode {
         }
     } else if let Some(serial) = &cli.gsusb {
         open_gsusb(&cli, serial)
+    } else if let Some(interface) = &cli.socketcan {
+        open_socketcan(&cli, interface)
     } else if (cli.sim.is_some() || cli.dry_run) && matches!(cli.command, Command::Adapter) {
         eprintln!("`adapter` needs a real adapter: use --serial <PORT> or --tcp <HOST:PORT>");
         ExitCode::from(2)
@@ -227,7 +241,7 @@ fn main() -> ExitCode {
             Err(FindAdapterError::NotFound) => {
                 eprintln!(
                     "no adapter found; plug one in, or use --serial <PORT>, --tcp <HOST:PORT> or \
-                     --gsusb, or try --dry-run or --sim <PROFILE>"
+                     --gsusb or --socketcan <IFACE>, or try --dry-run or --sim <PROFILE>"
                 );
                 ExitCode::from(2)
             }
@@ -247,6 +261,14 @@ fn main() -> ExitCode {
 // 500000, which only counts once frames on the bus confirm it. Both given must agree: a bitrate that
 // differs from the car's profile floods its bus with errors.
 fn gsusb_bitrate(cli: &Cli) -> Result<(u32, BitrateSource), String> {
+    Ok(match configured_bitrate(cli)? {
+        Some(bitrate) => (bitrate, BitrateSource::Configured),
+        None => (DEFAULT_BITRATE, BitrateSource::Assumed),
+    })
+}
+
+// The bitrate the user or the vehicle profile gave, if either did. Both given must agree.
+fn configured_bitrate(cli: &Cli) -> Result<Option<u32>, String> {
     let profile = match cli.profile.as_ref() {
         Some(name) => Some(
             Profile::builtin(name)
@@ -259,8 +281,8 @@ fn gsusb_bitrate(cli: &Cli) -> Result<(u32, BitrateSource), String> {
         (Some(given), Some(profile)) if given != profile => Err(format!(
             "--bitrate {given} contradicts the profile, whose bus runs at {profile} bit/s"
         )),
-        (Some(bitrate), _) | (None, Some(bitrate)) => Ok((bitrate, BitrateSource::Configured)),
-        (None, None) => Ok((DEFAULT_BITRATE, BitrateSource::Assumed)),
+        (Some(bitrate), _) | (None, Some(bitrate)) => Ok(Some(bitrate)),
+        (None, None) => Ok(None),
     }
 }
 
@@ -321,6 +343,83 @@ fn open_gsusb(cli: &Cli, serial: &str) -> ExitCode {
         _ => {}
     }
     run_gsusb(cli, adapter, &link)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn open_socketcan(_cli: &Cli, _interface: &str) -> ExitCode {
+    eprintln!("--socketcan is for Linux; use --gsusb for a CANable or candleLight on this system");
+    ExitCode::from(2)
+}
+
+// The interface is only read and a socket opened on it: its bitrate and mode are never set, so
+// there is nothing to take back down afterwards.
+#[cfg(target_os = "linux")]
+fn open_socketcan(cli: &Cli, interface: &str) -> ExitCode {
+    use obdcracker_transport::socketcan::{self, SocketCan};
+
+    if let Command::Adapter = cli.command {
+        eprintln!(
+            "`adapter` is for ELM327/STN adapters; a SocketCAN interface has nothing to report"
+        );
+        return ExitCode::from(2);
+    }
+    let bitrate = match configured_bitrate(cli) {
+        Ok(bitrate) => bitrate,
+        Err(e) => {
+            eprintln!("{e}");
+            return ExitCode::from(2);
+        }
+    };
+    let mut options = socketcan::Options::new(interface);
+    options.bitrate = bitrate;
+    if cli.listen_only {
+        options.mode = socketcan::Mode::ListenOnly;
+    }
+    let link = options.link_name();
+    let adapter = match SocketCan::open(&options) {
+        Ok(adapter) => adapter,
+        Err(failed) => {
+            // What was read from the interface before it was refused is evidence too.
+            if let Err(log) = log_failure(
+                &cli.audit_log,
+                link.as_str(),
+                failed.events.clone(),
+                "connect",
+                &failed.error,
+            ) {
+                eprintln!("can't write audit log {}: {log}", cli.audit_log.display());
+            }
+            eprintln!("{}", failed.error);
+            return ExitCode::FAILURE;
+        }
+    };
+    let name = adapter.interface();
+    let rate = adapter.bitrate().map_or_else(
+        || "no bitrate reported".to_owned(),
+        |b| format!("{b} bit/s"),
+    );
+    match adapter.bitrate_check() {
+        socketcan::BitrateCheck::Matched => {
+            eprintln!("using {name} ({rate}, as asked for)");
+        }
+        socketcan::BitrateCheck::Unconfirmed => eprintln!(
+            "warning: {name} reports no bitrate, so {} bit/s is unconfirmed. If the car's bus runs \
+             at another rate, sending disturbs it. Check how the interface was set up",
+            bitrate.unwrap_or(0)
+        ),
+        _ => eprintln!("using {name} ({rate})"),
+    }
+    if adapter.mode() == socketcan::Mode::ListenOnly {
+        eprintln!("listen-only: nothing will be sent, so every request fails");
+        if adapter.controller_listen_only() != Some(true) {
+            eprintln!(
+                "warning: {name}'s controller isn't in listen-only mode (or doesn't say), so it \
+                 still acknowledges the frames it hears. Take it down and set `listen-only on` \
+                 if the car must not notice the tap"
+            );
+        }
+    }
+    run(cli, adapter, &link, Timing::default())
 }
 
 // Runs the command, then takes the controller off the bus explicitly, so a reset that fails is
@@ -1901,8 +2000,8 @@ mod tests {
     use obdcracker_transport::gsusb::BitrateSource;
 
     use super::{
-        Cli, Discovery, dtc_out_of_step_note, gateway_list_lines, gsusb_bitrate, resume_command,
-        run_scan, sweep_out_of_step_note, tp20_identification,
+        Cli, Discovery, configured_bitrate, dtc_out_of_step_note, gateway_list_lines,
+        gsusb_bitrate, resume_command, run_scan, sweep_out_of_step_note, tp20_identification,
     };
 
     fn compared(address: u8, request_id: Option<u16>, status: ListedAs) -> Compared {
@@ -2246,6 +2345,123 @@ mod tests {
         .unwrap();
         assert!(cli.listen_only);
         assert_eq!(cli.bitrate, Some(250_000));
+    }
+
+    #[test]
+    fn socketcan_takes_an_interface_and_excludes_the_other_adapters() {
+        let cli = parse(&["obdcracker", "--socketcan", "can0", "vin"]).unwrap();
+        assert_eq!(cli.socketcan.as_deref(), Some("can0"));
+        assert_eq!(parse(&["obdcracker", "vin"]).unwrap().socketcan, None);
+        for words in [
+            &["obdcracker", "--socketcan", "vin"][..],
+            &["obdcracker", "--socketcan", "can0", "--gsusb", "vin"],
+            &["obdcracker", "--socketcan", "can0", "--gsusb=ABC", "vin"],
+            &["obdcracker", "--socketcan", "can0", "--tcp", "x:1", "vin"],
+            &[
+                "obdcracker",
+                "--socketcan",
+                "can0",
+                "--serial",
+                "/dev/null",
+                "vin",
+            ],
+            &["obdcracker", "--socketcan", "can0", "--sim", "a7", "vin"],
+            &["obdcracker", "--socketcan", "can0", "--dry-run", "vin"],
+            &[
+                "obdcracker",
+                "--socketcan",
+                "can0",
+                "--baud",
+                "38400",
+                "vin",
+            ],
+            &[
+                "obdcracker",
+                "--socketcan",
+                "can0",
+                "--bitrate",
+                "125000",
+                "vin",
+            ],
+            &["obdcracker", "--socketcan", "can0", "--bitrate", "", "vin"],
+            &[
+                "obdcracker",
+                "--socketcan",
+                "can0",
+                "--tcp",
+                "x:1",
+                "--listen-only",
+                "vin",
+            ],
+            &[
+                "obdcracker",
+                "--socketcan",
+                "can0",
+                "--sim",
+                "a7",
+                "--bitrate",
+                "500000",
+                "vin",
+            ],
+        ] {
+            assert!(parse(words).is_err(), "{words:?}");
+        }
+        let cli = parse(&[
+            "obdcracker",
+            "--socketcan",
+            "can0",
+            "--listen-only",
+            "--bitrate",
+            "250000",
+            "vin",
+        ])
+        .unwrap();
+        assert!(cli.listen_only);
+        assert_eq!(cli.bitrate, Some(250_000));
+    }
+
+    #[test]
+    fn the_socketcan_bitrate_is_the_flag_or_the_profile_or_none() {
+        let bitrate = |words: &[&str]| configured_bitrate(&parse(words).unwrap());
+        assert_eq!(
+            bitrate(&[
+                "obdcracker",
+                "--socketcan",
+                "can0",
+                "--bitrate",
+                "250000",
+                "vin"
+            ]),
+            Ok(Some(250_000))
+        );
+        assert_eq!(
+            bitrate(&[
+                "obdcracker",
+                "--socketcan",
+                "can0",
+                "--profile",
+                "a7",
+                "vin"
+            ]),
+            Ok(Some(500_000))
+        );
+        // No guess: the interface's own bitrate is what the session uses.
+        assert_eq!(
+            bitrate(&["obdcracker", "--socketcan", "can0", "vin"]),
+            Ok(None)
+        );
+        let err = bitrate(&[
+            "obdcracker",
+            "--socketcan",
+            "can0",
+            "--profile",
+            "a7",
+            "--bitrate",
+            "250000",
+            "vin",
+        ])
+        .unwrap_err();
+        assert!(err.contains("contradicts"), "{err}");
     }
 
     #[test]

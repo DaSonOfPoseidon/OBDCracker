@@ -157,3 +157,63 @@ jobs:
         run: uv tool install "elm327-emulator @ git+https://github.com/Ircama/ELM327-emulator@ff34d2f72da58c05a1b1f00d04f043e8b6c856fb"
       - if: env.SKIP_LEG != 'true'
         run: cargo test -p obdcracker-transport --test elm_emulator -- --ignored
+
+  # The SocketCAN backend on a real kernel interface, vcan0, with obdcracker-sim answering on the
+  # other end (issue #108). Run twice: vcan has no driver echo by default, and `echo=1` gives it
+  # one, so both of the backend's ways of confirming a frame run against the kernel. Not required
+  # by branch protection. It fails, never skips, if the module can't be installed or loaded, and
+  # the tests fail if vcan0 isn't there.
+  vcan:
+    needs: changes
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      SKIP_LEG: ${{ needs.changes.result == 'success' && needs.changes.outputs.code != 'true' }}
+    steps:
+      - if: env.SKIP_LEG == 'true'
+        run: echo "skipped, no build input changed"
+      - if: env.SKIP_LEG != 'true'
+        uses: actions/checkout@v5
+      - if: env.SKIP_LEG != 'true'
+        run: rustup show
+      - if: env.SKIP_LEG != 'true'
+        uses: Swatinem/rust-cache@v2
+      - if: env.SKIP_LEG != 'true'
+        run: cargo test -p obdcracker-cli --test socketcan_vcan --no-run
+      # Some runner kernels ship vcan in the main modules package and others in an extra one that
+      # may not exist for the runner's kernel at all (it did not for 7.0.0-1019-azure), so the extra
+      # package is only installed if the module isn't there already. If it still can't be loaded,
+      # the job fails: a skipped check would pass without testing anything.
+      - name: vcan module available
+        if: env.SKIP_LEG != 'true'
+        run: |
+          set -euo pipefail
+          if ! sudo modprobe vcan; then
+            sudo apt-get update
+            sudo apt-get install -y "linux-modules-extra-$(uname -r)"
+            sudo modprobe vcan
+          fi
+          sudo rmmod vcan
+      - name: vcan0 without a driver echo
+        if: env.SKIP_LEG != 'true'
+        env:
+          OBDCRACKER_VCAN_ECHO: "no"
+        run: |
+          set -euo pipefail
+          sudo modprobe vcan
+          sudo ip link add dev vcan0 type vcan
+          sudo ip link set up vcan0
+          cargo test -p obdcracker-cli --test socketcan_vcan -- --ignored --test-threads=1
+          sudo ip link delete vcan0
+          sudo rmmod vcan
+      - name: vcan0 with a driver echo
+        if: env.SKIP_LEG != 'true'
+        env:
+          OBDCRACKER_VCAN_ECHO: "yes"
+        run: |
+          set -euo pipefail
+          sudo modprobe vcan echo=1
+          sudo ip link add dev vcan0 type vcan
+          sudo ip link set up vcan0
+          cargo test -p obdcracker-cli --test socketcan_vcan -- --ignored --test-threads=1

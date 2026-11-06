@@ -28,7 +28,7 @@ the USB device ([details](gsusb.md#platforms)):
 
 - **Linux:** put the rules below in `/etc/udev/rules.d/70-gsusb.rules` and run `sudo udevadm control --reload` then
   replug the adapter. If the kernel's `gs_usb` module is loaded it holds the device, and `obdcracker` refuses (it never
-  detaches a kernel driver): use the `can0` interface it makes with `--socketcan` once that exists, or unload the module
+  detaches a kernel driver): use the `can0` interface it makes with [`--socketcan`](socketcan.md), or unload the module
   with `sudo rmmod gs_usb`.
 - **Windows:** install the WinUSB driver for the adapter (for example with [Zadig](https://zadig.akeo.ie/), choosing
   the adapter's interface 0).

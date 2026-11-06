@@ -12,12 +12,21 @@ publish.workspace = true
 serial = ["dep:serial2"]
 # gs_usb adapters (CANable, candleLight), over USB with no driver on Linux, Windows or macOS
 gsusb = ["dep:nusb"]
+# SocketCAN interfaces (any CAN adapter with a Linux driver, and vcan). Linux only: elsewhere the feature adds nothing.
+socketcan = ["dep:socketcan", "dep:nix"]
 
 [dependencies]
 obdcracker-core.workspace = true
 obdcracker-safety.workspace = true
 serial2 = { version = "0.2.38", optional = true }
 nusb = { version = "0.2.9", optional = true }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+# The socket (filters, error mask) and netlink reads of the interface's mode and bitrate. Nothing here may
+# write to the interface (docs/socketcan.md).
+socketcan = { version = "4.0.0", default-features = false, features = ["netlink"], optional = true }
+# Safe recvmsg (the socket's drop counter) and poll
+nix = { version = "0.31.3", default-features = false, features = ["socket", "net", "poll", "uio"], optional = true }
 
 [lints]
 workspace = true

@@ -18,7 +18,7 @@ manufacturer diagnostics are added as vehicle profiles. The development testbed 
 ## Features
 
 - **Safe by construction:** every request passes a tiered safety policy, and transports accept nothing else
-- **Any adapter, any OS:** ELM327/STN over USB serial or Wi-Fi, and CANable/candleLight (`gs_usb`) over USB, which is new and not yet tried on a car; more backends planned
+- **Any adapter, any OS:** ELM327/STN over USB serial or Wi-Fi, CANable/candleLight (`gs_usb`) over USB, and any SocketCAN interface on Linux; the last two are new and not yet tried on a car; more backends planned
 - **`fingerprint`:** calibration IDs, CVNs and part numbers of the engine and transmission, to see what a tune changed
 - **`scan`:** live data, DTCs and identification from the profile's modules, plus any that `--discover` finds
 - **`sweep`:** find the DIDs a module answers that no profile lists yet

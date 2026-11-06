@@ -83,7 +83,14 @@ fn refuses_to_run_without_an_adapter() {
     let out = obdcracker(&["--audit-log", log.to_str().unwrap(), "vin"]);
     assert_eq!(out.status.code(), Some(2));
     let stderr = String::from_utf8_lossy(&out.stderr);
-    for flag in ["--serial", "--tcp", "--gsusb", "--dry-run", "--sim"] {
+    for flag in [
+        "--serial",
+        "--tcp",
+        "--gsusb",
+        "--socketcan",
+        "--dry-run",
+        "--sim",
+    ] {
         assert!(stderr.contains(flag), "{stderr}");
     }
     assert!(!log.exists());
@@ -188,9 +195,105 @@ fn a_gsusb_bitrate_that_contradicts_the_profile_is_refused_before_any_usb() {
 
 #[test]
 fn adapter_is_for_elm_adapters_only() {
-    let out = obdcracker(&["--gsusb", "adapter"]);
+    for args in [
+        &["--gsusb", "adapter"][..],
+        &["--socketcan", "can0", "adapter"],
+    ] {
+        let out = obdcracker(args);
+        assert_eq!(out.status.code(), Some(2), "{args:?}");
+        // Elsewhere than Linux, --socketcan is refused before the command is looked at.
+        assert!(
+            String::from_utf8_lossy(&out.stderr).contains("ELM327")
+                || (args[0] == "--socketcan" && !cfg!(target_os = "linux")),
+            "{args:?}"
+        );
+    }
+}
+
+#[test]
+fn socketcan_options_need_an_interface_and_exclude_the_other_adapters() {
+    for args in [
+        &["--socketcan", "vin"][..],
+        &["--socketcan", "can0", "--tcp", "127.0.0.1:1", "vin"],
+        &["--socketcan", "can0", "--gsusb", "vin"],
+        &["--socketcan", "can0", "--sim", "a7", "vin"],
+        &["--socketcan", "can0", "--dry-run", "vin"],
+        &["--socketcan", "can0", "--baud", "38400", "vin"],
+        &["--socketcan", "can0", "--bitrate", "125000", "vin"],
+    ] {
+        let out = obdcracker(args);
+        assert!(!out.status.success(), "{args:?}");
+        assert_eq!(out.status.code(), Some(2), "{args:?}");
+    }
+}
+
+// Elsewhere than Linux the option is refused before the bitrate is looked at.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_socketcan_bitrate_that_contradicts_the_profile_is_refused_before_the_interface_is_read() {
+    let log = temp_log("socketcan-bitrate");
+    let out = obdcracker(&[
+        "--socketcan",
+        "can0",
+        "--profile",
+        "a7",
+        "--bitrate",
+        "250000",
+        "--audit-log",
+        log.to_str().unwrap(),
+        "vin",
+    ]);
     assert_eq!(out.status.code(), Some(2));
-    assert!(String::from_utf8_lossy(&out.stderr).contains("ELM327"));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("contradicts"));
+    assert!(!log.exists());
+}
+
+// Whatever interfaces the machine running the test has, one that does not exist opens nothing: the
+// run stops before anything is sent.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_socketcan_interface_that_does_not_exist_stops_before_anything_is_sent() {
+    let log = temp_log("socketcan-missing");
+    let out = obdcracker(&[
+        "--socketcan",
+        "nosuchcan9",
+        "--audit-log",
+        log.to_str().unwrap(),
+        "vin",
+    ]);
+    assert_eq!(out.status.code(), Some(1));
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(!stderr.contains("using"), "{stderr}");
+    assert!(stderr.contains("nosuchcan9"), "{stderr}");
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn a_socketcan_interface_name_that_could_leave_its_directory_is_refused() {
+    let log = temp_log("socketcan-path");
+    for name in ["../../etc", "can0/..", "a:b", ".."] {
+        let out = obdcracker(&[
+            "--socketcan",
+            name,
+            "--audit-log",
+            log.to_str().unwrap(),
+            "vin",
+        ]);
+        assert_eq!(out.status.code(), Some(1), "{name}");
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            stderr.contains("isn't a network interface name"),
+            "{name}: {stderr}"
+        );
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+#[test]
+fn socketcan_says_it_is_for_linux_elsewhere() {
+    let out = obdcracker(&["--socketcan", "can0", "vin"]);
+    assert_eq!(out.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("Linux"));
 }
 
 // Whatever USB is plugged into the machine running the test, a serial number that no device has

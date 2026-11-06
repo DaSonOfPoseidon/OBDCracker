@@ -11,9 +11,9 @@ use std::time::Duration;
 use obdcracker_safety::{Approved, ApprovedFlowControl};
 
 use crate::raw::RawCan;
+pub use crate::raw::{ConnectFailure, Mode};
 use crate::{Error, LinkEvent, Response, Transport};
 use can_port::GsUsbPort;
-pub use connect::ConnectFailure;
 use nusb::MaybeFuture;
 use nusb_usb::NusbUsb;
 pub use select::DeviceSummary;
@@ -38,27 +38,6 @@ mod port_tests;
 mod select_tests;
 #[cfg(test)]
 mod tests;
-
-/// What the controller may do on the bus.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Mode {
-    /// Receives and never transmits, not even an acknowledgement: the controller's own listen-only
-    /// mode, so nothing the host does can put a frame on the bus. Every send fails.
-    ListenOnly,
-    /// Sends the policy's approved requests and the flow control it mints.
-    Active,
-}
-
-impl Mode {
-    /// A fixed name for logs: `listen-only` or `active`.
-    #[must_use]
-    pub fn name(self) -> &'static str {
-        match self {
-            Self::ListenOnly => "listen-only",
-            Self::Active => "active",
-        }
-    }
-}
 
 /// Where the bitrate came from. It decides what silence during the bitrate check means.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -281,7 +260,7 @@ impl GsUsb {
     pub fn open(options: &Options) -> Result<Self, ConnectError> {
         connect::check_options(options).map_err(ConnectError::Failed)?;
         let devices = nusb::list_devices().wait().map_err(|e| {
-            ConnectError::Failed(ConnectFailure::before_usb(format!(
+            ConnectError::Failed(ConnectFailure::before_device(format!(
                 "can't list the USB devices: {e}"
             )))
         })?;

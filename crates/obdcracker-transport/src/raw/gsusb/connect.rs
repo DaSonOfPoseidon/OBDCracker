@@ -8,31 +8,10 @@ use super::timing;
 use super::usb::Usb;
 use super::wire::{self, BtConst, DeviceConfig};
 use super::{BitrateCheck, BitrateSource, Mode, Options, Session};
-use crate::raw::RawCan;
+use crate::Error;
+pub(super) use crate::raw::ConnectFailure;
 use crate::raw::port::{CanPort, Filter, PortEvent};
-use crate::{Error, LinkEvent};
-
-/// The only bitrates a car's diagnostic bus uses (ISO 15765-4), and the profiles' too.
-pub(super) const BITRATES: [u32; 2] = [250_000, 500_000];
-
-/// Why bringing a controller up or taking it down failed, and what was sent to the device on the
-/// way: evidence for the audit log ([`crate::log_failure`]).
-#[derive(Debug)]
-pub struct ConnectFailure {
-    /// What went wrong.
-    pub error: Error,
-    /// The control transfers sent to the device and its answers, oldest first.
-    pub events: Vec<LinkEvent>,
-}
-
-impl ConnectFailure {
-    pub(super) fn before_usb(message: String) -> Self {
-        Self {
-            error: Error::Adapter(message),
-            events: Vec::new(),
-        }
-    }
-}
+use crate::raw::{BITRATES, RawCan};
 
 /// The longest listen window accepted: a bus that is up shows frames in well under a second.
 pub(super) const MAX_LISTEN_WINDOW: Duration = Duration::from_secs(60);
@@ -41,13 +20,13 @@ pub(super) const MAX_LISTEN_WINDOW: Duration = Duration::from_secs(60);
 /// diagnostic bus uses, or a listen window too long to be one.
 pub(super) fn check_options(options: &Options) -> Result<(), ConnectFailure> {
     if !BITRATES.contains(&options.bitrate) {
-        return Err(ConnectFailure::before_usb(format!(
+        return Err(ConnectFailure::before_device(format!(
             "{} bit/s isn't a diagnostic CAN bitrate: use 250000 or 500000",
             options.bitrate
         )));
     }
     if options.listen_window > MAX_LISTEN_WINDOW {
-        return Err(ConnectFailure::before_usb(format!(
+        return Err(ConnectFailure::before_device(format!(
             "a listen window of {:?} is over the limit of {MAX_LISTEN_WINDOW:?}",
             options.listen_window
         )));

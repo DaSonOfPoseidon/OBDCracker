@@ -23,7 +23,7 @@ or macOS. On Linux those names also match other USB serial devices (Arduinos, mo
 one is picked and gets AT commands written to it, so pass `--serial` when one is plugged in. Windows can't tell USB
 from built-in ports, so every COM port counts there, and a lone built-in COM port would be picked and the connection
 would fail as "not an ELM"; give `--serial` on a PC with one. Other systems count every port too.
-`--serial`, `--tcp`, `--gsusb`, `--sim` and `--dry-run` skip the search, and `ports` still lists
+`--serial`, `--tcp`, `--gsusb`, `--socketcan`, `--sim` and `--dry-run` skip the search, and `ports` still lists
 every port.
 
 ### A CANable or candleLight (`--gsusb`)
@@ -41,6 +41,24 @@ given they must agree. Before the adapter goes on the bus it listens at that bit
 refuse; silence goes active with a warning when the bitrate was given and is refused when it was only the default
 (500000). `--listen-only` never goes on the bus at all. The audit log's link names the mode and bitrate
 (`gsusb:active:500000`). `adapter` is for ELM327/STN adapters only. Setup per OS is in [install](install.md#gs_usb-adapters).
+
+### A SocketCAN interface (`--socketcan`, Linux)
+
+```sh
+obdcracker --socketcan can0 --profile a7 vin                    # at the profile's bitrate, which can0 must already have
+obdcracker --socketcan can0 --bitrate 500000 fingerprint
+obdcracker --socketcan can0 --listen-only vin                   # never transmits: every request fails
+```
+
+Any interface the kernel has a driver for: a CANable on the kernel's `gs_usb` driver, PCAN-USB, Kvaser, a Pi CAN HAT, or
+`vcan` for tests ([details and setup](socketcan.md)). Unlike `--gsusb`, the program never sets the interface's bitrate or
+mode: bring it up yourself (`sudo ip link set can0 up type can bitrate 500000`). `--bitrate` (250000 or 500000) or the
+`--profile` is the bitrate the car's bus runs at, and only checked against the interface's own: another bitrate is refused,
+and an interface that reports none (`vcan`) gets a warning. Without either, nothing is checked. A down or faulted
+interface, one in listen-only or loopback mode (for an active session), and one that isn't a CAN interface are refused,
+with what was read in the audit log. `--listen-only` never writes a frame, but only an interface whose controller is in listen-only mode (`ip link set can0 type can listen-only on`, set up by you) also stays from acknowledging what it hears; otherwise the program says so. The audit log's link names the interface and the
+mode (`socketcan:can0:active`). `adapter` is for ELM327/STN adapters only. On other systems than Linux the option is
+refused.
 
 On macOS use the `/dev/cu.*` port. Leaving a wireless adapter plugged in drains the battery and lets anyone in range
 connect, so the CLI warns about it, and the audit log records which link a session used. See

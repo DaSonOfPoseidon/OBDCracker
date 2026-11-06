@@ -17,6 +17,8 @@ use port::{CanPort, Filter, PortEvent, RxFrame, TxFrame};
 pub mod gsusb;
 mod pace;
 mod port;
+#[cfg(all(feature = "socketcan", target_os = "linux"))]
+pub mod socketcan;
 #[cfg(test)]
 mod tests;
 
@@ -35,6 +37,69 @@ const MAX_STALE_FRAMES: usize = 256;
 const LONGEST_WAIT: Duration = Duration::from_secs(3600);
 
 const TP20_REFUSAL: &str = "raw CAN doesn't speak VW TP2.0 yet (#259)";
+
+/// What a raw-CAN session may do on the bus.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Mode {
+    /// Receives and never transmits: no frame of any kind is written, flow control included, so
+    /// every send fails. The backend also keeps the controller from acknowledging where it can
+    /// (docs/gsusb.md); `socketcan` can't change the interface's mode, so it says when the
+    /// controller would still acknowledge (docs/socketcan.md).
+    ListenOnly,
+    /// Sends the policy's approved requests and the flow control it mints.
+    Active,
+}
+
+impl Mode {
+    /// A fixed name for logs: `listen-only` or `active`.
+    #[must_use]
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::ListenOnly => "listen-only",
+            Self::Active => "active",
+        }
+    }
+}
+
+/// The only bitrates a car's diagnostic bus uses (ISO 15765-4), and the profiles' too.
+pub(crate) const BITRATES: [u32; 2] = [250_000, 500_000];
+
+/// Why bringing a backend up or taking it down failed, and what was sent to the device or read
+/// from it on the way: evidence for the audit log ([`crate::log_failure`]).
+#[derive(Debug)]
+pub struct ConnectFailure {
+    /// What went wrong.
+    pub error: Error,
+    /// What the backend did to the device and what it answered, oldest first.
+    pub events: Vec<LinkEvent>,
+}
+
+impl ConnectFailure {
+    pub(crate) fn before_device(message: String) -> Self {
+        Self {
+            error: Error::Adapter(message),
+            events: Vec::new(),
+        }
+    }
+}
+
+// The longest a name that came from outside is shown.
+const MAX_SHOWN: usize = 64;
+
+/// A string that came from outside, made safe to print on a terminal: anything but printable ASCII
+/// is replaced (an escape sequence in a USB product string must not reach the user's screen).
+pub(crate) fn printable(text: &str) -> String {
+    text.chars()
+        .take(MAX_SHOWN)
+        .map(|c| {
+            if c.is_ascii_graphic() || c == ' ' {
+                c
+            } else {
+                '?'
+            }
+        })
+        .collect()
+}
 
 /// Timing a transfer waits on that the standard leaves to the implementation.
 #[derive(Debug, Clone, Copy)]
