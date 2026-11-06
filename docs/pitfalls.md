@@ -414,6 +414,17 @@ Each entry names the class, what to check, and where it bit us.
   dominant bit, so a "listen-only" session that only refuses to send still shows on the car's bus unless the
   controller is itself in listen-only mode. A backend that can't set that mode (SocketCAN never changes the interface)
   must say so when the interface isn't in it, in the audit log and to the user, rather than promise a silent tap (#108).
+- **A frame is its length as well as its bytes.** SocketCAN's echo check compared the data bytes of the frame in flight
+  (always 8) with the received ones, so a VW TP2.0 setup sent at DLC 7 never matched its own echo and every write timed
+  out; and the same bytes at another length would have matched. Anything that matches or builds a frame (echo check,
+  golden frames, a fake's reaction) carries the DLC, and a test sends one frame shorter than 8 through every path
+  (echo, transmit counter, USB), not only the padded form (#259).
+- **A drain before a send must not eat the conversation it sits in.** The ISO-TP drain throws away what the last request
+  left, which is right between requests and wrong between the frames of one TP2.0 channel, where the module's ACK or next
+  data frame may already be queued when the tester sends its own ACK. A frame on an open channel reads the port to its
+  end (so a bus fault still latches before the write) and keeps the channel's frames for the session; only a new setup
+  drops what the last channel left. A reader that must never lose a frame has to say, per path, which of the two it
+  is (#259).
 
 ## Docs vs code
 

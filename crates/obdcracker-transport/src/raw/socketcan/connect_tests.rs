@@ -602,3 +602,106 @@ fn the_backend_never_changes_an_interface() {
         }
     }
 }
+
+// --- VW TP2.0 (#259) ---
+
+use super::fake::heard_len;
+use crate::raw::tests::tp20::{Car, IDENTIFICATION, SETUP_REQUEST, channel, policy, setup};
+use crate::tp20::{ChannelSession, Disconnect};
+
+// A car with one TP2.0 module that answers the identification read; every frame it sends is as
+// long as the module made it, as on a real bus.
+fn tp20_car(fake: &FakeDevice) {
+    let mut car = Car::with(vec![(IDENTIFICATION.to_vec(), vec![0x5A, 0x9B, 1, 2])]);
+    fake.state().on_send = Some(Box::new(move |frame| {
+        let id = u32::from_ne_bytes(frame[..4].try_into().unwrap());
+        let data = &frame[8..8 + usize::from(frame[4])];
+        Reaction::reply(
+            car.hear_frame(id, data)
+                .into_iter()
+                .map(|(id, payload)| heard_len(id, u8::try_from(payload.len()).unwrap(), &payload))
+                .collect(),
+        )
+    }));
+}
+
+#[test]
+fn a_tp20_session_runs_over_the_interface_with_or_without_an_echo() {
+    for fake in [FakeDevice::can0(500_000), FakeDevice::vcan()] {
+        tp20_car(&fake);
+        let mut session = open(&fake, &options("can0", None, Mode::Active)).unwrap();
+        let policy = policy();
+        let mut channel =
+            ChannelSession::open(&mut session, &policy, 0x01, Timing::default()).unwrap();
+        assert_eq!(
+            channel.request(&IDENTIFICATION).unwrap(),
+            [0x5A, 0x9B, 1, 2]
+        );
+        assert_eq!(channel.close(), Ok(Disconnect::Closed));
+        let sent = fake.sent();
+        // The setup (7 bytes), the tester's parameters (6), the request (5), the ACK of the
+        // answer (1) and the disconnect (1): each is confirmed (by its echo, or by the transmit
+        // counter) at the DLC it was sent with.
+        let dlcs: Vec<u8> = sent.iter().map(|frame| frame[4]).collect();
+        assert_eq!(dlcs, [7, 6, 5, 1, 1]);
+        assert_eq!(sent[0][8..], [0x01, 0xC0, 0x00, 0x10, 0x00, 0x03, 0x01, 0]);
+        assert_eq!(u32::from_ne_bytes(sent[0][..4].try_into().unwrap()), 0x200);
+        assert_eq!(u32::from_ne_bytes(sent[4][..4].try_into().unwrap()), 0x740);
+        assert_eq!(sent[4][8..], [0xA8, 0, 0, 0, 0, 0, 0, 0]);
+    }
+}
+
+#[test]
+fn a_tp20_frame_nobody_acknowledges_is_an_error_that_stops_later_sends() {
+    for fake in [FakeDevice::can0(500_000), FakeDevice::vcan()] {
+        fake.state().on_send = Some(Box::new(|_| Reaction {
+            echo: super::fake::Echo::Never,
+            counts: false,
+            ..Reaction::confirm()
+        }));
+        let mut session = open(&fake, &options("can0", None, Mode::Active)).unwrap();
+        let err = session.send(&setup()).unwrap_err();
+        assert!(err.to_string().contains("no confirmation"), "{err}");
+        assert!(session.send(&setup()).is_err());
+        assert_eq!(fake.sent().len(), 1);
+    }
+}
+
+#[test]
+fn a_listen_only_session_writes_no_tp2_0_frame() {
+    let fake = FakeDevice::vcan();
+    let mut session = open(&fake, &options("vcan0", None, Mode::ListenOnly)).unwrap();
+    let policy = policy();
+    let channel = channel();
+    let requests = [
+        setup(),
+        policy.approve_tp20_parameters(&channel).unwrap(),
+        policy.approve_tp20_keep_alive(&channel).unwrap(),
+        policy.approve_tp20_ack(&channel, 1).unwrap(),
+        policy.approve_tp20_disconnect(&channel).unwrap(),
+        policy
+            .approve_tp20_request(&channel, 0, &IDENTIFICATION)
+            .unwrap(),
+    ];
+    for request in &requests {
+        let err = session.send(request).unwrap_err();
+        assert!(err.to_string().contains("listen-only"), "{err}");
+    }
+    assert_eq!(fake.sent(), Vec::<[u8; 16]>::new());
+}
+
+#[test]
+fn a_bus_off_before_a_channel_frame_latches_and_nothing_more_is_written() {
+    let fake = FakeDevice::can0(500_000);
+    tp20_car(&fake);
+    let mut session = open(&fake, &options("can0", None, Mode::Active)).unwrap();
+    session.send(&setup()).unwrap();
+    assert_eq!(fake.sent().len(), 1);
+    fake.deliver(bus_off());
+    let request = policy().approve_tp20_disconnect(&channel()).unwrap();
+    let err = session.send(&request).unwrap_err();
+    assert!(err.to_string().contains("bus-off"), "{err}");
+    assert!(session.send(&request).is_err());
+    assert_eq!(fake.sent().len(), 1);
+    assert_eq!(fake.sent()[0][8..15], SETUP_REQUEST);
+}

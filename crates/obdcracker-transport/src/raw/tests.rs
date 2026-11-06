@@ -10,6 +10,8 @@ use super::port::{CanPort, Filter, PortEvent, RxFrame, TxFrame};
 use super::{Limits, RawCan};
 use crate::{Error, Expect, LinkEvent, Timing, Transport, exchange};
 
+pub(in crate::raw) mod tp20;
+
 type Responder = Box<dyn FnMut(&TxFrame) -> Vec<PortEvent>>;
 
 #[derive(Default)]
@@ -934,32 +936,6 @@ fn a_multi_frame_request_with_no_known_reply_id_is_refused_before_any_frame() {
     let result = can.send(&long_request(Target::Physical(0x710), 21));
     assert!(matches!(result, Err(Error::Adapter(_))));
     assert_eq!(can.port.log.len(), 0);
-}
-
-#[test]
-fn tp20_requests_are_refused_and_nothing_reaches_the_port() {
-    // Raw CAN has no TP2.0 yet: https://github.com/DaSonOfPoseidon/OBDCracker/issues/259
-    let policy = Policy::read_only().narrowed_to_tp20(&[0x01]);
-    let setup = policy.approve_tp20_setup(0x01).unwrap();
-    let reply = [0x00, 0xD0, 0x00, 0x03, 0x40, 0x07, 0x01];
-    let setup_id = obdcracker_core::tp20::setup_reply_id(0x01);
-    let channel = policy.tp20_channel(&setup, setup_id, &reply).unwrap();
-    let requests = [
-        setup,
-        policy.approve_tp20_parameters(&channel).unwrap(),
-        policy.approve_tp20_keep_alive(&channel).unwrap(),
-        policy.approve_tp20_disconnect(&channel).unwrap(),
-    ];
-    for request in requests {
-        let mut can = raw(Fake::default());
-        let result = can.send(&request);
-        assert!(
-            matches!(&result, Err(Error::Adapter(m)) if m.contains("TP2.0") && m.contains("#259"))
-        );
-        assert_eq!(can.port.log.len(), 0);
-        // Refusing doesn't latch.
-        can.send(&read_did(Target::Physical(0x7E0))).unwrap();
-    }
 }
 
 #[test]

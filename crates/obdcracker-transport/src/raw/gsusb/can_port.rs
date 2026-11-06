@@ -347,7 +347,7 @@ impl<U: Usb> CanPort for GsUsbPort<U> {
         let echo_id = self.next_echo;
         self.next_echo = (self.next_echo + 1) % ECHO_IDS;
         self.in_flight = Some(echo_id);
-        let bytes = wire::encode_tx(echo_id, frame.id, frame.extended, frame.data);
+        let bytes = wire::encode_tx(echo_id, frame.id, frame.extended, frame.bytes());
         if let Err(e) = self.usb.bulk_out(&bytes) {
             self.in_flight = None;
             return Err(self.fail(format!("writing a frame failed: {e}")));

@@ -1,5 +1,5 @@
-//! The ISO-TP transport shared by the raw-CAN backends (gs_usb, SocketCAN): framing, flow control
-//! and bus-state handling over any [`CanPort`]. See
+//! The transport shared by the raw-CAN backends (gs_usb, SocketCAN): ISO-TP framing and flow
+//! control, VW TP2.0 frames, and bus-state handling over any [`CanPort`]. See
 //! [`docs/raw-can.md`](https://github.com/DaSonOfPoseidon/OBDCracker/blob/main/docs/raw-can.md).
 
 use std::collections::VecDeque;
@@ -35,8 +35,6 @@ const DIAGNOSTIC_MASK: u32 = 0x700;
 const MAX_EVENTS: usize = 64;
 const MAX_STALE_FRAMES: usize = 256;
 const LONGEST_WAIT: Duration = Duration::from_secs(3600);
-
-const TP20_REFUSAL: &str = "raw CAN doesn't speak VW TP2.0 yet (#259)";
 
 /// What a raw-CAN session may do on the bus.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -126,12 +124,13 @@ struct Open {
     is_29_bit: bool,
 }
 
-/// ISO-TP over one CAN port.
+/// ISO-TP and VW TP2.0 over one CAN port.
 ///
 /// Sends an approved request as one frame or as a segmented transfer paced by the module's flow
-/// control, and receives replies through a [`ReplyWindow`], sending the flow control it mints.
-/// Once the port reports bus-off, error-passive or an error frame, nothing more is sent. See
-/// `docs/raw-can.md`.
+/// control, and receives replies through a [`ReplyWindow`], sending the flow control it mints. A
+/// VW TP2.0 frame goes out as one frame of its own length, and the frames of its source come
+/// back unparsed: `tp20::ChannelSession` does the rest. Once the port reports bus-off,
+/// error-passive or an error frame, nothing more is sent. See `docs/raw-can.md`.
 #[derive(Debug)]
 pub(crate) struct RawCan<P> {
     port: P,
@@ -140,6 +139,9 @@ pub(crate) struct RawCan<P> {
     fault: Option<String>,
     filters: Vec<Filter>,
     window: Option<Open>,
+    // The ID a VW TP2.0 conversation's frames come from, while one is open (11-bit): every frame
+    // from it is a reply, as it is. Never set together with `window`.
+    tp20: Option<u32>,
     ready: VecDeque<Response>,
     // Frames of replies not yet complete, for the log if they never are: (source, when, line).
     partial: Vec<(u32, SystemTime, String)>,
@@ -158,6 +160,7 @@ impl<P: CanPort> RawCan<P> {
             fault: None,
             filters: Vec::new(),
             window: None,
+            tp20: None,
             ready: VecDeque::new(),
             partial: Vec::new(),
             events: Vec::new(),
@@ -196,6 +199,7 @@ impl<P: CanPort> RawCan<P> {
     // the log would otherwise never show it.
     fn abandon(&mut self) {
         self.window = None;
+        self.tp20 = None;
         for reply in std::mem::take(&mut self.ready) {
             let line = format!("{:03X} {}", reply.source, hex(&reply.payload));
             self.push_event(LinkEvent::Unread {
@@ -249,9 +253,14 @@ impl<P: CanPort> RawCan<P> {
         }
     }
 
+    // An ISO-TP frame, padded to 8 bytes.
     fn write(&mut self, id: u32, extended: bool, bytes: &[u8]) -> Result<(), Error> {
+        self.write_frame(&TxFrame::padded(id, extended, bytes))
+    }
+
+    fn write_frame(&mut self, frame: &TxFrame) -> Result<(), Error> {
         self.check()?;
-        self.port.write(&TxFrame::padded(id, extended, bytes))?;
+        self.port.write(frame)?;
         self.last_frame = Some(Instant::now());
         Ok(())
     }
@@ -286,6 +295,10 @@ impl<P: CanPort> RawCan<P> {
                 )));
             }
         }
+        self.set_filters_for(request)
+    }
+
+    fn set_filters_for(&mut self, request: &Approved) -> Result<(), Error> {
         let filters = filters_for(request);
         if filters != self.filters {
             self.port.set_filters(&filters)?;
@@ -294,8 +307,86 @@ impl<P: CanPort> RawCan<P> {
         Ok(())
     }
 
+    // Before a frame on an open VW TP2.0 channel: reads what the port already holds, without
+    // dropping the channel's own frames (the module's ACK or its next frame may be among them, and
+    // the session reads them next). Every event is handled before the limit rejects it, so a
+    // bus fault queued behind other frames still latches before anything is written.
+    fn poll_channel(&mut self) -> Result<(), Error> {
+        let mut polled = 0;
+        loop {
+            let event = match self.port.read(Duration::ZERO) {
+                Ok(event) => event,
+                Err(Error::Timeout) => return Ok(()),
+                Err(e) => return Err(e),
+            };
+            polled += 1;
+            let frame = self.frame_of(event)?;
+            let source = self.tp20;
+            if !source.is_some_and(|source| self.accept_tp20(source, &frame)) {
+                // Gone for good, so the log gets it (#264); the frames the session will read
+                // are kept instead.
+                self.push_event(LinkEvent::Unread {
+                    at: SystemTime::now(),
+                    line: frame_line(&frame),
+                });
+            }
+            if polled > MAX_STALE_FRAMES {
+                return Err(Error::Adapter(format!(
+                    "more than {MAX_STALE_FRAMES} frames are queued on the CAN port while a \
+                     TP2.0 frame is waiting to be sent"
+                )));
+            }
+        }
+    }
+
+    // Sends a frame the policy built for VW TP2.0: a channel setup, or a frame on a channel a
+    // module opened. It goes out as one frame of its own length, with no ISO-TP framing, flow
+    // control or padding (docs/raw-can.md#vw-tp20).
+    fn send_tp20(&mut self, request: &Approved) -> Result<(), Error> {
+        let target = request.target();
+        let (Protocol::Tp20Channel, Some(source)) = (request.protocol(), request.reply_id()) else {
+            return Err(Error::Adapter(
+                "a VW TP2.0 frame needs the policy's TP2.0 approval and a reply ID".to_owned(),
+            ));
+        };
+        // Before anything is touched: a frame that can't be built leaves the session as it was.
+        let frame = TxFrame::exact(target.can_id(), target.is_29_bit(), request.payload())?;
+        // A setup starts a conversation, so what the last one left is dropped. A frame on an open
+        // channel goes on with the conversation in progress.
+        let continuing = matches!(target, Target::Tp20Channel(_)) && self.tp20.is_some();
+        let ready = if continuing {
+            // From here only the channel's own frames are the conversation's: a late repeat of
+            // the setup answer is logged, not handed to the session.
+            self.tp20 = Some(source);
+            self.poll_channel()
+                .and_then(|()| self.set_filters_for(request))
+        } else {
+            self.begin(request).inspect(|()| self.tp20 = Some(source))
+        };
+        let sent = ready.and_then(|()| self.write_frame(&frame));
+        if sent.is_err() {
+            self.abandon();
+        }
+        sent
+    }
+
+    // A VW TP2.0 conversation's reply: any frame from its source, as it is. False if the frame
+    // is someone else's.
+    fn accept_tp20(&mut self, source: u32, frame: &RxFrame) -> bool {
+        if frame.id != source || frame.extended {
+            return false;
+        }
+        self.ready
+            .push_back(Response::new(frame.id, frame.data.clone()).at_bus_time(frame.time));
+        true
+    }
+
     // Feeds a received frame to the window. Returns the flow control it asks for, if any.
     fn accept(&mut self, frame: &RxFrame) -> Option<ApprovedFlowControl> {
+        if let Some(source) = self.tp20 {
+            self.accept_tp20(source, frame);
+            return None;
+        }
         let open = self.window.as_mut()?;
         // A 29-bit frame whose ID reads like an 11-bit one is another module's.
         if frame.extended != open.is_29_bit {
@@ -457,7 +548,7 @@ impl<P: CanPort> Transport for RawCan<P> {
         if request.protocol() == Protocol::Tp20Channel
             || matches!(target, Target::Tp20Setup(_) | Target::Tp20Channel(_))
         {
-            return Err(Error::Adapter(TP20_REFUSAL.to_owned()));
+            return self.send_tp20(request);
         }
         if request.payload().len() > Addressing::Normal.max_single_frame()
             && request.reply_id().is_none()

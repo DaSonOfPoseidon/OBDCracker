@@ -3,7 +3,7 @@
 use std::time::{Duration, Instant};
 
 use super::can_port::SocketCanPort;
-use super::device::{Device, KernelFilter};
+use super::device::{Device, KernelFilter, Packet};
 use super::fake::{
     Echo, FakeDevice, Reaction, after_drops, bus_error, bus_off, error_frame, heard, heard_len,
     heard29, passive, remote, rx_overflow,
@@ -35,8 +35,15 @@ fn any11() -> Filter {
 }
 
 fn tx(id: u32, extended: bool, data: [u8; 8]) -> TxFrame {
-    TxFrame { id, extended, data }
+    TxFrame::padded(id, extended, &data)
 }
+
+fn tx_exact(id: u32, data: &[u8]) -> TxFrame {
+    TxFrame::exact(id, false, data).unwrap()
+}
+
+// VW TP2.0's channel setup (7 bytes) and disconnect (1): docs/raw-can.md#vw-tp20.
+const SETUP: [u8; 7] = [0x01, 0xC0, 0x00, 0x10, 0x00, 0x03, 0x01];
 
 fn frame(id: u32, data: &[u8]) -> PortEvent {
     PortEvent::Frame(RxFrame {
@@ -71,6 +78,74 @@ fn a_frame_is_written_with_its_padding_and_confirmed_before_write_returns() {
     assert_eq!(sent[0][8..], REQUEST);
     // The echo was taken: it is not left to be read as a frame from the bus.
     assert_eq!(port.read(Duration::ZERO), Err(Error::Timeout));
+}
+
+#[test]
+fn a_frame_of_exact_length_is_written_at_its_own_dlc_and_its_echo_confirms_it() {
+    let fake = echoing();
+    let mut port = open_port(&fake);
+    port.write(&tx_exact(0x200, &SETUP)).unwrap();
+    port.write(&tx_exact(0x740, &[0xA8])).unwrap();
+    let sent = fake.sent();
+    assert_eq!(sent.len(), 2);
+    assert_eq!(sent[0][4], 7, "DLC 7");
+    assert_eq!(
+        sent[0][8..],
+        [0x01, 0xC0, 0x00, 0x10, 0x00, 0x03, 0x01, 0x00]
+    );
+    assert_eq!(sent[1][4], 1, "DLC 1");
+    assert_eq!(sent[1][8..], [0xA8, 0, 0, 0, 0, 0, 0, 0]);
+    // Both echoes were taken: neither is left to be read as a frame from the bus.
+    assert_eq!(port.read(Duration::ZERO), Err(Error::Timeout));
+}
+
+#[test]
+fn an_echo_of_the_same_bytes_at_another_length_is_not_the_echo() {
+    // The padded 8-byte form of a 1-byte frame is another frame: only the exact one confirms.
+    let fake = echoing();
+    fake.state().on_send = Some(Box::new(|sent| {
+        let mut other = sent.to_vec();
+        other[4] = 8;
+        Reaction {
+            echo: Echo::Never,
+            before: vec![Packet {
+                frame: other,
+                dropped: 0,
+            }],
+            after: vec![],
+            counts: true,
+        }
+    }));
+    let mut port = open_port(&fake);
+    let err = port.write(&tx_exact(0x740, &[0xA8])).unwrap_err();
+    assert!(err.to_string().contains("no confirmation"), "{err}");
+}
+
+#[test]
+fn without_an_echo_the_transmit_counter_confirms_a_frame_of_exact_length() {
+    let fake = silent_driver();
+    let mut port = open_port(&fake);
+    port.write(&tx_exact(0x200, &SETUP)).unwrap();
+    port.write(&tx_exact(0x740, &[0xA8])).unwrap();
+    assert_eq!(fake.sent().len(), 2);
+    assert_eq!(fake.state().counter, 2);
+    assert_eq!(fake.sent()[1][4], 1);
+}
+
+#[test]
+fn a_frame_of_exact_length_that_nobody_acknowledges_stops_the_port() {
+    for fake in [echoing(), silent_driver()] {
+        fake.state().on_send = Some(Box::new(|_| Reaction {
+            echo: Echo::Never,
+            counts: false,
+            ..Reaction::confirm()
+        }));
+        let mut port = open_port(&fake);
+        let err = port.write(&tx_exact(0x200, &SETUP)).unwrap_err();
+        assert!(err.to_string().contains("no confirmation"), "{err}");
+        assert_eq!(port.write(&tx_exact(0x200, &SETUP)).unwrap_err(), err);
+        assert_eq!(fake.sent().len(), 1);
+    }
 }
 
 #[test]

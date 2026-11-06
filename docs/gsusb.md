@@ -101,6 +101,9 @@ any path, and its session sends nothing at all, flow control included.
   is reset at once, the send fails, and every later send and receive fails too. A bus fault (bus-off, error-passive,
   an error frame) seen while waiting ends the wait the same way.
 - A write that fails on USB, or a read that fails (an unplugged device), stops the port too.
+- The DLC is the frame's own: an ISO-TP frame is padded to 8 bytes, and a [VW TP2.0](raw-can.md#vw-tp20) frame goes out
+  at its length (a setup is DLC 7, a disconnect DLC 1), with zeros in the data bytes after it. The confirmation is
+  matched by echo ID, so it doesn't depend on the length.
 
 ## Receiving
 
@@ -131,4 +134,5 @@ control transfer for the audit log; the CLI does both, and says so if the reset 
 
 Everything above ran against a fake device. A car session needs these checked on a real adapter: STmin and latency
 through USB, the WinUSB setup on Windows, how claiming behaves next to the kernel driver, whether the device sends bus
-errors as described, and the timing a real bus gives.
+errors as described, and the timing a real bus gives. For VW TP2.0 (#259): that the device puts a DLC 7 setup and a
+DLC 1 disconnect on the bus as sent, and that a module answers them (#272).

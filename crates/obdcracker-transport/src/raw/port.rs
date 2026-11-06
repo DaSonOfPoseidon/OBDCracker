@@ -16,12 +16,15 @@ pub(crate) struct Filter {
     pub(crate) extended: bool,
 }
 
-/// A frame to put on the bus. Always 8 data bytes: the type has no shorter form.
+/// A frame to put on the bus: `len` data bytes (DLC `len`), of which `data` holds the first.
+/// ISO-TP frames are always 8 ([`TxFrame::padded`]); VW TP2.0 frames go out at their own length
+/// ([`TxFrame::exact`]). A port must send DLC `len`, not 8: use [`TxFrame::bytes`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct TxFrame {
     pub(crate) id: u32,
     pub(crate) extended: bool,
     pub(crate) data: [u8; CAN_DLC],
+    pub(crate) len: usize,
 }
 
 impl TxFrame {
@@ -32,7 +35,36 @@ impl TxFrame {
         for (slot, byte) in data.iter_mut().zip(bytes) {
             *slot = *byte;
         }
-        Self { id, extended, data }
+        Self {
+            id,
+            extended,
+            data,
+            len: CAN_DLC,
+        }
+    }
+
+    // A frame of exactly `bytes`, with no padding: VW TP2.0's setup is 7 bytes and a disconnect
+    // 1 (docs/raw-can.md#vw-tp20). Refuses what a classic CAN frame can't carry.
+    pub(super) fn exact(id: u32, extended: bool, bytes: &[u8]) -> Result<Self, Error> {
+        if bytes.is_empty() || bytes.len() > CAN_DLC {
+            return Err(Error::Adapter(format!(
+                "a {}-byte frame doesn't fit a classic CAN frame (1 to {CAN_DLC} bytes)",
+                bytes.len()
+            )));
+        }
+        let mut data = [0; CAN_DLC];
+        data[..bytes.len()].copy_from_slice(bytes);
+        Ok(Self {
+            id,
+            extended,
+            data,
+            len: bytes.len(),
+        })
+    }
+
+    /// The data bytes that go on the bus.
+    pub(crate) fn bytes(&self) -> &[u8] {
+        &self.data[..self.len]
     }
 }
 

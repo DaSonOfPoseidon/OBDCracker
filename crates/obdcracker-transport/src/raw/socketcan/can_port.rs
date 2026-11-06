@@ -27,11 +27,13 @@ const LONGEST_WAIT: Duration = Duration::from_secs(3600);
 const COUNTER_STEP: Duration = Duration::from_micros(200);
 
 // The frame a write is waiting to see come back.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct InFlight {
     id: u32,
     extended: bool,
-    data: [u8; 8],
+    // Exactly the bytes sent, so a frame of the same ID and the same bytes at another length is
+    // not its echo.
+    data: Vec<u8>,
 }
 
 /// One SocketCAN interface. See `docs/socketcan.md`.
@@ -199,9 +201,10 @@ impl<D: Device> SocketCanPort<D> {
                 // frame from another program on the interface can't be told apart (see
                 // docs/socketcan.md#sending).
                 if self.echo
-                    && self.in_flight.is_some_and(|f| {
-                        f.id == id && f.extended == extended && f.data[..] == data[..]
-                    })
+                    && self
+                        .in_flight
+                        .as_ref()
+                        .is_some_and(|f| f.id == id && f.extended == extended && f.data == data)
                 {
                     self.in_flight = None;
                 } else if self.accepts(id, extended) {
@@ -296,9 +299,9 @@ impl<D: Device> CanPort for SocketCanPort<D> {
         self.in_flight = Some(InFlight {
             id: frame.id,
             extended: frame.extended,
-            data: frame.data,
+            data: frame.bytes().to_vec(),
         });
-        let bytes = wire::encode_tx(frame.id, frame.extended, frame.data);
+        let bytes = wire::encode_tx(frame.id, frame.extended, frame.bytes());
         if let Err(e) = self.dev.send(&bytes) {
             self.in_flight = None;
             return Err(self.fail(format!("writing a frame failed: {e}")));

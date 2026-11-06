@@ -42,8 +42,10 @@ pub(super) const ERROR_MASK: u32 = ERR_TX_TIMEOUT
     | ERR_RESTARTED
     | ERR_CNT;
 
-/// A classic data frame to send, as the kernel takes it. Always DLC 8.
-pub(super) fn encode_tx(id: u32, extended: bool, data: [u8; 8]) -> [u8; FRAME_LEN] {
+/// A classic data frame to send, as the kernel takes it: DLC `data.len()` (1 to 8, never padded
+/// here), with zeros after the data.
+pub(super) fn encode_tx(id: u32, extended: bool, data: &[u8]) -> [u8; FRAME_LEN] {
+    debug_assert!((1..=8).contains(&data.len()));
     let can_id = if extended {
         (id & EFF_MASK) | EFF_FLAG
     } else {
@@ -51,8 +53,8 @@ pub(super) fn encode_tx(id: u32, extended: bool, data: [u8; 8]) -> [u8; FRAME_LE
     };
     let mut bytes = [0; FRAME_LEN];
     bytes[0..4].copy_from_slice(&can_id.to_ne_bytes());
-    bytes[4] = 8;
-    bytes[8..].copy_from_slice(&data);
+    bytes[4] = u8::try_from(data.len()).expect("a classic frame has at most 8 bytes");
+    bytes[8..8 + data.len()].copy_from_slice(data);
     bytes
 }
 

@@ -102,7 +102,7 @@ fn a_bit_timing_message_is_five_words() {
 fn a_transmitted_frame_is_twenty_bytes() {
     let data = [0x02, 0x10, 0x01, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA];
     assert_eq!(
-        wire::encode_tx(3, 0x7E0, false, data),
+        wire::encode_tx(3, 0x7E0, false, &data),
         [
             3, 0, 0, 0, // echo ID
             0xE0, 0x07, 0, 0, // CAN ID
@@ -112,10 +112,25 @@ fn a_transmitted_frame_is_twenty_bytes() {
     );
     // A 29-bit ID carries the extended flag (bit 31).
     assert_eq!(
-        wire::encode_tx(0, 0x18DA_00F1, true, data)[4..8],
+        wire::encode_tx(0, 0x18DA_00F1, true, &data)[4..8],
         [0xF1, 0x00, 0xDA, 0x98]
     );
     assert_eq!(FRAME_LEN, 20);
+}
+
+#[test]
+fn a_transmitted_frame_carries_its_own_length_with_nothing_after_it() {
+    let setup = [0x01, 0xC0, 0x00, 0x10, 0x00, 0x03, 0x01];
+    assert_eq!(
+        wire::encode_tx(2, 0x200, false, &setup),
+        [
+            2, 0, 0, 0, // echo ID
+            0x00, 0x02, 0, 0, // CAN ID
+            7, 0, 0, 0, // DLC 7
+            0x01, 0xC0, 0x00, 0x10, 0x00, 0x03, 0x01, 0x00
+        ]
+    );
+    assert_eq!(wire::encode_tx(2, 0x740, false, &[0xA8])[8], 1);
 }
 
 fn rx_bytes(echo_id: u32, can_id: u32, dlc: u8, channel: u8, flags: u8, data: [u8; 8]) -> Vec<u8> {
@@ -293,7 +308,7 @@ proptest! {
         id in 0u32..=0x7FF,
         data in proptest::array::uniform8(any::<u8>()),
     ) {
-        let bytes = wire::encode_tx(echo, id, false, data);
+        let bytes = wire::encode_tx(echo, id, false, &data);
         let parsed = wire::parse_frame(&bytes).unwrap();
         prop_assert_eq!(parsed.echo_id, echo);
         prop_assert_eq!(parsed.body, Body::Confirmation);

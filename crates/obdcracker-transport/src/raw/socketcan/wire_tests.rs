@@ -20,7 +20,7 @@ fn raw(can_id: u32, dlc: u8, data: [u8; 8]) -> Vec<u8> {
 
 #[test]
 fn a_transmitted_frame_is_sixteen_bytes_with_dlc_eight() {
-    let bytes = encode_tx(0x7E0, false, [2, 0x10, 1, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA]);
+    let bytes = encode_tx(0x7E0, false, &[2, 0x10, 1, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA]);
     assert_eq!(bytes.len(), 16);
     assert_eq!(bytes[0..4], 0x7E0u32.to_ne_bytes());
     assert_eq!(bytes[4], 8);
@@ -29,8 +29,18 @@ fn a_transmitted_frame_is_sixteen_bytes_with_dlc_eight() {
 }
 
 #[test]
+fn a_transmitted_frame_carries_its_own_length_with_nothing_after_it() {
+    let setup = [0x01, 0xC0, 0x00, 0x10, 0x00, 0x03, 0x01];
+    let bytes = encode_tx(0x200, false, &setup);
+    assert_eq!(bytes.len(), 16);
+    assert_eq!(bytes[4], 7);
+    assert_eq!(bytes[8..], [0x01, 0xC0, 0x00, 0x10, 0x00, 0x03, 0x01, 0x00]);
+    assert_eq!(encode_tx(0x740, false, &[0xA8])[4], 1);
+}
+
+#[test]
 fn an_extended_frame_carries_the_extended_flag() {
-    let bytes = encode_tx(0x17FC_0010, true, [0; 8]);
+    let bytes = encode_tx(0x17FC_0010, true, &[0; 8]);
     assert_eq!(bytes[0..4], (0x17FC_0010u32 | EFF_FLAG).to_ne_bytes());
 }
 
@@ -260,7 +270,7 @@ proptest! {
         data in any::<[u8; 8]>(),
     ) {
         let id = if extended { id } else { id & 0x7FF };
-        let parsed = parse_frame(&encode_tx(id, extended, data)).unwrap();
+        let parsed = parse_frame(&encode_tx(id, extended, &data)).unwrap();
         prop_assert_eq!(parsed, Body::Data { id, extended, data: data.to_vec() });
     }
 
