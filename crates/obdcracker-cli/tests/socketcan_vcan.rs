@@ -16,6 +16,7 @@ use obdcracker_core::isotp::{Addressing, Frame, Segmenter, Step};
 use obdcracker_safety::{Policy, Protocol, Target};
 use obdcracker_sim::SimBus;
 use obdcracker_transport::socketcan::{BitrateCheck, Mode, Options, SocketCan};
+use obdcracker_transport::tp20::{self, Answer, ChannelSession, Disconnect};
 use obdcracker_transport::{Error, Expect, Timing, Transport, exchange};
 use socketcan::{CanSocket, Socket};
 
@@ -494,4 +495,172 @@ fn interface_echoes() -> bool {
     let flags = std::fs::read_to_string(format!("/sys/class/net/{}/flags", interface())).unwrap();
     let flags = u32::from_str_radix(flags.trim().trim_start_matches("0x"), 16).unwrap();
     flags & 0x4_0000 != 0
+}
+
+// --- VW TP2.0 (#259) ---
+
+// A VW TP2.0 module at address 1, written out frame by frame here and not taken from the sim, so
+// what the tester sends is checked against a second reading of the layouts (docs/tp20.md). It
+// answers on a channel it opens: the module sends on 0x300 and listens on 0x740 (the passenger
+// door's answer in session 6), and every frame it sends is as long as the layout says.
+fn run_tp20_car(mut socket: CanSocket, stop: &AtomicBool, seen: &Seen) {
+    let send = |socket: &mut CanSocket, id: u32, data: &[u8]| {
+        socket.write_all(&raw_frame(id, data)).unwrap();
+    };
+    while !stop.load(Ordering::SeqCst) {
+        let Some((id, data)) = read_one(&mut socket) else {
+            continue;
+        };
+        seen.lock().unwrap().push((id, data.clone()));
+        match (id, data.as_slice()) {
+            (0x200, [0x01, 0xC0, ..]) => {
+                send(
+                    &mut socket,
+                    0x201,
+                    &[0x00, 0xD0, 0x00, 0x03, 0x40, 0x07, 0x01],
+                );
+            }
+            (0x740, [0xA0, ..] | [0xA3]) => {
+                send(&mut socket, 0x300, &[0xA1, 0x0F, 0x8A, 0xFF, 0x32, 0xFF]);
+            }
+            (0x740, [0xA8]) => send(&mut socket, 0x300, &[0xA8]),
+            // The identification request in one data frame (sequence 0, last, ACK wanted): the
+            // module ACKs it, then answers `5A 9B 01 02` in one frame.
+            (0x740, [0x10, 0x00, 0x02, 0x1A, 0x9B]) => {
+                send(&mut socket, 0x300, &[0xB1]);
+                send(
+                    &mut socket,
+                    0x300,
+                    &[0x10, 0x00, 0x04, 0x5A, 0x9B, 0x01, 0x02],
+                );
+            }
+            _ => {}
+        }
+    }
+}
+
+struct Tp20Car {
+    stop: Arc<AtomicBool>,
+    seen: Seen,
+    thread: Option<JoinHandle<()>>,
+}
+
+impl Tp20Car {
+    fn start() -> Self {
+        let socket = side_socket();
+        socket
+            .set_read_timeout(Some(Duration::from_millis(20)))
+            .unwrap();
+        let stop = Arc::new(AtomicBool::new(false));
+        let seen: Seen = Arc::default();
+        let thread = {
+            let (stop, seen) = (stop.clone(), seen.clone());
+            std::thread::spawn(move || run_tp20_car(socket, &stop, &seen))
+        };
+        Self {
+            stop,
+            seen,
+            thread: Some(thread),
+        }
+    }
+
+    fn stop(mut self) -> Vec<(u32, Vec<u8>)> {
+        self.stop.store(true, Ordering::SeqCst);
+        self.thread.take().unwrap().join().unwrap();
+        self.seen.lock().unwrap().clone()
+    }
+}
+
+impl Drop for Tp20Car {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::SeqCst);
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
+}
+
+#[test]
+#[ignore = "needs the vcan0 interface: the vcan CI job runs it with --ignored"]
+fn a_tp20_session_over_vcan_puts_every_frame_on_the_bus_at_its_own_length() {
+    let _one = exclusive();
+    let car = Tp20Car::start();
+    let mut session = SocketCan::open(&Options::new(interface())).unwrap();
+    let policy = Policy::read_only().narrowed_to_tp20(&[0x01]);
+    // A generous wait: the CI runner is slow, and what is checked is the frames.
+    let timing = Timing {
+        p2: Duration::from_millis(500),
+        ..Timing::default()
+    };
+    let mut channel = ChannelSession::open(&mut session, &policy, 0x01, timing).unwrap();
+    assert_eq!(
+        channel.request(&[0x1A, 0x9B]).unwrap(),
+        [0x5A, 0x9B, 0x01, 0x02]
+    );
+    assert_eq!(channel.close(), Ok(Disconnect::Closed));
+    drop(session);
+    let heard = car.stop();
+    // The kernel took each frame at the DLC it was sent with, whether the interface echoes
+    // (`vcan echo=1`) or the transmit counter confirmed it: the setup 7 bytes, the parameters 6,
+    // the request 5, the ACK of the answer 1 and the disconnect 1, none padded.
+    assert_eq!(
+        heard,
+        [
+            (0x200, vec![0x01, 0xC0, 0x00, 0x10, 0x00, 0x03, 0x01]),
+            (0x740, vec![0xA0, 0x0F, 0x8A, 0xFF, 0x32, 0xFF]),
+            (0x740, vec![0x10, 0x00, 0x02, 0x1A, 0x9B]),
+            (0x740, vec![0xB1]),
+            (0x740, vec![0xA8]),
+        ]
+    );
+}
+
+#[test]
+#[ignore = "needs the vcan0 interface: the vcan CI job runs it with --ignored"]
+fn tp20_discovery_over_vcan_finds_the_module_and_closes_its_channel() {
+    let _one = exclusive();
+    let car = Tp20Car::start();
+    let mut session = SocketCan::open(&Options::new(interface())).unwrap();
+    let policy = Policy::read_only().narrowed_to_tp20(&[0x01, 0x02]);
+    let timing = Timing {
+        p2: Duration::from_millis(500),
+        ..Timing::default()
+    };
+    let found = tp20::probe(&mut session, &policy, &[0x01, 0x02], timing).unwrap();
+    drop(session);
+    let heard = car.stop();
+    assert_eq!(found.len(), 1);
+    assert_eq!(found[0].address, 0x01);
+    assert!(matches!(found[0].answer, Answer::Channel(_)));
+    assert_eq!(found[0].disconnect, Some(Disconnect::Closed));
+    // The silent address got its setup too, at the same length.
+    assert_eq!(
+        heard,
+        [
+            (0x200, vec![0x01, 0xC0, 0x00, 0x10, 0x00, 0x03, 0x01]),
+            (0x740, vec![0xA8]),
+            (0x200, vec![0x02, 0xC0, 0x00, 0x10, 0x00, 0x03, 0x01]),
+        ]
+    );
+}
+
+#[test]
+#[ignore = "needs the vcan0 interface: the vcan CI job runs it with --ignored"]
+fn a_listen_only_session_over_vcan_puts_no_tp2_0_frame_on_the_bus() {
+    let _one = exclusive();
+    let car = Tp20Car::start();
+    let mut options = Options::new(interface());
+    options.mode = Mode::ListenOnly;
+    let mut session = SocketCan::open(&options).unwrap();
+    let policy = Policy::read_only().narrowed_to_tp20(&[0x01]);
+    let err = tp20::probe(&mut session, &policy, &[0x01], Timing::default()).unwrap_err();
+    assert!(err.to_string().contains("listen-only"), "{err}");
+    assert!(
+        ChannelSession::open(&mut session, &policy, 0x01, Timing::default()).is_err(),
+        "no channel without a setup on the bus"
+    );
+    drop(session);
+    std::thread::sleep(Duration::from_millis(100));
+    let heard = car.stop();
+    assert!(heard.is_empty(), "{heard:x?}");
 }
