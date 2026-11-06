@@ -1480,7 +1480,7 @@ fn every_stale_frame_is_accounted_for_when_the_drain_fails() {
         })
         .sum::<usize>();
     assert_eq!(unread + lost, 257);
-    // The frame behind the limit is still in the queue for the next attempt.
+    // The frame past the limit is recorded before the send fails, so it leaves the queue as well.
     assert_eq!(can.port.inbox.len(), 0);
 }
 
