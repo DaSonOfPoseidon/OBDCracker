@@ -138,6 +138,9 @@ must not go out on a faulted bus. A send the kernel refuses (the interface went 
 - Golden frames, filters and the error-frame mapping, and proptests of the frame parser and the filters, are in
   `wire_tests.rs`. The port is tested against a fake interface that keeps the kernel's filter rules (`port_tests.rs`), and
   the checks and a session carrying requests, with and without an echo, in `connect_tests.rs`.
+  The fake counts a write made while an earlier frame's confirmation was still unread (`overlapped`), so a session test
+  can say that a transfer's frames were confirmed one at a time. [raw-can.md](raw-can.md#the-requirements-and-their-tests)
+  maps each of #42's requirements to its tests.
 - `crates/obdcracker-cli/tests/socketcan_vcan.rs` runs the real binary and the library against the kernel's `vcan0`, with
   `obdcracker-sim` answering on the other end as ISO-TP frames, and a VW TP2.0 module written out frame by frame in
   the test (so the lengths on the wire, a 7-byte setup and a 1-byte disconnect, are checked against a second reading

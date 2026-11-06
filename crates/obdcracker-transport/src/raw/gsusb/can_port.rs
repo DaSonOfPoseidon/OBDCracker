@@ -221,6 +221,11 @@ impl<U: Usb> GsUsbPort<U> {
 
     // --- Receiving ---
 
+    #[cfg(test)]
+    pub(super) fn filters(&self) -> &[Filter] {
+        &self.filters
+    }
+
     fn accepts(&self, id: u32, extended: bool) -> bool {
         self.filters
             .iter()

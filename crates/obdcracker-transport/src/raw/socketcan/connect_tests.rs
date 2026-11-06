@@ -6,8 +6,8 @@ use obdcracker_core::obd;
 use obdcracker_safety::{Policy, Protocol, Target};
 
 use super::connect::{self, check_name, plan};
-use super::device::{BusState, Iface, Modes};
-use super::fake::{FakeDevice, Reaction, bus_off, heard};
+use super::device::{BusState, Device, Iface, KernelFilter, Modes};
+use super::fake::{FakeDevice, Reaction, after_drops, bus_off, heard, heard29};
 use super::{BitrateCheck, ConnectFailure, Mode, Options, Session};
 use crate::{Error, Expect, LinkEvent, Timing, Transport, exchange};
 
@@ -153,6 +153,21 @@ fn another_bitrate_than_the_one_asked_for_is_refused_and_not_changed() {
         assert!(message.contains("never changes"), "{message}");
         // Nothing was opened, so nothing could have been sent.
         assert_eq!(fake.state().opened, None);
+        assert_eq!(fake.state().filter_history.len(), 0);
+        assert_eq!(fake.sent(), Vec::<[u8; 16]>::new());
+    }
+}
+
+// #42 requirement 5: the bitrate is checked from what the interface reports, and checking writes
+// nothing.
+#[test]
+fn the_bitrate_check_writes_nothing_and_reads_the_interface_once() {
+    for fake in [FakeDevice::can0(500_000), FakeDevice::vcan()] {
+        let session = open(&fake, &options("can0", Some(500_000), Mode::Active)).unwrap();
+        assert_eq!(fake.sent(), Vec::<[u8; 16]>::new());
+        assert_eq!(fake.state().counter, 0);
+        assert_eq!(fake.state().describes, 1);
+        drop(session);
     }
 }
 
@@ -485,6 +500,135 @@ fn a_multi_frame_request_sends_each_frame_after_the_last_was_confirmed() {
         assert_eq!(sent[1][13..], [0xAA, 0xAA, 0xAA]);
         // Each was counted or echoed before the next went out.
         assert_eq!(fake.state().counter, 2);
+        assert_eq!(fake.state().overlapped, 0);
+    }
+}
+
+// #42 requirement 2: a long transfer, so a port that let the next frame go before the last one was
+// confirmed would show (the fake counts a write made while a confirmation was still unread).
+#[test]
+fn every_frame_of_a_long_request_is_padded_and_confirmed_before_the_next() {
+    for fake in [FakeDevice::can0(500_000), FakeDevice::vcan()] {
+        car(&fake);
+        let mut session = open(&fake, &options("can0", None, Mode::Active)).unwrap();
+        let mut payload = vec![0x19, 0x02, 0xAF];
+        payload.resize(100, 0);
+        let request = Policy::read_only()
+            .approve(Protocol::Uds, Target::Physical(0x7E0), &payload)
+            .unwrap();
+        session.send(&request).unwrap();
+        let sent = fake.sent();
+        // a first frame of 6 bytes, then 94 bytes in sevens
+        assert_eq!(sent.len(), 1 + 94usize.div_ceil(7));
+        for (n, frame) in sent.iter().enumerate() {
+            assert_eq!(frame[4], 8, "DLC 8 on frame {n}");
+            if n > 0 {
+                assert_eq!(frame[8], 0x20 | (u8::try_from(n).unwrap() & 0x0F), "{n}");
+            }
+        }
+        assert_eq!(fake.state().overlapped, 0);
+    }
+}
+
+// Guards the test above: the fake must see a confirmation nobody read as an overlap.
+#[test]
+fn the_fake_counts_a_write_made_before_the_last_confirmation_was_read() {
+    for fake in [FakeDevice::can0(500_000), FakeDevice::vcan()] {
+        let mut device = fake.clone();
+        let echo = fake.state().iface.echo;
+        device.open(echo).unwrap();
+        device
+            .set_filters(&[KernelFilter { id: 0, mask: 0 }])
+            .unwrap();
+        device.send(&[0; 16]).unwrap();
+        assert_eq!(fake.state().overlapped, 0);
+        device.send(&[1; 16]).unwrap();
+        assert_eq!(fake.state().overlapped, 1);
+    }
+}
+
+// #42 requirement 3: the kernel is given the replies of each request, at their width, and a frame
+// outside them never reaches the socket.
+#[test]
+fn the_kernel_filter_follows_each_request_and_keeps_to_its_width() {
+    let fake = FakeDevice::vcan();
+    car(&fake);
+    let mut session = open(&fake, &options("vcan0", None, Mode::Active)).unwrap();
+    let broadcast = Policy::read_only()
+        .approve(
+            Protocol::Uds,
+            Target::ObdFunctional,
+            &obd::vehicle_info(0x02),
+        )
+        .unwrap();
+    session.send(&broadcast).unwrap();
+    for (packet, reaches) in [
+        (heard(0x7E8, &[1]), true),
+        (heard(0x7EF, &[2]), true),
+        (heard(0x7F0, &[3]), false),
+        (heard(0x7E7, &[3]), false),
+        (heard(0x7DF, &[4]), false),
+        (heard29(0x7E8, &[5]), false),
+    ] {
+        let queued = fake.state().inbox.len();
+        fake.deliver(packet);
+        assert_eq!(fake.state().inbox.len() - queued, usize::from(reaches));
+    }
+    session.send(&read_did()).unwrap();
+    for (packet, reaches) in [
+        (heard(0x7E8, &[1]), true),
+        (heard(0x7E9, &[2]), false),
+        (heard(0x7E0, &[3]), false),
+    ] {
+        let queued = fake.state().inbox.len();
+        fake.deliver(packet);
+        assert_eq!(fake.state().inbox.len() - queued, usize::from(reaches));
+    }
+    let extended = Policy::read_only()
+        .approve(
+            Protocol::Uds,
+            Target::Physical29(0x18DA_10F1),
+            &[0x22, 0xF1, 0x87],
+        )
+        .unwrap();
+    session.send(&extended).unwrap();
+    for (packet, reaches) in [
+        (heard29(0x18DA_F110, &[1]), true),
+        (heard(0x7E8, &[2]), false),
+        (heard(0x18DA_F110 & 0x7FF, &[3]), false),
+    ] {
+        let queued = fake.state().inbox.len();
+        fake.deliver(packet);
+        assert_eq!(fake.state().inbox.len() - queued, usize::from(reaches));
+    }
+}
+
+// #42 requirement 3: a receive overrun is an error, never a gap in a reply.
+#[test]
+fn a_receive_overrun_in_a_reply_is_an_error_and_the_half_reply_is_dropped() {
+    for fake in [FakeDevice::can0(500_000), FakeDevice::vcan()] {
+        fake.state().on_send = Some(Box::new(|frame| match id_and_pci(frame) {
+            (0x7E0, 0x03) => Reaction::reply(vec![heard(
+                0x7E8,
+                &[0x10, 0x0A, 0x62, 0xF1, 0x87, 0x01, 0x02, 0x03],
+            )]),
+            // The socket's queue overflowed: the drop counter rides on the next frame.
+            (0x7E0, 0x30) => Reaction::reply(vec![after_drops(
+                heard(0x7E8, &[0x21, 0x04, 0x05, 0x06, 0x07]),
+                2,
+            )]),
+            _ => Reaction::confirm(),
+        }));
+        let mut session = open(&fake, &options("can0", None, Mode::Active)).unwrap();
+        session.send(&read_did()).unwrap();
+        match session.recv(Duration::from_millis(50)) {
+            Err(Error::Adapter(message)) => assert!(message.contains("overrun"), "{message}"),
+            other => panic!("{other:?}"),
+        }
+        // What came after the loss is not the rest of that reply, and nothing was glued together.
+        assert_eq!(session.recv(Duration::from_millis(5)), Err(Error::Timeout));
+        // The bus is fine: the session goes on.
+        session.send(&read_did()).unwrap();
     }
 }
 
@@ -644,6 +788,7 @@ fn a_tp20_session_runs_over_the_interface_with_or_without_an_echo() {
         // counter) at the DLC it was sent with.
         let dlcs: Vec<u8> = sent.iter().map(|frame| frame[4]).collect();
         assert_eq!(dlcs, [7, 6, 5, 1, 1]);
+        assert_eq!(fake.state().overlapped, 0);
         assert_eq!(sent[0][8..], [0x01, 0xC0, 0x00, 0x10, 0x00, 0x03, 0x01, 0]);
         assert_eq!(u32::from_ne_bytes(sent[0][..4].try_into().unwrap()), 0x200);
         assert_eq!(u32::from_ne_bytes(sent[4][..4].try_into().unwrap()), 0x740);

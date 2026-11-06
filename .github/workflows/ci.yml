@@ -217,3 +217,45 @@ jobs:
           sudo ip link add dev vcan0 type vcan
           sudo ip link set up vcan0
           cargo test -p obdcracker-cli --test socketcan_vcan -- --ignored --test-threads=1
+
+  # The raw-CAN separation-time (STmin) tests on a Windows runner, where timers round up to about
+  # 15 ms (issue #42, requirement 6). The tests that read the real clock are #[ignore]d, so the
+  # required `check` job never runs them on its loaded runner, and they assert only that no gap is
+  # short and that the fastest of many is on time, so a stalled runner cannot fail them
+  # (crates/obdcracker-transport/src/raw/tests/timing.rs). `cargo test` passes when a filter matches
+  # nothing, so the job counts what the filters match and what ran, and fails if either is short.
+  # Not required by branch protection.
+  timing-windows:
+    needs: changes
+    if: ${{ !cancelled() }}
+    runs-on: ${{ needs.changes.result == 'success' && needs.changes.outputs.code != 'true' && 'ubuntu-latest' || 'windows-latest' }}
+    timeout-minutes: 15
+    env:
+      SKIP_LEG: ${{ needs.changes.result == 'success' && needs.changes.outputs.code != 'true' }}
+    steps:
+      - if: env.SKIP_LEG == 'true'
+        run: echo "skipped, no build input changed"
+      - if: env.SKIP_LEG != 'true'
+        uses: actions/checkout@v5
+      - if: env.SKIP_LEG != 'true'
+        run: rustup show
+      - if: env.SKIP_LEG != 'true'
+        uses: Swatinem/rust-cache@v2
+      - name: separation time on Windows
+        if: env.SKIP_LEG != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          filters=(raw::tests::timing:: raw::pace::tests::)
+          # What the filters matched when this was written. Lower it only when a test is removed
+          # on purpose: a rename that drops a test out of the filters must fail here, not pass.
+          least=11
+          listed=$(cargo test -p obdcracker-transport --lib -- "${filters[@]}" --include-ignored --list | grep -c ': test' || true)
+          echo "the filters match $listed tests"
+          if [ "$listed" -lt "$least" ]; then
+            echo "expected at least $least tests, found $listed" >&2
+            exit 1
+          fi
+          # One at a time: they measure time, so they must not compete for the runner's cores.
+          cargo test -p obdcracker-transport --lib -- "${filters[@]}" --include-ignored --test-threads=1 | tee timing.log
+          grep -F "test result: ok. $listed passed; 0 failed; 0 ignored;" timing.log

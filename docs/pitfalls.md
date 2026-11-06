@@ -473,6 +473,19 @@ Each entry names the class, what to check, and where it bit us.
   that exercise it. PR #9: dropping late replies made a P2* test's ECU go pending too late to count.
 - **Timing tests need margins and repeat runs.** Leave tens of milliseconds between events that must fall on either
   side of a deadline, and run the test several times before trusting it.
+- **A fake that only counts the failure case makes an ordering assertion vacuous.** The `gs_usb` fake's `overlapped`
+  counter rose only after a frame it had been told never to confirm, so `assert_eq!(overlapped, 0)` after a successful
+  transfer passed even with the wait for the confirmation deleted, and the SocketCAN session test asserted only the
+  final counter. Make the fake see the thing itself (a write made while an earlier confirmation was still unread),
+  mutate the wait away to watch the test fail, and add a test that the fake counts it (#42).
+- **A wall-clock bound on a shared runner needs the fastest of many, not every one.** A runner can stall a thread for
+  tens of milliseconds at any moment, so "this gap took under 5 ms" fails at random, and `elapsed() < 1ms` on a no-op
+  did. Assert the hard bound (never short) on every measurement and the budget on the minimum of dozens, and keep the
+  test out of the required `check` job (`#[ignore]`, run by its own job). Put a sleep where the code should spin to
+  see the test fail (#42).
+- **A CI job that runs tests by name filter passes when the filter matches nothing.** `cargo test` reports
+  `0 passed` as success, so a renamed test or module turns the job into a no-op. List what the filters match, fail
+  below a floor, and require the run's `N passed; 0 failed; 0 ignored` to equal the list (`ci.yml`, `timing-windows`, #42).
 - **No dev-dependency cycles across the `Transport` trait.** `obdcracker-transport` tests can't use `obdcracker-sim`:
   a cycle builds two copies of the trait. Put integration tests in the downstream crate.
 

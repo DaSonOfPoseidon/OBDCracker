@@ -66,6 +66,11 @@ pub(super) struct State {
     pub(super) fail_send: bool,
     pub(super) fail_recv: Option<String>,
     pub(super) counter: u64,
+    /// The last value the transmit counter was read as.
+    observed: u64,
+    /// Frames written while an earlier one was still unconfirmed: its echo not yet read from the
+    /// socket, or the transmit counter not yet read since it moved.
+    pub(super) overlapped: usize,
     pub(super) counter_fails: bool,
     /// The transmit counter reads one behind until the socket has been read this many times.
     pub(super) counter_lag_recvs: usize,
@@ -116,6 +121,8 @@ impl FakeDevice {
             fail_send: false,
             fail_recv: None,
             counter: 0,
+            observed: 0,
+            overlapped: 0,
             counter_fails: false,
             counter_lag_recvs: 0,
             flood: None,
@@ -213,6 +220,15 @@ impl Device for FakeDevice {
         if state.fail_send {
             return Err(Error::Adapter("Network is down".to_owned()));
         }
+        // An echo still in the queue is a frame whose confirmation was never read; without an echo
+        // the counter has to have been read at its latest value.
+        let unread_echo = state
+            .inbox
+            .iter()
+            .any(|packet| state.sent.iter().any(|sent| sent[..] == packet.frame[..]));
+        if unread_echo || (!echo && state.observed < state.counter) {
+            state.overlapped += 1;
+        }
         state.sent.push(*frame);
         let reaction = match state.on_send.as_mut() {
             Some(on_send) => on_send(frame),
@@ -272,12 +288,15 @@ impl Device for FakeDevice {
     }
 
     fn tx_packets(&mut self) -> Result<u64, Error> {
-        let state = self.0.borrow();
+        let mut state = self.0.borrow_mut();
         if state.counter_fails {
             Err(Error::Adapter("no such file".to_owned()))
         } else if state.recvs < state.counter_lag_recvs {
-            Ok(state.counter.saturating_sub(1))
+            let lagging = state.counter.saturating_sub(1);
+            state.observed = lagging;
+            Ok(lagging)
         } else {
+            state.observed = state.counter;
             Ok(state.counter)
         }
     }
