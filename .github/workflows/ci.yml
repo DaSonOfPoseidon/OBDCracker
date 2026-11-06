@@ -181,11 +181,20 @@ jobs:
         uses: Swatinem/rust-cache@v2
       - if: env.SKIP_LEG != 'true'
         run: cargo test -p obdcracker-cli --test socketcan_vcan --no-run
-      # The runner's kernel keeps vcan in its extra modules package.
-      - if: env.SKIP_LEG != 'true'
+      # Some runner kernels ship vcan in the main modules package and others in an extra one that
+      # may not exist for the runner's kernel at all (it did not for 7.0.0-1019-azure), so the extra
+      # package is only installed if the module isn't there already. If it still can't be loaded,
+      # the job fails: a skipped check would pass without testing anything.
+      - name: vcan module available
+        if: env.SKIP_LEG != 'true'
         run: |
-          sudo apt-get update
-          sudo apt-get install -y "linux-modules-extra-$(uname -r)"
+          set -euo pipefail
+          if ! sudo modprobe vcan; then
+            sudo apt-get update
+            sudo apt-get install -y "linux-modules-extra-$(uname -r)"
+            sudo modprobe vcan
+          fi
+          sudo rmmod vcan
       - name: vcan0 without a driver echo
         if: env.SKIP_LEG != 'true'
         env:
