@@ -83,6 +83,8 @@ struct Session<D: device::Device> {
     // What the kernel reports, if it does.
     bitrate: Option<u32>,
     check: BitrateCheck,
+    // Whether the controller is itself in listen-only mode, if the driver says.
+    controller_listen_only: Option<bool>,
 }
 
 impl<D: device::Device> Session<D> {
@@ -199,6 +201,14 @@ impl SocketCan {
     #[must_use]
     pub fn bitrate(&self) -> Option<u32> {
         self.0.bitrate
+    }
+
+    /// Whether the interface's controller is itself in listen-only mode, if the driver says. A
+    /// [`Mode::ListenOnly`] session writes no frame either way, but only a controller in
+    /// listen-only mode also stays from acknowledging the frames it receives.
+    #[must_use]
+    pub fn controller_listen_only(&self) -> Option<bool> {
+        self.0.controller_listen_only
     }
 
     /// How to name this link in the audit log: `socketcan:<interface>:<mode>`.

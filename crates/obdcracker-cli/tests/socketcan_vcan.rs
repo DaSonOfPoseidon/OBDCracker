@@ -319,7 +319,7 @@ fn fingerprint_over_vcan_reads_each_module_on_its_physical_id() {
         if data.first().is_some_and(|pci| pci >> 4 == 3) {
             continue;
         }
-        assert!(matches!(id, 0x7DF | 0x7E0 | 0x7E1), "{id:x}");
+        assert!(matches!(id, 0x7DF..=0x7E1), "{id:x}");
         assert_eq!(data.len(), 8, "{data:x?}");
     }
     assert!(heard.iter().any(|(id, _)| *id == 0x7E1), "{heard:x?}");
@@ -348,10 +348,21 @@ fn a_listen_only_run_over_vcan_puts_nothing_on_the_bus() {
         "{}",
         lossy(&out.stderr)
     );
+    // vcan has no controller, so it can't say it is in listen-only mode: the user is told that
+    // the tap may still be acknowledged.
+    assert!(
+        lossy(&out.stderr).contains("still acknowledges"),
+        "{}",
+        lossy(&out.stderr)
+    );
     assert!(heard.is_empty(), "{heard:x?}");
     let audit = std::fs::read_to_string(&log).unwrap();
     assert!(
         audit.contains(r#""link":"socketcan:vcan0:listen-only""#),
+        "{audit}"
+    );
+    assert!(
+        audit.contains("acknowledges the frames it receives"),
         "{audit}"
     );
 }
@@ -462,17 +473,15 @@ fn frames_the_kernel_dropped_are_an_error_not_a_gap() {
     for _ in 0..4000 {
         side.write_all(&junk).unwrap();
     }
-    // Read what is queued until the queue is empty. The frames that were dropped are gone, and
+    // One read skips what is queued until it is empty. The frames that were dropped are gone, and
     // none of the ones left carries the news: the socket's drop counter rides on the next frame
     // that is queued after a loss.
-    loop {
-        match session.recv(Duration::from_millis(100)) {
-            Ok(reply) => panic!("junk read as a reply: {reply:?}"),
-            Err(Error::Timeout) => break,
-            Err(e) => {
-                assert!(e.to_string().contains("dropped received frames"), "{e}");
-                return;
-            }
+    match session.recv(Duration::from_millis(100)) {
+        Ok(reply) => panic!("junk read as a reply: {reply:?}"),
+        Err(Error::Timeout) => {}
+        Err(e) => {
+            assert!(e.to_string().contains("dropped received frames"), "{e}");
+            return;
         }
     }
     side.write_all(&junk).unwrap();

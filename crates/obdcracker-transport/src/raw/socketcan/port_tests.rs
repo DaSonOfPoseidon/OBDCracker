@@ -220,10 +220,10 @@ fn a_failed_send_stops_the_port() {
     fake.state().fail_send = true;
     let err = port.write(&tx(0x7E0, false, REQUEST)).unwrap_err();
     assert!(err.to_string().contains("writing a frame failed"), "{err}");
-    assert!(fake.sent().is_empty());
+    assert_eq!(fake.sent(), Vec::<[u8; 16]>::new());
     fake.state().fail_send = false;
     assert_eq!(port.write(&tx(0x7E0, false, REQUEST)).unwrap_err(), err);
-    assert!(fake.sent().is_empty());
+    assert_eq!(fake.sent(), Vec::<[u8; 16]>::new());
 }
 
 #[test]
@@ -233,7 +233,7 @@ fn listen_only_never_writes() {
     port.set_filters(&[any11()]).unwrap();
     let err = port.write(&tx(0x7E0, false, REQUEST)).unwrap_err();
     assert!(err.to_string().contains("listen-only"), "{err}");
-    assert!(fake.sent().is_empty());
+    assert_eq!(fake.sent(), Vec::<[u8; 16]>::new());
     // It still listens.
     fake.deliver(heard(0x7E8, &[1]));
     assert_eq!(
@@ -283,7 +283,7 @@ fn without_an_echo_an_unreadable_counter_writes_nothing() {
     fake.state().counter_fails = true;
     let err = port.write(&tx(0x7E0, false, REQUEST)).unwrap_err();
     assert!(err.to_string().contains("transmit counter"), "{err}");
-    assert!(fake.sent().is_empty());
+    assert_eq!(fake.sent(), Vec::<[u8; 16]>::new());
 }
 
 #[test]
@@ -307,7 +307,7 @@ fn an_id_wider_than_its_width_is_refused_before_any_write() {
     let mut port = open_port(&fake);
     assert!(port.write(&tx(0x800, false, REQUEST)).is_err());
     assert!(port.write(&tx(0x2000_0000, true, REQUEST)).is_err());
-    assert!(fake.sent().is_empty());
+    assert_eq!(fake.sent(), Vec::<[u8; 16]>::new());
     // A refusal for a bad request is not a fault of the port.
     port.write(&tx(0x7FF, false, REQUEST)).unwrap();
     port.write(&tx(0x1FFF_FFFF, true, REQUEST)).unwrap();
@@ -550,7 +550,7 @@ fn a_flood_while_waiting_for_the_echo_overruns_instead_of_growing() {
     let fake = echoing();
     fake.state().on_send = Some(Box::new(|_| Reaction {
         before: (0..3000)
-            .map(|i| heard(0x7E8, &[(i % 256) as u8]))
+            .map(|i| heard(0x7E8, &[u8::try_from(i % 256).unwrap()]))
             .collect(),
         ..Reaction::confirm()
     }));
@@ -597,7 +597,7 @@ fn the_ports_own_settings_are_logged_for_the_audit_log() {
         2,
         "the transport's filters, then the echo's"
     );
-    assert!(port.take_events().is_empty());
+    assert_eq!(port.take_events(), Vec::<LinkEvent>::new());
 }
 
 #[test]

@@ -22,7 +22,8 @@ const MAX_POLLED_PAST_DEADLINE: usize = 4096;
 // The most notes kept for the audit log between `take_events` calls.
 const MAX_EVENTS: usize = 64;
 const LONGEST_WAIT: Duration = Duration::from_secs(3600);
-// Without a driver echo the transmit counter is read this often while a write waits.
+// Without a driver echo the transmit counter is read about this often while a write waits (the
+// socket wait rounds up to a millisecond).
 const COUNTER_STEP: Duration = Duration::from_micros(200);
 
 // The frame a write is waiting to see come back.

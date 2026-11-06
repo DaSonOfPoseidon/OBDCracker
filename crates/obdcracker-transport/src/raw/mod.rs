@@ -43,7 +43,8 @@ const TP20_REFUSAL: &str = "raw CAN doesn't speak VW TP2.0 yet (#259)";
 pub enum Mode {
     /// Receives and never transmits: no frame of any kind is written, flow control included, so
     /// every send fails. The backend also keeps the controller from acknowledging where it can
-    /// (docs/gsusb.md, docs/socketcan.md).
+    /// (docs/gsusb.md); `socketcan` can't change the interface's mode, so it says when the
+    /// controller would still acknowledge (docs/socketcan.md).
     ListenOnly,
     /// Sends the policy's approved requests and the flow control it mints.
     Active,

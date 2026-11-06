@@ -1,6 +1,7 @@
 //! Checking a SocketCAN interface before the socket is opened. Everything here reads: it never
 //! changes the interface's state, bitrate or mode. See `docs/socketcan.md#connecting`.
 
+use std::fmt::Write as _;
 use std::time::SystemTime;
 
 use super::can_port::SocketCanPort;
@@ -62,24 +63,28 @@ fn describe(name: &str, iface: &Iface) -> String {
         },
         if iface.up { "up" } else { "down" },
     );
-    line.push_str(&match iface.state {
-        Some(state) => format!(", state {}", state.name()),
-        None => ", state not reported".to_owned(),
-    });
-    line.push_str(&match iface.bitrate {
-        Some(bitrate) => format!(", bitrate {bitrate} bit/s"),
-        None => ", no bitrate configured".to_owned(),
-    });
-    line.push_str(&match iface.modes {
-        Some(modes) => format!(
+    match iface.state {
+        Some(state) => write!(line, ", state {}", state.name()),
+        None => write!(line, ", state not reported"),
+    }
+    .expect("writing to a String cannot fail");
+    match iface.bitrate {
+        Some(bitrate) => write!(line, ", bitrate {bitrate} bit/s"),
+        None => write!(line, ", no bitrate configured"),
+    }
+    .expect("writing to a String cannot fail");
+    match iface.modes {
+        Some(modes) => write!(
+            line,
             ", listen-only {}, loopback {}, presume-ack {}, one-shot {}",
             on_off(modes.listen_only),
             on_off(modes.loopback),
             on_off(modes.presume_ack),
             on_off(modes.one_shot),
         ),
-        None => ", modes not reported".to_owned(),
-    });
+        None => write!(line, ", modes not reported"),
+    }
+    .expect("writing to a String cannot fail");
     line.push_str(if iface.echo {
         ", the driver echoes sent frames"
     } else {
@@ -147,6 +152,20 @@ pub(super) fn plan(name: &str, iface: &Iface, options: &Options) -> Result<Plan,
         }
         if modes.one_shot {
             notes.push(format!("{name} sends each frame once and never retries it"));
+        }
+    }
+    if options.mode == Mode::ListenOnly {
+        match iface.modes {
+            Some(modes) if modes.listen_only => {}
+            Some(_) => notes.push(format!(
+                "{name} isn't in the controller's listen-only mode: no frame is written, but its \
+                 controller still acknowledges the frames it receives. This tool never changes \
+                 an interface's mode (take {name} down, then set `listen-only on` yourself)"
+            )),
+            None => notes.push(format!(
+                "{name} doesn't report its modes, so whether its controller acknowledges the \
+                 frames it receives is unknown"
+            )),
         }
     }
     if iface.state == Some(BusState::ErrorWarning) {
@@ -234,5 +253,6 @@ pub(super) fn connect<D: Device>(
         interface: options.interface.clone(),
         bitrate: iface.bitrate,
         check: plan.check,
+        controller_listen_only: iface.modes.map(|modes| modes.listen_only),
     })
 }

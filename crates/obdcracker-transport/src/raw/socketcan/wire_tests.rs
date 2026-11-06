@@ -249,8 +249,7 @@ proptest! {
                 let limit = if extended { 0x1FFF_FFFF } else { 0x7FF };
                 prop_assert!(id <= limit);
             }
-            Ok(Body::Remote | Body::Error(_)) => {}
-            Err(_) => {}
+            Ok(Body::Remote | Body::Error(_)) | Err(_) => {}
         }
     }
 

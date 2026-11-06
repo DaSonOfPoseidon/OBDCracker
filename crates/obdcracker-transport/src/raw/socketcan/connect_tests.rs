@@ -275,6 +275,31 @@ fn a_listen_only_session_on_a_listen_only_interface_connects() {
 }
 
 #[test]
+fn a_listen_only_session_says_when_the_controller_would_still_acknowledge() {
+    // The kernel's listen-only mode is what keeps a controller from acknowledging frames: without
+    // it, a session that writes nothing still puts a dominant bit on the bus for each frame.
+    let acknowledges = |notes: &[String]| notes.iter().any(|n| n.contains("acknowledges"));
+    let fake = FakeDevice::can0(500_000);
+    let mut session = open(&fake, &options("can0", None, Mode::ListenOnly)).unwrap();
+    assert_eq!(session.controller_listen_only, Some(false));
+    assert!(acknowledges(&status_lines(session.take_events())));
+    // An interface that doesn't report its modes: unknown, and said so.
+    let fake = iface(|i| i.modes = None);
+    let mut session = open(&fake, &options("can0", None, Mode::ListenOnly)).unwrap();
+    assert_eq!(session.controller_listen_only, None);
+    assert!(acknowledges(&status_lines(session.take_events())));
+    // The controller in listen-only mode is silent: nothing to say.
+    let fake = iface(|i| i.modes = Some(modes(|m| m.listen_only = true)));
+    let mut session = open(&fake, &options("can0", None, Mode::ListenOnly)).unwrap();
+    assert_eq!(session.controller_listen_only, Some(true));
+    assert!(!acknowledges(&status_lines(session.take_events())));
+    // An active session acknowledges as any node does, and has no such note.
+    let fake = FakeDevice::can0(500_000);
+    let mut session = open(&fake, &options("can0", None, Mode::Active)).unwrap();
+    assert!(!acknowledges(&status_lines(session.take_events())));
+}
+
+#[test]
 fn a_loopback_interface_is_refused_for_an_active_session_only() {
     let fake = iface(|i| i.modes = Some(modes(|m| m.loopback = true)));
     let message = refusal(open(&fake, &options("can0", None, Mode::Active)));
@@ -481,7 +506,7 @@ fn a_listen_only_session_writes_nothing_not_even_what_the_policy_approves() {
             )
             .unwrap();
         assert!(session.send(&broadcast).is_err());
-        assert!(fake.sent().is_empty());
+        assert_eq!(fake.sent(), Vec::<[u8; 16]>::new());
         assert_eq!(fake.state().counter, 0);
     }
 }
@@ -493,7 +518,7 @@ fn a_listen_only_session_can_receive_and_still_writes_nothing() {
     // Nothing was asked, so a lone reply frame has no window to belong to: it is dropped.
     fake.deliver(heard(0x7E8, &[0x04, 0x62, 0xF1, 0x87, 0x99]));
     assert_eq!(session.recv(Duration::from_millis(5)), Err(Error::Timeout));
-    assert!(fake.sent().is_empty());
+    assert_eq!(fake.sent(), Vec::<[u8; 16]>::new());
 }
 
 #[test]
@@ -520,7 +545,7 @@ fn a_bus_off_latches_and_nothing_more_is_written() {
     let err = session.send(&read_did()).unwrap_err();
     assert!(err.to_string().contains("bus-off"), "{err}");
     assert!(session.send(&read_did()).is_err());
-    assert!(fake.sent().is_empty());
+    assert_eq!(fake.sent(), Vec::<[u8; 16]>::new());
 }
 
 #[test]
@@ -531,7 +556,7 @@ fn an_interface_that_went_away_is_an_error_not_a_hang() {
     fake.state().fail_send = true;
     assert!(session.send(&read_did()).is_err());
     assert!(session.recv(Duration::from_millis(5)).is_err());
-    assert!(fake.sent().is_empty());
+    assert_eq!(fake.sent(), Vec::<[u8; 16]>::new());
 }
 
 // --- The interface is only ever read ---

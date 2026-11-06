@@ -411,6 +411,13 @@ fn open_socketcan(cli: &Cli, interface: &str) -> ExitCode {
     }
     if adapter.mode() == socketcan::Mode::ListenOnly {
         eprintln!("listen-only: nothing will be sent, so every request fails");
+        if adapter.controller_listen_only() != Some(true) {
+            eprintln!(
+                "warning: {name}'s controller isn't in listen-only mode (or doesn't say), so it \
+                 still acknowledges the frames it hears. Take it down and set `listen-only on` \
+                 if the car must not notice the tap"
+            );
+        }
     }
     run(cli, adapter, &link, Timing::default())
 }

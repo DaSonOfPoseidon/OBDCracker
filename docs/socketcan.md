@@ -54,6 +54,7 @@ read-only `RTM_GETLINK` for its state, bitrate and modes), and the session is re
 | down | refused | refused |
 | state bus-off, error-passive, stopped or sleeping | refused | refused |
 | the controller is in listen-only mode | refused (the kernel drops what is sent without saying so) | goes ahead |
+| the controller is not in listen-only mode, or the driver doesn't say | goes ahead | goes ahead, with a warning and a note in the audit log: nothing is written, but the controller still acknowledges the frames it hears |
 | the controller is in loopback mode | refused (its frames never reach the bus) | goes ahead |
 | a bitrate was asked for and the interface reports another | refused, naming both | refused |
 | a bitrate was asked for and the interface reports none (`vcan`, some drivers) | goes ahead, with a warning and a note in the audit log | the same |
@@ -63,8 +64,12 @@ read-only `RTM_GETLINK` for its state, bitrate and modes), and the session is re
 The interface name is typed by a user and becomes part of a path under `/sys/class/net`, so the first row is checked
 before anything is read. What the kernel prints in sysfs is read at most 64 bytes at a time and parsed as exactly a
 number (or `0x` and hex digits) and a newline; anything else is an error, and is never echoed back.
-A `--listen-only` session never writes whatever the interface is set to: the check against the interface's mode only
-decides whether an *active* session could have worked.
+A `--listen-only` session never writes a frame whatever the interface is set to: the check against the interface's mode
+only decides whether an *active* session could have worked. Writing no frame is not the same as being silent on the bus,
+though. A CAN controller acknowledges each frame it receives with a dominant bit, and only the controller's own
+listen-only mode stops that, which this backend never sets. So on an interface that isn't in it, a listen-only session
+says so, and a tap that must be invisible to the car needs `listen-only on` set up first (take the interface down, set it,
+bring it up).
 
 ## What it never does
 
@@ -93,7 +98,7 @@ consecutive frames out of order (#42).
   (ID, width and 8 data bytes) has come back.
 - **The driver doesn't echo**: the kernel makes a copy of every frame at the moment it is queued, which says nothing
   about the bus. The backend reads the driver's transmit counter (`/sys/class/net/<name>/statistics/tx_packets`) before
-  the write and waits for it to move, reading it every 200 microseconds. This is the best the interface offers, and it has
+  the write and waits for it to move, reading it again about every millisecond (the socket wait's resolution). This is the best the interface offers, and it has
   one limit it can't close: another program sending on the same interface moves the counter too.
 
 Either way, 500 ms without confirmation means nobody acknowledged the frame (or the interface can't send), and the

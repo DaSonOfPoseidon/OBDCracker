@@ -410,6 +410,11 @@ Each entry names the class, what to check, and where it bit us.
   against the real socket, which only returns early on an interrupt. A fake must keep the contract it stands in for (wait
   the full timeout before saying nothing came), and the port must decide from the clock, not from one empty read (#108).
 
+- **Writing no frame isn't being silent on the bus.** A CAN controller acknowledges every frame it receives with a
+  dominant bit, so a "listen-only" session that only refuses to send still shows on the car's bus unless the
+  controller is itself in listen-only mode. A backend that can't set that mode (SocketCAN never changes the interface)
+  must say so when the interface isn't in it, in the audit log and to the user, rather than promise a silent tap (#108).
+
 ## Docs vs code
 
 - **After every fix, re-read the doc comments on what changed** ("returns every reply", "capped at", "fixture

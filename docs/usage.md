@@ -56,7 +56,7 @@ mode: bring it up yourself (`sudo ip link set can0 up type can bitrate 500000`).
 `--profile` is the bitrate the car's bus runs at, and only checked against the interface's own: another bitrate is refused,
 and an interface that reports none (`vcan`) gets a warning. Without either, nothing is checked. A down or faulted
 interface, one in listen-only or loopback mode (for an active session), and one that isn't a CAN interface are refused,
-with what was read in the audit log. `--listen-only` never writes at all. The audit log's link names the interface and the
+with what was read in the audit log. `--listen-only` never writes a frame, but only an interface whose controller is in listen-only mode (`ip link set can0 type can listen-only on`, set up by you) also stays from acknowledging what it hears; otherwise the program says so. The audit log's link names the interface and the
 mode (`socketcan:can0:active`). `adapter` is for ELM327/STN adapters only. On other systems than Linux the option is
 refused.
 
