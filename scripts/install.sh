@@ -302,7 +302,7 @@ main() {
 	note "obdcracker ports                       # find the adapter's port"
 	note "obdcracker adapter                     # check the adapter; sends nothing to the car"
 	note "obdcracker vin"
-	note "if it finds none or several adapters, add --serial <PORT> to these commands"
+	note "if it finds none or several adapters, or another USB serial device is plugged in, add --serial <PORT> to these commands"
 	if [ -z "$path_had_cargo" ]; then
 		# rustup-init leaves this file and adds it to the shell profiles; a packaged rustup doesn't
 		if [ -f "$CARGO_HOME_DIR/env" ]; then
