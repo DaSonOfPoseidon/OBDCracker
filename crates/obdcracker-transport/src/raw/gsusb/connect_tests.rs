@@ -8,9 +8,12 @@ use obdcracker_safety::{Policy, Protocol, Target};
 use super::connect::{self, ConnectFailure};
 use super::fake::{
     BUS_OFF, Echo, FEATURES, FakeUsb, PASSIVE, Reaction, candlelight_const, error_frame, heard,
+    raw_frame,
 };
+use super::usb::Usb;
 use super::wire;
 use super::{BitrateCheck, BitrateSource, Mode, Options, Session};
+use crate::raw::port::Filter;
 use crate::{Error, Expect, LinkEvent, Timing, Transport, exchange};
 
 const LISTEN: u32 = wire::FLAG_LISTEN_ONLY | wire::FLAG_BERR_REPORTING;
@@ -619,6 +622,150 @@ fn a_multi_frame_request_sends_each_frame_after_the_last_was_confirmed() {
     // The last, short frame is padded.
     assert_eq!(written[1].1[5..], [0xAA, 0xAA, 0xAA]);
     assert_eq!(fake.0.borrow().overlapped, 0);
+}
+
+// #42 requirement 2: a long transfer, so a port that let the next frame go before the last one was
+// confirmed would show (the fake counts a write made while a confirmation was still unread).
+#[test]
+fn every_frame_of_a_long_request_is_padded_and_confirmed_before_the_next() {
+    let fake = FakeUsb::new();
+    busy_bus(&fake);
+    car(&fake);
+    let mut session = open(&fake, &options(Mode::Active)).unwrap();
+    let mut payload = vec![0x19, 0x02, 0xAF];
+    payload.resize(100, 0);
+    let request = Policy::read_only()
+        .approve(Protocol::Uds, Target::Physical(0x7E0), &payload)
+        .unwrap();
+    session.send(&request).unwrap();
+    let out = fake.bulk_out();
+    // a first frame of 6 bytes, then 94 bytes in sevens
+    assert_eq!(out.len(), 1 + 94usize.div_ceil(7));
+    for (n, frame) in out.iter().enumerate() {
+        assert_eq!(frame[8], 8, "DLC 8 on frame {n}");
+        if n > 0 {
+            assert_eq!(frame[12], 0x20 | (u8::try_from(n).unwrap() & 0x0F), "{n}");
+        }
+    }
+    assert_eq!(fake.0.borrow().overlapped, 0);
+}
+
+// Guards the test above: the fake must see a confirmation nobody read as an overlap.
+#[test]
+fn the_fake_counts_a_write_made_before_the_last_confirmation_was_read() {
+    let fake = FakeUsb::new();
+    let mut usb = fake.clone();
+    let frame = raw_frame(
+        0,
+        0x7E0,
+        8,
+        0,
+        0,
+        &[0x03, 0x22, 0xF1, 0x87, 0xAA, 0xAA, 0xAA, 0xAA],
+    );
+    Usb::bulk_out(&mut usb, &frame).unwrap();
+    assert_eq!(fake.0.borrow().overlapped, 0);
+    Usb::bulk_out(&mut usb, &frame).unwrap();
+    assert_eq!(fake.0.borrow().overlapped, 1);
+}
+
+// #42 requirement 3: the port is asked for the replies of each request, and nothing else.
+#[test]
+fn the_port_is_given_the_replies_of_the_request_only() {
+    let fake = FakeUsb::new();
+    busy_bus(&fake);
+    car(&fake);
+    let mut session = open(&fake, &options(Mode::Active)).unwrap();
+    assert_eq!(session.can.port.filters(), []);
+    session.send(&read_did()).unwrap();
+    assert_eq!(
+        session.can.port.filters(),
+        [Filter {
+            id: 0x7E8,
+            mask: 0x7FF,
+            extended: false
+        }]
+    );
+    let broadcast = Policy::read_only()
+        .approve(
+            Protocol::Uds,
+            Target::ObdFunctional,
+            &obd::vehicle_info(0x02),
+        )
+        .unwrap();
+    session.send(&broadcast).unwrap();
+    assert_eq!(
+        session.can.port.filters(),
+        [Filter {
+            id: 0x7E8,
+            mask: 0x7F8,
+            extended: false
+        }]
+    );
+    let extended = Policy::read_only()
+        .approve(
+            Protocol::Uds,
+            Target::Physical29(0x18DA_10F1),
+            &[0x22, 0xF1, 0x87],
+        )
+        .unwrap();
+    session.send(&extended).unwrap();
+    assert_eq!(
+        session.can.port.filters(),
+        [Filter {
+            id: 0x18DA_F110,
+            mask: 0x1FFF_FFFF,
+            extended: true
+        }]
+    );
+}
+
+#[test]
+fn a_frame_from_another_module_is_not_the_requests_reply() {
+    let fake = FakeUsb::new();
+    busy_bus(&fake);
+    let mut session = open(&fake, &options(Mode::Active)).unwrap();
+    session.send(&read_did()).unwrap();
+    fake.queue(heard(0x7E9, &[0x05, 0x62, 0xF1, 0x87, 0x11, 0x22]));
+    assert_eq!(session.recv(Duration::from_millis(5)), Err(Error::Timeout));
+    fake.queue(heard(0x7E8, &[0x05, 0x62, 0xF1, 0x87, 0x11, 0x22]));
+    assert_eq!(
+        session.recv(Duration::from_millis(5)).unwrap().payload,
+        [0x62, 0xF1, 0x87, 0x11, 0x22]
+    );
+}
+
+// #42 requirement 3: a receive overrun is an error, never a gap in a reply.
+#[test]
+fn a_receive_overrun_in_a_reply_is_an_error_and_the_half_reply_is_dropped() {
+    let fake = FakeUsb::new();
+    busy_bus(&fake);
+    fake.on_write(|_, can_id, data| match (can_id, data[0]) {
+        (0x7E0, 0x03) => Reaction::reply(vec![heard(
+            0x7E8,
+            &[0x10, 0x0A, 0x62, 0xF1, 0x87, 0x01, 0x02, 0x03],
+        )]),
+        // The device lost frames: its overflow flag rides on the next one.
+        (0x7E0, 0x30) => Reaction::reply(vec![raw_frame(
+            wire::ECHO_ID_RX,
+            0x7E8,
+            8,
+            0,
+            1,
+            &[0x21, 0x04, 0x05, 0x06, 0x07, 0, 0, 0],
+        )]),
+        _ => Reaction::confirm(),
+    });
+    let mut session = open(&fake, &options(Mode::Active)).unwrap();
+    session.send(&read_did()).unwrap();
+    match session.recv(Duration::from_millis(50)) {
+        Err(Error::Adapter(message)) => assert!(message.contains("overrun"), "{message}"),
+        other => panic!("{other:?}"),
+    }
+    // What came after the loss is not the rest of that reply, and nothing was glued together.
+    assert_eq!(session.recv(Duration::from_millis(5)), Err(Error::Timeout));
+    // The bus is fine: the session goes on.
+    session.send(&read_did()).unwrap();
 }
 
 #[test]

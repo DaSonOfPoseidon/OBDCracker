@@ -78,7 +78,8 @@ pub(super) struct State {
     pub(super) late_on_reset: Vec<Vec<u8>>,
     /// Frames written while the controller was in reset.
     pub(super) written_while_stopped: usize,
-    /// Frames written while an earlier one was still unconfirmed.
+    /// Frames written while an earlier one was still unconfirmed: one the device never confirmed,
+    /// or whose confirmation the port had not yet read.
     pub(super) overlapped: usize,
     unconfirmed: usize,
     pub(super) bulk_in_calls: usize,
@@ -257,7 +258,12 @@ impl Usb for FakeUsb {
         if s.started.is_none() {
             s.written_while_stopped += 1;
         }
-        if s.unconfirmed > 0 {
+        let unread = s
+            .inbox
+            .iter()
+            .filter(|packet| packet.len() >= 4 && packet[..4] != ECHO_ID_RX.to_le_bytes())
+            .count();
+        if s.unconfirmed > 0 || unread > 0 {
             s.overlapped += 1;
         }
         let echo_id = u32::from_le_bytes([data[0], data[1], data[2], data[3]]);
