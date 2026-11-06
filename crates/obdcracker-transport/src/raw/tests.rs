@@ -1,4 +1,4 @@
-use std::cell::{Cell, RefCell};
+use std::cell::Cell;
 use std::collections::VecDeque;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
@@ -10,6 +10,7 @@ use super::port::{CanPort, Filter, PortEvent, RxFrame, TxFrame};
 use super::{Limits, RawCan};
 use crate::{Error, Expect, LinkEvent, Timing, Transport, exchange};
 
+pub(in crate::raw) mod timing;
 pub(in crate::raw) mod tp20;
 
 type Responder = Box<dyn FnMut(&TxFrame) -> Vec<PortEvent>>;
@@ -436,107 +437,6 @@ fn a_bus_fault_stops_flow_control_a_reply_needed() {
     can.port.inbox.push_back(first);
     can.recv(SHORT).unwrap_err();
     assert_eq!(can.port.written().len(), 1);
-}
-
-// ---- #42 requirement 6: STmin
-
-thread_local! {
-    static NAPS: RefCell<Vec<Duration>> = const { RefCell::new(Vec::new()) };
-}
-
-fn nap(d: Duration) {
-    NAPS.with(|naps| naps.borrow_mut().push(d));
-}
-
-fn naps() -> Vec<Duration> {
-    NAPS.with(|naps| std::mem::take(&mut *naps.borrow_mut()))
-}
-
-#[test]
-fn st_min_zero_never_sleeps() {
-    naps();
-    let mut can = RawCan::new(module_flow_control(0x7E8, 0)).with_sleeper(nap);
-    can.send(&long_request(Target::Physical(0x7E0), 200))
-        .unwrap();
-    assert_eq!(naps(), Vec::<Duration>::new());
-}
-
-#[test]
-fn a_short_st_min_is_waited_by_spinning_and_never_cut_short() {
-    // 0xF5 is 500 us; 0x01 is 1 ms
-    for (code, gap) in [
-        (0xF5, Duration::from_micros(500)),
-        (0x01, Duration::from_millis(1)),
-    ] {
-        naps();
-        let mut can = RawCan::new(module_flow_control(0x7E8, code)).with_sleeper(nap);
-        can.send(&long_request(Target::Physical(0x7E0), 40))
-            .unwrap();
-        assert_eq!(naps(), Vec::<Duration>::new());
-        let times: Vec<Instant> = can
-            .port
-            .log
-            .iter()
-            .filter_map(|entry| match entry {
-                Logged::Write(_, at) => Some(*at),
-                Logged::Filters(_) => None,
-            })
-            .collect();
-        for pair in times[1..].windows(2) {
-            assert!(
-                pair[1] - pair[0] >= gap,
-                "{:?} < {gap:?}",
-                pair[1] - pair[0]
-            );
-        }
-    }
-}
-
-#[test]
-fn a_long_st_min_sleeps_for_less_than_it_asks() {
-    naps();
-    let mut can = RawCan::new(module_flow_control(0x7E8, 20)).with_sleeper(nap);
-    can.send(&long_request(Target::Physical(0x7E0), 14))
-        .unwrap();
-    let naps = naps();
-    assert_ne!(naps.len(), 0);
-    assert!(naps.iter().all(|nap| *nap < Duration::from_millis(20)));
-}
-
-#[test]
-fn the_gap_counts_from_the_confirmed_frame_not_before() {
-    // A port that takes 5 ms to confirm each frame. Stamped before the write, a 1 ms gap would
-    // already be over when it returned.
-    #[derive(Debug)]
-    struct Slow(Fake);
-    impl CanPort for Slow {
-        fn set_filters(&mut self, filters: &[Filter]) -> Result<(), Error> {
-            self.0.set_filters(filters)
-        }
-        fn write(&mut self, frame: &TxFrame) -> Result<(), Error> {
-            std::thread::sleep(Duration::from_millis(5));
-            self.0.write(frame)
-        }
-        fn read(&mut self, timeout: Duration) -> Result<PortEvent, Error> {
-            self.0.read(timeout)
-        }
-    }
-    let mut can = RawCan::new(Slow(module_flow_control(0x7E8, 1)));
-    can.send(&long_request(Target::Physical(0x7E0), 21))
-        .unwrap();
-    let times: Vec<Instant> = can
-        .port
-        .0
-        .log
-        .iter()
-        .filter_map(|entry| match entry {
-            Logged::Write(_, at) => Some(*at),
-            Logged::Filters(_) => None,
-        })
-        .collect();
-    for pair in times[1..].windows(2) {
-        assert!(pair[1] - pair[0] >= Duration::from_millis(6));
-    }
 }
 
 // ---- #42 requirement 7: flow control goes to the responder's physical ID
