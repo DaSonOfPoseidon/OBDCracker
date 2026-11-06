@@ -846,7 +846,6 @@ fn parse_record(text: &str) -> Result<u8, String> {
     }
 }
 
-// Exactly three hex digits. `from_str_radix` alone would also take `+1D`.
 fn parse_bitrate(text: &str) -> Result<u32, String> {
     match text {
         "250000" => Ok(250_000),
@@ -857,6 +856,7 @@ fn parse_bitrate(text: &str) -> Result<u32, String> {
     }
 }
 
+// Exactly three hex digits. `from_str_radix` alone would also take `+1D`.
 fn parse_request_id(text: &str) -> Result<u32, String> {
     if text.len() == 3 && text.bytes().all(|b| b.is_ascii_hexdigit()) {
         u32::from_str_radix(text, 16).map_err(|e| e.to_string())
