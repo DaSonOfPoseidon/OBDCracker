@@ -50,6 +50,16 @@ fn ask(bus: &mut SimBus, target: Target, payload: &[u8]) -> Vec<u8> {
     reply.payload
 }
 
+fn ask_or_silent(bus: &mut SimBus, target: Target, payload: &[u8]) -> Option<Vec<u8>> {
+    let request = Policy::read_only()
+        .approve(Protocol::Uds, target, payload)
+        .unwrap();
+    bus.send(&request).unwrap();
+    bus.recv(Duration::from_millis(5))
+        .ok()
+        .map(|reply| reply.payload)
+}
+
 fn quantity(bus: &mut SimBus, target: Target, pid: u8) -> (f32, Unit) {
     let reply = ask(bus, target, &obd::current_data(pid));
     let mut readings = obd::decode_current_data(&reply).unwrap();
@@ -99,6 +109,30 @@ fn mode_01_formulas_hold_at_both_ends_of_their_range() {
             "transmission {pid:02X}"
         );
     }
+}
+
+#[test]
+fn mode_01_every_pid_has_0x00_in_one_module_and_0xff_in_the_other() {
+    let mut bus = bus();
+    let mut checked = 0;
+    // 0xFF is only in the engine, and the bitmap PIDs are computed.
+    for pid in (0x01..0xFFu8).filter(|pid| !pid.is_multiple_of(0x20)) {
+        let engine = ask_or_silent(&mut bus, ENGINE, &obd::current_data(pid));
+        let transmission = ask_or_silent(&mut bus, TRANSMISSION, &obd::current_data(pid));
+        let (engine, transmission) = match (engine, transmission) {
+            (None, None) => continue,
+            (Some(engine), Some(transmission)) => (engine, transmission),
+            other => panic!("PID {pid:02X} is in only one module: {other:02X?}"),
+        };
+        let end = |reply: &[u8]| match reply[2..] {
+            [first @ (0x00 | 0xFF), ref rest @ ..] if rest.iter().all(|&b| b == first) => first,
+            ref data => panic!("PID {pid:02X}: {data:02X?} isn't all 0x00 or all 0xFF"),
+        };
+        assert_eq!(engine.len(), transmission.len(), "PID {pid:02X}");
+        assert_eq!(end(&engine), !end(&transmission), "PID {pid:02X}");
+        checked += 1;
+    }
+    assert_eq!(checked, 17);
 }
 
 #[test]

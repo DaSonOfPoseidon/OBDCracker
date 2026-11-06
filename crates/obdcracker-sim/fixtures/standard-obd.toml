@@ -1,13 +1,15 @@
 # Synthetic OBD-II data, not from any car: values derived from the standard (SAE J1979 and
 # ISO 15765-4) at the edges of what the decoders accept, for modules at the OBD-II IDs 0x7E0 and
-# 0x7E1. The first module holds a PID's largest value (or, where a formula has an offset, its
-# smallest), the second the opposite end, so every mode 01 formula is checked at both. Each value is
-# worked out by hand in `tests/standard_obd.rs`, not read back from the decoder.
+# 0x7E1. Every mode 01 PID is 0x00 in each data byte in one module and 0xFF in the other, so each
+# formula is checked at both ends (a test checks that this holds). Each value is worked out by hand
+# in `tests/standard_obd.rs`, not read back from the decoder. Highest PID: 0xFF, only in the engine.
 #
-# Mode 03: the first module has the lowest and highest code of every system (P, C, B, U) and a
-# code with hex letters; the second has no codes, which is a reply of a count of 0.
-# Mode 09: a VIN made of the letters on each side of the excluded I, O and Q, calibration IDs of
-# 16 characters, 1 character and an empty slot, CVNs from 00000000 up, and names at their full width.
+# Mode 03: the first module has a code of each system (P, C, B, U) at both ends of its range (P0001
+# is the lowest, since P0000 is padding) and one with hex letters; the second has no codes, which is
+# a reply with a count of 0.
+# Mode 09: VINs of all the digits and of the letters either side of the excluded I, O and Q,
+# calibration IDs of 16 characters, 1 character and an empty slot, CVNs of 00000000 and FFFFFFFF,
+# and names at their full width (4 and 15 characters) and their shortest (1).
 
 [[ecu]]
 module = "engine"
