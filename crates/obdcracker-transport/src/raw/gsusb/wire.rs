@@ -159,8 +159,12 @@ impl BitTiming {
 
 /// A classic data frame to send, as the bulk OUT endpoint takes it: `echo_id` is handed back when
 /// the controller has put the frame on the bus.
-pub(super) fn encode_tx(echo_id: u32, id: u32, extended: bool, data: [u8; 8]) -> [u8; FRAME_LEN] {
+///
+/// The DLC is `data.len()` (1 to 8: a frame is never padded here), and the bytes after the data
+/// are zero.
+pub(super) fn encode_tx(echo_id: u32, id: u32, extended: bool, data: &[u8]) -> [u8; FRAME_LEN] {
     debug_assert_ne!(echo_id, ECHO_ID_RX);
+    debug_assert!((1..=8).contains(&data.len()));
     let can_id = if extended {
         (id & EFF_MASK) | EFF_FLAG
     } else {
@@ -169,9 +173,9 @@ pub(super) fn encode_tx(echo_id: u32, id: u32, extended: bool, data: [u8; 8]) ->
     let mut bytes = [0; FRAME_LEN];
     bytes[0..4].copy_from_slice(&echo_id.to_le_bytes());
     bytes[4..8].copy_from_slice(&can_id.to_le_bytes());
-    bytes[8] = 8;
+    bytes[8] = u8::try_from(data.len()).expect("a classic frame has at most 8 bytes");
     // Channel 0, flags 0 and the reserved byte stay zero.
-    bytes[12..].copy_from_slice(&data);
+    bytes[12..12 + data.len()].copy_from_slice(data);
     bytes
 }
 

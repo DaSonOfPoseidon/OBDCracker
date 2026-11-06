@@ -53,7 +53,7 @@ pub(super) enum Echo {
     Twice,
 }
 
-type OnWrite = Box<dyn FnMut(u32, u32, [u8; 8]) -> Reaction>;
+type OnWrite = Box<dyn FnMut(u32, u32, &[u8]) -> Reaction>;
 type OnStart = Box<dyn FnMut(u32) -> Vec<Vec<u8>>>;
 
 pub(super) struct State {
@@ -62,7 +62,7 @@ pub(super) struct State {
     pub(super) inbox: VecDeque<Vec<u8>>,
     pub(super) device_config: Vec<u8>,
     pub(super) bt_const: Vec<u8>,
-    /// Called with (echo ID, CAN ID, data) for each frame written.
+    /// Called with (echo ID, CAN ID, data at its DLC) for each frame written.
     pub(super) on_write: Option<OnWrite>,
     /// Called with the flags when the controller is started: the frames it hears.
     pub(super) on_start: Option<OnStart>,
@@ -132,7 +132,7 @@ impl FakeUsb {
         self.0.borrow_mut().inbox.push_back(frame);
     }
 
-    pub(super) fn on_write(&self, f: impl FnMut(u32, u32, [u8; 8]) -> Reaction + 'static) {
+    pub(super) fn on_write(&self, f: impl FnMut(u32, u32, &[u8]) -> Reaction + 'static) {
         self.0.borrow_mut().on_write = Some(Box::new(f));
     }
 
@@ -262,11 +262,10 @@ impl Usb for FakeUsb {
         }
         let echo_id = u32::from_le_bytes([data[0], data[1], data[2], data[3]]);
         let can_id = u32::from_le_bytes([data[4], data[5], data[6], data[7]]);
-        let mut payload = [0; 8];
-        payload.copy_from_slice(&data[12..20]);
+        let payload = data[12..12 + usize::from(data[8])].to_vec();
         let mut reaction = match s.on_write.take() {
             Some(mut f) => {
-                let reaction = f(echo_id, can_id, payload);
+                let reaction = f(echo_id, can_id, &payload);
                 s.on_write = Some(f);
                 reaction
             }

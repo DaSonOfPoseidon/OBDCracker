@@ -680,3 +680,108 @@ fn an_unplugged_device_is_an_error_not_a_hang() {
     assert!(session.recv(Duration::from_millis(5)).is_err());
     fake.assert_nothing_written();
 }
+
+// --- VW TP2.0 (#259) ---
+
+use crate::raw::tests::tp20::{Car, IDENTIFICATION, SETUP_REQUEST, channel, policy, setup};
+use crate::tp20::{ChannelSession, Disconnect};
+
+// A car with one TP2.0 module that answers the identification read; every frame it sends is as
+// long as the module made it, as on a real bus.
+fn tp20_car(fake: &FakeUsb) {
+    let mut car = Car::with(vec![(IDENTIFICATION.to_vec(), vec![0x5A, 0x9B, 1, 2])]);
+    fake.on_write(move |_, can_id, data| {
+        Reaction::reply(
+            car.hear_frame(can_id, data)
+                .into_iter()
+                .map(|(id, payload)| heard(id, &payload))
+                .collect(),
+        )
+    });
+}
+
+#[test]
+fn a_tp20_session_runs_over_usb_with_every_frame_at_its_own_length() {
+    let fake = FakeUsb::new();
+    busy_bus(&fake);
+    tp20_car(&fake);
+    let mut session = open(&fake, &options(Mode::Active)).unwrap();
+    let policy = policy();
+    let mut channel = ChannelSession::open(&mut session, &policy, 0x01, Timing::default()).unwrap();
+    assert_eq!(
+        channel.request(&IDENTIFICATION).unwrap(),
+        [0x5A, 0x9B, 1, 2]
+    );
+    assert_eq!(channel.close(), Ok(Disconnect::Closed));
+    let out = fake.bulk_out();
+    // The setup (7 bytes), the tester's parameters (6), the request (5), the ACK of the answer
+    // (1) and the disconnect (1): the DLC on USB is the frame's own, the bytes after it zero.
+    let dlcs: Vec<u8> = out.iter().map(|frame| frame[8]).collect();
+    assert_eq!(dlcs, [7, 6, 5, 1, 1]);
+    assert_eq!(out[0][12..], [0x01, 0xC0, 0x00, 0x10, 0x00, 0x03, 0x01, 0]);
+    assert_eq!(out[0][4..8], [0x00, 0x02, 0, 0], "to 0x200");
+    assert_eq!(out[4][12..], [0xA8, 0, 0, 0, 0, 0, 0, 0]);
+    assert_eq!(out[4][4..8], [0x40, 0x07, 0, 0], "to 0x740");
+    // Each was confirmed before the next went out.
+    assert_eq!(fake.0.borrow().overlapped, 0);
+}
+
+#[test]
+fn a_tp20_frame_nobody_acknowledges_is_an_error_that_stops_later_sends() {
+    let fake = FakeUsb::new();
+    busy_bus(&fake);
+    fake.on_write(|_, _, _| Reaction {
+        echo: Echo::Never,
+        ..Reaction::confirm()
+    });
+    let mut session = open(&fake, &options(Mode::Active)).unwrap();
+    let err = session.send(&setup()).unwrap_err();
+    assert!(err.to_string().contains("acknowledged"), "{err}");
+    assert!(fake.is_stopped());
+    let sent = fake.bulk_out().len();
+    assert!(session.send(&setup()).is_err());
+    assert_eq!(fake.bulk_out().len(), sent);
+}
+
+#[test]
+fn a_listen_only_session_writes_no_tp2_0_frame() {
+    let fake = FakeUsb::new();
+    let mut session = open(&fake, &options(Mode::ListenOnly)).unwrap();
+    let policy = policy();
+    let channel = channel();
+    let requests = [
+        setup(),
+        policy.approve_tp20_parameters(&channel).unwrap(),
+        policy.approve_tp20_keep_alive(&channel).unwrap(),
+        policy.approve_tp20_ack(&channel, 1).unwrap(),
+        policy.approve_tp20_disconnect(&channel).unwrap(),
+        policy
+            .approve_tp20_request(&channel, 0, &IDENTIFICATION)
+            .unwrap(),
+    ];
+    for request in &requests {
+        let err = session.send(request).unwrap_err();
+        assert!(err.to_string().contains("listen-only"), "{err}");
+    }
+    fake.assert_nothing_written();
+    assert!(!started_active(&fake.modes()));
+}
+
+#[test]
+fn a_bus_off_before_a_channel_frame_latches_and_nothing_more_is_written() {
+    let fake = FakeUsb::new();
+    busy_bus(&fake);
+    tp20_car(&fake);
+    let mut session = open(&fake, &options(Mode::Active)).unwrap();
+    let policy = policy();
+    session.send(&setup()).unwrap();
+    let written = fake.bulk_out().len();
+    assert_eq!(written, 1);
+    fake.queue(error_frame(BUS_OFF, 0));
+    let request = policy.approve_tp20_disconnect(&channel()).unwrap();
+    let err = session.send(&request).unwrap_err();
+    assert!(err.to_string().contains("bus-off"), "{err}");
+    assert!(session.send(&request).is_err());
+    assert_eq!(fake.bulk_out().len(), written);
+    assert_eq!(fake.written()[0].1[..7], SETUP_REQUEST);
+}

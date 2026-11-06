@@ -31,7 +31,11 @@ fn any11() -> Filter {
 }
 
 fn tx(id: u32, extended: bool, data: [u8; 8]) -> TxFrame {
-    TxFrame { id, extended, data }
+    TxFrame::padded(id, extended, &data)
+}
+
+fn tx_exact(id: u32, data: &[u8]) -> TxFrame {
+    TxFrame::exact(id, false, data).unwrap()
 }
 
 fn frame(id: u32, data: &[u8]) -> PortEvent {
@@ -63,6 +67,40 @@ fn a_frame_is_written_with_its_padding_and_confirmed_before_write_returns() {
     assert_eq!(out[0][12..], [2, 0x10, 1, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA]);
     // The confirmation was taken: nothing is left to read.
     assert_eq!(port.read(Duration::ZERO), Err(Error::Timeout));
+}
+
+#[test]
+fn a_frame_of_exact_length_goes_out_at_its_own_dlc_and_is_confirmed() {
+    // VW TP2.0: a channel setup is 7 bytes, a disconnect 1 (docs/raw-can.md#vw-tp20).
+    let fake = FakeUsb::new();
+    let mut port = open_port(&fake);
+    let setup = [0x01, 0xC0, 0x00, 0x10, 0x00, 0x03, 0x01];
+    port.write(&tx_exact(0x200, &setup)).unwrap();
+    port.write(&tx_exact(0x740, &[0xA8])).unwrap();
+    let out = fake.bulk_out();
+    assert_eq!(out.len(), 2);
+    assert_eq!(out[0][8], 7, "DLC 7");
+    assert_eq!(
+        out[0][12..],
+        [0x01, 0xC0, 0x00, 0x10, 0x00, 0x03, 0x01, 0x00]
+    );
+    assert_eq!(out[1][8], 1, "DLC 1");
+    assert_eq!(out[1][12..], [0xA8, 0, 0, 0, 0, 0, 0, 0]);
+    // Both confirmations were taken: nothing is left to read.
+    assert_eq!(port.read(Duration::ZERO), Err(Error::Timeout));
+}
+
+#[test]
+fn a_frame_of_exact_length_that_is_never_confirmed_is_an_error() {
+    let fake = FakeUsb::new();
+    fake.on_write(|_, _, _| Reaction {
+        echo: Echo::Never,
+        ..Reaction::confirm()
+    });
+    let mut port = open_port(&fake);
+    let err = port.write(&tx_exact(0x200, &[0x01, 0xC0])).unwrap_err();
+    assert!(err.to_string().contains("confirm"), "{err}");
+    assert!(fake.is_stopped());
 }
 
 #[test]
