@@ -302,6 +302,24 @@ fn without_an_echo_a_bus_fault_ends_the_wait() {
 }
 
 #[test]
+fn without_an_echo_a_fault_read_as_the_counter_moves_is_not_a_success() {
+    // The fault is read while the write waits, and the counter moves on the very next look: the
+    // confirmation must not hide the fault, or the next frame of the transfer goes out on a
+    // faulted bus.
+    let fake = silent_driver();
+    fake.state().counter_lag_recvs = 1;
+    fake.state().on_send = Some(Box::new(|_| Reaction {
+        before: vec![bus_off()],
+        ..Reaction::confirm()
+    }));
+    let mut port = open_port(&fake);
+    let err = port.write(&tx(0x7E0, false, REQUEST)).unwrap_err();
+    assert!(err.to_string().contains("bus-off"), "{err}");
+    assert_eq!(port.write(&tx(0x7E0, false, REQUEST)).unwrap_err(), err);
+    assert_eq!(fake.sent().len(), 1);
+}
+
+#[test]
 fn an_id_wider_than_its_width_is_refused_before_any_write() {
     let fake = echoing();
     let mut port = open_port(&fake);

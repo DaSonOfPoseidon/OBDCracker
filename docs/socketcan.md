@@ -95,7 +95,9 @@ consecutive frames out of order (#42).
   to receive the frames it sends itself (`CAN_RAW_RECV_OWN_MSGS`), and the driver returns each one when it has gone out on
   the bus. The kernel's receive filter applies to those copies too, so besides the transport's reply filter it also lets
   the sent frame's own ID through, for as long as that ID is the one being sent. A write returns when the same frame
-  (ID, width and 8 data bytes) has come back.
+  (ID, width and 8 data bytes) has come back. One limit it can't close yet: another program on the same interface
+  sending the identical frame at the same instant would confirm the write too, because the kernel's `MSG_CONFIRM`
+  mark isn't read ([#276](https://github.com/DaSonOfPoseidon/OBDCracker/issues/276)).
 - **The driver doesn't echo**: the kernel makes a copy of every frame at the moment it is queued, which says nothing
   about the bus. The backend reads the driver's transmit counter (`/sys/class/net/<name>/statistics/tx_packets`) before
   the write and waits for it to move, reading it again about every millisecond (the socket wait's resolution). This is the best the interface offers, and it has
@@ -103,7 +105,8 @@ consecutive frames out of order (#42).
 
 Either way, 500 ms without confirmation means nobody acknowledged the frame (or the interface can't send), and the
 controller may be retrying it. The backend stops, as above. A bus fault (bus-off, error-passive, an error frame) seen
-while waiting ends the wait the same way. A send the kernel refuses (the interface went down, the queue stayed full for
+while waiting ends the wait the same way, even if the frame was confirmed in the same moment: the next frame of a transfer
+must not go out on a faulted bus. A send the kernel refuses (the interface went down, the queue stayed full for
 500 ms) stops the port too.
 
 ## Receiving

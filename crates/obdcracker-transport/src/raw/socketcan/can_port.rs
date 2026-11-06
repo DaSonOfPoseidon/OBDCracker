@@ -195,7 +195,9 @@ impl<D: Device> SocketCanPort<D> {
         match body {
             Body::Data { id, extended, data } => {
                 // The one frame this socket sent that it is waiting to see. Nothing else is taken
-                // for an echo: it is the frame, byte for byte, or it is received data.
+                // for an echo: it is the frame, byte for byte, or it is received data. An identical
+                // frame from another program on the interface can't be told apart (see
+                // docs/socketcan.md#sending).
                 if self.echo
                     && self.in_flight.is_some_and(|f| {
                         f.id == id && f.extended == extended && f.data[..] == data[..]
@@ -303,6 +305,14 @@ impl<D: Device> CanPort for SocketCanPort<D> {
         }
         let deadline = Instant::now() + TX_CONFIRM_TIMEOUT;
         loop {
+            // A fault read so far comes first: the frame may be confirmed too, but the next frame
+            // of the transfer must not go out on a faulted bus.
+            if let Some(fault) = self.queued_fault() {
+                self.in_flight = None;
+                return Err(self.fail(format!(
+                    "{fault} while a transmitted frame was in flight{UNCONFIRMED_ADVICE}"
+                )));
+            }
             let confirmed = if self.echo {
                 self.in_flight.is_none()
             } else {
@@ -311,12 +321,6 @@ impl<D: Device> CanPort for SocketCanPort<D> {
             if confirmed {
                 self.in_flight = None;
                 return Ok(());
-            }
-            if let Some(fault) = self.queued_fault() {
-                self.in_flight = None;
-                return Err(self.fail(format!(
-                    "{fault} while a transmitted frame was unconfirmed{UNCONFIRMED_ADVICE}"
-                )));
             }
             let left = deadline.saturating_duration_since(Instant::now());
             if left.is_zero() {

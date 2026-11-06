@@ -67,6 +67,8 @@ pub(super) struct State {
     pub(super) fail_recv: Option<String>,
     pub(super) counter: u64,
     pub(super) counter_fails: bool,
+    /// The transmit counter reads one behind until the socket has been read this many times.
+    pub(super) counter_lag_recvs: usize,
     /// Every read finds this packet.
     pub(super) flood: Option<Packet>,
     pub(super) recvs: usize,
@@ -115,6 +117,7 @@ impl FakeDevice {
             fail_recv: None,
             counter: 0,
             counter_fails: false,
+            counter_lag_recvs: 0,
             flood: None,
             recvs: 0,
             describes: 0,
@@ -272,6 +275,8 @@ impl Device for FakeDevice {
         let state = self.0.borrow();
         if state.counter_fails {
             Err(Error::Adapter("no such file".to_owned()))
+        } else if state.recvs < state.counter_lag_recvs {
+            Ok(state.counter.saturating_sub(1))
         } else {
             Ok(state.counter)
         }

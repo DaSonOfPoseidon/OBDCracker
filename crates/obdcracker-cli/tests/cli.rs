@@ -227,6 +227,8 @@ fn socketcan_options_need_an_interface_and_exclude_the_other_adapters() {
     }
 }
 
+// Elsewhere than Linux the option is refused before the bitrate is looked at.
+#[cfg(target_os = "linux")]
 #[test]
 fn a_socketcan_bitrate_that_contradicts_the_profile_is_refused_before_the_interface_is_read() {
     let log = temp_log("socketcan-bitrate");
