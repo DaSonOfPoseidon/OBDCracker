@@ -1,15 +1,16 @@
 # Raw CAN
 
-The [`gsusb`](gsusb.md) and [`socketcan`](socketcan.md) backends put ISO-TP frames on the bus themselves, with no adapter doing the framing. They
-share one transport, `RawCan`, in `crates/obdcracker-transport/src/raw/`, over a crate-private `CanPort` trait (set
+The [`gsusb`](gsusb.md) and [`socketcan`](socketcan.md) backends put ISO-TP and [VW TP2.0](#vw-tp20) frames on the bus
+themselves, with no adapter doing the framing. They share one transport, `RawCan`, in `crates/obdcracker-transport/src/raw/`, over a crate-private `CanPort` trait (set
 filters, write one frame, read a frame or bus event). Only `RawCan` calls `CanPort::write`, and it writes only the
-frames of an approved request and the flow control frames `obdcracker-safety` mints, so no importer can put a raw frame
-on the bus. The requirements come from other projects' field reports (#42).
+frames of an approved request (a TP2.0 frame is an approved request too) and the flow control frames `obdcracker-safety`
+mints, so no importer can put a raw frame on the bus. The requirements come from other projects' field reports (#42).
 
 ## Frames
 
-- Every frame is padded to 8 bytes with `0xAA`, as ISO 15765-4 requires; many ECUs drop a shorter one. `TxFrame` has
-  no shorter form.
+- Every ISO-TP frame is padded to 8 bytes with `0xAA`, as ISO 15765-4 requires; many ECUs drop a shorter one
+  (`TxFrame::padded`). A VW TP2.0 frame is the opposite: it goes out at its own length, with nothing added
+  (`TxFrame::exact`, [below](#vw-tp20)). A port sends the DLC the frame carries (`TxFrame::bytes`), never a fixed 8.
 - A port confirms a frame went out before `write` returns, and `RawCan` sends the next one only after that, so a
   transfer's frames can't pass each other (PCAN with several TX mailboxes did, python-can-isotp #66). A frame that
   isn't confirmed is an error and ends the transfer.
@@ -64,9 +65,41 @@ Bus-off, error-passive and an error frame are errors, and each **latches**: `sen
 message, and nothing more is written (not even flow control a reply asked for). A node sending into a bus it is
 disrupting is the main way a diagnostic tool affects a running car. Only a new connection clears it.
 
+## VW TP2.0
+
+A channel setup, or a frame on a channel a module opened, that the policy approved (`Protocol::Tp20Channel`, see
+[tp20.md](tp20.md)) goes out as **one frame** of exactly the approved bytes on the approved ID, at 11 bits: the setup is
+7 bytes on `0x200`, a parameters frame 6, a keep-alive, ACK and disconnect 1, a request's data frame 3 plus the request.
+There is no segmentation, flow control, padding or separation time, because TP2.0 does its own sequencing, ACKs and
+timing in `tp20::ChannelSession`, which only needs `send` and `recv` and runs over this transport as over the ELM
+driver. The ELM driver sends the same bytes (`AT V1`, variable DLC; [elm327.md](elm327.md#vw-tp20-channel-frames)), and
+the vcan test checks the kernel takes them at those lengths.
+
+- **One frame in flight, confirmed before `send` returns,** the bus-off latch, listen-only (the port refuses every
+  write) and `&Approved` only are the ISO-TP rules, unchanged. A frame that isn't confirmed is an error and ends the
+  conversation.
+- **Receiving:** every frame from the conversation's source, at 11 bits, is a reply **as the module sent it**, with
+  its own length: not parsed, not reassembled, not padded or trimmed. The source is the setup answer's ID (`0x200` plus
+  the address) after a setup, and the channel's receive ID (`0x300`) after a frame on the channel. A frame from any other
+  ID, or a 29-bit one with the same number, is ignored, and a flood of them can't hold `recv` past its timeout. `recv`
+  waits its whole timeout, so the session never sees the early timeout an ELM327's prompt gives.
+- **A module that pads its frames** (an ACK `B1 AA AA AA AA AA AA AA`, a setup answer of 8 bytes) is not understood: the
+  decoders check every length, as they do over the ELM driver, so the session closes the channel (`Framing`,
+  `Undecodable`). Modules seen so far (the passenger door, session 6) send exact lengths.
+- **Filters:** the setup answer's ID only, then the channel's receive ID only, then the ISO-TP reply IDs again when an
+  ISO-TP request follows, each set when it changes.
+- **What is dropped and what is kept.** A *setup* starts a conversation like an ISO-TP request does: the frames the last
+  one left are read and dropped (and logged as unread) before it is written, so a late data frame of a closed channel,
+  which arrives on the same `0x300` as the next channel's, can't pass for it. A frame *on an open channel* continues the
+  conversation: the frames already queued (the module's ACK, its next data frame) are **kept** for the session to read next,
+  because the session ACKs a frame while the module may already be sending the next. Before such a frame is written the
+  port is still read once to its end, so a bus fault queued behind them latches before anything goes out; the same
+  bound as the drain applies (256 events, the 257th handled first and logged), and a queue past it fails the send. An
+  overrun in the middle of a channel ends the conversation (a lost frame would break the session's sequence numbers).
+  After an ISO-TP request, TP2.0 frames from the old channel's ID are nobody's reply.
+
 ## Not here yet
 
 - Checking the bitrate listen-only before going active (#42, requirement 5) belongs to each backend's connect step.
   `gsusb` does it ([details](gsusb.md#the-bitrate-check)). `socketcan` can't: the kernel owns the interface, so it only checks
   that the bitrate the interface reports is the one asked for, and never sets it ([details](socketcan.md#connecting)).
-- VW TP2.0: a TP2.0 request, setup or channel frame is refused with an adapter error naming #259.

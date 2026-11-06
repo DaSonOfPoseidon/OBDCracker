@@ -215,8 +215,9 @@ the `9B` it answers is shown as not read, with its bytes. An adapter failure on 
 The modules aren't scanned otherwise. A disconnect goes
 only on a channel a module gave in answer to its setup, answered on 0x300 as the setup asked, and never on an ID
 below 0x300, an ID a profile module uses, or the OBD-II IDs. If the policy refuses one, the output says so, and
-the module closes the idle channel by itself. It needs an adapter that echoes each character as it reads it, such as
-an OBDLink ([why](elm327.md#vw-tp20-channel-frames)).
+the module closes the idle channel by itself. Over an ELM adapter it needs one that echoes each character as it reads it,
+such as an OBDLink ([why](elm327.md#vw-tp20-channel-frames)); with `--gsusb` or `--socketcan` the frames go out as raw CAN
+frames of their own length ([how](raw-can.md#vw-tp20)).
 
 ## `sweep`
 

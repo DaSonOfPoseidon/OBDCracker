@@ -87,7 +87,8 @@ yourself (`ip link set <interface> down`) if the bus is disturbed.
 
 ## Sending
 
-Every frame is padded to 8 bytes with `0xAA` and sent through the socket's `write`. As in the other raw-CAN backend, the
+Every ISO-TP frame is padded to 8 bytes with `0xAA`, and a [VW TP2.0](raw-can.md#vw-tp20) frame is sent at its own
+length (a setup is DLC 7, a disconnect DLC 1); either way it goes through the socket's `write`. As in the other raw-CAN backend, the
 next frame of a transfer goes out only after the previous one is confirmed, because several transmit mailboxes can send
 consecutive frames out of order (#42).
 
@@ -95,7 +96,8 @@ consecutive frames out of order (#42).
   to receive the frames it sends itself (`CAN_RAW_RECV_OWN_MSGS`), and the driver returns each one when it has gone out on
   the bus. The kernel's receive filter applies to those copies too, so besides the transport's reply filter it also lets
   the sent frame's own ID through, for as long as that ID is the one being sent. A write returns when the same frame
-  (ID, width and 8 data bytes) has come back. One limit it can't close yet: another program on the same interface
+  (ID, width and every data byte, at the length it was sent with) has come back: the same bytes at another length are
+  not the echo. One limit it can't close yet: another program on the same interface
   sending the identical frame at the same instant would confirm the write too, because the kernel's `MSG_CONFIRM`
   mark isn't read ([#276](https://github.com/DaSonOfPoseidon/OBDCracker/issues/276)).
 - **The driver doesn't echo**: the kernel makes a copy of every frame at the moment it is queued, which says nothing
@@ -137,7 +139,9 @@ must not go out on a faulted bus. A send the kernel refuses (the interface went 
   `wire_tests.rs`. The port is tested against a fake interface that keeps the kernel's filter rules (`port_tests.rs`), and
   the checks and a session carrying requests, with and without an echo, in `connect_tests.rs`.
 - `crates/obdcracker-cli/tests/socketcan_vcan.rs` runs the real binary and the library against the kernel's `vcan0`, with
-  `obdcracker-sim` answering on the other end as ISO-TP frames. The CI job `vcan` loads the module, creates `vcan0`, and runs
+  `obdcracker-sim` answering on the other end as ISO-TP frames, and a VW TP2.0 module written out frame by frame in
+  the test (so the lengths on the wire, a 7-byte setup and a 1-byte disconnect, are checked against a second reading
+  of [tp20.md](tp20.md), not the sim's). The CI job `vcan` loads the module, creates `vcan0`, and runs
   them twice, without and with a driver echo (`OBDCRACKER_VCAN_ECHO` says which, and the test fails if the interface
   disagrees). The job fails, not skips, if the module can't be installed or loaded, and the tests fail if `vcan0` is missing.
   The tests are ignored in an ordinary `cargo test`; to run them:
@@ -151,4 +155,6 @@ cargo test -p obdcracker-cli --test socketcan_vcan -- --ignored --test-threads=1
 
 Everything above ran against `vcan` and a fake. A car session needs these checked on a real controller: that its driver
 echoes (and when, relative to the frame being on the bus), the timing a real bus gives, how the kernel reports
-bus-off and error-passive on it, and `berr-reporting`.
+bus-off and error-passive on it, and `berr-reporting`. For VW TP2.0 (#259): that the driver takes a DLC 7 setup and a
+DLC 1 disconnect and echoes them at that length (or moves the transmit counter for them), which `vcan` does with and
+without `echo=1`.
