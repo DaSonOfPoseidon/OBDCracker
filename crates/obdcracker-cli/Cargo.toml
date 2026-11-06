@@ -15,9 +15,13 @@ obdcracker-core.workspace = true
 obdcracker-profile.workspace = true
 obdcracker-safety.workspace = true
 obdcracker-sim.workspace = true
-obdcracker-transport = { workspace = true, features = ["serial", "gsusb"] }
+obdcracker-transport = { workspace = true, features = ["serial", "gsusb", "socketcan"] }
 clap = { version = "4.6.7", features = ["derive"] }
 
 [[bin]]
 name = "obdcracker"
 path = "src/main.rs"
+
+# A raw socket for the simulated car on the other end of vcan0 (tests/socketcan_vcan.rs)
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+socketcan = { version = "4.0.0", default-features = false }

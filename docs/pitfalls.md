@@ -393,6 +393,23 @@ Each entry names the class, what to check, and where it bit us.
   datasheet feature that does it and turn each off, and make the fake adapter do what the real one does by default
   (PR #149).
 
+- **A filter set for replies also hides what you sent.** The kernel applies a SocketCAN socket's receive filter to the
+  copies of its own frames, so with the transport's filter on the reply IDs the driver's echo of a request (the only
+  proof it went out) never arrived, and every write timed out. The port adds the sent frame's own ID to the kernel's
+  filter while it waits, and the fake interface keeps the kernel's filter rules so a test fails without it (#108).
+- **A loss counter shows only on the next delivery.** `SO_RXQ_OVFL` puts the socket's drop count on the frames queued
+  after a loss. A flood that fills the queue and ends shows nothing until another frame is queued, so a test must send one
+  more after the queue is drained, and a caller can't tell a lost last frame from silence: the reply times out (#108,
+  `docs/socketcan.md#receiving`).
+- **A name from the user that becomes a path is validated first.** The SocketCAN interface name is joined into
+  `/sys/class/net/<name>/...`, so `..` or `a/b` would read another file. Allow printable ASCII without `/` and `:`, at
+  most 15 characters (the kernel's own limit), and not `.` or `..`, before anything is read; read sysfs values with a size
+  cap and parse them strictly (`0x` and hex digits, or digits, and one newline), without echoing the content back (#108).
+- **A fake that returns early hides a deadline.** The first fake interface returned "nothing" after 2 ms whatever it was
+  asked to wait, so a write that gave up on the first empty read passed its tests, and would have waited far too little
+  against the real socket, which only returns early on an interrupt. A fake must keep the contract it stands in for (wait
+  the full timeout before saying nothing came), and the port must decide from the clock, not from one empty read (#108).
+
 ## Docs vs code
 
 - **After every fix, re-read the doc comments on what changed** ("returns every reply", "capped at", "fixture
@@ -466,7 +483,9 @@ Each entry names the class, what to check, and where it bit us.
   `--serial`, but with `--tcp` given (same group as `--serial`) clap accepted it silently. Add `conflicts_with` too,
   and test every combination. (`--baud` has since dropped the `requires`: without `--serial`, the adapter found
   automatically takes it.) `--listen-only` and `--bitrate` (which require `--gsusb`) did the same with `--tcp`
-  until they got `conflicts_with_all` too (#246).
+  until they got `conflicts_with_all` too (#246). They now require the group `can` (`--gsusb` or `--socketcan`). A new
+  adapter flag goes into every other flag's conflict list too: `--baud` still allowed `--socketcan` until a test
+  of every combination said so (#108).
 - **Keep commit subjects under 72 characters.** Check before committing: once a commit is pushed, fixing its subject
   means rewriting shared history.
 - **Run clippy before committing.** Pedantic lints that caught us: `manual_is_multiple_of`, `assert!(x.is_empty())`,

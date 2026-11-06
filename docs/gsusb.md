@@ -25,7 +25,7 @@ describes itself.
 ### Platforms
 
 - **Linux:** the backend never detaches a kernel driver. While the kernel's `gs_usb` module is loaded it holds the
-  device, and connecting fails with a message pointing to `--socketcan` (#108) or to unloading the module
+  device, and connecting fails with a message pointing to [`--socketcan`](socketcan.md) or to unloading the module
   (`sudo rmmod gs_usb`). Without the module you need permission to open the device; a udev rule does that
   ([install](install.md#gs_usb-adapters)).
 - **Windows:** the device needs the WinUSB driver (installed per device, for example with Zadig). Without it,

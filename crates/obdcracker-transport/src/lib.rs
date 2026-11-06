@@ -23,7 +23,11 @@ mod mock;
 /// use obdcracker_transport::raw::CanPort;
 /// ```
 #[cfg_attr(
-    not(any(test, feature = "gsusb")),
+    not(any(
+        test,
+        feature = "gsusb",
+        all(feature = "socketcan", target_os = "linux")
+    )),
     expect(dead_code, reason = "no backend uses it without a feature")
 )]
 mod raw;
@@ -38,6 +42,8 @@ pub use exchange::{Expect, Timing, exchange};
 pub use mock::Mock;
 #[cfg(feature = "gsusb")]
 pub use raw::gsusb;
+#[cfg(all(feature = "socketcan", target_os = "linux"))]
+pub use raw::socketcan;
 pub use session::{ExtendedSession, Left, S3, SessionError};
 
 /// A reply from one module: the CAN ID it came from and its reassembled payload.
