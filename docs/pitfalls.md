@@ -57,6 +57,14 @@ Each entry names the class, what to check, and where it bit us.
 - **An importer must fail on a line it can't read, not skip it.** `scripts/import-opendbc.sh` matched only
   `b'...'` literals, so opendbc's one `b"..."` Hyundai reply (it holds a `'`) would have dropped out of a fixture
   without a word. Accept every form the source uses, and exit with the line when one still doesn't parse (#12).
+  The same went for keys: only `(Ecu.x, 0x7e0, None)` was read, so every Toyota reply behind a sub-address (0x750)
+  was skipped, and a key it couldn't read left the next replies filed under the previous one. A car, key or reply
+  line that isn't read exactly ends the import.
+- **A value with its prefix stripped doesn't say which request it answered.** opendbc keeps Toyota's identification
+  replies without the `49 04`, `62 F1 81` or `5A 88 01` it stripped, and asks one ECU all three ways. Rebuilding a
+  prefix is a guess, so make it from facts the data carries (the count byte, the length, the address), fail the
+  import on a shape it doesn't fit, and decode the rebuilt reply with the codec of that request in a test with the
+  expected text written by hand from the source (#12).
 - **Public fields bypass the parser.** Anything with `pub` fields can be built or edited by hand, so consumers must
   re-validate (`Profile::validate`), or the type must make invalid values impossible.
 - **Empty, blank and padding-only values** are input too: names, text DIDs, CALIDs. `"   "` is not empty but

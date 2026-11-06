@@ -1,10 +1,12 @@
 //! Real identification replies from opendbc, decoded through the same path `fingerprint` uses. They
 //! catch the quirks made-up fixture values don't, such as space-padded part numbers: VW/Audi
-//! engines and transmissions (issue #15), then Hyundai, Ford and Honda modules (issue #12).
+//! engines and transmissions (issue #15), then Hyundai, Ford, Honda and Toyota modules (issue
+//! #12).
 
 use std::collections::VecDeque;
 use std::time::Duration;
 
+use obdcracker_core::obd;
 use obdcracker_core::response;
 use obdcracker_core::uds::{self, did};
 use obdcracker_safety::{Approved, Policy, Protocol, Target};
@@ -191,11 +193,14 @@ struct OtherReply {
 
 impl OtherReply {
     fn payload(&self) -> Vec<u8> {
-        self.payload
-            .split(' ')
-            .map(|byte| u8::from_str_radix(byte, 16).unwrap())
-            .collect()
+        hex_bytes(&self.payload)
     }
+}
+
+fn hex_bytes(text: &str) -> Vec<u8> {
+    text.split(' ')
+        .map(|byte| u8::from_str_radix(byte, 16).unwrap())
+        .collect()
 }
 
 fn other_replies() -> Vec<OtherReply> {
@@ -615,4 +620,386 @@ fn fingerprint_addresses_a_honda_module_at_its_29_bit_id() {
         assert_eq!(*target, Target::Physical29(0x18DA_28F1));
     }
     assert!(got.modules[0].dids.iter().all(|(_, v)| v.is_err()));
+}
+
+#[derive(Deserialize)]
+struct ToyotaReplies {
+    reply: Vec<ToyotaReply>,
+}
+
+#[derive(Deserialize)]
+struct ToyotaReply {
+    make: String,
+    car: String,
+    ecu: String,
+    request_id: u32,
+    response_id: u32,
+    sub_address: Option<u8>,
+    payload: String,
+}
+
+fn toyota_replies() -> Vec<ToyotaReply> {
+    let replies: ToyotaReplies =
+        toml::from_str(include_str!("../fixtures/opendbc-toyota.toml")).unwrap();
+    replies.reply
+}
+
+// Which request a Toyota reply answers. opendbc stores the reply without the prefix it strips and
+// asks one ECU several ways, so the form follows the key and the value's shape: mode 09 PID 04
+// from the OBD-II engine address, UDS F181 (a count, then 16-byte records) from the other
+// counted ones, and KWP2000 `1A 88 01` (one bare 16-byte record) from the rest.
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum Form {
+    Calids,
+    Software,
+    Kwp,
+}
+
+impl Form {
+    fn prefix(self) -> &'static [u8] {
+        match self {
+            Self::Calids => &[0x49, 0x04],
+            Self::Software => &[0x62, 0xF1, 0x81],
+            Self::Kwp => &[0x5A, 0x88, 0x01],
+        }
+    }
+}
+
+struct ToyotaExpected {
+    car: &'static str,
+    ecu: &'static str,
+    request_id: u32,
+    sub_address: Option<u8>,
+    form: Form,
+    // The records' text, without their 0x00 or space padding.
+    records: &'static [&'static str],
+}
+
+const fn toyota(
+    car: &'static str,
+    ecu: &'static str,
+    (request_id, sub_address): (u32, Option<u8>),
+    form: Form,
+    records: &'static [&'static str],
+) -> ToyotaExpected {
+    ToyotaExpected {
+        car,
+        ecu,
+        request_id,
+        sub_address,
+        form,
+        records,
+    }
+}
+
+use Form::{Calids, Kwp, Software};
+
+// The fixture's replies in order, from the values in opendbc's `fingerprints.py` at the pinned
+// commit. The Camry's are the KWP2000 form; the Corolla's, Mirai's and Prius's the UDS one.
+const TOYOTA: [ToyotaExpected; 18] = [
+    toyota(
+        "TOYOTA_CAMRY",
+        "engine",
+        (0x700, None),
+        Software,
+        &["8966306L3100"],
+    ),
+    toyota(
+        "TOYOTA_CAMRY",
+        "engine",
+        (0x7E0, None),
+        Calids,
+        &["333P1100", "A0202000"],
+    ),
+    toyota("TOYOTA_CAMRY", "dsu", (0x791, None), Kwp, &["8821F0601200"]),
+    toyota("TOYOTA_CAMRY", "abs", (0x7B0, None), Kwp, &["F152606210"]),
+    toyota("TOYOTA_CAMRY", "eps", (0x7A1, None), Kwp, &["8965B33540"]),
+    toyota(
+        "TOYOTA_CAMRY",
+        "fwdRadar",
+        (0x750, Some(0x0F)),
+        Kwp,
+        &["8821F0601200"],
+    ),
+    toyota(
+        "TOYOTA_CAMRY",
+        "fwdCamera",
+        (0x750, Some(0x6D)),
+        Kwp,
+        &["8646F0601200"],
+    ),
+    toyota(
+        "TOYOTA_COROLLA_TSS2",
+        "engine",
+        (0x700, None),
+        Software,
+        &["896630A22000"],
+    ),
+    toyota(
+        "TOYOTA_COROLLA_TSS2",
+        "engine",
+        (0x7E0, None),
+        Calids,
+        &["30A10000", "A0202000"],
+    ),
+    toyota(
+        "TOYOTA_COROLLA_TSS2",
+        "eps",
+        (0x7A1, None),
+        Software,
+        &["8965B12350"],
+    ),
+    toyota(
+        "TOYOTA_COROLLA_TSS2",
+        "abs",
+        (0x7B0, None),
+        Software,
+        &["F152602280"],
+    ),
+    toyota(
+        "TOYOTA_COROLLA_TSS2",
+        "fwdRadar",
+        (0x750, Some(0x0F)),
+        Software,
+        &["8821F3301100"],
+    ),
+    toyota(
+        "TOYOTA_COROLLA_TSS2",
+        "fwdCamera",
+        (0x750, Some(0x6D)),
+        Software,
+        &["8646F12010C0", "8646G26011A0"],
+    ),
+    toyota(
+        "TOYOTA_CHR",
+        "engine",
+        (0x7E0, None),
+        Calids,
+        &["31024000", "A0202000", "895231203202"],
+    ),
+    toyota(
+        "TOYOTA_MIRAI",
+        "abs",
+        (0x7D1, None),
+        Software,
+        &["898A36203000"],
+    ),
+    toyota(
+        "TOYOTA_MIRAI",
+        "eps",
+        (0x7A1, None),
+        Software,
+        &["8965B6204100", "8965B6203100"],
+    ),
+    toyota(
+        "TOYOTA_PRIUS",
+        "engine",
+        (0x700, None),
+        Software,
+        &["896634761000", "8966A4703000"],
+    ),
+    toyota(
+        "LEXUS_LC_TSS2",
+        "engine",
+        (0x7E0, None),
+        Calids,
+        &["31126000"],
+    ),
+];
+
+fn toyota_paired() -> Vec<(ToyotaReply, ToyotaExpected)> {
+    let replies = toyota_replies();
+    assert_eq!(replies.len(), TOYOTA.len());
+    replies.into_iter().zip(TOYOTA).collect()
+}
+
+fn toyota_with(form: Form) -> Vec<(ToyotaReply, ToyotaExpected)> {
+    toyota_paired()
+        .into_iter()
+        .filter(|(_, want)| want.form == form)
+        .collect()
+}
+
+fn what(reply: &ToyotaReply) -> String {
+    format!("{} {} 0x{:03X}", reply.car, reply.ecu, reply.request_id)
+}
+
+#[test]
+fn toyota_fixture_holds_exactly_the_expected_replies() {
+    let mut keys = Vec::new();
+    for (reply, want) in toyota_paired() {
+        let what = what(&reply);
+        assert_eq!(
+            (&*reply.make, &*reply.car, &*reply.ecu),
+            ("toyota", want.car, want.ecu),
+            "{what}"
+        );
+        assert_eq!(reply.request_id, want.request_id, "{what}");
+        assert_eq!(reply.sub_address, want.sub_address, "{what}");
+        let key = (reply.car, reply.request_id, reply.sub_address);
+        assert!(!keys.contains(&key), "{what} is listed twice");
+        keys.push(key);
+    }
+}
+
+#[test]
+fn toyota_reply_ids_are_the_request_plus_8_and_only_0x750_has_sub_addresses() {
+    for (reply, _) in toyota_paired() {
+        let what = what(&reply);
+        assert_eq!(reply.response_id, reply.request_id + 8, "{what}");
+        assert_eq!(
+            reply.sub_address.is_some(),
+            reply.request_id == 0x750,
+            "{what}"
+        );
+    }
+}
+
+#[test]
+fn toyota_mode_09_calids_decode_to_the_stored_text() {
+    let replies = toyota_with(Calids);
+    assert_eq!(replies.len(), 4);
+    for (reply, want) in replies {
+        let what = what(&reply);
+        let payload = hex_bytes(&reply.payload);
+        assert_eq!(reply.request_id, 0x7E0, "{what}");
+        let calids: Vec<_> = obd::decode_calids(&payload)
+            .unwrap_or_else(|e| panic!("{what}: {e}"))
+            .collect::<Result<_, _>>()
+            .unwrap_or_else(|e| panic!("{what}: {e}"));
+        let text: Vec<_> = want.records.iter().map(|&r| Some(r)).collect();
+        assert_eq!(calids, text, "{what}");
+    }
+}
+
+// F181, application software identification: a count, then that many 16-byte records.
+fn software_records(data: &[u8]) -> Vec<&[u8]> {
+    let (&count, records) = data.split_first().unwrap();
+    assert_eq!(records.len(), usize::from(count) * 16);
+    records.as_chunks::<16>().0.iter().map(|r| &r[..]).collect()
+}
+
+#[test]
+fn toyota_f181_replies_split_into_their_records() {
+    let replies = toyota_with(Software);
+    assert_eq!(replies.len(), 9);
+    for (reply, want) in replies {
+        let what = what(&reply);
+        let payload = hex_bytes(&reply.payload);
+        let data = uds::decode_did(&payload, 0xF181).unwrap_or_else(|e| panic!("{what}: {e}"));
+        let texts: Vec<_> = software_records(data)
+            .into_iter()
+            .map(|r| uds::decode_text(r).unwrap())
+            .collect();
+        assert_eq!(texts, want.records, "{what}");
+        // The count byte isn't text, so reading the whole value as one string is refused rather
+        // than taking 0x01 for a character.
+        assert_eq!(
+            uds::decode_text(data),
+            Err(response::Error::Malformed),
+            "{what}"
+        );
+    }
+}
+
+#[test]
+fn toyota_kwp2000_replies_answer_1a_88_01_with_one_record() {
+    let request = [0x1A, 0x88, 0x01];
+    let replies = toyota_with(Kwp);
+    assert_eq!(replies.len(), 5);
+    for (reply, want) in replies {
+        let what = what(&reply);
+        let payload = hex_bytes(&reply.payload);
+        assert!(response::kwp2000_answers(&request, &payload), "{what}");
+        let rest = response::positive(0x1A, &payload).unwrap();
+        let [0x88, 0x01, record @ ..] = rest else {
+            panic!("{what}: {rest:02X?}");
+        };
+        // One bare record: unlike F181, there is no count.
+        assert_eq!(record.len(), 16, "{what}");
+        assert_eq!(uds::decode_text(record).unwrap(), want.records[0], "{what}");
+    }
+}
+
+#[test]
+fn toyota_replies_start_with_the_prefix_of_their_form() {
+    for (reply, want) in toyota_paired() {
+        let payload = hex_bytes(&reply.payload);
+        assert!(payload.starts_with(want.form.prefix()), "{}", what(&reply));
+    }
+}
+
+#[test]
+fn toyota_padding_is_removed_and_nothing_else() {
+    for (reply, want) in toyota_paired() {
+        let what = what(&reply);
+        let payload = hex_bytes(&reply.payload);
+        let records = &payload[want.form.prefix().len()..];
+        // A count byte, except in the KWP2000 form.
+        let records = if want.form == Kwp {
+            records
+        } else {
+            &records[1..]
+        };
+        let (chunks, rest) = records.as_chunks::<16>();
+        assert!(rest.is_empty(), "{what}");
+        // Each record is its text, then 0x00 (a part number's own padding) or spaces (the
+        // Camry's radar, camera and DSU).
+        assert_eq!(chunks.len(), want.records.len(), "{what}");
+        for (chunk, text) in chunks.iter().zip(want.records) {
+            assert!(chunk.starts_with(text.as_bytes()), "{what}");
+            let padding = &chunk[text.len()..];
+            assert!(padding.iter().all(|&b| b == 0 || b == b' '), "{what}");
+            assert!(!text.is_empty() && text.len() <= 14, "{what}");
+        }
+    }
+}
+
+#[test]
+fn toyota_obd_and_f181_reads_are_approved_and_only_the_obd_engine_has_a_known_reply_id() {
+    let policy = Policy::read_only();
+    for (reply, want) in toyota_paired() {
+        // Addressing through a sub-address stays with #112, and the policy doesn't approve
+        // KWP2000's `1A 88 01` yet (#280).
+        if want.form == Kwp || reply.sub_address.is_some() {
+            continue;
+        }
+        let request = match want.form {
+            Calids => obd::vehicle_info(0x04).to_vec(),
+            _ => uds::read_did(0xF181).to_vec(),
+        };
+        let approved = policy
+            .approve(Protocol::Uds, Target::physical(reply.request_id), &request)
+            .unwrap_or_else(|e| panic!("{}: {e:?}", what(&reply)));
+        // ISO 15765-4 gives only 0x7E0..=0x7E7 a reply ID; the others need a profile that lists
+        // them (the +8 of the fixture is opendbc's rule, not the policy's).
+        let known = (reply.request_id == 0x7E0).then_some(reply.response_id);
+        assert_eq!(approved.reply_id(), known, "{}", what(&reply));
+    }
+}
+
+#[test]
+fn fingerprint_reads_real_toyota_calibration_ids() {
+    for (reply, want) in toyota_with(Calids) {
+        let what = what(&reply);
+        let payload = hex_bytes(&reply.payload);
+        let response_id = reply.response_id;
+        let mut car = Scripted {
+            answer: |_: u32, request: &[u8]| {
+                // The engine answers mode 09 PID 04 and nothing else.
+                (request == obd::vehicle_info(0x04))
+                    .then(|| Response::new(response_id, payload.clone()))
+            },
+            replies: VecDeque::new(),
+        };
+        let timing = Timing {
+            p2: Duration::from_millis(5),
+            ..Timing::default()
+        };
+        let got = fingerprint(&mut car, &Policy::read_only(), &[], timing).unwrap();
+        assert_eq!(got.ecus.len(), 1, "{what}");
+        assert_eq!(got.ecus[0].source, response_id, "{what}");
+        let text: Vec<_> = want.records.iter().map(|&r| Some(r.to_owned())).collect();
+        assert_eq!(got.ecus[0].calids, Ok(text), "{what}");
+    }
 }
