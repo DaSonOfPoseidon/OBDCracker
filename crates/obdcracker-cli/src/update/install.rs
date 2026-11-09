@@ -16,6 +16,8 @@ const SCRIPT_LIMIT: usize = 1 << 20;
 // Where the running program goes while its replacement is installed: Windows won't overwrite or
 // delete a running .exe, but it will rename one.
 pub(super) const OLD_NAME: &str = "obdcracker.old.exe";
+// The copy made of it, renamed to the program's own name so the path is never empty
+const COPY_NAME: &str = "obdcracker.copy.exe";
 
 /// Runs a program, waits for it and gives its exit code.
 pub(crate) trait Runner {
@@ -82,15 +84,17 @@ fn check_script(body: &[u8], windows: bool) -> Result<(), String> {
     }
 }
 
-/// Removes the `obdcracker.old.exe` an earlier update left beside `exe`. It stays only while
-/// something still runs it.
+/// Removes the `obdcracker.old.exe` an earlier update left beside `exe`, and the copy of it a
+/// cancelled one may have. The old one stays only while something still runs it.
 pub(super) fn remove_stale(exe: &Path) {
-    let _ = fs::remove_file(exe.with_file_name(OLD_NAME));
+    for name in [OLD_NAME, COPY_NAME] {
+        let _ = fs::remove_file(exe.with_file_name(name));
+    }
 }
 
 /// Downloads the install script at `sha` and runs it, giving its exit code. On Windows the
-/// running program is renamed out of the way first, and put back if the script left nothing in
-/// its place.
+/// running program is renamed out of the way first, with a copy left in its place, and put back
+/// if the script left nothing there.
 pub(crate) fn run(setup: &Setup, sha: &str) -> Result<i32, String> {
     let name = script_name(setup.windows);
     let reply = setup
@@ -127,9 +131,21 @@ struct Aside {
 }
 
 impl Aside {
+    // Windows can't overwrite a running program but can rename it. A copy goes in its place, so
+    // the path never stays empty for long: the process is ended without cleanup by Ctrl+C on a
+    // console, and nothing here would run after it.
     fn new(exe: &Path) -> io::Result<Self> {
         let old = exe.with_file_name(OLD_NAME);
-        fs::rename(exe, &old)?;
+        let copy = exe.with_file_name(COPY_NAME);
+        fs::copy(exe, &copy)?;
+        let moved = fs::rename(exe, &old).and_then(|()| fs::rename(&copy, exe));
+        if let Err(e) = moved {
+            if !exe.exists() {
+                let _ = fs::rename(&old, exe);
+            }
+            let _ = fs::remove_file(&copy);
+            return Err(e);
+        }
         Ok(Aside {
             exe: exe.to_owned(),
             old,
@@ -453,8 +469,9 @@ mod tests {
         let http = FakeHttp::new().reply(PS1_URL, 200, b"param()\n");
         let exe_in = exe.clone();
         let runner = FakeRunner::new(move |_, _| {
-            // While it runs the old program is at its new name and nothing is at the old one
-            assert!(!exe_in.exists());
+            // The running program is at its new name, and a copy that isn't running is in its
+            // place: a script cancelled with Ctrl+C leaves a program that starts
+            assert_eq!(fs::read(&exe_in).unwrap(), b"old program");
             assert_eq!(
                 fs::read(exe_in.with_file_name(OLD_NAME)).unwrap(),
                 b"old program"
@@ -481,6 +498,24 @@ mod tests {
     }
 
     #[test]
+    fn on_windows_a_script_that_removes_the_program_and_fails_gets_it_put_back() {
+        let dir = scratch("aside-removed");
+        let temp = scratch("aside-removed-temp");
+        let exe = dir.join("obdcracker.exe");
+        fs::write(&exe, b"old program").unwrap();
+        let http = FakeHttp::new().reply(PS1_URL, 200, b"param()\n");
+        let exe_in = exe.clone();
+        let runner = FakeRunner::new(move |_, _| {
+            fs::remove_file(&exe_in).unwrap();
+            Ok(1)
+        });
+        assert_eq!(run(&windows_setup(&http, &runner, &exe, &temp), SHA), Ok(1));
+        assert_eq!(fs::read(&exe).unwrap(), b"old program");
+        let _ = fs::remove_dir_all(&dir);
+        let _ = fs::remove_dir_all(&temp);
+    }
+
+    #[test]
     fn on_windows_a_failed_script_leaves_the_old_program_where_it_was() {
         let dir = scratch("aside-fail");
         let temp = scratch("aside-fail-temp");
@@ -490,7 +525,7 @@ mod tests {
         let runner = FakeRunner::exits(1);
         assert_eq!(run(&windows_setup(&http, &runner, &exe, &temp), SHA), Ok(1));
         assert_eq!(fs::read(&exe).unwrap(), b"old program");
-        assert_eq!(names(&dir), ["obdcracker.exe"]);
+        assert_eq!(names(&dir), ["obdcracker.exe", OLD_NAME]);
         let _ = fs::remove_dir_all(&dir);
         let _ = fs::remove_dir_all(&temp);
     }
@@ -505,7 +540,7 @@ mod tests {
         let runner = FakeRunner::new(|_, _| Err(io::ErrorKind::NotFound.into()));
         assert!(run(&windows_setup(&http, &runner, &exe, &temp), SHA).is_err());
         assert_eq!(fs::read(&exe).unwrap(), b"old program");
-        assert_eq!(names(&dir), ["obdcracker.exe"]);
+        assert_eq!(names(&dir), ["obdcracker.exe", OLD_NAME]);
         let _ = fs::remove_dir_all(&dir);
         let _ = fs::remove_dir_all(&temp);
     }
@@ -544,6 +579,7 @@ mod tests {
         fs::write(&exe, b"current").unwrap();
         remove_stale(&exe);
         fs::write(dir.join(OLD_NAME), b"stale").unwrap();
+        fs::write(dir.join(COPY_NAME), b"half a copy").unwrap();
         remove_stale(&exe);
         assert_eq!(names(&dir), ["obdcracker.exe"]);
         let _ = fs::remove_dir_all(&dir);

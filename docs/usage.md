@@ -291,11 +291,13 @@ first install. It needs `curl` (Windows 10 and later have `curl.exe`) or, on a s
   would run, and downloads and installs nothing.
 - **No adapter:** `update` opens no adapter and writes no audit log. `--serial`, `--tcp`, `--gsusb`, `--socketcan`,
   `--sim`, `--profile`, `--baud`, `--listen-only`, `--bitrate` and `--audit-log` are refused with status 2.
-- **Rate limit:** GitHub's API allows 60 requests an hour per address without signing in, and `update` makes at most
-  three (the release list, one commit, one comparison). When GitHub refuses, `update` says so.
+- **Rate limit:** GitHub's API allows 60 requests an hour per address without signing in, and `update` makes
+  three (the release list, one commit, one comparison). The release list is read 100 releases at a time, so a project
+  with more than 100 releases takes more, up to ten pages. When GitHub refuses, `update` says so.
 - **Exit status:** 0 when this build is up to date or was updated, 1 when the update was refused or failed (a
   script that failed with a code from 1 to 255 gives that code), 2 for a bad command line.
 - **On Windows** the running `obdcracker.exe` can't be overwritten, so it is renamed to `obdcracker.old.exe` beside
-  it while the script runs. It is put back if the script left no program at its place (a failed install, or one that
-  put the new program somewhere else), and removed by the next `update` otherwise. A failed install leaves the
-  program where it was.
+  it and a copy of it takes its place while the script runs. The script then replaces the copy, and a failed or
+  cancelled (Ctrl+C) update leaves a working `obdcracker.exe`. If the script removed the program and left none, the
+  old one is renamed back. `obdcracker.old.exe` (and `obdcracker.copy.exe`, which only an interrupted update at the
+  worst moment leaves) are removed by the next `update`, since Windows can't delete a program that is running.
