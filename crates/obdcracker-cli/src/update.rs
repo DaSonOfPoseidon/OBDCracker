@@ -17,6 +17,9 @@ const REPO: &str = "DaSonOfPoseidon/OBDCracker";
 // The install guide's section for a build that can't be compared with a release.
 const INSTALL_DOC: &str = "docs/install.md#updating";
 
+const RELEASES_PER_PAGE: usize = 100;
+// Ten pages are a thousand releases, far more than this project will make.
+const RELEASE_PAGES: usize = 10;
 // What each reply may weigh. A comparison lists the files that changed, so it is the largest.
 const RELEASES_LIMIT: usize = 8 << 20;
 const COMMIT_LIMIT: usize = 64 << 10;
@@ -209,8 +212,9 @@ fn is_sha(text: &str) -> bool {
     text.len() == 40 && text.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
 }
 
-// The published releases' versions. Every entry is checked, the ones left out too.
-fn parse_releases(body: &[u8]) -> Result<Vec<Version>, String> {
+// One page of the release list: the published releases' versions, and how many entries the page
+// held. Every entry is checked, the ones left out too.
+fn parse_releases(body: &[u8]) -> Result<(Vec<Version>, usize), String> {
     let value: Value = serde_json::from_slice(body)
         .map_err(|e| format!("GitHub's release list isn't JSON: {e}"))?;
     let entries = value
@@ -236,7 +240,7 @@ fn parse_releases(body: &[u8]) -> Result<Vec<Version>, String> {
             versions.extend(Version::parse_tag(tag));
         }
     }
-    Ok(versions)
+    Ok((versions, entries.len()))
 }
 
 fn choose(releases: &[Version], want: &Want) -> Result<Target, Refusal> {
@@ -323,8 +327,26 @@ fn decide(installed: &Installed, target: &Target, history: History, allow: bool)
     }
 }
 
-fn releases_url() -> String {
-    format!("https://api.github.com/repos/{REPO}/releases?per_page=100")
+fn releases_url(page: usize) -> String {
+    format!("https://api.github.com/repos/{REPO}/releases?per_page={RELEASES_PER_PAGE}&page={page}")
+}
+
+// Every published release, a page of GitHub's list at a time. The highest version can be on any
+// page, and so can a version asked for by name.
+fn fetch_releases(http: &dyn Http) -> Result<Vec<Version>, String> {
+    let mut versions = Vec::new();
+    for page in 1..=RELEASE_PAGES {
+        let reply = http.get(&releases_url(page), Accept::Json, RELEASES_LIMIT)?;
+        let (found, entries) = parse_releases(&ok_body(reply, "the release list")?)?;
+        versions.extend(found);
+        if entries < RELEASES_PER_PAGE {
+            return Ok(versions);
+        }
+    }
+    Err(format!(
+        "GitHub lists more than {} releases, more than update reads",
+        RELEASE_PAGES * RELEASES_PER_PAGE
+    ))
 }
 
 fn commit_url(target: &Target) -> String {
@@ -374,8 +396,7 @@ pub(crate) fn plan(
     let releases = if matches!(want, Want::Main) {
         Vec::new()
     } else {
-        let reply = http.get(&releases_url(), Accept::Json, RELEASES_LIMIT)?;
-        parse_releases(&ok_body(reply, "the release list")?)?
+        fetch_releases(http)?
     };
     let target = match choose(&releases, want) {
         Ok(target) => target,
@@ -622,8 +643,12 @@ mod tests {
             ("nightly", false, false),
             ("v0.1.0", false, false),
         ]);
-        assert_eq!(parse_releases(&body).unwrap(), vec![v(0, 2, 0), v(0, 1, 0)]);
-        assert_eq!(parse_releases(b"[]").unwrap(), vec![]);
+        // Ten entries on the page, two of them releases
+        assert_eq!(
+            parse_releases(&body).unwrap(),
+            (vec![v(0, 2, 0), v(0, 1, 0)], 10)
+        );
+        assert_eq!(parse_releases(b"[]").unwrap(), (vec![], 0));
     }
 
     #[test]
@@ -942,7 +967,7 @@ mod flow_tests {
     const SHA_B: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
     const API: &str = "https://api.github.com/repos/DaSonOfPoseidon/OBDCracker";
     const RELEASES: &str =
-        "https://api.github.com/repos/DaSonOfPoseidon/OBDCracker/releases?per_page=100";
+        "https://api.github.com/repos/DaSonOfPoseidon/OBDCracker/releases?per_page=100&page=1";
     const COMMIT_V2: &str =
         "https://api.github.com/repos/DaSonOfPoseidon/OBDCracker/commits/tags/v0.2.0";
     const COMMIT_MAIN: &str =
@@ -1038,6 +1063,58 @@ mod flow_tests {
             "{planned:?}"
         );
         assert_eq!(http.urls(), [RELEASES]);
+    }
+
+    fn releases_page(page: usize) -> String {
+        format!(
+            "https://api.github.com/repos/DaSonOfPoseidon/OBDCracker/releases?per_page=100&page={page}"
+        )
+    }
+
+    // A full page of prereleases, which are all skipped
+    fn full_page_of_prereleases() -> Vec<u8> {
+        let items: Vec<Value> = (0..100)
+            .map(|i| {
+                serde_json::json!({"tag_name": format!("v0.0.{i}"), "draft": false, "prerelease": true})
+            })
+            .collect();
+        serde_json::to_vec(&items).unwrap()
+    }
+
+    #[test]
+    fn releases_past_the_first_page_are_found() {
+        let http = FakeHttp::new()
+            .reply(&releases_page(1), 200, &full_page_of_prereleases())
+            .reply(&releases_page(2), 200, &releases(&["v0.1.0", "v0.2.0"]))
+            .reply(COMMIT_V2, 200, SHA_B.as_bytes());
+        let installed = me(v(0, 1, 0), None);
+        let planned = plan(&http, &installed, &Want::Latest, false).unwrap();
+        assert!(matches!(planned, Planned::Install { .. }), "{planned:?}");
+        assert_eq!(
+            http.urls(),
+            [releases_page(1), releases_page(2), COMMIT_V2.to_owned()]
+        );
+        // A named release on a later page exists too
+        let planned = plan(&http, &installed, &Want::Version(v(0, 2, 0)), false).unwrap();
+        assert!(matches!(planned, Planned::Install { .. }), "{planned:?}");
+    }
+
+    #[test]
+    fn a_release_list_that_never_ends_is_an_error() {
+        let mut http = FakeHttp::new();
+        for page in 1..=RELEASE_PAGES + 1 {
+            http = http.reply(&releases_page(page), 200, &full_page_of_prereleases());
+        }
+        let err = plan(&http, &me(v(0, 1, 0), None), &Want::Latest, false).unwrap_err();
+        assert!(err.contains("more than"), "{err}");
+        assert_eq!(http.urls().len(), RELEASE_PAGES);
+    }
+
+    #[test]
+    fn a_short_first_page_is_the_whole_list() {
+        let http = github();
+        plan(&http, &me(v(0, 1, 0), None), &Want::Latest, false).unwrap();
+        assert_eq!(http.urls(), [RELEASES, COMMIT_V2]);
     }
 
     #[test]
