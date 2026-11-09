@@ -95,10 +95,7 @@ function Install-ObdCracker {
     }
 
     # The commit REF names right now. The download is then of that commit, so the build is what was
-    # resolved even if the branch moves in between. A full commit hash is used as given. refs/tags/x and
-    # refs/heads/x are looked up as written. A bare name is looked up as a tag and as a branch: one match
-    # is used, and both is an error rather than a quiet pick. A name that is neither may still be a
-    # short hash, so it is looked up as given last.
+    # resolved even if the branch moves in between. How a name is read: docs/install.md.
     function Resolve-Ref([string]$Ref) {
         if (Test-CommitHash $Ref) { return $Ref }
         Say "Looking up $Ref on GitHub"

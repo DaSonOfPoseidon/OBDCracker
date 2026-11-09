@@ -100,10 +100,7 @@ try_ref() {
 }
 
 # Sets COMMIT to the commit REF names right now. The download is then of that commit, so the build
-# is what was resolved even if the branch moves in between. A full commit hash is used as given.
-# `refs/tags/x` and `refs/heads/x` are looked up as written. A bare name is looked up as a tag and
-# as a branch: one match is used, and both is an error rather than a quiet pick. A name that is
-# neither may still be a short hash, so it is looked up as given last.
+# is what was resolved even if the branch moves in between. How a name is read: docs/install.md.
 # Called with `early` (before anything is installed), it leaves COMMIT empty for a failure that
 # isn't GitHub answering: there may be no CA certificates yet, which ensure_linker_linux installs.
 resolve_ref() {
