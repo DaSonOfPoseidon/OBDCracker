@@ -352,6 +352,21 @@ fn open_socketcan(_cli: &Cli, _interface: &str) -> ExitCode {
     ExitCode::from(2)
 }
 
+// The warning for an interface that reports no bitrate. Listen-only sends nothing, so a wrong rate
+// there can't disturb the bus; it only means frames are missed or misread.
+#[cfg(target_os = "linux")]
+fn socketcan_unconfirmed_warning(name: &str, bitrate: u32, listen_only: bool) -> String {
+    let effect = if listen_only {
+        "frames will be missed or misread"
+    } else {
+        "sending disturbs it"
+    };
+    format!(
+        "warning: {name} reports no bitrate, so {bitrate} bit/s is unconfirmed. If the car's bus \
+         runs at another rate, {effect}. Check how the interface was set up"
+    )
+}
+
 // The interface is only read and a socket opened on it: its bitrate and mode are never set, so
 // there is nothing to take back down afterwards.
 #[cfg(target_os = "linux")]
@@ -399,18 +414,18 @@ fn open_socketcan(cli: &Cli, interface: &str) -> ExitCode {
         || "no bitrate reported".to_owned(),
         |b| format!("{b} bit/s"),
     );
+    let listen_only = adapter.mode() == socketcan::Mode::ListenOnly;
     match adapter.bitrate_check() {
         socketcan::BitrateCheck::Matched => {
             eprintln!("using {name} ({rate}, as asked for)");
         }
         socketcan::BitrateCheck::Unconfirmed => eprintln!(
-            "warning: {name} reports no bitrate, so {} bit/s is unconfirmed. If the car's bus runs \
-             at another rate, sending disturbs it. Check how the interface was set up",
-            bitrate.unwrap_or(0)
+            "{}",
+            socketcan_unconfirmed_warning(name, bitrate.unwrap_or(0), listen_only)
         ),
         _ => eprintln!("using {name} ({rate})"),
     }
-    if adapter.mode() == socketcan::Mode::ListenOnly {
+    if listen_only {
         eprintln!("listen-only: nothing will be sent, so every request fails");
         if adapter.controller_listen_only() != Some(true) {
             eprintln!(
@@ -2000,6 +2015,8 @@ mod tests {
 
     use obdcracker_transport::gsusb::BitrateSource;
 
+    #[cfg(target_os = "linux")]
+    use super::socketcan_unconfirmed_warning;
     use super::{
         Cli, Discovery, configured_bitrate, dtc_out_of_step_note, gateway_list_lines,
         gsusb_bitrate, resume_command, run_scan, sweep_out_of_step_note, tp20_identification,
@@ -2428,6 +2445,23 @@ mod tests {
                 .contains("a value is required for '--socketcan <IFACE>'"),
             "{err}"
         );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn an_unconfirmed_socketcan_bitrate_says_what_a_wrong_one_does_in_each_mode() {
+        let active = socketcan_unconfirmed_warning("vcan0", 500_000, false);
+        assert!(active.contains("vcan0 reports no bitrate"), "{active}");
+        assert!(active.contains("500000 bit/s is unconfirmed"), "{active}");
+        assert!(active.contains("sending disturbs it"), "{active}");
+
+        // Listen-only sends nothing, so a wrong rate can't disturb the bus, only hide frames.
+        let listen = socketcan_unconfirmed_warning("vcan0", 500_000, true);
+        assert!(listen.contains("vcan0 reports no bitrate"), "{listen}");
+        assert!(listen.contains("500000 bit/s is unconfirmed"), "{listen}");
+        assert!(listen.contains("missed or misread"), "{listen}");
+        assert!(!listen.contains("sending"), "{listen}");
+        assert!(!listen.contains("disturb"), "{listen}");
     }
 
     #[test]
