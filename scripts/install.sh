@@ -23,7 +23,8 @@ usage() {
 Usage: install.sh [--ref REF] [--dir DIR] [--source PATH]
 
   --ref REF      branch, tag or commit to build, looked up on GitHub first so the build is of that exact
-                 commit [default: main]
+                 commit [default: main]. A name that is both a tag and a branch is refused: say
+                 refs/tags/NAME, refs/heads/NAME or the commit hash
   --dir DIR      where the source and build cache live [default: ${XDG_DATA_HOME:-\$HOME/.local/share}/obdcracker]
   --source PATH  build this checkout instead of downloading one (--ref is then ignored)
 EOF
@@ -47,15 +48,28 @@ fetch() {
 	fi
 }
 
-# Prints a URL's body to stdout, asking GitHub's API for a bare commit hash.
-fetch_sha() {
+# Asks GitHub's API for a bare commit hash, into LOOKUP. Returns 0 when it answered with one, 1 when
+# GitHub says it has no such ref (HTTP 404 or 422), 2 for any other HTTP answer (left in HTTP_STATUS),
+# and 3 when there was no answer at all.
+api_lookup() {
+	LOOKUP=
+	HTTP_STATUS=
+	body=$TMP/lookup-body
 	if command -v curl >/dev/null 2>&1; then
-		curl --proto '=https' --tlsv1.2 -fsSL -H 'Accept: application/vnd.github.sha' "$1"
+		HTTP_STATUS=$(curl --proto '=https' --tlsv1.2 -sL -H 'Accept: application/vnd.github.sha' -o "$body" -w '%{http_code}' "$1") || return 3
 	elif command -v wget >/dev/null 2>&1; then
-		wget --https-only -qO- --header='Accept: application/vnd.github.sha' "$1"
+		wget --https-only -q -S -O "$body" --header='Accept: application/vnd.github.sha' "$1" 2>"$TMP/lookup-headers" || :
+		# -S prints the status line of every response, redirects included: the last one is the answer
+		HTTP_STATUS=$(sed -n 's/^ *HTTP\/[0-9.]* \([0-9][0-9][0-9]\).*/\1/p' "$TMP/lookup-headers" | tail -n 1)
+		[ -n "$HTTP_STATUS" ] || return 3
 	else
 		die "need curl or wget to download $1"
 	fi
+	case $HTTP_STATUS in
+	200) LOOKUP=$(cat "$body") ;;
+	404 | 422) return 1 ;;
+	*) return 2 ;;
+	esac
 }
 
 # Whether $1 is a full commit hash: exactly 40 lowercase hex characters, which is all
@@ -64,23 +78,73 @@ is_sha() {
 	[ "${#1}" -eq 40 ] && case $1 in *[!0-9a-f]*) return 1 ;; esac
 }
 
-# Sets COMMIT to the commit REF names right now. The download is then of that commit, so the build
-# is what was resolved even if the branch moves in between. Called with `early` (before anything is
-# installed), it leaves COMMIT empty for a failure that isn't GitHub refusing the ref: there may be no
-# CA certificates yet, which ensure_linker_linux installs.
-resolve_ref() {
-	say "Looking up $REF on GitHub"
+# Looks up one name for resolve_ref and sets COMMIT to its commit. Returns 0 when found, 1 when
+# GitHub has no such ref, and 2 when there was no answer and the run is `early` (COMMIT is then
+# empty). Any other failure ends the script: only "no such ref" lets resolve_ref try the next name,
+# so a rate limit or an outage can never end in a different ref being built.
+try_ref() {
 	status=0
-	COMMIT=$(fetch_sha "https://api.github.com/repos/$REPO/commits/$REF") || status=$?
-	if [ "$status" -ne 0 ]; then
-		# curl -f exits 22 and wget 8 when the server answered with an error
-		if [ "${1:-}" = early ] && [ "$status" -ne 22 ] && [ "$status" -ne 8 ]; then
-			COMMIT=
-			return 0
-		fi
-		die "couldn't look up $REF: check the name, and that it's pushed to GitHub (GitHub's API also limits how often one address can ask)"
+	api_lookup "https://api.github.com/repos/$REPO/commits/$1" || status=$?
+	case $status in
+	0) ;;
+	1) return 1 ;;
+	2) die "couldn't look up $REF: GitHub answered HTTP $HTTP_STATUS (its API limits how often one address can ask)" ;;
+	*)
+		[ "${2:-}" = early ] || die "couldn't look up $REF: no answer from GitHub, check the network"
+		COMMIT=
+		return 2
+		;;
+	esac
+	is_sha "$LOOKUP" || die "GitHub's answer for $REF isn't a commit hash"
+	COMMIT=$LOOKUP
+}
+
+# Sets COMMIT to the commit REF names right now. The download is then of that commit, so the build
+# is what was resolved even if the branch moves in between. A full commit hash is used as given.
+# `refs/tags/x` and `refs/heads/x` are looked up as written. A bare name is looked up as a tag and
+# as a branch: one match is used, and both is an error rather than a quiet pick. A name that is
+# neither may still be a short hash, so it is looked up as given last.
+# Called with `early` (before anything is installed), it leaves COMMIT empty for a failure that
+# isn't GitHub answering: there may be no CA certificates yet, which ensure_linker_linux installs.
+resolve_ref() {
+	COMMIT=
+	if is_sha "$REF"; then
+		COMMIT=$REF
+		return 0
 	fi
-	is_sha "$COMMIT" || die "GitHub's answer for $REF isn't a commit hash"
+	say "Looking up $REF on GitHub"
+	case $REF in
+	refs/tags/* | refs/heads/*)
+		status=0
+		try_ref "$REF" "${1:-}" || status=$?
+		case $status in
+		0 | 2) return 0 ;;
+		esac
+		die "couldn't find $REF on GitHub: check the name, and that it's pushed"
+		;;
+	esac
+	status=0
+	try_ref "refs/tags/$REF" "${1:-}" || status=$?
+	[ "$status" -ne 2 ] || return 0
+	tag_commit=
+	[ "$status" -ne 0 ] || tag_commit=$COMMIT
+	status=0
+	try_ref "refs/heads/$REF" "${1:-}" || status=$?
+	[ "$status" -ne 2 ] || return 0
+	if [ "$status" -eq 0 ] && [ -n "$tag_commit" ]; then
+		die "'$REF' is both a tag and a branch: pass refs/tags/$REF, refs/heads/$REF or a commit hash to say which"
+	fi
+	[ "$status" -ne 0 ] || return 0
+	if [ -n "$tag_commit" ]; then
+		COMMIT=$tag_commit
+		return 0
+	fi
+	status=0
+	try_ref "$REF" "${1:-}" || status=$?
+	case $status in
+	0 | 2) return 0 ;;
+	esac
+	die "couldn't find $REF on GitHub: check the name, and that it's pushed"
 }
 
 # Runs git in the checkout being built, ignoring variables that would point it at another repository.

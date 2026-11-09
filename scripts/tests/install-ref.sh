@@ -256,6 +256,7 @@ if [ "$(uname -s)" = Linux ]; then
 		status=0
 		mkdir -p "$work/home" "$work/src"
 		: >"$work/src/Cargo.toml"
+		: >"$work/src/rust-toolchain.toml"
 		HOME=$work/home XDG_DATA_HOME=$work/data CARGO_HOME=$work/cargo FAKE_LOG=$work/log \
 			FAKE_TABLE=$work/table PATH=$work/e2e-bin:$PATH "$sh_bin" "$install" "$@" >"$work/out" 2>&1 || status=$?
 	}
