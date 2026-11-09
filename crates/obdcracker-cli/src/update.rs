@@ -93,18 +93,28 @@ pub(crate) enum Want {
     Main,
 }
 
-/// A release or `main`, by the name GitHub resolves to a commit.
+/// A release, or `main` when there is no version.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Target {
     pub(crate) version: Option<Version>,
-    pub(crate) git_ref: String,
+}
+
+impl Target {
+    // The name GitHub's commit lookup takes. `tags/` and `heads/` keep a branch named like a tag
+    // from being taken for it.
+    fn api_ref(&self) -> String {
+        match self.version {
+            Some(version) => format!("tags/v{version}"),
+            None => "heads/main".to_owned(),
+        }
+    }
 }
 
 impl fmt::Display for Target {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self.version {
             Some(version) => write!(f, "v{version}"),
-            None => f.write_str(&self.git_ref),
+            None => f.write_str("main"),
         }
     }
 }
@@ -232,13 +242,9 @@ fn parse_releases(body: &[u8]) -> Result<Vec<Version>, String> {
 fn choose(releases: &[Version], want: &Want) -> Result<Target, Refusal> {
     let release = |version: Version| Target {
         version: Some(version),
-        git_ref: format!("v{version}"),
     };
     match want {
-        Want::Main => Ok(Target {
-            version: None,
-            git_ref: "main".to_owned(),
-        }),
+        Want::Main => Ok(Target { version: None }),
         Want::Version(version) => releases
             .contains(version)
             .then(|| release(*version))
@@ -321,8 +327,11 @@ fn releases_url() -> String {
     format!("https://api.github.com/repos/{REPO}/releases?per_page=100")
 }
 
-fn commit_url(git_ref: &str) -> String {
-    format!("https://api.github.com/repos/{REPO}/commits/{git_ref}")
+fn commit_url(target: &Target) -> String {
+    format!(
+        "https://api.github.com/repos/{REPO}/commits/{}",
+        target.api_ref()
+    )
 }
 
 fn compare_url(base: &str, head: &str) -> String {
@@ -375,7 +384,7 @@ pub(crate) fn plan(
     if let Some(refusal) = lower_version(installed, &target, allow_downgrade) {
         return Ok(Planned::Refused(refusal));
     }
-    let reply = http.get(&commit_url(&target.git_ref), Accept::Sha, COMMIT_LIMIT)?;
+    let reply = http.get(&commit_url(&target), Accept::Sha, COMMIT_LIMIT)?;
     let sha = parse_sha(&ok_body(reply, &format!("the commit of {target}"))?)?;
     let history = history(http, installed, &sha)?;
     Ok(match decide(installed, &target, history, allow_downgrade) {
@@ -431,7 +440,7 @@ pub(crate) fn run(
     out: &mut dyn Write,
     err: &mut dyn Write,
 ) -> u8 {
-    if setup.windows {
+    if setup.windows && !options.dry_run {
         install::remove_stale(setup.exe);
     }
     let planned = plan(
@@ -508,15 +517,11 @@ mod tests {
     fn release(version: Version) -> Target {
         Target {
             version: Some(version),
-            git_ref: format!("v{}.{}.{}", version.major, version.minor, version.patch),
         }
     }
 
     fn main_branch() -> Target {
-        Target {
-            version: None,
-            git_ref: "main".to_owned(),
-        }
+        Target { version: None }
     }
 
     fn installed(version: Version, known: bool) -> Installed {
@@ -647,6 +652,14 @@ mod tests {
                 "{}",
                 String::from_utf8_lossy(bad)
             );
+        }
+        // Nesting past what the parser allows is an error, not a stack overflow
+        for deep in [
+            "[".repeat(100_000),
+            format!(r#"[{{"tag_name":{}}}]"#, "[".repeat(100_000)),
+        ] {
+            assert!(parse_releases(deep.as_bytes()).is_err());
+            assert!(parse_compare(deep.as_bytes()).is_err());
         }
     }
 
@@ -931,9 +944,9 @@ mod flow_tests {
     const RELEASES: &str =
         "https://api.github.com/repos/DaSonOfPoseidon/OBDCracker/releases?per_page=100";
     const COMMIT_V2: &str =
-        "https://api.github.com/repos/DaSonOfPoseidon/OBDCracker/commits/v0.2.0";
+        "https://api.github.com/repos/DaSonOfPoseidon/OBDCracker/commits/tags/v0.2.0";
     const COMMIT_MAIN: &str =
-        "https://api.github.com/repos/DaSonOfPoseidon/OBDCracker/commits/main";
+        "https://api.github.com/repos/DaSonOfPoseidon/OBDCracker/commits/heads/main";
     const COMPARE_V2: &str = "https://api.github.com/repos/DaSonOfPoseidon/OBDCracker/compare/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa...bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb?per_page=1";
     const SCRIPT_URL: &str = "https://raw.githubusercontent.com/DaSonOfPoseidon/OBDCracker/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb/scripts/install.sh";
     const SCRIPT: &[u8] = b"#!/bin/sh\necho installing\n";
@@ -975,7 +988,6 @@ mod flow_tests {
         let planned = plan(&http, &me(v(0, 1, 0), Some(SHA_A)), &Want::Latest, false).unwrap();
         let target = Target {
             version: Some(v(0, 2, 0)),
-            git_ref: "v0.2.0".to_owned(),
         };
         assert_eq!(
             planned,
@@ -1256,6 +1268,34 @@ mod flow_tests {
             out.starts_with("replacing 0.3.0 (commit aaaaaaa) with v0.2.0 (commit bbbbbbb)"),
             "{out}"
         );
+    }
+
+    #[test]
+    fn on_windows_an_update_removes_the_old_program_a_dry_run_leaves_it() {
+        let session = Session::new(newer_than_installed(), 0);
+        let exe = session.temp.join("obdcracker.exe");
+        let old = session.temp.join(install::OLD_NAME);
+        let installed = me(v(0, 1, 0), Some(SHA_A));
+        for (dry_run, left) in [(true, true), (false, false)] {
+            std::fs::write(&old, b"stale").unwrap();
+            let setup = Setup {
+                http: &session.http,
+                runner: &session.runner,
+                exe: &exe,
+                temp_dir: &session.temp,
+                windows: true,
+            };
+            let options = options(Want::Latest, false, dry_run);
+            // Not installed: the program isn't there to move aside, so a real run stops there
+            let _ = run(
+                &options,
+                &installed,
+                &setup,
+                &mut Vec::new(),
+                &mut Vec::new(),
+            );
+            assert_eq!(old.exists(), left, "dry run: {dry_run}");
+        }
     }
 
     #[test]
