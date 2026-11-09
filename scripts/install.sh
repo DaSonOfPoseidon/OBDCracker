@@ -64,11 +64,21 @@ is_sha() {
 }
 
 # Sets COMMIT to the commit REF names right now. The download is then of that commit, so the build
-# is what was resolved even if the branch moves in between.
+# is what was resolved even if the branch moves in between. Called with `early` (before anything is
+# installed), it leaves COMMIT empty for a failure that isn't GitHub refusing the ref: there may be no
+# CA certificates yet, which ensure_linker_linux installs.
 resolve_ref() {
 	say "Looking up $REF on GitHub"
-	COMMIT=$(fetch_sha "https://api.github.com/repos/$REPO/commits/$REF") ||
+	status=0
+	COMMIT=$(fetch_sha "https://api.github.com/repos/$REPO/commits/$REF") || status=$?
+	if [ "$status" -ne 0 ]; then
+		# curl -f exits 22 and wget 8 when the server answered with an error
+		if [ "${1:-}" = early ] && [ "$status" -ne 22 ] && [ "$status" -ne 8 ]; then
+			COMMIT=
+			return 0
+		fi
 		die "couldn't look up $REF: check the name, and that it's pushed to GitHub (GitHub's API also limits how often one address can ask)"
+	fi
 	is_sha "$COMMIT" || die "GitHub's answer for $REF isn't a commit hash"
 }
 
@@ -91,9 +101,9 @@ source_commit() {
 		note "the checkout isn't a clean git checkout, so the build's commit will be unknown"
 		return 0
 	fi
-	head=$(source_git rev-parse HEAD 2>/dev/null) || return 0
-	if is_sha "$head"; then
-		COMMIT=$head
+	sha=$(source_git rev-parse HEAD 2>/dev/null) || return 0
+	if is_sha "$sha"; then
+		COMMIT=$sha
 	fi
 }
 
@@ -184,7 +194,7 @@ install_rustup() {
 
 # Downloads REF's commit into DIR/src, replacing the copy from the last run only once the new one is complete.
 download_source() {
-	resolve_ref
+	[ -n "$COMMIT" ] || resolve_ref
 	say "Downloading $REPO at $REF (commit $COMMIT)"
 	archive="$TMP/source.tar.gz"
 	fetch "https://codeload.github.com/$REPO/tar.gz/$COMMIT" >"$archive" ||
@@ -336,6 +346,8 @@ main() {
 	if [ -n "$SRC" ]; then
 		[ -f "$SRC/Cargo.toml" ] || die "--source $SRC has no Cargo.toml"
 		SRC=$(cd "$SRC" && pwd)
+	elif command -v curl >/dev/null 2>&1 || command -v wget >/dev/null 2>&1; then
+		resolve_ref early
 	fi
 	prepare_dir
 

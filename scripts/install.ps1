@@ -148,6 +148,8 @@ function Install-ObdCracker {
         (Get-ChildItem -Force -LiteralPath $Dir | Select-Object -First 1)) {
         throw "$Dir already exists and wasn't made by this script; pick another -Dir (or -Source to build a checkout)"
     }
+    # Looked up before anything is installed, so a ref GitHub doesn't know stops the script at once
+    $commit = if ($Source) { '' } else { Resolve-Ref $Ref }
     New-Item -ItemType Directory -Force -Path $Dir | Out-Null
     # Absolute, because the build runs from inside the source tree
     $Dir = (Resolve-Path -LiteralPath $Dir).Path
@@ -193,13 +195,11 @@ function Install-ObdCracker {
         if (-not (($env:Path -split ';') -contains $cargoBin)) { $env:Path = "$cargoBin;$env:Path" }
 
         # 3. The source
-        $commit = ''
         if ($Source) {
             $src = $Source
             Note "building the checkout in $src"
             $commit = Get-SourceCommit $src
         } else {
-            $commit = Resolve-Ref $Ref
             Say "Downloading $repo at $Ref (commit $commit)"
             $zip = Join-Path $tmp 'source.zip'
             try {
