@@ -64,10 +64,13 @@ On macOS use the `/dev/cu.*` port. Leaving a wireless adapter plugged in drains 
 connect, so the CLI warns about it, and the audit log records which link a session used. See
 [adapters](adapters.md) for what's supported.
 
-Two options work with `vin`, `fingerprint`, `scan`, `sweep` and `dtc` (not `ports`, `adapter` or `update`):
+Two options, each with its own list of commands:
 
-- `--dry-run` prints the frames the command would send and opens no adapter.
-- `--sim a7` runs it against a simulated A7.
+- `--dry-run` works with `vin`, `fingerprint`, `scan`, `sweep`, `dtc` and `update`. The car commands print the frames
+  they would send and open no adapter; `update` makes the same lookups and prints the command it would run, and installs
+  nothing. `adapter` refuses it, and `ports` ignores it.
+- `--sim a7` works with `vin`, `fingerprint`, `scan`, `sweep` and `dtc`, and runs the command against a simulated A7.
+  `adapter` and `update` refuse it with status 2, and `ports` ignores it.
 
 ## `vin`
 
