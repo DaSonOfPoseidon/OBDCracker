@@ -25,6 +25,35 @@ fn obdcracker_with_ports(ports: &str, args: &[&str]) -> Output {
         .unwrap()
 }
 
+#[test]
+fn version_names_the_build_commit() {
+    let out = obdcracker(&["--version"]);
+    assert!(out.status.success());
+    let text = String::from_utf8(out.stdout).unwrap();
+    let line = text.strip_suffix('\n').unwrap();
+    let rest = line.strip_prefix("obdcracker ").unwrap();
+    let (version, commit) = rest.split_once(" (commit ").unwrap();
+    let commit = commit.strip_suffix(')').unwrap();
+    assert_eq!(version, env!("CARGO_PKG_VERSION"));
+    let numbers: Vec<&str> = version.split('.').collect();
+    assert!(numbers.len() == 3 && numbers.iter().all(|n| n.parse::<u32>().is_ok()));
+    assert!(
+        commit == "unknown"
+            || (commit.len() == 40
+                && commit
+                    .bytes()
+                    .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))),
+        "{commit}"
+    );
+    // What the environment holds when it runs is not what the binary was built with
+    let out = Command::new(env!("CARGO_BIN_EXE_obdcracker"))
+        .env("OBDCRACKER_COMMIT", "f".repeat(40))
+        .arg("--version")
+        .output()
+        .unwrap();
+    assert_eq!(String::from_utf8(out.stdout).unwrap(), text);
+}
+
 // Port names the host OS's adapter rule keeps.
 fn usb_ports(names: &[&str]) -> Vec<String> {
     names

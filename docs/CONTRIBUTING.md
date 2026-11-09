@@ -180,6 +180,10 @@ with `gh workflow run codex-review.yml -f pr=<pr>`, then see the result with `gh
 - **Never commit** car dumps, tune files, maps or unreviewed audit logs (`.gitignore` covers the usual names), or
   secrets of any kind.
 
+## Releases
+
+A release is a `vX.Y.Z` tag on `main`; [Releasing](releasing.md) has the steps and what the release workflow checks.
+
 ## Checks
 
 ```sh

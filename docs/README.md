@@ -24,5 +24,6 @@
 
 - [Contributing](CONTRIBUTING.md): how changes land, issues, reviews and commits
 - [Development](development.md): crate layout and checks
+- [Releasing](releasing.md): version bump, tag and the release workflow
 - [Pitfalls](pitfalls.md): classes of bug reviews have caught; read before making a change
 - [Third-party test data](third-party.md): outside sources used in tests, and their licenses

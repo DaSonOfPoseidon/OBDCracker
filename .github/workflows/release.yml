@@ -1,0 +1,44 @@
+name: Release
+
+# Pushing a tag `vX.Y.Z` publishes a GitHub release for it. docs/releasing.md has the steps.
+on:
+  push:
+    tags: ["v*"]
+
+# The release is the only thing this workflow writes.
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      TAG: ${{ github.ref_name }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      # Every branch's history, to tell whether the tagged commit is on main.
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      # A tag anyone can push must still name this workspace's version and a commit that landed on main.
+      - name: tag matches the version and is on main
+        run: |
+          set -euo pipefail
+          # The `version` in [workspace.package]
+          version=$(sed -n '/^\[workspace\.package\]/,/^\[/{s/^version *= *"\([^"]*\)".*/\1/p;}' Cargo.toml)
+          if ! [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Cargo.toml's workspace version '$version' isn't X.Y.Z"
+            exit 1
+          fi
+          if [ "$TAG" != "v$version" ]; then
+            echo "::error::tag '$TAG' isn't v$version, the workspace version in Cargo.toml at that commit"
+            exit 1
+          fi
+          if ! git merge-base --is-ancestor HEAD origin/main; then
+            echo "::error::tag '$TAG' is on $(git rev-parse HEAD), which isn't on main: merge it first, then tag main"
+            exit 1
+          fi
+      - name: publish the release
+        run: gh release create "$TAG" --verify-tag --generate-notes

@@ -5,7 +5,7 @@ use std::process::ExitCode;
 use std::time::Duration;
 
 use clap::builder::PossibleValuesParser;
-use clap::{ArgGroup, Parser, Subcommand};
+use clap::{ArgGroup, CommandFactory, FromArgMatches, Parser, Subcommand};
 use obdcracker_core::obd;
 use obdcracker_core::response::{self, Error as ReplyError, Nrc};
 use obdcracker_core::uds::{DiagnosticSession, UdsDtc};
@@ -33,7 +33,8 @@ const TCP_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Debug, Parser)]
 #[command(
-    version,
+    // The binary's name, not the package's (obdcracker-cli), which `--version` would print
+    name = "obdcracker",
     about = "Talk to a car's diagnostic bus through an OBD2 adapter",
     // The adapters that put CAN frames on the bus themselves, which --listen-only and --bitrate
     // are for.
@@ -192,8 +193,32 @@ enum Command {
     Adapter,
 }
 
+// What this binary was built from: the version, and the commit the installer was told (`unknown`
+// when it wasn't: see build.rs).
+#[derive(Debug, Clone, Copy)]
+struct Build {
+    version: &'static str,
+    commit: &'static str,
+}
+
+const BUILD: Build = Build {
+    version: env!("CARGO_PKG_VERSION"),
+    commit: env!("OBDCRACKER_BUILD_COMMIT"),
+};
+
+impl std::fmt::Display for Build {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{} (commit {})", self.version, self.commit)
+    }
+}
+
+fn command() -> clap::Command {
+    // clap keeps the version as a `&'static str`, and this runs once per process.
+    Cli::command().version(&*Box::leak(BUILD.to_string().into_boxed_str()))
+}
+
 fn main() -> ExitCode {
-    let cli = Cli::parse();
+    let cli = Cli::from_arg_matches(&command().get_matches()).unwrap_or_else(|e| e.exit());
     if let Command::Ports = cli.command {
         return ports();
     }
@@ -2022,6 +2047,7 @@ mod tests {
     use std::process::ExitCode;
     use std::time::Duration;
 
+    use crate::{BUILD, Build, command};
     use clap::Parser;
     use obdcracker_core::tp20::Channel;
     use obdcracker_safety::{Approved, Target};
@@ -2337,6 +2363,20 @@ mod tests {
 
     fn parse(words: &[&str]) -> Result<Cli, clap::Error> {
         Cli::try_parse_from(words)
+    }
+
+    #[test]
+    fn version_shows_the_build_commit() {
+        let build = Build {
+            version: "1.2.3",
+            commit: "unknown",
+        };
+        assert_eq!(build.to_string(), "1.2.3 (commit unknown)");
+        let err = command()
+            .try_get_matches_from(["obdcracker", "--version"])
+            .unwrap_err();
+        assert_eq!(err.kind(), clap::error::ErrorKind::DisplayVersion);
+        assert_eq!(err.to_string(), format!("obdcracker {BUILD}\n"));
     }
 
     #[test]

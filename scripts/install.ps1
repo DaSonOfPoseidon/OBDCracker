@@ -13,7 +13,7 @@
 # Write-Host is the point here: progress for a person, kept out of the pipeline
 [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSAvoidUsingWriteHost', '')]
 param(
-    # Branch, tag or commit to build
+    # Branch, tag or commit to build, looked up on GitHub first so the build is of that exact commit
     [string]$Ref = 'main',
     # Where the source and build cache live
     [string]$Dir = (Join-Path $env:LOCALAPPDATA 'obdcracker'),
@@ -63,6 +63,60 @@ function Install-ObdCracker {
     $cargoBin = Join-Path $cargoHome 'bin'
     $pathHadCargo = ($env:Path -split ';') -contains $cargoBin
 
+    # A full commit hash is exactly 40 lowercase hex characters, which is all `obdcracker --version` shows.
+    # -cmatch because -match ignores case, and \z because $ also matches before a final newline.
+    function Test-CommitHash([string]$Text) { $Text -cmatch '^[0-9a-f]{40}\z' }
+
+    # The commit REF names right now, from GitHub's API. The download is then of that commit, so the
+    # build is what was resolved even if the branch moves in between.
+    function Resolve-Ref([string]$Ref) {
+        Say "Looking up $Ref on GitHub"
+        try {
+            $response = Invoke-WebRequest -UseBasicParsing -Headers @{ Accept = 'application/vnd.github.sha' } `
+                -Uri "https://api.github.com/repos/$repo/commits/$Ref"
+        } catch {
+            throw "couldn't look up ${Ref}: check the name, and that it's pushed to GitHub (GitHub's API also limits how often one address can ask) ($($_.Exception.Message))"
+        }
+        $body = $response.Content
+        # Windows PowerShell 5.1 hands back bytes for a content type it doesn't know
+        if ($body -is [byte[]]) { $body = [Text.Encoding]::ASCII.GetString($body) }
+        $commit = ([string]$body).Trim()
+        if (-not (Test-CommitHash $commit)) { throw "GitHub's answer for $Ref isn't a commit hash" }
+        return $commit
+    }
+
+    # The checkout's HEAD, only when the build is exactly that commit: the checkout's top directory,
+    # with no uncommitted or untracked files. Otherwise empty (unknown).
+    function Get-SourceCommit([string]$Path) {
+        if (-not (Get-Command git -ErrorAction SilentlyContinue)) {
+            Note "git isn't installed, so the build's commit will be unknown"
+            return ''
+        }
+        # Native errors must not stop the script here: an unknown commit isn't a failure. Variables
+        # that would point git at another repository are set aside for the call.
+        $ErrorActionPreference = 'Continue'
+        $saved = @{}
+        foreach ($name in 'GIT_DIR', 'GIT_WORK_TREE', 'GIT_INDEX_FILE') {
+            $saved[$name] = [Environment]::GetEnvironmentVariable($name, 'Process')
+            [Environment]::SetEnvironmentVariable($name, $null, 'Process')
+        }
+        try {
+            $prefix = & git -C $Path rev-parse --show-prefix 2>$null
+            $prefixStatus = $LASTEXITCODE
+            $changes = & git -C $Path status --porcelain --untracked-files=normal 2>$null
+            $changesStatus = $LASTEXITCODE
+            if ($prefixStatus -ne 0 -or $prefix -or $changesStatus -ne 0 -or $changes) {
+                Note "the checkout isn't a clean git checkout, so the build's commit will be unknown"
+                return ''
+            }
+            $head = & git -C $Path rev-parse HEAD 2>$null
+            if ($LASTEXITCODE -eq 0 -and (Test-CommitHash ([string]$head))) { return [string]$head }
+            return ''
+        } finally {
+            foreach ($name in $saved.Keys) { [Environment]::SetEnvironmentVariable($name, $saved[$name], 'Process') }
+        }
+    }
+
     # Whether MSVC can link a Rust program: the compiler component, plus a Windows SDK with the
     # system and C runtime libraries for this architecture, which Visual Studio installs separately
     function Test-MsvcToolchain {
@@ -94,6 +148,8 @@ function Install-ObdCracker {
         (Get-ChildItem -Force -LiteralPath $Dir | Select-Object -First 1)) {
         throw "$Dir already exists and wasn't made by this script; pick another -Dir (or -Source to build a checkout)"
     }
+    # Looked up before anything is installed, so a ref GitHub doesn't know stops the script at once
+    $commit = if ($Source) { '' } else { Resolve-Ref $Ref }
     New-Item -ItemType Directory -Force -Path $Dir | Out-Null
     # Absolute, because the build runs from inside the source tree
     $Dir = (Resolve-Path -LiteralPath $Dir).Path
@@ -142,13 +198,14 @@ function Install-ObdCracker {
         if ($Source) {
             $src = $Source
             Note "building the checkout in $src"
+            $commit = Get-SourceCommit $src
         } else {
-            Say "Downloading $repo at $Ref"
+            Say "Downloading $repo at $Ref (commit $commit)"
             $zip = Join-Path $tmp 'source.zip'
             try {
-                Invoke-WebRequest -UseBasicParsing -Uri "https://codeload.github.com/$repo/zip/$Ref" -OutFile $zip
+                Invoke-WebRequest -UseBasicParsing -Uri "https://codeload.github.com/$repo/zip/$commit" -OutFile $zip
             } catch {
-                throw "couldn't download ${Ref}: check the name, and that it's pushed to GitHub ($($_.Exception.Message))"
+                throw "couldn't download commit $commit of ${Ref}: check the network ($($_.Exception.Message))"
             }
             $unpacked = Join-Path $tmp 'source'
             Expand-Archive -LiteralPath $zip -DestinationPath $unpacked
@@ -168,7 +225,7 @@ function Install-ObdCracker {
         Push-Location -LiteralPath $src
         # Environment the build changes, put back afterwards so an iex caller's session keeps its own
         $savedEnv = @{}
-        foreach ($name in 'RUSTUP_TOOLCHAIN', 'RUSTC', 'CARGO_BUILD_TARGET', 'CARGO_HOME', 'RUSTUP_HOME') {
+        foreach ($name in 'RUSTUP_TOOLCHAIN', 'RUSTC', 'CARGO_BUILD_TARGET', 'CARGO_HOME', 'RUSTUP_HOME', 'OBDCRACKER_COMMIT') {
             $savedEnv[$name] = [Environment]::GetEnvironmentVariable($name, 'Process')
         }
         try {
@@ -184,6 +241,8 @@ function Install-ObdCracker {
             # from the caller's environment would still swap the compiler or the target, so drop them.
             $env:RUSTC = $null
             $env:CARGO_BUILD_TARGET = $null
+            # build.rs records this for `--version`; nothing else the caller exported may stand in for it
+            $env:OBDCRACKER_COMMIT = if ($commit) { $commit } else { $null }
             # The build cache lives outside the source, so a re-run only rebuilds what changed.
             # --root pins where the binary goes, whatever CARGO_INSTALL_ROOT or Cargo's install.root say.
             Invoke-Checked rustup @('run', $toolchain, 'cargo', 'install', '--path', 'crates/obdcracker-cli',
@@ -208,7 +267,8 @@ function Install-ObdCracker {
             Note "If it still isn't listed, install the FTDI VCP driver (ftdichip.com/drivers/vcp-drivers)."
         }
 
-        Say 'Done. Next, with the adapter plugged into the car and the ignition on:'
+        $installed = if ($commit) { $commit } else { 'unknown' }
+        Say "Done. Installed commit $installed. Next, with the adapter plugged into the car and the ignition on:"
         Note 'obdcracker ports                      # find the adapter''s port, e.g. COM3'
         Note 'obdcracker adapter                    # check the adapter; sends nothing to the car'
         Note 'obdcracker vin'
