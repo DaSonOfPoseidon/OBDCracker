@@ -388,6 +388,85 @@ fn the_plan_is_decided_from_the_report_alone() {
     assert!(plan("can0", &other, &wanted).is_err());
 }
 
+// The refusal for an interface at another bitrate than the one asked for, decided by the session's
+// mode and what the controller reports about its own listen-only mode.
+fn refused_at_wrong_bitrate(mode: Mode, controller_listen_only: Option<bool>) -> String {
+    let mut report = FakeDevice::can0(250_000).state().iface.clone();
+    report.modes = controller_listen_only.map(|listen_only| modes(|m| m.listen_only = listen_only));
+    plan("can0", &report, &options("can0", Some(500_000), mode)).unwrap_err()
+}
+
+#[test]
+fn a_wrong_bitrate_is_refused_saying_what_it_does_in_an_active_session() {
+    let message = refused_at_wrong_bitrate(Mode::Active, Some(false));
+    assert!(
+        message.contains("Sending at the wrong bitrate disturbs the car's bus"),
+        "{message}"
+    );
+    assert!(
+        message.contains("250000") && message.contains("500000"),
+        "{message}"
+    );
+    assert!(message.contains("ask for 250000"), "{message}");
+    assert!(message.contains("never changes"), "{message}");
+    assert!(!message.contains("missed or misread"), "{message}");
+}
+
+#[test]
+fn a_wrong_bitrate_in_a_listen_only_session_only_misses_frames_when_the_controller_is_listen_only()
+{
+    let message = refused_at_wrong_bitrate(Mode::ListenOnly, Some(true));
+    assert!(
+        message.contains("frames would be missed or misread"),
+        "{message}"
+    );
+    assert!(message.contains("ask for 250000"), "{message}");
+    assert!(message.contains("never changes"), "{message}");
+    assert!(!message.contains("Sending"), "{message}");
+    assert!(!message.contains("error frames"), "{message}");
+    assert!(!message.contains("disturb"), "{message}");
+}
+
+#[test]
+fn a_wrong_bitrate_in_a_listen_only_session_says_the_controller_can_disturb_the_bus() {
+    let message = refused_at_wrong_bitrate(Mode::ListenOnly, Some(false));
+    assert!(
+        message.contains("frames would be missed or misread"),
+        "{message}"
+    );
+    assert!(
+        message.contains("the controller can send error frames and disturb the bus"),
+        "{message}"
+    );
+    assert!(
+        message.contains("since it isn't in listen-only mode"),
+        "{message}"
+    );
+    assert!(!message.contains("(or doesn't say)"), "{message}");
+    assert!(!message.contains("Sending"), "{message}");
+    assert!(message.contains("ask for 250000"), "{message}");
+    assert!(message.contains("never changes"), "{message}");
+}
+
+#[test]
+fn a_wrong_bitrate_with_an_unreported_controller_mode_does_not_state_it_as_fact() {
+    let message = refused_at_wrong_bitrate(Mode::ListenOnly, None);
+    assert!(
+        message.contains("frames would be missed or misread"),
+        "{message}"
+    );
+    assert!(
+        message.contains("the controller can send error frames and disturb the bus"),
+        "{message}"
+    );
+    assert!(
+        message.contains("since it isn't in listen-only mode (or doesn't say)"),
+        "{message}"
+    );
+    assert!(!message.contains("Sending"), "{message}");
+    assert!(message.contains("ask for 250000"), "{message}");
+}
+
 // --- A session carrying requests ---
 
 // Reads the frame's CAN ID and first data byte.
