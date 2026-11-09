@@ -47,7 +47,12 @@ jobs:
       - if: env.SKIP_LEG != 'true'
         run: docker run --rm -v "$PWD:/repo" -w /repo rhysd/actionlint:1.7.7
       - if: env.SKIP_LEG != 'true'
-        run: shellcheck scripts/install.sh
+        run: shellcheck scripts/install.sh scripts/tests/install-ref.sh
+      # How the install scripts turn --ref into a commit, against a fake GitHub API
+      - if: env.SKIP_LEG != 'true'
+        run: scripts/tests/install-ref.sh
+      - if: env.SKIP_LEG != 'true'
+        run: pwsh -NoProfile -File scripts/tests/install-ref.ps1
 
   # Branch protection requires the contexts "check", "build (macos-latest)" etc., and a skipped job or
   # matrix leg never reports one, so a PR that cannot change the build would wait forever. When no
@@ -77,7 +82,7 @@ jobs:
           # -z: NUL-separated and unquoted, so a name with non-ASCII or special characters isn't C-quoted.
           git diff -z --name-only --no-renames "$BASE_SHA" HEAD > "$RUNNER_TEMP/changed"
           tr '\0' '\n' < "$RUNNER_TEMP/changed"
-          if grep -zEq '(\.rs$|(^|/)Cargo\.(toml|lock)$|^rust-toolchain\.toml$|^deny\.toml$|^\.?(clippy|rustfmt)\.toml$|^scripts/install\.(sh|ps1)$|^\.github/workflows/|^crates/|^\.cargo/|^README\.md$|^docs/library\.md$)' "$RUNNER_TEMP/changed"; then
+          if grep -zEq '(\.rs$|(^|/)Cargo\.(toml|lock)$|^rust-toolchain\.toml$|^deny\.toml$|^\.?(clippy|rustfmt)\.toml$|^scripts/(install\.(sh|ps1)|tests/)|^\.github/workflows/|^crates/|^\.cargo/|^README\.md$|^docs/library\.md$)' "$RUNNER_TEMP/changed"; then
             echo "code=true" >> "$GITHUB_OUTPUT"
           else
             echo "code=false" >> "$GITHUB_OUTPUT"

@@ -15,7 +15,8 @@
 # Write-Host is the point here: progress for a person, kept out of the pipeline
 [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSAvoidUsingWriteHost', '')]
 param(
-    # Branch, tag or commit to build, looked up on GitHub first so the build is of that exact commit
+    # Branch, tag or commit to build, looked up on GitHub first so the build is of that exact commit. A name
+    # that is both a tag and a branch is refused: say refs/tags/NAME, refs/heads/NAME or the commit hash
     [string]$Ref = 'main',
     # Where the source and build cache live
     [string]$Dir = (Join-Path $env:LOCALAPPDATA 'obdcracker'),
@@ -69,15 +70,21 @@ function Install-ObdCracker {
     # -cmatch because -match ignores case, and \z because $ also matches before a final newline.
     function Test-CommitHash([string]$Text) { $Text -cmatch '^[0-9a-f]{40}\z' }
 
-    # The commit REF names right now, from GitHub's API. The download is then of that commit, so the
-    # build is what was resolved even if the branch moves in between.
-    function Resolve-Ref([string]$Ref) {
-        Say "Looking up $Ref on GitHub"
+    # The commit GitHub's API names for $Name, or $null when GitHub says it has no such ref (HTTP 404
+    # or 422). Anything else throws: only "no such ref" may lead on to another name, so a rate limit or
+    # an outage can never end in a different ref being built.
+    function Find-Commit([string]$Ref, [string]$Name) {
         try {
             $response = Invoke-WebRequest -UseBasicParsing -Headers @{ Accept = 'application/vnd.github.sha' } `
-                -Uri "https://api.github.com/repos/$repo/commits/$Ref"
+                -Uri "https://api.github.com/repos/$repo/commits/$Name"
         } catch {
-            throw "couldn't look up ${Ref}: check the name, and that it's pushed to GitHub (GitHub's API also limits how often one address can ask) ($($_.Exception.Message))"
+            # Windows PowerShell 5.1 and PowerShell 7 both put the HTTP answer on the exception's Response
+            $status = if ($_.Exception.Response) { [int]$_.Exception.Response.StatusCode } else { 0 }
+            if ($status -eq 404 -or $status -eq 422) { return $null }
+            if ($status) {
+                throw "couldn't look up ${Ref}: GitHub answered HTTP $status (its API limits how often one address can ask)"
+            }
+            throw "couldn't look up ${Ref}: no answer from GitHub, check the network ($($_.Exception.Message))"
         }
         $body = $response.Content
         # Windows PowerShell 5.1 hands back bytes for a content type it doesn't know
@@ -85,6 +92,32 @@ function Install-ObdCracker {
         $commit = ([string]$body).Trim()
         if (-not (Test-CommitHash $commit)) { throw "GitHub's answer for $Ref isn't a commit hash" }
         return $commit
+    }
+
+    # The commit REF names right now. The download is then of that commit, so the build is what was
+    # resolved even if the branch moves in between. A full commit hash is used as given. refs/tags/x and
+    # refs/heads/x are looked up as written. A bare name is looked up as a tag and as a branch: one match
+    # is used, and both is an error rather than a quiet pick. A name that is neither may still be a
+    # short hash, so it is looked up as given last.
+    function Resolve-Ref([string]$Ref) {
+        if (Test-CommitHash $Ref) { return $Ref }
+        Say "Looking up $Ref on GitHub"
+        $notFound = "couldn't find $Ref on GitHub: check the name, and that it's pushed"
+        if ($Ref -clike 'refs/tags/*' -or $Ref -clike 'refs/heads/*') {
+            $found = Find-Commit $Ref $Ref
+            if (-not $found) { throw $notFound }
+            return $found
+        }
+        $tag = Find-Commit $Ref "refs/tags/$Ref"
+        $branch = Find-Commit $Ref "refs/heads/$Ref"
+        if ($tag -and $branch) {
+            throw "'$Ref' is both a tag and a branch: pass refs/tags/$Ref, refs/heads/$Ref or a commit hash to say which"
+        }
+        if ($tag) { return $tag }
+        if ($branch) { return $branch }
+        $found = Find-Commit $Ref $Ref
+        if (-not $found) { throw $notFound }
+        return $found
     }
 
     # The checkout's HEAD, only when the build is exactly that commit: the checkout's top directory,
