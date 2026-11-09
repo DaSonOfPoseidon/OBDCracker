@@ -2354,8 +2354,7 @@ mod tests {
         assert_eq!(cli.socketcan.as_deref(), Some("can0"));
         assert_eq!(parse(&["obdcracker", "vin"]).unwrap().socketcan, None);
         for words in [
-            &["obdcracker", "--socketcan", "vin"][..],
-            &["obdcracker", "--socketcan", "can0", "--gsusb", "vin"],
+            &["obdcracker", "--socketcan", "can0", "--gsusb", "vin"][..],
             &["obdcracker", "--socketcan", "can0", "--gsusb=ABC", "vin"],
             &["obdcracker", "--socketcan", "can0", "--tcp", "x:1", "vin"],
             &[
@@ -2419,6 +2418,16 @@ mod tests {
         .unwrap();
         assert!(cli.listen_only);
         assert_eq!(cli.bitrate, Some(250_000));
+    }
+
+    #[test]
+    fn socketcan_with_no_interface_fails_on_the_missing_value() {
+        let err = parse(&["obdcracker", "--socketcan"]).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("a value is required for '--socketcan <IFACE>'"),
+            "{err}"
+        );
     }
 
     #[test]

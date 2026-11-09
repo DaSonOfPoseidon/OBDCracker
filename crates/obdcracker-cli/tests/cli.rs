@@ -213,8 +213,7 @@ fn adapter_is_for_elm_adapters_only() {
 #[test]
 fn socketcan_options_need_an_interface_and_exclude_the_other_adapters() {
     for args in [
-        &["--socketcan", "vin"][..],
-        &["--socketcan", "can0", "--tcp", "127.0.0.1:1", "vin"],
+        &["--socketcan", "can0", "--tcp", "127.0.0.1:1", "vin"][..],
         &["--socketcan", "can0", "--gsusb", "vin"],
         &["--socketcan", "can0", "--sim", "a7", "vin"],
         &["--socketcan", "can0", "--dry-run", "vin"],
@@ -225,6 +224,19 @@ fn socketcan_options_need_an_interface_and_exclude_the_other_adapters() {
         assert!(!out.status.success(), "{args:?}");
         assert_eq!(out.status.code(), Some(2), "{args:?}");
     }
+}
+
+// With nothing after it, --socketcan has no interface. clap must name the missing value, not just
+// exit 2: `--socketcan vin` takes `vin` as the interface and fails on the subcommand instead.
+#[test]
+fn socketcan_with_no_interface_names_the_missing_value() {
+    let out = obdcracker(&["--socketcan"]);
+    assert_eq!(out.status.code(), Some(2));
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("a value is required for '--socketcan <IFACE>'"),
+        "{stderr}"
+    );
 }
 
 // Elsewhere than Linux the option is refused before the bitrate is looked at.
