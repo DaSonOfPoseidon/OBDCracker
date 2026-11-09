@@ -352,14 +352,24 @@ fn open_socketcan(_cli: &Cli, _interface: &str) -> ExitCode {
     ExitCode::from(2)
 }
 
-// The warning for an interface that reports no bitrate. Listen-only sends nothing, so a wrong rate
-// there can't disturb the bus; it only means frames are missed or misread.
+// The warning for an interface that reports no bitrate. A wrong rate disturbs the bus only where
+// the controller transmits: an active session sends frames, and a controller that isn't in
+// listen-only mode sends error frames at the wrong rate. Only a listen-only controller just misses
+// or misreads frames.
 #[cfg(target_os = "linux")]
-fn socketcan_unconfirmed_warning(name: &str, bitrate: u32, listen_only: bool) -> String {
-    let effect = if listen_only {
-        "frames will be missed or misread"
-    } else {
-        "sending disturbs it"
+fn socketcan_unconfirmed_warning(
+    name: &str,
+    bitrate: u32,
+    listen_only: bool,
+    controller_passive: bool,
+) -> String {
+    let effect = match (listen_only, controller_passive) {
+        (false, _) => "sending disturbs it",
+        (true, true) => "frames will be missed or misread",
+        (true, false) => {
+            "the controller can send error frames and disturb the bus, since it isn't in \
+             listen-only mode"
+        }
     };
     format!(
         "warning: {name} reports no bitrate, so {bitrate} bit/s is unconfirmed. If the car's bus \
@@ -415,19 +425,25 @@ fn open_socketcan(cli: &Cli, interface: &str) -> ExitCode {
         |b| format!("{b} bit/s"),
     );
     let listen_only = adapter.mode() == socketcan::Mode::ListenOnly;
+    let controller_passive = adapter.controller_listen_only() == Some(true);
     match adapter.bitrate_check() {
         socketcan::BitrateCheck::Matched => {
             eprintln!("using {name} ({rate}, as asked for)");
         }
         socketcan::BitrateCheck::Unconfirmed => eprintln!(
             "{}",
-            socketcan_unconfirmed_warning(name, bitrate.unwrap_or(0), listen_only)
+            socketcan_unconfirmed_warning(
+                name,
+                bitrate.unwrap_or(0),
+                listen_only,
+                controller_passive
+            )
         ),
         _ => eprintln!("using {name} ({rate})"),
     }
     if listen_only {
         eprintln!("listen-only: nothing will be sent, so every request fails");
-        if adapter.controller_listen_only() != Some(true) {
+        if !controller_passive {
             eprintln!(
                 "warning: {name}'s controller isn't in listen-only mode (or doesn't say), so it \
                  still acknowledges the frames it hears. Take it down and set `listen-only on` \
@@ -2450,18 +2466,25 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn an_unconfirmed_socketcan_bitrate_says_what_a_wrong_one_does_in_each_mode() {
-        let active = socketcan_unconfirmed_warning("vcan0", 500_000, false);
+        let active = socketcan_unconfirmed_warning("vcan0", 500_000, false, false);
         assert!(active.contains("vcan0 reports no bitrate"), "{active}");
         assert!(active.contains("500000 bit/s is unconfirmed"), "{active}");
         assert!(active.contains("sending disturbs it"), "{active}");
 
-        // Listen-only sends nothing, so a wrong rate can't disturb the bus, only hide frames.
-        let listen = socketcan_unconfirmed_warning("vcan0", 500_000, true);
-        assert!(listen.contains("vcan0 reports no bitrate"), "{listen}");
-        assert!(listen.contains("500000 bit/s is unconfirmed"), "{listen}");
-        assert!(listen.contains("missed or misread"), "{listen}");
-        assert!(!listen.contains("sending"), "{listen}");
-        assert!(!listen.contains("disturb"), "{listen}");
+        // Listen-only with a controller that is listen-only too sends nothing: frames are only missed.
+        let passive = socketcan_unconfirmed_warning("vcan0", 500_000, true, true);
+        assert!(passive.contains("500000 bit/s is unconfirmed"), "{passive}");
+        assert!(passive.contains("missed or misread"), "{passive}");
+        assert!(!passive.contains("sending"), "{passive}");
+        assert!(!passive.contains("disturb"), "{passive}");
+        assert!(!passive.contains("error frames"), "{passive}");
+
+        // Listen-only only at the application level: the controller can still send error frames.
+        let shared = socketcan_unconfirmed_warning("vcan0", 500_000, true, false);
+        assert!(shared.contains("500000 bit/s is unconfirmed"), "{shared}");
+        assert!(shared.contains("error frames"), "{shared}");
+        assert!(shared.contains("disturb the bus"), "{shared}");
+        assert!(!shared.contains("missed or misread"), "{shared}");
     }
 
     #[test]
