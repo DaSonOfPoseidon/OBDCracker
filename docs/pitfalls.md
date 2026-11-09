@@ -37,6 +37,9 @@ Each entry names the class, what to check, and where it bit us.
   mode 01 PID widths, text DIDs. Round-trip through `obdcracker-core` rather than re-implementing the rule.
 - **Respect the wire format's limits.** A count stored in a `u8` (mode 03, mode 09) or a `u16` (UDS DTC count) caps
   the list. Reject the input; don't saturate with `unwrap_or(MAX)`, which makes two replies contradict each other.
+- **A page limit fails only when a page past it has entries.** A list that fills its last allowed page may end exactly
+  there. Erroring as soon as that page is full calls a list of exactly the limit too long. Read one page past the limit
+  and fail only if it isn't empty, and test both the exact limit and one past it (`update`'s release list, #291).
 - **Standard data has a format whether or not a profile lists it.** F190 must be a VIN, and
   F187/F188/F189/F191/F197/F19E must be text (ISO 14229-1). Skipping validation because there's no `DidDef` let
   `hex = "FF"` pass as a VIN, and letting a `DidDef` replace the check let `F190 text = "abc"` through. A profile

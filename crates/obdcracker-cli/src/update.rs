@@ -332,7 +332,8 @@ fn releases_url(page: usize) -> String {
 }
 
 // Every published release, a page of GitHub's list at a time. The highest version can be on any
-// page, and so can a version asked for by name.
+// page, and so can a version asked for by name. A full page may have more after it, so the page
+// past the last one read must be empty for the list to be whole.
 fn fetch_releases(http: &dyn Http) -> Result<Vec<Version>, String> {
     let mut versions = Vec::new();
     for page in 1..=RELEASE_PAGES {
@@ -342,6 +343,15 @@ fn fetch_releases(http: &dyn Http) -> Result<Vec<Version>, String> {
         if entries < RELEASES_PER_PAGE {
             return Ok(versions);
         }
+    }
+    let reply = http.get(
+        &releases_url(RELEASE_PAGES + 1),
+        Accept::Json,
+        RELEASES_LIMIT,
+    )?;
+    let (_, entries) = parse_releases(&ok_body(reply, "the release list")?)?;
+    if entries == 0 {
+        return Ok(versions);
     }
     Err(format!(
         "GitHub lists more than {} releases, more than update reads",
@@ -1099,6 +1109,48 @@ mod flow_tests {
         assert!(matches!(planned, Planned::Install { .. }), "{planned:?}");
     }
 
+    // Ten full pages, the last one holding a release, and then a page that is `after`
+    fn ten_full_pages_then(after: &[u8]) -> FakeHttp {
+        let mut items: Vec<Value> = (0..99)
+            .map(|i| serde_json::json!({"tag_name": format!("v0.0.{i}"), "draft": false, "prerelease": true}))
+            .collect();
+        items.push(serde_json::json!({"tag_name": "v0.2.0", "draft": false, "prerelease": false}));
+        let last = serde_json::to_vec(&items).unwrap();
+        let mut http = FakeHttp::new();
+        for page in 1..RELEASE_PAGES {
+            http = http.reply(&releases_page(page), 200, &full_page_of_prereleases());
+        }
+        http.reply(&releases_page(RELEASE_PAGES), 200, &last)
+            .reply(&releases_page(RELEASE_PAGES + 1), 200, after)
+            .reply(COMMIT_V2, 200, SHA_B.as_bytes())
+    }
+
+    #[test]
+    fn exactly_the_most_releases_read_is_the_whole_list() {
+        // The list ends on the last page read: the page after it is empty
+        let http = ten_full_pages_then(b"[]");
+        let planned = plan(&http, &me(v(0, 1, 0), None), &Want::Latest, false).unwrap();
+        let target = Target {
+            version: Some(v(0, 2, 0)),
+        };
+        assert_eq!(
+            planned,
+            Planned::Install {
+                target,
+                sha: SHA_B.to_owned()
+            }
+        );
+        assert_eq!(http.urls().len(), RELEASE_PAGES + 2);
+    }
+
+    #[test]
+    fn a_release_list_one_past_the_most_read_is_an_error() {
+        let http = ten_full_pages_then(&releases(&["v0.3.0"]));
+        let err = plan(&http, &me(v(0, 1, 0), None), &Want::Latest, false).unwrap_err();
+        assert!(err.contains("more than"), "{err}");
+        assert_eq!(http.urls().len(), RELEASE_PAGES + 1);
+    }
+
     #[test]
     fn a_release_list_that_never_ends_is_an_error() {
         let mut http = FakeHttp::new();
@@ -1107,7 +1159,7 @@ mod flow_tests {
         }
         let err = plan(&http, &me(v(0, 1, 0), None), &Want::Latest, false).unwrap_err();
         assert!(err.contains("more than"), "{err}");
-        assert_eq!(http.urls().len(), RELEASE_PAGES);
+        assert_eq!(http.urls().len(), RELEASE_PAGES + 1);
     }
 
     #[test]
