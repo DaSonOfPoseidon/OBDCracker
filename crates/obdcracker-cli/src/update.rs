@@ -1,12 +1,26 @@
 //! `obdcracker update`: pick a release (or `main`), check it against what is installed, and run
 //! the install script at that exact commit. See docs/install.md#updating.
 
+mod http;
+mod install;
+
 use std::fmt;
+use std::io::Write;
 
 use serde_json::Value;
 
+pub(crate) use http::SystemHttp;
+use http::{Accept, Http, Reply};
+pub(crate) use install::{Setup, SystemRunner};
+
+const REPO: &str = "DaSonOfPoseidon/OBDCracker";
 // The install guide's section for a build that can't be compared with a release.
 const INSTALL_DOC: &str = "docs/install.md#updating";
+
+// What each reply may weigh. A comparison lists the files that changed, so it is the largest.
+const RELEASES_LIMIT: usize = 8 << 20;
+const COMMIT_LIMIT: usize = 64 << 10;
+const COMPARE_LIMIT: usize = 32 << 20;
 
 /// A release version, `major.minor.patch` with plain digits and no leading zeros.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -132,7 +146,10 @@ impl fmt::Display for Refusal {
             ),
             Refusal::NotReleased(version) => write!(f, "there is no release v{version}"),
             Refusal::LowerVersion { installed, target } => {
-                write!(f, "v{target} is older than the installed {installed}; {FLAG}")
+                write!(
+                    f,
+                    "v{target} is older than the installed {installed}; {FLAG}"
+                )
             }
             Refusal::Behind => write!(
                 f,
@@ -247,8 +264,8 @@ fn parse_sha(body: &[u8]) -> Result<String, String> {
 
 // `compare/<installed>...<target>`: `status` is the target's, so `ahead` means it is newer.
 fn parse_compare(body: &[u8]) -> Result<History, String> {
-    let value: Value = serde_json::from_slice(body)
-        .map_err(|e| format!("GitHub's comparison isn't JSON: {e}"))?;
+    let value: Value =
+        serde_json::from_slice(body).map_err(|e| format!("GitHub's comparison isn't JSON: {e}"))?;
     let status = value
         .get("status")
         .and_then(Value::as_str)
@@ -297,6 +314,180 @@ fn decide(installed: &Installed, target: &Target, history: History, allow: bool)
             Some(version) if version > installed.version => Decision::Install,
             version => refuse(Refusal::UnknownCommit { target: version }),
         },
+    }
+}
+
+fn releases_url() -> String {
+    format!("https://api.github.com/repos/{REPO}/releases?per_page=100")
+}
+
+fn commit_url(git_ref: &str) -> String {
+    format!("https://api.github.com/repos/{REPO}/commits/{git_ref}")
+}
+
+fn compare_url(base: &str, head: &str) -> String {
+    format!("https://api.github.com/repos/{REPO}/compare/{base}...{head}?per_page=1")
+}
+
+// The script as it is at one commit, so what runs is what was looked up.
+fn script_url(sha: &str, name: &str) -> String {
+    format!("https://raw.githubusercontent.com/{REPO}/{sha}/scripts/{name}")
+}
+
+// A reply's body, once GitHub has accepted the request.
+fn ok_body(reply: Reply, what: &str) -> Result<Vec<u8>, String> {
+    match reply.status {
+        200..=299 => Ok(reply.body),
+        status @ (403 | 429) => Err(format!(
+            "GitHub refused the request for {what} (HTTP {status}); it may be limiting requests \
+             (its API allows 60 an hour per address without signing in), so wait and try again"
+        )),
+        status => Err(format!("GitHub answered HTTP {status} for {what}")),
+    }
+}
+
+/// What was found out about a target, short of installing it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Planned {
+    Refused(Refusal),
+    UpToDate { target: Target, sha: String },
+    Install { target: Target, sha: String },
+}
+
+/// Looks up the target and, where the installed commit is known and differs, compares the two:
+/// at most the release list, one commit and one comparison.
+pub(crate) fn plan(
+    http: &dyn Http,
+    installed: &Installed,
+    want: &Want,
+    allow_downgrade: bool,
+) -> Result<Planned, String> {
+    let releases = if matches!(want, Want::Main) {
+        Vec::new()
+    } else {
+        let reply = http.get(&releases_url(), Accept::Json, RELEASES_LIMIT)?;
+        parse_releases(&ok_body(reply, "the release list")?)?
+    };
+    let target = match choose(&releases, want) {
+        Ok(target) => target,
+        Err(refusal) => return Ok(Planned::Refused(refusal)),
+    };
+    if let Some(refusal) = lower_version(installed, &target, allow_downgrade) {
+        return Ok(Planned::Refused(refusal));
+    }
+    let reply = http.get(&commit_url(&target.git_ref), Accept::Sha, COMMIT_LIMIT)?;
+    let sha = parse_sha(&ok_body(reply, &format!("the commit of {target}"))?)?;
+    let history = history(http, installed, &sha)?;
+    Ok(match decide(installed, &target, history, allow_downgrade) {
+        Decision::Refused(refusal) => Planned::Refused(refusal),
+        Decision::UpToDate => Planned::UpToDate { target, sha },
+        Decision::Install => Planned::Install { target, sha },
+    })
+}
+
+fn history(http: &dyn Http, installed: &Installed, sha: &str) -> Result<History, String> {
+    let Some(commit) = &installed.commit else {
+        return Ok(History::Unknown);
+    };
+    if commit == sha {
+        return Ok(History::Same);
+    }
+    let reply = http.get(&compare_url(commit, sha), Accept::Json, COMPARE_LIMIT)?;
+    if reply.status == 404 {
+        return Ok(History::NotFound);
+    }
+    parse_compare(&ok_body(reply, "the comparison of the installed commit")?)
+}
+
+/// What `update` was asked.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Options {
+    pub(crate) want: Want,
+    pub(crate) allow_downgrade: bool,
+    pub(crate) dry_run: bool,
+}
+
+fn short(sha: &str) -> &str {
+    &sha[..sha.len().min(7)]
+}
+
+fn installed_text(installed: &Installed) -> String {
+    match &installed.commit {
+        Some(commit) => format!("{} (commit {})", installed.version, short(commit)),
+        None => format!("{} (unknown commit)", installed.version),
+    }
+}
+
+fn target_text(target: &Target, sha: &str) -> String {
+    format!("{target} (commit {})", short(sha))
+}
+
+/// Runs `update`: says what it found, and installs when it may. Gives the exit code: 0 when the
+/// build is up to date or was updated, the script's own code when it failed, 1 otherwise.
+pub(crate) fn run(
+    options: &Options,
+    installed: &Installed,
+    setup: &Setup,
+    out: &mut dyn Write,
+    err: &mut dyn Write,
+) -> u8 {
+    if setup.windows {
+        install::remove_stale(setup.exe);
+    }
+    let planned = plan(
+        setup.http,
+        installed,
+        &options.want,
+        options.allow_downgrade,
+    );
+    let (target, sha) = match planned {
+        Err(why) => {
+            let _ = writeln!(err, "error: {why}");
+            return 1;
+        }
+        Ok(Planned::Refused(refusal)) => {
+            let _ = writeln!(err, "not updating: {refusal}");
+            return 1;
+        }
+        Ok(Planned::UpToDate { target, sha }) => {
+            let _ = writeln!(out, "already up to date: {}", target_text(&target, &sha));
+            return 0;
+        }
+        Ok(Planned::Install { target, sha }) => (target, sha),
+    };
+    let change = format!(
+        "{} with {}",
+        installed_text(installed),
+        target_text(&target, &sha)
+    );
+    if options.dry_run {
+        let name = install::script_name(setup.windows);
+        let (program, args) = install::command(setup.windows, std::path::Path::new(name), &sha);
+        let args: Vec<_> = args.iter().map(|a| a.to_string_lossy()).collect();
+        let _ = writeln!(out, "would replace {change}");
+        let _ = writeln!(
+            out,
+            "would download {} and run: {program} {}",
+            script_url(&sha, name),
+            args.join(" ")
+        );
+        let _ = writeln!(out, "dry run: nothing was downloaded or installed");
+        return 0;
+    }
+    let _ = writeln!(out, "replacing {change}");
+    match install::run(setup, &sha) {
+        Ok(0) => {
+            let _ = writeln!(out, "updated to {}", target_text(&target, &sha));
+            0
+        }
+        Ok(code) => {
+            let _ = writeln!(err, "error: the install script failed (exit code {code})");
+            u8::try_from(code).ok().filter(|c| *c != 0).unwrap_or(1)
+        }
+        Err(why) => {
+            let _ = writeln!(err, "error: {why}");
+            1
+        }
     }
 }
 
@@ -720,5 +911,451 @@ mod tests {
             let text = Refusal::UnknownCommit { target }.to_string();
             assert!(text.contains("docs/install.md#updating"), "{text}");
         }
+    }
+}
+
+#[cfg(test)]
+mod flow_tests {
+    use std::cell::RefCell;
+    use std::ffi::OsString;
+    use std::io;
+    use std::path::{Path, PathBuf};
+
+    use super::http::fake::FakeHttp;
+    use super::install::Runner;
+    use super::*;
+
+    const SHA_A: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const SHA_B: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    const API: &str = "https://api.github.com/repos/DaSonOfPoseidon/OBDCracker";
+    const RELEASES: &str =
+        "https://api.github.com/repos/DaSonOfPoseidon/OBDCracker/releases?per_page=100";
+    const COMMIT_V2: &str =
+        "https://api.github.com/repos/DaSonOfPoseidon/OBDCracker/commits/v0.2.0";
+    const COMMIT_MAIN: &str =
+        "https://api.github.com/repos/DaSonOfPoseidon/OBDCracker/commits/main";
+    const COMPARE_V2: &str = "https://api.github.com/repos/DaSonOfPoseidon/OBDCracker/compare/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa...bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb?per_page=1";
+    const SCRIPT_URL: &str = "https://raw.githubusercontent.com/DaSonOfPoseidon/OBDCracker/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb/scripts/install.sh";
+    const SCRIPT: &[u8] = b"#!/bin/sh\necho installing\n";
+
+    fn v(major: u32, minor: u32, patch: u32) -> Version {
+        Version::parse(&format!("{major}.{minor}.{patch}")).unwrap()
+    }
+
+    fn me(version: Version, commit: Option<&str>) -> Installed {
+        Installed {
+            version,
+            commit: commit.map(str::to_owned),
+        }
+    }
+
+    fn releases(tags: &[&str]) -> Vec<u8> {
+        let items: Vec<Value> = tags
+            .iter()
+            .map(|t| serde_json::json!({"tag_name": t, "draft": false, "prerelease": false}))
+            .collect();
+        serde_json::to_vec(&items).unwrap()
+    }
+
+    fn compare(status: &str) -> Vec<u8> {
+        format!(r#"{{"status":"{status}","commits":[],"files":[]}}"#).into_bytes()
+    }
+
+    // GitHub with v0.2.0 as its newest release, at commit B
+    fn github() -> FakeHttp {
+        FakeHttp::new()
+            .reply(RELEASES, 200, &releases(&["v0.1.0", "v0.2.0"]))
+            .reply(COMMIT_V2, 200, SHA_B.as_bytes())
+            .reply(COMMIT_MAIN, 200, SHA_B.as_bytes())
+    }
+
+    #[test]
+    fn the_requests_go_to_the_release_list_the_commit_and_the_comparison() {
+        let http = github().reply(COMPARE_V2, 200, &compare("ahead"));
+        let planned = plan(&http, &me(v(0, 1, 0), Some(SHA_A)), &Want::Latest, false).unwrap();
+        let target = Target {
+            version: Some(v(0, 2, 0)),
+            git_ref: "v0.2.0".to_owned(),
+        };
+        assert_eq!(
+            planned,
+            Planned::Install {
+                target,
+                sha: SHA_B.to_owned()
+            }
+        );
+        assert_eq!(http.urls(), [RELEASES, COMMIT_V2, COMPARE_V2]);
+        assert_eq!(http.accepts(), [Accept::Json, Accept::Sha, Accept::Json]);
+        assert!(COMPARE_V2.starts_with(API));
+    }
+
+    #[test]
+    fn main_needs_no_release_list() {
+        let http = github().reply(
+            "https://api.github.com/repos/DaSonOfPoseidon/OBDCracker/compare/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa...bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb?per_page=1",
+            200,
+            &compare("ahead"),
+        );
+        let planned = plan(&http, &me(v(0, 1, 0), Some(SHA_A)), &Want::Main, false).unwrap();
+        assert!(matches!(planned, Planned::Install { .. }), "{planned:?}");
+        assert_eq!(http.urls(), [COMMIT_MAIN, COMPARE_V2]);
+    }
+
+    #[test]
+    fn the_installed_commit_being_the_target_asks_for_no_comparison() {
+        let http = github();
+        let planned = plan(&http, &me(v(0, 2, 0), Some(SHA_B)), &Want::Latest, false).unwrap();
+        assert!(matches!(planned, Planned::UpToDate { .. }), "{planned:?}");
+        assert_eq!(http.urls(), [RELEASES, COMMIT_V2]);
+    }
+
+    #[test]
+    fn an_unknown_installed_commit_asks_for_no_comparison() {
+        let http = github();
+        let planned = plan(&http, &me(v(0, 1, 0), None), &Want::Latest, false).unwrap();
+        assert!(matches!(planned, Planned::Install { .. }), "{planned:?}");
+        assert_eq!(http.urls(), [RELEASES, COMMIT_V2]);
+    }
+
+    #[test]
+    fn a_lower_version_is_refused_after_the_release_list_alone() {
+        let http = github();
+        let planned = plan(&http, &me(v(0, 3, 0), Some(SHA_A)), &Want::Latest, false).unwrap();
+        assert!(
+            matches!(planned, Planned::Refused(Refusal::LowerVersion { .. })),
+            "{planned:?}"
+        );
+        assert_eq!(http.urls(), [RELEASES]);
+    }
+
+    #[test]
+    fn a_missing_release_is_refused_after_the_release_list_alone() {
+        let http = github();
+        let want = Want::Version(v(0, 9, 0));
+        let planned = plan(&http, &me(v(0, 1, 0), Some(SHA_A)), &want, false).unwrap();
+        assert_eq!(planned, Planned::Refused(Refusal::NotReleased(v(0, 9, 0))));
+        assert_eq!(http.urls(), [RELEASES]);
+
+        let http = FakeHttp::new().reply(RELEASES, 200, b"[]");
+        let planned = plan(&http, &me(v(0, 1, 0), Some(SHA_A)), &Want::Latest, false).unwrap();
+        assert_eq!(planned, Planned::Refused(Refusal::NoReleases));
+    }
+
+    #[test]
+    fn a_comparison_github_cannot_make_is_refused_unless_downgrades_are_allowed() {
+        let http = github().reply(COMPARE_V2, 404, b"{}");
+        let installed = me(v(0, 1, 0), Some(SHA_A));
+        assert_eq!(
+            plan(&http, &installed, &Want::Latest, false).unwrap(),
+            Planned::Refused(Refusal::NotOnGithub)
+        );
+        assert!(matches!(
+            plan(&http, &installed, &Want::Latest, true).unwrap(),
+            Planned::Install { .. }
+        ));
+    }
+
+    #[test]
+    fn behind_and_diverged_are_refused_and_identical_is_up_to_date() {
+        let installed = me(v(0, 1, 0), Some(SHA_A));
+        for (status, expected) in [
+            ("behind", Some(Refusal::Behind)),
+            ("diverged", Some(Refusal::Diverged)),
+            ("identical", None),
+        ] {
+            let http = github().reply(COMPARE_V2, 200, &compare(status));
+            let planned = plan(&http, &installed, &Want::Latest, false).unwrap();
+            match expected {
+                Some(refusal) => assert_eq!(planned, Planned::Refused(refusal)),
+                None => assert!(matches!(planned, Planned::UpToDate { .. }), "{planned:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn a_reply_that_is_not_what_was_asked_for_is_an_error_not_a_decision() {
+        let installed = me(v(0, 1, 0), Some(SHA_A));
+        let cases = [
+            // The release list
+            FakeHttp::new().reply(RELEASES, 200, b"<html>"),
+            FakeHttp::new().reply(RELEASES, 500, b""),
+            FakeHttp::new().fails(RELEASES, "curl failed (6): no host"),
+            // The commit
+            FakeHttp::new()
+                .reply(RELEASES, 200, &releases(&["v0.2.0"]))
+                .reply(COMMIT_V2, 200, b"v0.2.0"),
+            FakeHttp::new()
+                .reply(RELEASES, 200, &releases(&["v0.2.0"]))
+                .reply(COMMIT_V2, 404, b""),
+            // The comparison
+            github().reply(COMPARE_V2, 200, &compare("sideways")),
+            github().reply(COMPARE_V2, 200, b"{}"),
+            github().reply(COMPARE_V2, 500, b""),
+            github().reply(COMPARE_V2, 200, b"oops"),
+            github(),
+        ];
+        for http in cases {
+            assert!(plan(&http, &installed, &Want::Latest, true).is_err());
+        }
+    }
+
+    #[test]
+    fn a_rate_limit_says_so() {
+        let installed = me(v(0, 1, 0), Some(SHA_A));
+        for status in [403, 429] {
+            for http in [
+                FakeHttp::new().reply(RELEASES, status, b"{}"),
+                github().reply(COMPARE_V2, status, b"{}"),
+                FakeHttp::new()
+                    .reply(RELEASES, 200, &releases(&["v0.2.0"]))
+                    .reply(COMMIT_V2, status, b"{}"),
+            ] {
+                let err = plan(&http, &installed, &Want::Latest, false).unwrap_err();
+                assert!(err.contains("60 an hour"), "{err}");
+            }
+        }
+    }
+
+    struct FakeRunner {
+        calls: RefCell<Vec<String>>,
+        code: i32,
+    }
+
+    impl Runner for FakeRunner {
+        fn run(&self, program: &str, args: &[OsString]) -> io::Result<i32> {
+            let args: Vec<_> = args.iter().map(|a| a.to_string_lossy()).collect();
+            self.calls
+                .borrow_mut()
+                .push(format!("{program} {}", args.join(" ")));
+            Ok(self.code)
+        }
+    }
+
+    struct Session {
+        http: FakeHttp,
+        runner: FakeRunner,
+        temp: PathBuf,
+    }
+
+    impl Session {
+        fn new(http: FakeHttp, code: i32) -> Self {
+            let temp = std::env::temp_dir().join(format!(
+                "obdcracker-update-flow-{}-{}",
+                std::process::id(),
+                std::thread::current()
+                    .name()
+                    .unwrap_or("t")
+                    .replace("::", "-")
+            ));
+            let _ = std::fs::remove_dir_all(&temp);
+            std::fs::create_dir_all(&temp).unwrap();
+            Session {
+                http,
+                runner: FakeRunner {
+                    calls: RefCell::new(Vec::new()),
+                    code,
+                },
+                temp,
+            }
+        }
+
+        // Returns the exit code, standard output and standard error
+        fn run(&self, options: &Options, installed: &Installed) -> (u8, String, String) {
+            let setup = Setup {
+                http: &self.http,
+                runner: &self.runner,
+                exe: Path::new("/nonexistent/obdcracker"),
+                temp_dir: &self.temp,
+                windows: false,
+            };
+            let (mut out, mut err) = (Vec::new(), Vec::new());
+            let code = run(options, installed, &setup, &mut out, &mut err);
+            (
+                code,
+                String::from_utf8(out).unwrap(),
+                String::from_utf8(err).unwrap(),
+            )
+        }
+    }
+
+    impl Drop for Session {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.temp);
+        }
+    }
+
+    fn options(want: Want, allow_downgrade: bool, dry_run: bool) -> Options {
+        Options {
+            want,
+            allow_downgrade,
+            dry_run,
+        }
+    }
+
+    fn newer_than_installed() -> FakeHttp {
+        github()
+            .reply(COMPARE_V2, 200, &compare("ahead"))
+            .reply(SCRIPT_URL, 200, SCRIPT)
+    }
+
+    #[test]
+    fn a_dry_run_reports_the_command_and_downloads_and_runs_nothing() {
+        let session = Session::new(newer_than_installed(), 0);
+        let installed = me(v(0, 1, 0), Some(SHA_A));
+        let (code, out, err) = session.run(&options(Want::Latest, false, true), &installed);
+        assert_eq!(code, 0, "{err}");
+        assert!(
+            out.contains("would replace 0.1.0 (commit aaaaaaa) with v0.2.0 (commit bbbbbbb)"),
+            "{out}"
+        );
+        assert!(
+            out.contains(&format!(
+                "would download {SCRIPT_URL} and run: sh install.sh --ref {SHA_B}"
+            )),
+            "{out}"
+        );
+        assert!(out.contains("nothing was downloaded or installed"), "{out}");
+        assert_eq!(session.http.urls(), [RELEASES, COMMIT_V2, COMPARE_V2]);
+        assert!(session.runner.calls.borrow().is_empty());
+    }
+
+    #[test]
+    fn an_update_installs_the_commit_that_was_looked_up_and_says_so() {
+        let session = Session::new(newer_than_installed(), 0);
+        let installed = me(v(0, 1, 0), Some(SHA_A));
+        let (code, out, err) = session.run(&options(Want::Latest, false, false), &installed);
+        assert_eq!(code, 0, "{err}");
+        assert!(
+            out.contains("replacing 0.1.0 (commit aaaaaaa) with v0.2.0 (commit bbbbbbb)"),
+            "{out}"
+        );
+        assert!(out.contains("updated to v0.2.0 (commit bbbbbbb)"), "{out}");
+        assert_eq!(
+            session.http.urls(),
+            [RELEASES, COMMIT_V2, COMPARE_V2, SCRIPT_URL]
+        );
+        let calls = session.runner.calls.borrow();
+        assert_eq!(calls.len(), 1);
+        assert!(calls[0].starts_with("sh "), "{calls:?}");
+        assert!(
+            calls[0].ends_with(&format!("install.sh --ref {SHA_B}")),
+            "{calls:?}"
+        );
+    }
+
+    #[test]
+    fn a_replacement_with_the_flag_names_both_builds_before_it_installs() {
+        let http = github()
+            .reply(COMPARE_V2, 200, &compare("behind"))
+            .reply(SCRIPT_URL, 200, SCRIPT);
+        let session = Session::new(http, 0);
+        let installed = me(v(0, 3, 0), Some(SHA_A));
+        let (code, out, err) = session.run(&options(Want::Latest, true, false), &installed);
+        assert_eq!(code, 0, "{err}");
+        assert!(
+            out.starts_with("replacing 0.3.0 (commit aaaaaaa) with v0.2.0 (commit bbbbbbb)"),
+            "{out}"
+        );
+    }
+
+    #[test]
+    fn an_unknown_installed_commit_is_named_as_unknown() {
+        let session = Session::new(newer_than_installed(), 0);
+        let (_, out, _) = session.run(&options(Want::Latest, false, true), &me(v(0, 1, 0), None));
+        assert!(
+            out.contains("would replace 0.1.0 (unknown commit) with"),
+            "{out}"
+        );
+    }
+
+    #[test]
+    fn the_script_s_failure_code_is_the_exit_code() {
+        for (script, expected) in [(2, 2), (255, 255), (256, 1), (-1, 1), (1000, 1)] {
+            let session = Session::new(newer_than_installed(), script);
+            let installed = me(v(0, 1, 0), Some(SHA_A));
+            let (code, out, err) = session.run(&options(Want::Latest, false, false), &installed);
+            assert_eq!(code, expected, "{script}");
+            assert!(err.contains("the install script failed"), "{err}");
+            assert!(!out.contains("updated to"), "{out}");
+        }
+    }
+
+    #[test]
+    fn a_refusal_exits_1_names_the_reason_and_runs_nothing() {
+        let session = Session::new(newer_than_installed(), 0);
+        let installed = me(v(0, 3, 0), Some(SHA_A));
+        let (code, out, err) = session.run(&options(Want::Latest, false, false), &installed);
+        assert_eq!(code, 1);
+        assert!(
+            err.contains("not updating") && err.contains("--allow-downgrade"),
+            "{err}"
+        );
+        assert_eq!(out, "");
+        assert!(session.runner.calls.borrow().is_empty());
+        assert!(!session.http.urls().contains(&SCRIPT_URL.to_owned()));
+    }
+
+    #[test]
+    fn being_up_to_date_exits_0_and_runs_nothing() {
+        let session = Session::new(newer_than_installed(), 0);
+        let installed = me(v(0, 2, 0), Some(SHA_B));
+        let (code, out, _) = session.run(&options(Want::Latest, false, false), &installed);
+        assert_eq!(code, 0);
+        assert!(
+            out.contains("already up to date: v0.2.0 (commit bbbbbbb)"),
+            "{out}"
+        );
+        assert!(session.runner.calls.borrow().is_empty());
+        let (code, out, _) = session.run(&options(Want::Main, false, false), &installed);
+        assert_eq!(code, 0);
+        assert!(
+            out.contains("already up to date: main (commit bbbbbbb)"),
+            "{out}"
+        );
+    }
+
+    #[test]
+    fn a_network_error_exits_1_and_runs_nothing() {
+        let session = Session::new(
+            FakeHttp::new().fails(RELEASES, "curl failed (6): no host"),
+            0,
+        );
+        let installed = me(v(0, 1, 0), Some(SHA_A));
+        let (code, _, err) = session.run(&options(Want::Latest, false, false), &installed);
+        assert_eq!(code, 1);
+        assert!(err.starts_with("error: curl failed"), "{err}");
+        assert!(session.runner.calls.borrow().is_empty());
+    }
+
+    #[test]
+    fn a_script_that_cannot_be_downloaded_exits_1_and_runs_nothing() {
+        let http = github()
+            .reply(COMPARE_V2, 200, &compare("ahead"))
+            .reply(SCRIPT_URL, 404, b"");
+        let session = Session::new(http, 0);
+        let installed = me(v(0, 1, 0), Some(SHA_A));
+        let (code, out, err) = session.run(&options(Want::Latest, false, false), &installed);
+        assert_eq!(code, 1);
+        assert!(err.contains("HTTP 404"), "{err}");
+        assert!(!out.contains("updated to"), "{out}");
+        assert!(session.runner.calls.borrow().is_empty());
+    }
+
+    #[test]
+    fn the_installed_build_is_read_from_the_version_and_commit_a_build_records() {
+        let known = Installed::from_build("0.1.0", SHA_A).unwrap();
+        assert_eq!(known, me(v(0, 1, 0), Some(SHA_A)));
+        assert_eq!(
+            Installed::from_build("0.1.0", "unknown").unwrap().commit,
+            None
+        );
+        // Anything that isn't a full commit is not one to compare
+        assert_eq!(Installed::from_build("0.1.0", "main").unwrap().commit, None);
+        assert_eq!(
+            Installed::from_build("0.1.0", &SHA_A[..39]).unwrap().commit,
+            None
+        );
+        assert!(Installed::from_build("0.1", SHA_A).is_err());
+        assert!(Installed::from_build("0.1.0-rc1", SHA_A).is_err());
     }
 }

@@ -380,6 +380,50 @@ fn ports_lists_serial_ports_without_an_adapter() {
     );
 }
 
+// Each of these stops before `update` looks anything up, so no test reaches GitHub.
+#[test]
+fn update_refuses_the_flags_that_pick_an_adapter_or_an_audit_log() {
+    let log = temp_log("update-flags");
+    for flags in [
+        &["--serial", "/dev/obdcracker-no-such-port"][..],
+        &["--tcp", "127.0.0.1:1"],
+        &["--sim", "a7"],
+        &["--profile", "a7"],
+        &["--audit-log", log.to_str().unwrap()],
+        &["--gsusb", "--listen-only"],
+    ] {
+        let out = obdcracker(&[flags, &["update"]].concat());
+        assert_eq!(out.status.code(), Some(2), "{flags:?}");
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            stderr.contains("`update` uses no adapter"),
+            "{flags:?}: {stderr}"
+        );
+        assert!(out.stdout.is_empty(), "{flags:?}");
+    }
+    assert!(!log.exists());
+}
+
+#[test]
+fn update_refuses_a_version_together_with_main_and_a_bad_version() {
+    let out = obdcracker(&["update", "0.2.0", "--main"]);
+    assert_eq!(out.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("cannot be used with"));
+    let out = obdcracker(&["update", "latest"]);
+    assert_eq!(out.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("isn't a release version"));
+}
+
+#[test]
+fn update_help_names_its_options() {
+    let out = obdcracker(&["update", "--help"]);
+    assert!(out.status.success());
+    let text = String::from_utf8_lossy(&out.stdout);
+    for word in ["[VERSION]", "--main", "--allow-downgrade"] {
+        assert!(text.contains(word), "{word}: {text}");
+    }
+}
+
 #[test]
 fn a_missing_serial_port_is_an_error() {
     let log = temp_log("serial-missing");
