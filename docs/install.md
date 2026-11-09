@@ -44,8 +44,16 @@ SUBSYSTEM=="usb", ATTRS{idVendor}=="1209", ATTRS{idProduct}=="ca01", MODE="0660"
 
 ## Building a branch or a checkout
 
-- A branch: `-Ref <branch>` on Windows (`& ([scriptblock]::Create((irm <url>))) -Ref <branch>`), or
-  `| sh -s -- --ref <branch>` elsewhere.
-- A checkout: `scripts/install.ps1 -Source .` or `scripts/install.sh --source .`.
+- A branch, tag or commit: `-Ref <ref>` on Windows (`& ([scriptblock]::Create((irm <url>))) -Ref <ref>`), or
+  `| sh -s -- --ref <ref>` elsewhere. The script asks GitHub which commit the ref names and builds exactly that one.
+- A checkout: `scripts/install.ps1 -Source .` or `scripts/install.sh --source .`. The build is recorded as the
+  checkout's commit only when the checkout is clean (no uncommitted or untracked files); otherwise it's `unknown`.
+
+## Which commit is installed
+
+`obdcracker --version` prints the version and the commit it was built from, for example
+`obdcracker 0.1.0 (commit 0123456789abcdef0123456789abcdef01234567)`. The commit is `unknown` for a build the
+install script didn't make, such as a plain `cargo build`; set `OBDCRACKER_COMMIT` to a full lower-case commit hash
+when building to record one. Anything else in that variable is ignored.
 
 Next: [using the CLI](usage.md).

@@ -130,6 +130,19 @@ jobs:
         run: powershell -NoProfile -ExecutionPolicy Bypass -File scripts\install.ps1 -Source .
       - if: env.SKIP_LEG != 'true'
         run: obdcracker --version
+      # --source records the commit of a clean checkout, and the job leaves this one clean.
+      - name: --version names this commit
+        if: env.SKIP_LEG != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          version=$(obdcracker --version)
+          echo "$version"
+          expected=" (commit $(git rev-parse HEAD))"
+          if [[ "$version" != *"$expected" ]]; then
+            echo "expected a version line ending in '$expected'" >&2
+            exit 1
+          fi
 
   # The ELM driver against an ELM327 implementation we didn't write (issue #13). Not required
   # by branch protection, and it doesn't fail the run while it settles in.

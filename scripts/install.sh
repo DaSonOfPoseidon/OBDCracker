@@ -21,7 +21,8 @@ usage() {
 	cat <<EOF
 Usage: install.sh [--ref REF] [--dir DIR] [--source PATH]
 
-  --ref REF      branch, tag or commit to build [default: main]
+  --ref REF      branch, tag or commit to build, looked up on GitHub first so the build is of that exact
+                 commit [default: main]
   --dir DIR      where the source and build cache live [default: ${XDG_DATA_HOME:-\$HOME/.local/share}/obdcracker]
   --source PATH  build this checkout instead of downloading one (--ref is then ignored)
 EOF
@@ -42,6 +43,57 @@ fetch() {
 		wget --https-only -qO- "$1"
 	else
 		die "need curl or wget to download $1"
+	fi
+}
+
+# Prints a URL's body to stdout, asking GitHub's API for a bare commit hash.
+fetch_sha() {
+	if command -v curl >/dev/null 2>&1; then
+		curl --proto '=https' --tlsv1.2 -fsSL -H 'Accept: application/vnd.github.sha' "$1"
+	elif command -v wget >/dev/null 2>&1; then
+		wget --https-only -qO- --header='Accept: application/vnd.github.sha' "$1"
+	else
+		die "need curl or wget to download $1"
+	fi
+}
+
+# Whether $1 is a full commit hash: exactly 40 lowercase hex characters, which is all
+# `obdcracker --version` will show.
+is_sha() {
+	[ "${#1}" -eq 40 ] && case $1 in *[!0-9a-f]*) return 1 ;; esac
+}
+
+# Sets COMMIT to the commit REF names right now. The download is then of that commit, so the build
+# is what was resolved even if the branch moves in between.
+resolve_ref() {
+	say "Looking up $REF on GitHub"
+	COMMIT=$(fetch_sha "https://api.github.com/repos/$REPO/commits/$REF") ||
+		die "couldn't look up $REF: check the name, and that it's pushed to GitHub (GitHub's API also limits how often one address can ask)"
+	is_sha "$COMMIT" || die "GitHub's answer for $REF isn't a commit hash"
+}
+
+# Runs git in the checkout being built, ignoring variables that would point it at another repository.
+source_git() {
+	env -u GIT_DIR -u GIT_WORK_TREE -u GIT_INDEX_FILE git -C "$SRC" "$@"
+}
+
+# Sets COMMIT to the checkout's HEAD, only when the build is exactly that commit: the checkout's top
+# directory, with no uncommitted or untracked files. Otherwise COMMIT stays empty (unknown).
+source_commit() {
+	COMMIT=
+	if ! command -v git >/dev/null 2>&1; then
+		note "git isn't installed, so the build's commit will be unknown"
+		return 0
+	fi
+	prefix=$(source_git rev-parse --show-prefix 2>/dev/null) || prefix=x
+	changes=$(source_git status --porcelain --untracked-files=normal 2>/dev/null) || changes=x
+	if [ -n "$prefix" ] || [ -n "$changes" ]; then
+		note "the checkout isn't a clean git checkout, so the build's commit will be unknown"
+		return 0
+	fi
+	head=$(source_git rev-parse HEAD 2>/dev/null) || return 0
+	if is_sha "$head"; then
+		COMMIT=$head
 	fi
 }
 
@@ -130,12 +182,13 @@ install_rustup() {
 	command -v rustup >/dev/null 2>&1 || die "rustup installed, but it isn't in $CARGO_BIN"
 }
 
-# Downloads REF into DIR/src, replacing the copy from the last run only once the new one is complete.
+# Downloads REF's commit into DIR/src, replacing the copy from the last run only once the new one is complete.
 download_source() {
-	say "Downloading $REPO at $REF"
+	resolve_ref
+	say "Downloading $REPO at $REF (commit $COMMIT)"
 	archive="$TMP/source.tar.gz"
-	fetch "https://codeload.github.com/$REPO/tar.gz/$REF" >"$archive" ||
-		die "couldn't download $REF: check the name, and that it's pushed to GitHub"
+	fetch "https://codeload.github.com/$REPO/tar.gz/$COMMIT" >"$archive" ||
+		die "couldn't download commit $COMMIT of $REF: check the network"
 	rm -rf "$DIR/src.new"
 	mkdir "$DIR/src.new"
 	tar -xzf "$archive" -C "$DIR/src.new" --strip-components=1
@@ -166,7 +219,11 @@ build() {
 	rustup toolchain install "$toolchain" --profile minimal </dev/null
 	# `rustup run` puts that toolchain's cargo and rustc first. RUSTC or CARGO_BUILD_TARGET from
 	# the caller's environment would still swap the compiler or the target, so drop them.
-	unset RUSTC CARGO_BUILD_TARGET
+	unset RUSTC CARGO_BUILD_TARGET OBDCRACKER_COMMIT
+	# build.rs records this for `--version`; nothing else the caller exported may stand in for it
+	if [ -n "$COMMIT" ]; then
+		export OBDCRACKER_COMMIT="$COMMIT"
+	fi
 	# The build cache lives outside the source, so a re-run only rebuilds what changed. --root pins
 	# where the binary goes, whatever CARGO_INSTALL_ROOT or Cargo's install.root say.
 	rustup run "$toolchain" cargo install --path crates/obdcracker-cli --locked --force \
@@ -225,6 +282,7 @@ main() {
 	REF=main
 	DIR=${XDG_DATA_HOME:-$HOME/.local/share}/obdcracker
 	SRC=
+	COMMIT=
 	while [ $# -gt 0 ]; do
 		case $1 in
 		--ref | --dir | --source)
@@ -289,6 +347,7 @@ main() {
 	ensure_rustup
 	if [ -n "$SRC" ]; then
 		note "building the checkout in $SRC"
+		source_commit
 	else
 		download_source
 	fi
@@ -298,7 +357,7 @@ main() {
 	fi
 	verify
 
-	say "Done. Next, with the adapter plugged into the car and the ignition on:"
+	say "Done. Installed commit ${COMMIT:-unknown}. Next, with the adapter plugged into the car and the ignition on:"
 	note "obdcracker ports                       # find the adapter's port"
 	note "obdcracker adapter                     # check the adapter; sends nothing to the car"
 	note "obdcracker vin"
