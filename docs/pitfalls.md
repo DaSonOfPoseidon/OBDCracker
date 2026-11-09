@@ -521,6 +521,11 @@ Each entry names the class, what to check, and where it bit us.
   (`CARGO_HOME`, `RUSTUP_HOME`) needs making absolute, like `--dir`. And "installed" isn't "usable": probe HTTPS
   (curl can lack a CA bundle) and link a program on macOS too (stale Command Line Tools after an OS upgrade).
   Sweep all of a script's inputs, including its environment, in one pass; this took four review rounds piecemeal.
+- **A bare ref can be a tag, a branch and a commit prefix.** A bare `commits/<name>` lookup leaves the
+  choice to GitHub, so the install scripts could build a branch's commit for a name the user meant as a tag. Look a bare name up as
+  `refs/tags/` and `refs/heads/` and refuse when both exist. Fall through to the next form only on HTTP 404 or 422
+  ("no such ref"): a 500 or a rate limit that fell through could build a different ref than the one asked for.
+  Test with a fake API, in both `install.sh` and `install.ps1` (#296).
 - **`pkill -f <pattern>` matches the shell running it** when the pattern is in its own command line. Save the PID
   when starting a background process and kill that.
 - **clap skips `requires` when the required argument conflicts with one that's present.** `--baud` once required

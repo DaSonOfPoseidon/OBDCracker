@@ -46,6 +46,14 @@ SUBSYSTEM=="usb", ATTRS{idVendor}=="1209", ATTRS{idProduct}=="ca01", MODE="0660"
 
 - A branch, tag or commit: `-Ref <ref>` on Windows (`& ([scriptblock]::Create((irm <url>))) -Ref <ref>`), or
   `| sh -s -- --ref <ref>` elsewhere. The script asks GitHub which commit the ref names and builds exactly that one.
+  How it reads `<ref>`:
+  - A full commit hash (40 lower-case hex characters) is used as given, with no lookup.
+  - `refs/tags/<name>` and `refs/heads/<name>` are looked up as written.
+  - Any other name is looked up as a tag and as a branch. If only one exists, that one is built. If both exist,
+    the script stops and asks for `refs/tags/<name>`, `refs/heads/<name>` or the commit hash, rather than guess.
+  - A name that is neither a tag nor a branch is then looked up as given, so a short commit hash works.
+  - A lookup that fails for any reason other than GitHub saying the ref doesn't exist (a rate limit, a server
+    error, no network) never leads on to another name, so the script can't build a different ref than you asked for.
 - A checkout: `scripts/install.ps1 -Source .` or `scripts/install.sh --source .`. The build is recorded as the
   checkout's commit only when the checkout is clean (no uncommitted or untracked files); otherwise it's `unknown`.
 
