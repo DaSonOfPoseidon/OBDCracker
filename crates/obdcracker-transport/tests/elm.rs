@@ -1343,9 +1343,11 @@ mod requests {
     #[test]
     fn frames_printed_between_reads_are_reported_not_returned() {
         // The module's data arrives while the caller isn't reading; the stop that comes with the
-        // next frame reads it on the way (the adapter prints in 3-byte pieces) and logs it.
+        // next frame reads it on the way (the adapter prints in 3-byte pieces) and logs it. The
+        // frames are due 200 ms after the request, not 10: under load the test thread can reach its
+        // 2 ms recv more than 10 ms late, and a recv that starts after the frames are due reads them.
         use obdcracker_transport::LinkEvent;
-        let mut elm = with_echo_shown(one_frame_stn(Duration::from_millis(10)));
+        let mut elm = with_echo_shown(one_frame_stn(Duration::from_millis(200)));
         let channel = request_sent(&mut elm);
         elm.link_mut().chunk = 3;
         assert!(matches!(
@@ -1353,7 +1355,20 @@ mod requests {
             Err(Error::Timeout)
         ));
         elm.take_events();
-        std::thread::sleep(Duration::from_millis(40));
+        // Wait until the module's frames have reached the fake adapter and been printed, not for a
+        // fixed time that a loaded runner can outlast.
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        loop {
+            elm.link_mut().elm.poll();
+            if elm.link().elm.next_frame_at().is_none() {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the fake adapter never printed the module's frames"
+            );
+            std::thread::sleep(Duration::from_millis(1));
+        }
         let policy = Policy::read_only();
         elm.send(&policy.approve_tp20_ack(&channel, 1).unwrap())
             .unwrap();
