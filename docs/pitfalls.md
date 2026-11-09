@@ -484,6 +484,10 @@ Each entry names the class, what to check, and where it bit us.
   that exercise it. PR #9: dropping late replies made a P2* test's ECU go pending too late to count.
 - **Timing tests need margins and repeat runs.** Leave tens of milliseconds between events that must fall on either
   side of a deadline, and run the test several times before trusting it.
+- **A scripted delay measured from the request races the test thread.** The fake adapter's TP2.0 frames were due
+  5 ms after the request, so a test thread descheduled before its next `recv` found them already lost (7 of 50 runs
+  under load, #297). Count the delay from the event the test is about (`FakeElm::delay_from_monitor`: the adapter
+  starts monitoring), and run the test 50 times under 24 busy loops before trusting a short gap.
 - **A fake that only counts the failure case makes an ordering assertion vacuous.** The `gs_usb` fake's `overlapped`
   counter rose only after a frame it had been told never to confirm, so `assert_eq!(overlapped, 0)` after a successful
   transfer passed even with the wait for the confirmation deleted, and the SocketCAN session test asserted only the
