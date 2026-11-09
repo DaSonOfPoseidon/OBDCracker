@@ -5,6 +5,17 @@ takes a [vehicle profile](profiles.md) (where each module sits) and a fixture (w
 [`a7.toml`](../crates/obdcracker-sim/fixtures/a7.toml). Every field is checked when the car is built, and an
 unknown field is an error.
 
+The other files in `crates/obdcracker-sim/fixtures/` aren't built into a car:
+
+- [`standard-obd.toml`](../crates/obdcracker-sim/fixtures/standard-obd.toml) is in this format, but synthetic: OBD-II
+  mode 01, 03 and 09 values worked out from the standard at the edges of what the decoders accept (every mode 01
+  formula at both ends of its range, the first and last code of each DTC system, full-width and empty calibration
+  IDs). It has no car behind it, and is used with a two-module profile in `tests/standard_obd.rs`. The 255-entry
+  limits are built in that test, not listed in the file.
+- `opendbc-vag.toml`, `opendbc-other-makes.toml` and `opendbc-toyota.toml` are real identification replies from
+  [commaai/opendbc](third-party.md), written by `scripts/import-opendbc.sh` and read by `tests/opendbc.rs`. They
+  hold replies, not a car: a reply may sit behind an extended-address byte, which the sim can't address yet (#112).
+
 ## Checks across the file
 
 - A module named in `[[ecu]]` must be in the profile, listed once, speak UDS and use normal addressing (approved

@@ -1,0 +1,73 @@
+# Synthetic OBD-II data, not from any car: values derived from the standard (SAE J1979 and
+# ISO 15765-4) at the edges of what the decoders accept, for modules at the OBD-II IDs 0x7E0 and
+# 0x7E1. Every mode 01 PID is 0x00 in each data byte in one module and 0xFF in the other, so each
+# formula is checked at both ends (a test checks that this holds). Each value is worked out by hand
+# in `tests/standard_obd.rs`, not read back from the decoder. Highest PID: 0xFF, only in the engine.
+#
+# Mode 03: the first module has a code of each system (P, C, B, U) at both ends of its range (P0001
+# is the lowest, since P0000 is padding) and one with hex letters; the second has no codes, which is
+# a reply with a count of 0.
+# Mode 09: VINs of all the digits and of the letters either side of the excluded I, O and Q,
+# calibration IDs of 16 characters, 1 character and an empty slot, CVNs of 00000000 and FFFFFFFF,
+# and names at their full width (4 and 15 characters) and their shortest (1).
+
+[[ecu]]
+module = "engine"
+
+[ecu.obd]
+vin = "0123456789ABCDEFG"
+calids = ["ABCDEFGHJKLMNPRS", "A", "", "0123456789ABCDEF"]
+cvns = ["FF FF FF FF", "00 00 00 01", "00 00 00 00", "80 00 00 00"]
+ecu_name = { acronym = "ABCD", name = "ABCDEFGHIJKLMNO" }
+dtcs = [
+  "P0001", "P0A7F", "P3FFF", "C0000", "C3FFF", "B0000", "B3FFF", "U0000", "U3FFF",
+]
+
+[ecu.obd.pids]
+"04" = "00"
+"05" = "00"
+"0C" = "FF FF"
+"0D" = "FF"
+"0F" = "FF"
+"10" = "FF FF"
+"11" = "FF"
+"1F" = "FF FF"
+"21" = "FF FF"
+"30" = "FF"
+"33" = "FF"
+"3C" = "FF FF"
+"42" = "FF FF"
+"5D" = "00 00"
+"5E" = "FF FF"
+"61" = "00"
+"63" = "FF FF"
+"FF" = "AB"
+
+[[ecu]]
+module = "transmission"
+
+[ecu.obd]
+vin = "HJKLMNPRSTUVWXYZ9"
+calids = ["Z"]
+cvns = ["12 34 56 78"]
+ecu_name = { acronym = "T", name = "T" }
+dtcs = []
+
+[ecu.obd.pids]
+"04" = "FF"
+"05" = "FF"
+"0C" = "00 00"
+"0D" = "00"
+"0F" = "00"
+"10" = "00 00"
+"11" = "00"
+"1F" = "00 00"
+"21" = "00 00"
+"30" = "00"
+"33" = "00"
+"3C" = "00 00"
+"42" = "00 00"
+"5D" = "FF FF"
+"5E" = "00 00"
+"61" = "FF"
+"63" = "00 00"
