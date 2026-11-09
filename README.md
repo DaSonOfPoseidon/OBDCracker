@@ -94,7 +94,7 @@ The same policy applies to importers: there is no raw-frame escape hatch. See [U
 | | |
 |---|---|
 | [Install](docs/install.md) | One-command install on Windows, macOS and Linux |
-| [Using the CLI](docs/usage.md) | `adapter`, `fingerprint`, `scan`, `sweep` and their options |
+| [Using the CLI](docs/usage.md) | `adapter`, `ports`, `vin`, `fingerprint`, `scan`, `sweep`, `dtc`, `update` and their options |
 | [Library](docs/library.md) | Importing the `obdcracker` crate |
 | [Safety model](docs/safety.md) | The policy, tiers, backups, dry runs and the audit log |
 | [Adapters](docs/adapters.md) | Supported adapter drivers and links |

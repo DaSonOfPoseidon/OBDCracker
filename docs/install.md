@@ -1,7 +1,7 @@
 # Install
 
 One command builds the `obdcracker` CLI from source. It installs whatever is missing (a C linker and rustup), and
-doesn't need Git. Run it again to update.
+doesn't need Git. Run it again, or [`obdcracker update`](#updating), to update.
 
 ```powershell
 # Windows (PowerShell)
@@ -55,5 +55,24 @@ SUBSYSTEM=="usb", ATTRS{idVendor}=="1209", ATTRS{idProduct}=="ca01", MODE="0660"
 `obdcracker 0.1.0 (commit 0123456789abcdef0123456789abcdef01234567)`. The commit is `unknown` for a build the
 install script didn't make, such as a plain `cargo build`; set `OBDCRACKER_COMMIT` to a full lower-case commit hash
 when building to record one. Anything else in that variable is ignored.
+
+## Updating
+
+```sh
+obdcracker update            # the highest release, if it is newer than this build
+obdcracker update 0.2.0      # a release by version (v0.2.0 works too)
+obdcracker update --main     # the newest commit on main
+```
+
+`obdcracker update` asks GitHub which commit the release (or `main`) names, checks that it is newer than the installed
+build, and runs the install script for exactly that commit. It needs `curl` or `wget`, and builds from source like the
+first install. `obdcracker --dry-run update` says what it would install and installs nothing. It never goes back to an
+older version, or to a commit that isn't newer than the installed one, unless you pass `--allow-downgrade`. The rules
+are in [using the CLI](usage.md#update).
+
+A build whose `--version` says `commit unknown` (one made before `update` existed, or by a plain `cargo build`) can't
+be compared with a release: `update` installs a release with a higher version, and refuses `--main` and the same
+version. Run the install script once, with the command at the top of this page, to replace it with a build that
+records its commit; after that `update` can compare.
 
 Next: [using the CLI](usage.md).

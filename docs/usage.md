@@ -1,9 +1,9 @@
 # Using the CLI
 
 Plug the adapter into the car and turn the ignition on. `vin`, `fingerprint`, `scan`, `sweep` and `dtc` send requests only
-through the [safety policy](safety.md), and with a real adapter they append to an audit log. `ports` and `adapter`
-send nothing to the car. `ports` writes no audit log; `adapter` writes one only if connecting to the adapter fails,
-recording what it sent the adapter and heard back.
+through the [safety policy](safety.md), and with a real adapter they append to an audit log. `ports`, `adapter` and
+`update` send nothing to the car. `ports` and `update` write no audit log; `adapter` writes one only if connecting to
+the adapter fails, recording what it sent the adapter and heard back.
 
 ## Connecting
 
@@ -64,7 +64,7 @@ On macOS use the `/dev/cu.*` port. Leaving a wireless adapter plugged in drains 
 connect, so the CLI warns about it, and the audit log records which link a session used. See
 [adapters](adapters.md) for what's supported.
 
-Two options work with `vin`, `fingerprint`, `scan`, `sweep` and `dtc` (not `ports` or `adapter`):
+Two options work with `vin`, `fingerprint`, `scan`, `sweep` and `dtc` (not `ports`, `adapter` or `update`):
 
 - `--dry-run` prints the frames the command would send and opens no adapter.
 - `--sim a7` runs it against a simulated A7.
@@ -257,3 +257,45 @@ The code can't be 000000 (no code) or FFFFFF (every group). If the module answer
 the default is `FF`, every record. `FE` is refused: it means every OBD record only to the extended data read. It's
 for a module that refuses `FF` but may answer a single record (#169). A reply for another record isn't taken as the
 answer, since it may be a late answer to an earlier request.
+
+## `update`
+
+```sh
+obdcracker update                          # the highest release, if it is newer than this build
+obdcracker update 0.2.0                    # that release (v0.2.0 works too)
+obdcracker update --main                   # the newest commit on main
+obdcracker --dry-run update                # look it up and say what would be installed; installs nothing
+obdcracker update 0.1.0 --allow-downgrade  # replace this build with an older one
+```
+
+Looks a release (or `main`) up on GitHub, checks that it is newer than this build, and runs the
+[install script](install.md) at that exact commit: `sh install.sh --ref <commit>` on macOS and Linux, and
+`powershell -NoProfile -ExecutionPolicy Bypass -File install.ps1 -Ref <commit>` on Windows, each downloaded from
+`raw.githubusercontent.com` at the same commit first. The script builds from source, so an update takes as long as a
+first install. It needs `curl` (Windows 10 and later have `curl.exe`) or, on a system without it, `wget`.
+
+- **Which release:** only published releases whose tag is exactly `v<major>.<minor>.<patch>` count (not drafts,
+  pre-releases or other tags). Without a version it takes the highest version, not the newest.
+- **Newer than this build:** this build's version and commit are in `obdcracker --version`. When the commit is
+  known, GitHub compares it with the target's. The target is installed when it is ahead, and `update` says it is up
+  to date when the commits are the same. A target that is behind, on a different line of history or not known to GitHub
+  (a build from a local checkout) is refused.
+- **Older versions:** a release with a lower version than this build is refused before any commit is compared.
+  `--allow-downgrade` replaces the refusals above, and says which build it replaces with which (versions and short
+  commits) before it installs. It doesn't change "up to date": the same commit is never reinstalled.
+- **A build with no recorded commit** (`unknown` in `--version`: one made before `update` existed, or by a plain
+  `cargo build`) can't be compared. It installs a release with a strictly higher version, and refuses `--main` and
+  the same version unless `--allow-downgrade` is given. Running the [install script](install.md#updating) once
+  replaces it with a build that records its commit.
+- **`--dry-run`** goes before `update`, as for every command. It makes the same lookups and prints the command it
+  would run, and downloads and installs nothing.
+- **No adapter:** `update` opens no adapter and writes no audit log. `--serial`, `--tcp`, `--gsusb`, `--socketcan`,
+  `--sim`, `--profile`, `--baud`, `--listen-only`, `--bitrate` and `--audit-log` are refused with status 2.
+- **Rate limit:** GitHub's API allows 60 requests an hour per address without signing in, and `update` makes at most
+  three (the release list, one commit, one comparison). When GitHub refuses, `update` says so.
+- **Exit status:** 0 when this build is up to date or was updated, 1 when the update was refused or failed (a
+  script that failed with a code from 1 to 255 gives that code), 2 for a bad command line.
+- **On Windows** the running `obdcracker.exe` can't be overwritten, so it is renamed to `obdcracker.old.exe` beside
+  it while the script runs. It is put back if the script left no program at its place (a failed install, or one that
+  put the new program somewhere else), and removed by the next `update` otherwise. A failed install leaves the
+  program where it was.
