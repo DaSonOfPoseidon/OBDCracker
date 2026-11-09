@@ -1,5 +1,7 @@
 //! The `obdcracker` command-line tool.
 
+mod update;
+
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::Duration;
