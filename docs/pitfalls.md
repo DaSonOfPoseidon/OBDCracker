@@ -499,6 +499,10 @@ Each entry names the class, what to check, and where it bit us.
   below a floor, and require the run's `N passed; 0 failed; 0 ignored` to equal the list (`ci.yml`, `timing-windows`, #42).
 - **No dev-dependency cycles across the `Transport` trait.** `obdcracker-transport` tests can't use `obdcracker-sim`:
   a cycle builds two copies of the trait. Put integration tests in the downstream crate.
+- **A fake service accepts any path, so check each path form against the real one.** `update`'s fake HTTP answered
+  `commits/tags/v0.1.0` because the test wrote it, while GitHub refuses that form with 422 for a tag. Each kind of ref
+  (a tag, a branch, a commit) can take a different path form, so call the real API once per form before pinning it,
+  and pin the exact URL in a test (`refs/tags/` and `refs/heads/` in `update.rs`, #295).
 
 ## Tooling and process
 

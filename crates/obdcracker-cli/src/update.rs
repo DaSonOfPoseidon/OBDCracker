@@ -103,12 +103,12 @@ pub(crate) struct Target {
 }
 
 impl Target {
-    // The name GitHub's commit lookup takes. `tags/` and `heads/` keep a branch named like a tag
-    // from being taken for it.
+    // The name GitHub's commit lookup takes. Only the full `refs/` form works for a tag: `tags/<tag>`
+    // is refused with 422. `refs/` also keeps a branch named like a tag from being taken for it.
     fn api_ref(&self) -> String {
         match self.version {
-            Some(version) => format!("tags/v{version}"),
-            None => "heads/main".to_owned(),
+            Some(version) => format!("refs/tags/v{version}"),
+            None => "refs/heads/main".to_owned(),
         }
     }
 }
@@ -732,6 +732,23 @@ mod tests {
     }
 
     #[test]
+    fn a_commit_is_looked_up_by_its_full_ref() {
+        // GitHub's `commits/tags/<tag>` is a 422 for a tag; the full `refs/` name is the one it takes
+        let release = Target {
+            version: Some(v(0, 1, 0)),
+        };
+        assert_eq!(
+            commit_url(&release),
+            "https://api.github.com/repos/DaSonOfPoseidon/OBDCracker/commits/refs/tags/v0.1.0"
+        );
+        let main = Target { version: None };
+        assert_eq!(
+            commit_url(&main),
+            "https://api.github.com/repos/DaSonOfPoseidon/OBDCracker/commits/refs/heads/main"
+        );
+    }
+
+    #[test]
     fn a_commit_reply_is_exactly_a_commit() {
         assert_eq!(parse_sha(SHA_A.as_bytes()).unwrap(), SHA_A);
         assert_eq!(parse_sha(format!("{SHA_A}\n").as_bytes()).unwrap(), SHA_A);
@@ -979,9 +996,9 @@ mod flow_tests {
     const RELEASES: &str =
         "https://api.github.com/repos/DaSonOfPoseidon/OBDCracker/releases?per_page=100&page=1";
     const COMMIT_V2: &str =
-        "https://api.github.com/repos/DaSonOfPoseidon/OBDCracker/commits/tags/v0.2.0";
+        "https://api.github.com/repos/DaSonOfPoseidon/OBDCracker/commits/refs/tags/v0.2.0";
     const COMMIT_MAIN: &str =
-        "https://api.github.com/repos/DaSonOfPoseidon/OBDCracker/commits/heads/main";
+        "https://api.github.com/repos/DaSonOfPoseidon/OBDCracker/commits/refs/heads/main";
     const COMPARE_V2: &str = "https://api.github.com/repos/DaSonOfPoseidon/OBDCracker/compare/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa...bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb?per_page=1";
     const SCRIPT_URL: &str = "https://raw.githubusercontent.com/DaSonOfPoseidon/OBDCracker/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb/scripts/install.sh";
     const SCRIPT: &[u8] = b"#!/bin/sh\necho installing\n";
