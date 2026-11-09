@@ -5,7 +5,8 @@
 #   wget -qO- https://raw.githubusercontent.com/DaSonOfPoseidon/OBDCracker/main/scripts/install.sh | sh
 #
 # It installs a C linker and rustup if they're missing, downloads the source (no Git needed), builds
-# the CLI into ~/.cargo/bin and, on Linux, gives you access to serial ports. Run it again to update.
+# the CLI into ~/.cargo/bin and, on Linux, gives you access to serial ports. Run it again to update,
+# or run `obdcracker update`, which runs this script at the commit it picked (`--ref <40-hex commit>`).
 # Options go after `sh -s --`, e.g. `| sh -s -- --ref some-branch`.
 #
 # Everything is in functions and `main` runs on the last line, so a cut-off download runs nothing,

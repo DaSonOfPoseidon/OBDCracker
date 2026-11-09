@@ -3,7 +3,9 @@
 #   irm https://raw.githubusercontent.com/DaSonOfPoseidon/OBDCracker/main/scripts/install.ps1 | iex
 #
 # It installs the Visual C++ Build Tools (Rust's linker on Windows) and rustup if they're missing,
-# downloads the source, and builds the CLI into ~\.cargo\bin. Run it again to update. With options:
+# downloads the source, and builds the CLI into ~\.cargo\bin. Run it again to update, or run
+# `obdcracker update`, which runs this script at the commit it picked (`-Ref <40-hex commit>`).
+# With options:
 #
 #   & ([scriptblock]::Create((irm https://raw.githubusercontent.com/DaSonOfPoseidon/OBDCracker/main/scripts/install.ps1))) -Ref some-branch
 #   powershell -ExecutionPolicy Bypass -File scripts\install.ps1 -Source .   # build a checkout

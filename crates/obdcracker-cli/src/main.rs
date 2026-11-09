@@ -1,10 +1,13 @@
 //! The `obdcracker` command-line tool.
 
+mod update;
+
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::Duration;
 
 use clap::builder::PossibleValuesParser;
+use clap::parser::ValueSource;
 use clap::{ArgGroup, CommandFactory, FromArgMatches, Parser, Subcommand};
 use obdcracker_core::obd;
 use obdcracker_core::response::{self, Error as ReplyError, Nrc};
@@ -81,7 +84,8 @@ struct Cli {
           conflicts_with_all = ["serial", "tcp", "dry_run", "sim"])]
     bitrate: Option<u32>,
 
-    /// Print the frames that would be sent without opening any adapter
+    /// Print the frames that would be sent without opening any adapter; with `update`, only look
+    /// the release up and say what would be installed
     #[arg(long, group = "adapter")]
     dry_run: bool,
 
@@ -189,6 +193,21 @@ enum Command {
     },
     /// List this computer's serial ports
     Ports,
+    /// Install a newer release of this tool, or the newest commit on main: look it up on GitHub,
+    /// check it is newer than this build, then run the install script at that commit. Uses no
+    /// adapter. With --dry-run, only says what it would do
+    Update {
+        /// The release to install, such as 0.2.0 or v0.2.0 [default: the highest release]
+        #[arg(value_name = "VERSION", value_parser = update_version, conflicts_with = "main")]
+        version: Option<update::Version>,
+        /// Install the newest commit on main instead of a release
+        #[arg(long)]
+        main: bool,
+        /// Replace this build with an older release, with a commit that isn't newer than this
+        /// build's, or with one that can't be compared with it (a build that records no commit)
+        #[arg(long)]
+        allow_downgrade: bool,
+    },
     /// Show what the adapter is and the voltage it sees; sends nothing on the bus
     Adapter,
 }
@@ -217,10 +236,94 @@ fn command() -> clap::Command {
     Cli::command().version(&*Box::leak(BUILD.to_string().into_boxed_str()))
 }
 
+fn update_version(text: &str) -> Result<update::Version, String> {
+    update::Version::parse_request(text)
+        .ok_or_else(|| format!("'{text}' isn't a release version such as 0.2.0 or v0.2.0"))
+}
+
+// The first flag that picks an adapter, a car's profile or the audit log, none of which `update`
+// uses. `--audit-log` has a default, so only one the user typed counts.
+fn flag_update_ignores(cli: &Cli, audit_log_given: bool) -> Option<&'static str> {
+    [
+        (cli.serial.is_some(), "--serial"),
+        (cli.tcp.is_some(), "--tcp"),
+        (cli.gsusb.is_some(), "--gsusb"),
+        (cli.socketcan.is_some(), "--socketcan"),
+        (cli.sim.is_some(), "--sim"),
+        (cli.profile.is_some(), "--profile"),
+        (cli.baud.is_some(), "--baud"),
+        (cli.listen_only, "--listen-only"),
+        (cli.bitrate.is_some(), "--bitrate"),
+        (audit_log_given, "--audit-log"),
+    ]
+    .into_iter()
+    .find_map(|(given, name)| given.then_some(name))
+}
+
+fn update(cli: &Cli, audit_log_given: bool) -> ExitCode {
+    let Command::Update {
+        version,
+        main,
+        allow_downgrade,
+    } = &cli.command
+    else {
+        unreachable!()
+    };
+    if let Some(flag) = flag_update_ignores(cli, audit_log_given) {
+        eprintln!(
+            "`update` uses no adapter or audit log, so {flag} doesn't apply (only --dry-run does)"
+        );
+        return ExitCode::from(2);
+    }
+    let want = if *main {
+        update::Want::Main
+    } else {
+        version.map_or(update::Want::Latest, update::Want::Version)
+    };
+    let installed = match update::Installed::from_build(BUILD.version, BUILD.commit) {
+        Ok(installed) => installed,
+        Err(e) => {
+            eprintln!("error: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let exe = match std::env::current_exe() {
+        Ok(exe) => exe,
+        Err(e) => {
+            eprintln!("error: can't find this program's own file: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let setup = update::Setup {
+        http: &update::SystemHttp::new(),
+        runner: &update::SystemRunner,
+        exe: &exe,
+        temp_dir: &std::env::temp_dir(),
+        windows: cfg!(windows),
+    };
+    let options = update::Options {
+        want,
+        allow_downgrade: *allow_downgrade,
+        dry_run: cli.dry_run,
+    };
+    ExitCode::from(update::run(
+        &options,
+        &installed,
+        &setup,
+        &mut std::io::stdout(),
+        &mut std::io::stderr(),
+    ))
+}
+
 fn main() -> ExitCode {
-    let cli = Cli::from_arg_matches(&command().get_matches()).unwrap_or_else(|e| e.exit());
+    let matches = command().get_matches();
+    let cli = Cli::from_arg_matches(&matches).unwrap_or_else(|e| e.exit());
     if let Command::Ports = cli.command {
         return ports();
+    }
+    if let Command::Update { .. } = cli.command {
+        let audit_log_given = matches.value_source("audit_log") == Some(ValueSource::CommandLine);
+        return update(&cli, audit_log_given);
     }
     if let Some(port) = &cli.serial {
         open_serial(&cli, port)
@@ -695,7 +798,8 @@ fn run<T: Transport>(cli: &Cli, transport: T, link: &str, timing: Timing) -> Exi
         | Command::Fingerprint
         | Command::Scan { .. }
         | Command::Sweep { .. }
-        | Command::Dtc { .. } => unreachable!(),
+        | Command::Dtc { .. }
+        | Command::Update { .. } => unreachable!(),
     }
 }
 
@@ -2363,6 +2467,80 @@ mod tests {
 
     fn parse(words: &[&str]) -> Result<Cli, clap::Error> {
         Cli::try_parse_from(words)
+    }
+
+    // What `update` was given: the version, `--main` and `--allow-downgrade`.
+    fn update_args(words: &[&str]) -> Result<(Option<String>, bool, bool), clap::Error> {
+        let cli = parse(&[&["obdcracker", "update"], words].concat())?;
+        let crate::Command::Update {
+            version,
+            main,
+            allow_downgrade,
+        } = cli.command
+        else {
+            panic!("not update");
+        };
+        Ok((version.map(|v| v.to_string()), main, allow_downgrade))
+    }
+
+    #[test]
+    fn update_takes_no_arguments_a_version_or_main() {
+        assert_eq!(update_args(&[]).unwrap(), (None, false, false));
+        assert_eq!(
+            update_args(&["0.2.0"]).unwrap(),
+            (Some("0.2.0".into()), false, false)
+        );
+        assert_eq!(
+            update_args(&["v0.2.0"]).unwrap(),
+            (Some("0.2.0".into()), false, false)
+        );
+        assert_eq!(update_args(&["--main"]).unwrap(), (None, true, false));
+        assert_eq!(
+            update_args(&["0.0.9", "--allow-downgrade"]).unwrap(),
+            (Some("0.0.9".into()), false, true)
+        );
+        assert_eq!(
+            update_args(&["--main", "--allow-downgrade"]).unwrap(),
+            (None, true, true)
+        );
+    }
+
+    #[test]
+    fn update_refuses_a_version_with_main_and_a_version_that_isnt_one() {
+        let err = update_args(&["0.2.0", "--main"]).unwrap_err();
+        assert_eq!(err.exit_code(), 2);
+        assert!(err.to_string().contains("cannot be used with"), "{err}");
+        for bad in ["latest", "0.2", "V0.2.0", "0.2.0-rc1", "01.2.3", "main", ""] {
+            let err = update_args(&[bad]).unwrap_err();
+            assert_eq!(err.exit_code(), 2, "{bad}");
+        }
+        assert_eq!(update_args(&["0.2.0", "0.3.0"]).unwrap_err().exit_code(), 2);
+    }
+
+    #[test]
+    fn update_ignores_no_flag_that_picks_an_adapter() {
+        for words in [
+            &["--serial", "COM3"][..],
+            &["--tcp", "127.0.0.1:35000"],
+            &["--gsusb"],
+            &["--socketcan", "can0"],
+            &["--sim", "a7"],
+            &["--profile", "a7"],
+            &["--baud", "9600"],
+            &["--gsusb", "--listen-only"],
+            &["--gsusb", "--bitrate", "500000"],
+        ] {
+            let cli = parse(&[&["obdcracker"], words, &["update"]].concat()).unwrap();
+            let flag = crate::flag_update_ignores(&cli, false);
+            assert_eq!(flag, Some(words[0]), "{words:?}");
+        }
+        let cli = parse(&["obdcracker", "update"]).unwrap();
+        assert_eq!(crate::flag_update_ignores(&cli, false), None);
+        assert_eq!(crate::flag_update_ignores(&cli, true), Some("--audit-log"));
+        // --dry-run is the one global flag it uses
+        let cli = parse(&["obdcracker", "--dry-run", "update"]).unwrap();
+        assert_eq!(crate::flag_update_ignores(&cli, false), None);
+        assert!(cli.dry_run);
     }
 
     #[test]
