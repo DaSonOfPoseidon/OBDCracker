@@ -64,6 +64,13 @@ pub struct FakeElm {
     pub listen_one_frame: bool,
     /// Frames a module sends after a request (see [`Delayed`]).
     pub delayed: Option<Delayed>,
+    /// Count each [`Delayed`] frame's time from when the adapter next starts monitoring (`STM`
+    /// or `ATMA`), not from the request: the module answers a set time after the host started
+    /// listening, whatever the test thread does before it. A request sent first drops frames
+    /// still held, and with no monitor the frames never arrive.
+    pub delay_from_monitor: bool,
+    // Frames waiting for the adapter to start monitoring (`delay_from_monitor`).
+    held: Vec<(Duration, u32, Vec<u8>)>,
     // Frames on the bus that haven't reached the adapter yet.
     bus: Vec<(Instant, u32, Vec<u8>)>,
     /// Frames the receive filter would have shown that arrived while the adapter was neither
@@ -221,6 +228,8 @@ impl FakeElm {
             listening: false,
             listen_one_frame: false,
             delayed: None,
+            delay_from_monitor: false,
+            held: Vec::new(),
             bus: Vec::new(),
             lost_frames: Vec::new(),
             monitoring: false,
@@ -380,7 +389,7 @@ impl FakeElm {
             // Monitor with the filters as set; an STN's command (STN FRPM, section 8.9), unknown
             // to a plain ELM327.
             if self.sti.is_some() {
-                self.monitoring = true;
+                self.start_monitoring();
                 self.monitor_all = false;
             } else {
                 self.print("?");
@@ -436,7 +445,7 @@ impl FakeElm {
             }
             "MA" => {
                 // No prompt until the host stops it.
-                self.monitoring = true;
+                self.start_monitoring();
                 self.monitor_all = self.sti.is_some();
                 return;
             }
@@ -710,14 +719,7 @@ impl FakeElm {
             self.print(&line);
             printed += 1;
         }
-        if let Some(delayed) = self.delayed.as_mut() {
-            let now = Instant::now();
-            let late = delayed(header, &bytes);
-            self.bus.extend(
-                late.into_iter()
-                    .map(|(after, id, data)| (now + after, id, data)),
-            );
-        }
+        self.schedule_late_frames(header, &bytes);
         if one_frame && printed > 0 {
             // The listen ended with its first frame.
             self.prompt();
@@ -726,6 +728,35 @@ impl FakeElm {
         } else if !self.hang_after_request {
             self.prompt();
         }
+    }
+
+    // Puts the frames a module sends after this request on the bus, or holds them for the
+    // monitor (`delay_from_monitor`).
+    fn schedule_late_frames(&mut self, header: u32, request: &[u8]) {
+        let Some(delayed) = self.delayed.as_mut() else {
+            return;
+        };
+        let late = delayed(header, request);
+        if self.delay_from_monitor {
+            self.held = late;
+        } else {
+            let now = Instant::now();
+            self.bus.extend(
+                late.into_iter()
+                    .map(|(after, id, data)| (now + after, id, data)),
+            );
+        }
+    }
+
+    // Starts monitoring, which puts the frames held for it on the bus.
+    fn start_monitoring(&mut self) {
+        self.monitoring = true;
+        let now = Instant::now();
+        let held = std::mem::take(&mut self.held);
+        self.bus.extend(
+            held.into_iter()
+                .map(|(after, id, data)| (now + after, id, data)),
+        );
     }
 
     // How a frame is printed after a request or while monitoring.

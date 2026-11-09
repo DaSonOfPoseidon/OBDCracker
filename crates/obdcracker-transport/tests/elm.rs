@@ -1141,6 +1141,40 @@ mod requests {
         car
     }
 
+    // `one_frame_stn` with the module's frames due `delay` after the adapter starts monitoring,
+    // not after the request. #227 is about a module that answers just after the host starts
+    // listening; counting from the request let a test thread that was descheduled between the
+    // ACK and its `recv` lose the frames before the driver could monitor.
+    fn one_frame_stn_from_monitor(delay: Duration) -> FakeElm {
+        let mut car = one_frame_stn(delay);
+        car.delay_from_monitor = true;
+        car
+    }
+
+    #[test]
+    fn frames_due_from_the_monitor_wait_for_it_however_long_the_host_takes() {
+        // 0 ms after the monitor starts, and the host takes 50 ms to start it: the frames are
+        // heard, none lost.
+        let mut elm = with_echo_shown(one_frame_stn_from_monitor(Duration::ZERO));
+        request_sent(&mut elm);
+        std::thread::sleep(Duration::from_millis(50));
+        assert_eq!(elm.recv(Duration::from_secs(1)).unwrap().payload[0], 0x20);
+        assert_eq!(elm.recv(Duration::from_secs(1)).unwrap().payload[0], 0x01);
+        assert_eq!(elm.link().elm.lost_frames, []);
+    }
+
+    #[test]
+    fn frames_due_from_the_monitor_never_arrive_if_nothing_monitors() {
+        // The trigger never fires: the frames are not on the bus, so they are not lost either,
+        // and a caller waiting for them times out.
+        let mut elm = with_echo_shown(one_frame_stn_from_monitor(Duration::ZERO));
+        request_sent(&mut elm);
+        std::thread::sleep(Duration::from_millis(20));
+        elm.link_mut().elm.poll();
+        assert_eq!(elm.link().elm.next_frame_at(), None);
+        assert_eq!(elm.link().elm.lost_frames, []);
+    }
+
     // Opens channel 0x740/0x300 on `elm` and sends the `1A 9B` request; the module's ACK has
     // been read when this returns.
     fn request_sent(elm: &mut Elm<FakeLink>) -> obdcracker_safety::OpenTp20Channel {
@@ -1166,8 +1200,11 @@ mod requests {
     #[test]
     fn a_tp20_answer_right_after_the_ack_is_heard_and_acked() {
         // The STN prints its prompt after the module's ACK, and the module's data follows 5 ms
-        // later: with nothing listening, that frame was lost (#227).
-        let mut elm = with_echo_shown(one_frame_stn(Duration::from_millis(5)));
+        // later: with nothing listening, that frame was lost (#227). The 5 ms run from when the
+        // adapter starts monitoring, so a loaded test thread can't make the module early. The
+        // second frame, 1 ms after the first, is meant to be heard too: monitor mode keeps
+        // listening after the first frame, and `lost_frames` stays empty.
+        let mut elm = with_echo_shown(one_frame_stn_from_monitor(Duration::from_millis(5)));
         let channel = request_sent(&mut elm);
         let policy = Policy::read_only();
         let data = elm.recv(Duration::from_secs(1)).unwrap();
@@ -1184,6 +1221,15 @@ mod requests {
             "the ACK went out"
         );
         assert_eq!(elm.link().elm.lost_frames, []);
+        // Nothing went out between the request and the ACK: no `A3` to re-arm the listen (#227).
+        let sent = &elm.link().elm.sent;
+        assert_eq!(
+            sent[sent.len() - 2..],
+            [
+                (0x740, vec![0x10, 0x00, 0x02, 0x1A, 0x9B]),
+                (0x740, vec![0xB2])
+            ]
+        );
     }
 
     fn count(elm: &Elm<FakeLink>, command: &str) -> usize {
@@ -1196,7 +1242,7 @@ mod requests {
         // ACK's reply arrives one frame at a time too.
         use obdcracker_transport::Timing;
         use obdcracker_transport::tp20::{ChannelSession, Disconnect};
-        let mut elm = with_echo_shown(one_frame_stn(Duration::from_millis(5)));
+        let mut elm = with_echo_shown(one_frame_stn_from_monitor(Duration::from_millis(5)));
         let policy = Policy::read_only();
         let timing = Timing {
             p2: Duration::from_millis(100),
