@@ -104,6 +104,24 @@ pub(super) struct Plan {
 const HOW_TO_SET_UP: &str = "This tool never changes an interface's bitrate or mode: set it up yourself, \
      for example `sudo ip link set can0 up type can bitrate 500000`";
 
+/// What a wrong bitrate does in a session of `mode`. Sending at it disturbs the bus. Listening at it
+/// only misses or misreads frames, unless the controller isn't in listen-only mode: then it can
+/// still send error frames.
+fn wrong_bitrate_effect(mode: Mode, controller_listen_only: Option<bool>) -> &'static str {
+    match (mode, controller_listen_only) {
+        (Mode::Active, _) => "Sending at the wrong bitrate disturbs the car's bus",
+        (Mode::ListenOnly, Some(true)) => "At the wrong bitrate, frames would be missed or misread",
+        (Mode::ListenOnly, Some(false)) => {
+            "At the wrong bitrate, frames would be missed or misread, and the controller can send \
+             error frames and disturb the bus, since it isn't in listen-only mode"
+        }
+        (Mode::ListenOnly, None) => {
+            "At the wrong bitrate, frames would be missed or misread, and the controller can send \
+             error frames and disturb the bus, since it isn't in listen-only mode (or doesn't say)"
+        }
+    }
+}
+
 /// Decides whether a session may use `iface`, or says why not.
 pub(super) fn plan(name: &str, iface: &Iface, options: &Options) -> Result<Plan, String> {
     if !iface.is_can {
@@ -178,9 +196,9 @@ pub(super) fn plan(name: &str, iface: &Iface, options: &Options) -> Result<Plan,
         (Some(expected), Some(actual)) => {
             return Err(format!(
                 "{name} runs at {actual} bit/s but {expected} bit/s was asked for (--bitrate or \
-                 the vehicle profile). Sending at the wrong bitrate disturbs the car's bus, and \
-                 this tool never changes an interface's bitrate: set it yourself, or ask for \
-                 {actual}"
+                 the vehicle profile). {}, and this tool never changes an interface's bitrate: \
+                 set it yourself, or ask for {actual}",
+                wrong_bitrate_effect(options.mode, iface.modes.map(|modes| modes.listen_only))
             ));
         }
         (Some(expected), None) => {
