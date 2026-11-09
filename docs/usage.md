@@ -294,9 +294,14 @@ first install. It needs `curl` (Windows 10 and later have `curl.exe`) or, on a s
   would run, and downloads and installs nothing.
 - **No adapter:** `update` opens no adapter and writes no audit log. `--serial`, `--tcp`, `--gsusb`, `--socketcan`,
   `--sim`, `--profile`, `--baud`, `--listen-only`, `--bitrate` and `--audit-log` are refused with status 2.
-- **Rate limit:** GitHub's API allows 60 requests an hour per address without signing in, and `update` makes
-  three (the release list, one commit, one comparison). The release list is read 100 releases at a time, so a project
-  with more than 100 releases takes more, up to ten pages. When GitHub refuses, `update` says so.
+- **Rate limit:** GitHub's API allows 60 requests an hour per address without signing in. `update` and
+  `update <VERSION>` make one request per release page, one for the target's commit and, when the installed commit is
+  known and differs from the target's, one comparison. `update --main` reads no release list, so it makes the commit
+  lookup and that comparison only. The release list is read 100 releases at a time, and a page is read while the one
+  before it was full: 99 releases take one page, and exactly 100 take two (the second empty). A list of exactly 1000
+  releases takes eleven pages, and a longer one is refused after the eleventh. When the list has no
+  release to install (none listed, or a named version missing) or the one it has is lower than this build's (without
+  `--allow-downgrade`), `update` is refused before the commit is looked up. When GitHub refuses, `update` says so.
 - **Exit status:** 0 when this build is up to date or was updated, 1 when the update was refused or failed (a
   script that failed with a code from 1 to 255 gives that code), 2 for a bad command line.
 - **On Windows** the running `obdcracker.exe` can't be overwritten, so it is renamed to `obdcracker.old.exe` beside
