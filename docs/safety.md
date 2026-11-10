@@ -131,8 +131,9 @@ a car.
 Every frame sent or received in a real session is appended to an audit log, along with any adapter error (such as an
 adapter mishearing a request it may already have sent), every command to the adapter (`"dir":"cmd"`, such as
 `AT SH 7E0`, with its answer), every status line that ended a request instead of a reply (`"dir":"status"`, such as
-`NO DATA`), and every reply line the adapter printed after nothing read it any more (`"dir":"unread"`, such as a late
-reply). It holds only what the adapter hears through its receive filter, not the
+`NO DATA`), every reply line the adapter printed after nothing read it any more (`"dir":"unread"`, such as a late
+reply), and every driver setting that changes how a request is sent (`"dir":"setting"`, such as
+`"name":"segment-on-stn","value":"on"`, logged before the first request). It holds only what the adapter hears through its receive filter, not the
 whole bus. Requests and the flow control frames a backend sends while receiving are logged before they are sent, and the log
 records which link a session used.
 

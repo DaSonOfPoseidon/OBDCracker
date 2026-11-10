@@ -3581,7 +3581,7 @@ mod forced_caf0 {
         let sent = since(&elm, before);
         assert!(sent.iter().any(|c| c == STPX_LINE), "{sent:?}");
         assert!(!sent.iter().any(|c| c.starts_with("ATCAF")), "{sent:?}");
-        assert!(frames_received(&elm).is_empty());
+        assert_eq!(frames_received(&elm).len(), 0);
     }
 
     #[test]

@@ -16,7 +16,9 @@ use crate::{Error, LinkEvent, Response, Transport, hex};
 /// request in segments and the flow control it read (`"dir":"tx_frame"` and `"dir":"rx_frame"`,
 /// with the ID and the 8 data bytes as `"payload"`), reply lines nobody read before the
 /// next request (`"dir":"unread"`), status lines that ended a request, such as `NO DATA`
-/// (`"dir":"status"`), and how many events were lost (`"dir":"lost"`). Each line's `ts_ms` is
+/// (`"dir":"status"`), driver settings that change how a request is sent, such as
+/// [`Elm::segment_on_stn`](crate::elm::Elm::segment_on_stn) (`"dir":"setting"`, with `"name"` and
+/// `"value"`), and how many events were lost (`"dir":"lost"`). Each line's `ts_ms` is
 /// when it happened (for a reply line, when the driver read it from the link), so an event can
 /// be logged after a later request. When dropped, it has the transport read what's left of the
 /// last request ([`Transport::settle`]) and logs that too, unless it was settled since.
