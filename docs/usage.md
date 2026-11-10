@@ -212,8 +212,12 @@ profile's TP2.0 list. On the A7 these are the 13 modules that stayed silent on I
 addresses the gateway's `2A29` table marks like the passenger door's (52, #169). Some of those may be modules that
 answer on ISO-TP; a setup to one is still a read. For each module that
 answers, it shows the channel it gave, a refusal or the bytes it sent. It then closes each channel with `A8`. Then, for
-each module that gave a channel, it opens one again and reads the module's identification (KWP2000 `1A 9B`), showing
-the bytes and their printable text, and closes it ([how](tp20.md#data-transfer)). A record that doesn't start with
+each module that gave a channel, it opens one again, asks for VAG's diagnostic session (`10 89`, which the modules want
+before they answer reads: car session 9's module 52 answered `1A 9B` with `7F 1A 11` without it), reads the module's
+identification (KWP2000 `1A 9B`), showing the bytes and their printable text, and closes the channel, which ends the
+session ([how](tp20.md#data-transfer)). The output ends with the session the read ran in: `(session 89)` if the
+module answered exactly `50 89`, else `(default session: ...)` with why (`10 89` refused with its code, not answered,
+or answered with other bytes), and the read is still tried. A record that doesn't start with
 the `9B` it answers is shown as not read, with its bytes. An adapter failure on a channel ends the scan with an error.
 The modules aren't scanned otherwise. A disconnect goes
 only on a channel a module gave in answer to its setup, answered on 0x300 as the setup asked, and never on an ID
