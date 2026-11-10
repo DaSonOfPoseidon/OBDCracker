@@ -167,3 +167,15 @@ A module that doesn't confirm `10 01` at the end is left to return after S3.
   failing to end it is a `Why::Adapter` stop.
 - If leaving the session fails, `Sweep::still_extended` says why the module may still be in it. When the adapter fails
   on `10 01`, `still_extended` stays `None` and `Sweep::stop` is `Why::Adapter`; the module may still be in the session.
+
+## One request for several DIDs
+
+`read_dids::read_dids` (in `crates/obdcracker-transport`; the CLI's [`read-dids`](usage.md#read-dids)) sends one `22` with
+1 to 21 DIDs, such as `22 F187 F188 F189 F191`, which `scan` doesn't (it batches at most 3, and only DIDs whose lengths
+the profile gives) and `sweep_dids` doesn't (one DID per request). The caller gives each DID's length where it knows one
+(`length_of`), and the reply is split only as far as that goes: every DID up to the first unknown one that isn't last,
+then the rest as `DidsData::unsplit`. Each echo, each known length and the end of the reply are checked exactly, and one
+that doesn't fit is `ReadError::Undecodable` with its bytes. The request goes through the policy, and nothing is sent for
+an empty list, more than 21 DIDs or a repeat. A request of 4 or more DIDs is over 7 bytes, so an ELM327 sends it in
+segments only once it has shown it echoes as it reads, which its first request does: the CLI reads the first DID alone
+first, and an importer must send some single-frame request first, or the read is refused with nothing written.

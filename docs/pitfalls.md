@@ -412,6 +412,13 @@ Each entry names the class, what to check, and where it bit us.
   datasheet feature that does it and turn each off, and make the fake adapter do what the real one does by default
   (PR #149).
 
+- **A feature gated on state an earlier request sets never works as a process's only request.** Sending over 7 bytes
+  needs the adapter to have shown it echoes each character (`early_echo`), which only a first request shows, and
+  every driver test started from a `warmed` connection that had sent one. The CLI's `read-dids`, a fresh process
+  with one long request, would have been refused every time (#308). For each feature that depends on state the
+  driver learns, run it as the first and only request of a connection (the TCP fake in `cli.rs`, not `warmed`), and
+  have the command send the cheapest safe request first where it can't.
+
 - **A read path that collects lines to fail on them must still log them.** The segmenting driver stops the adapter's
   listen after the flow control and fails the request if the module printed another frame first, but it kept those
   lines for itself, so the frame that failed the request, and the `NO DATA` or `BUS BUSY` that ended another, were in no
