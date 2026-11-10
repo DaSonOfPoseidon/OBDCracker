@@ -1,8 +1,8 @@
 # Design: sending requests over 7 bytes on an ELM327 with `AT CAF0`
 
 Status: **approved as written by the user (2026-11-10) and implemented (#214).** It was unit 1 of 3: unit 2 built it
-([`elm327.md`](../elm327.md#multi-frame-requests-on-a-plain-elm327) says what the driver does), unit 3 (#308) adds an
-option that forces it on an STN so the OBDLink can test it.
+([`elm327.md`](../elm327.md#multi-frame-requests-on-a-plain-elm327) says what the driver does), unit 3 (#308) added an
+option that forces it on an STN so the OBDLink can test it (section 13).
 
 A plain ELM327 sends one CAN frame per request line (up to 7 bytes) and has no segmenting of its own, so the driver
 refuses a request longer than that ([`elm327.md`](../elm327.md#limits)): a UDS `22` read of 4 DIDs is 9 bytes and can't
@@ -411,20 +411,23 @@ In `tests/elm.rs` against `fake_elm.rs`, which first has to learn the adapter's 
 
 ## 13. Forcing it on an STN (#308)
 
-Unit 3. An STN has `STPX`, so it takes the path above only when a **library option and a CLI flag** say so, both off
-by default; their names are unit 3's (the library's in the style of the other connect options, the CLI's documented in
-`usage.md`). With the option set, a request of 8 to 44 bytes on an STN goes through this note's path instead of `STPX`,
+Unit 3 (built in #308). An STN has `STPX`, so it takes the path above only when a **library option and a CLI flag** say
+so, both off by default: `Elm::segment_on_stn(true)` and `--elm-segmenting caf0` ([`usage.md`](../usage.md#sending-a-long-request-on-an-stn---elm-segmenting)).
+The flag's other value, `stpx`, is the default. With the option set, a request of 8 to 44 bytes on an STN goes through this note's path instead of `STPX`,
 with every check of section 1, and 1 to 7 bytes goes as today. The option is **recorded in the audit log before the
-first request of the session**, so a log can say how a frame was sent (#304 goal 4 checks it). What an STN does
+first request of the session** as a `"dir":"setting"` line (`"name":"segment-on-stn"`, `"value":"on"`), so a log can say how
+a frame was sent (#304 goal 4 checks it). What an STN does
 differently (padding, the listen ending at the prompt, any `FC RX TIMEOUT`-like status in `CAF0`) is Open questions, 3.
 
 ## 14. Car test (#304 goal 4)
 
-After goal 3, through the tool with the policy and `--audit-log a7s10-caf0.jsonl`, once #308 merges: the forced
+After goal 3, through the tool with the policy and `--audit-log a7s10-caf0.jsonl`, `--elm-segmenting caf0` and
+`read-dids --module transmission --did F187,F188,F189,F191` (and the same for the gateway): the forced
 option on the OBDLink, a 4-DID read `22 F187 F188 F189 F191` to the transmission (7E1 to 7E9) and the gateway (710 to
 77A), not the engine (#306). It also needs `docs/usage.md`'s name for the flag. Expected in the log:
 
-- the option shown as forced, then the request once: `tx` with the 9-byte payload;
+- the option shown as forced (`setting`), then `read-dids`' first request, a single-frame read of F187 that shows the
+  adapter echoes as it reads (a `tx` of 3 bytes), then the request once: `tx` with the 9-byte payload;
 - `ATCAF0` and its echo, then `tx_frame 10 09 22 F1 87 F1 88 F1`, an `rx_frame` for the module's `30 xx yy ...`,
   `X` and `STOPPED`, then `tx_frame 21 89 F1 91 00 00 00 00` (the filler may be the adapter's PP 26 value), and the answer
   (`62 F1 87 ...`, or `7F 22 ..`) matching the same DIDs read one at a time in goal 1;

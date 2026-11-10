@@ -1,6 +1,6 @@
 # Using the CLI
 
-Plug the adapter into the car and turn the ignition on. `vin`, `fingerprint`, `scan`, `sweep` and `dtc` send requests only
+Plug the adapter into the car and turn the ignition on. `vin`, `fingerprint`, `scan`, `sweep`, `dtc` and `read-dids` send requests only
 through the [safety policy](safety.md), and with a real adapter they append to an audit log. `ports`, `adapter` and
 `update` send nothing to the car. `ports` and `update` write no audit log; `adapter` writes one only if connecting to
 the adapter fails, recording what it sent the adapter and heard back.
@@ -25,6 +25,22 @@ from built-in ports, so every COM port counts there, and a lone built-in COM por
 would fail as "not an ELM"; give `--serial` on a PC with one. Other systems count every port too.
 `--serial`, `--tcp`, `--gsusb`, `--socketcan`, `--sim` and `--dry-run` skip the search, and `ports` still lists
 every port.
+
+### Sending a long request on an STN (`--elm-segmenting`)
+
+```sh
+obdcracker --elm-segmenting caf0 --profile a7 read-dids --module transmission --did F187,F188,F189,F191
+```
+
+A request of 8 to 44 bytes (a `22` read of 4 or more DIDs) goes out as `STPX` on an STN chip such as an OBDLink, which
+segments it itself, and as raw frames the driver writes with `AT CAF0` on a plain ELM327
+([how](elm327.md#multi-frame-requests-on-a-plain-elm327)). `--elm-segmenting caf0` makes an STN take the second path
+too, so it can be tried on the one adapter that has both ([design](design/elm-caf0-segmenting.md#13-forcing-it-on-an-stn-308)).
+`--elm-segmenting stpx` is the default. Every check of that path applies, and a request of 1 to 7 bytes is one frame
+either way. The audit log records the choice before the first request (`"dir":"setting"`, `"name":"segment-on-stn"`,
+`"value":"on"` for `caf0`, `"off"` for an explicit `stpx`; nothing without the flag). The option is for ELM327/STN
+adapters: it is refused with `--gsusb`, `--socketcan`, `--sim` and `--dry-run`, and by `adapter` and `update`, with
+status 2.
 
 ### A CANable or candleLight (`--gsusb`)
 
@@ -66,10 +82,10 @@ connect, so the CLI warns about it, and the audit log records which link a sessi
 
 Two options, each with its own list of commands:
 
-- `--dry-run` works with `vin`, `fingerprint`, `scan`, `sweep`, `dtc` and `update`. The car commands print the frames
+- `--dry-run` works with `vin`, `fingerprint`, `scan`, `sweep`, `dtc`, `read-dids` and `update`. The car commands print the frames
   they would send and open no adapter; `update` makes the same lookups and prints the command it would run, and installs
   nothing. `adapter` refuses it, and `ports` ignores it.
-- `--sim a7` works with `vin`, `fingerprint`, `scan`, `sweep` and `dtc`, and runs the command against a simulated A7.
+- `--sim a7` works with `vin`, `fingerprint`, `scan`, `sweep`, `dtc` and `read-dids`, and runs the command against a simulated A7.
   `adapter` and `update` refuse it with status 2, and `ports` ignores it.
 
 ## `vin`
@@ -265,6 +281,36 @@ the default is `FF`, every record. `FE` is refused: it means every OBD record on
 for a module that refuses `FF` but may answer a single record (#169). A reply for another record isn't taken as the
 answer, since it may be a late answer to an earlier request.
 
+## `read-dids`
+
+```sh
+obdcracker --profile a7 read-dids --module transmission --did F187,F188,F189,F191  # one request for four DIDs
+```
+
+Reads several DIDs from one profile module with a single request (`22` and each DID), such as the four identification
+DIDs: 9 bytes, so it goes out in segments. The DIDs are four hex digits each, comma-separated, in the order the reply
+must hold them: 1 to 21 (a request of at most 43 bytes, under the driver's 44), with no repeats. The policy approves the
+request as it does any other, the profile can only narrow it, and nothing is sent if it refuses.
+
+The reply doesn't say where one DID's data ends, so it is split only as far as the profile gives lengths. Each DID
+whose length the profile gives is printed as `<ID> <module> <DID> [bytes]`. From the first DID with no length that isn't
+the last, the rest is printed whole, as `<ID> <module> <DIDs> not split, as the profile gives no length for the first
+[bytes]`, from that DID's echo on (a DID with no length that is last takes the rest of the reply). The reply is checked
+exactly: each DID's echo in the order asked, each known length, nothing left over once every DID is split, and room for
+the DIDs still to come. A reply that fails any of that (a DID the module left out, bytes after the last one) is
+printed as `(reply is malformed: <bytes>)` and shows no values; a refusal is printed by name, as `scan` does. The
+command exits 0 only when the module gave a good reply, 1 when it didn't, refused or said nothing, and 2 for a bad
+command line (a DID that isn't four hex digits, a repeat, none or more than 21, a module the profile doesn't have, no
+profile).
+
+An ELM327 sends a request over 7 bytes in segments only on an adapter that has shown it echoes each character as it
+reads it, and its first request shows that, so with 4 or more DIDs the command first reads the first DID alone (a single
+frame to the same module, through the same policy) and then sends the whole read: the audit log has both. A list the
+command would refuse is refused before that first read. If the first read gets no answer, the whole read isn't sent
+(status 1), since the module's late answer could be taken for the whole read's; a refusal counts as an answer. `--dry-run`
+prints the frames of the whole request only, and `--elm-segmenting caf0` chooses how an STN sends it
+([above](#sending-a-long-request-on-an-stn---elm-segmenting)).
+
 ## `update`
 
 ```sh
@@ -297,7 +343,8 @@ first install. It needs `curl` (Windows 10 and later have `curl.exe`) or, on a s
 - **`--dry-run`** goes before `update`, as for every command. It makes the same lookups and prints the command it
   would run, and downloads and installs nothing.
 - **No adapter:** `update` opens no adapter and writes no audit log. `--serial`, `--tcp`, `--gsusb`, `--socketcan`,
-  `--sim`, `--profile`, `--baud`, `--listen-only`, `--bitrate` and `--audit-log` are refused with status 2.
+  `--sim`, `--profile`, `--baud`, `--elm-segmenting`, `--listen-only`, `--bitrate` and `--audit-log` are refused with
+  status 2.
 - **Rate limit:** GitHub's API allows 60 requests an hour per address without signing in. `update` and
   `update <VERSION>` make one request per release page, one for the target's commit and, when the installed commit is
   known and differs from the target's, one comparison. `update --main` reads no release list, so it makes the commit

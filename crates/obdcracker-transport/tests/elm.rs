@@ -3490,6 +3490,263 @@ mod caf0 {
     }
 }
 
+// An STN's long request goes as `STPX`, unless the driver is told to segment it with `AT CAF0`
+// like a plain ELM327's (docs/design/elm-caf0-segmenting.md, section 13).
+mod forced_caf0 {
+    use obdcracker_transport::LinkEvent;
+    use support::fake_elm::Module;
+
+    use super::*;
+
+    const REQUEST_ID: u32 = 0x7E1;
+    const REPLY_ID: u32 = 0x7E9;
+    const ANSWER: [u8; 3] = [0x59, 0x02, 0xFF];
+    const FOUR_DIDS: [u8; 9] = [0x22, 0xF1, 0x87, 0xF1, 0x88, 0xF1, 0x89, 0xF1, 0x91];
+    // The line the fake records for the 4-DID read sent with `STPX`.
+    const STPX_LINE: &str = "STPXD:22F187F188F189F191";
+
+    // `len` bytes of a `19` read, which the policy takes at any length.
+    fn read_of(len: usize) -> Vec<u8> {
+        (0..len)
+            .map(|n| match n {
+                0 => 0x19,
+                1 => 0x02,
+                2 => 0xFF,
+                n => u8::try_from(n).unwrap(),
+            })
+            .collect()
+    }
+
+    fn request(len: usize) -> Approved {
+        approve(Target::Physical(REQUEST_ID), &read_of(len))
+    }
+
+    // An adapter with a module that answers every request it receives whole; an STN if `stn`.
+    fn adapter(stn: bool) -> FakeElm {
+        let mut adapter = FakeElm::new(Box::new(|header, _| {
+            if header == REQUEST_ID {
+                vec![(REPLY_ID, ANSWER.to_vec())]
+            } else {
+                Vec::new()
+            }
+        }))
+        .with_module(Module::new(REQUEST_ID, REPLY_ID));
+        if stn {
+            adapter.sti = Some("STN1155 v5.6.19".into());
+        }
+        adapter
+    }
+
+    // Connected, with the option as `forced` says, and past a first request, so the driver has
+    // seen the adapter echo each character as it reads it.
+    fn warmed(adapter: FakeElm, forced: bool) -> Elm<FakeLink> {
+        let mut elm = connect(adapter);
+        elm.segment_on_stn(forced);
+        elm.send(&approve(Target::Physical(0x7E0), &[0x09, 0x02]))
+            .unwrap();
+        while elm.recv(Duration::from_secs(1)).is_ok() {}
+        elm
+    }
+
+    // Every frame the module received.
+    fn frames_received(elm: &Elm<FakeLink>) -> Vec<Vec<u8>> {
+        elm.link()
+            .elm
+            .module
+            .as_ref()
+            .unwrap()
+            .frames
+            .iter()
+            .map(|(_, frame)| frame.clone())
+            .collect()
+    }
+
+    fn exchange_one(elm: &mut Elm<FakeLink>, request: &Approved) -> Response {
+        elm.send(request).unwrap();
+        let answer = elm.recv(Duration::from_secs(1)).unwrap();
+        while elm.recv(Duration::from_millis(100)).is_ok() {}
+        answer
+    }
+
+    fn since(elm: &Elm<FakeLink>, before: usize) -> Vec<String> {
+        commands(elm)[before..].to_vec()
+    }
+
+    #[test]
+    fn an_stn_sends_a_long_request_as_stpx_unless_told_to_segment_it() {
+        let mut elm = warmed(adapter(true), false);
+        let before = commands(&elm).len();
+        let answer = exchange_one(&mut elm, &approve(Target::Physical(REQUEST_ID), &FOUR_DIDS));
+        assert_eq!(answer, Response::new(REPLY_ID, ANSWER.to_vec()));
+        let sent = since(&elm, before);
+        assert!(sent.iter().any(|c| c == STPX_LINE), "{sent:?}");
+        assert!(!sent.iter().any(|c| c.starts_with("ATCAF")), "{sent:?}");
+        assert_eq!(frames_received(&elm).len(), 0);
+    }
+
+    #[test]
+    fn an_stn_told_to_segment_sends_the_same_request_as_caf0_frames() {
+        let mut elm = warmed(adapter(true), true);
+        let before = commands(&elm).len();
+        let answer = exchange_one(&mut elm, &approve(Target::Physical(REQUEST_ID), &FOUR_DIDS));
+        assert_eq!(answer, Response::new(REPLY_ID, ANSWER.to_vec()));
+        let sent = since(&elm, before);
+        assert!(!sent.iter().any(|c| c.starts_with("STPX")), "{sent:?}");
+        assert!(sent.iter().any(|c| c == "ATCAF0"), "{sent:?}");
+        assert_eq!(
+            frames_received(&elm),
+            [
+                vec![0x10, 0x09, 0x22, 0xF1, 0x87, 0xF1, 0x88, 0xF1],
+                vec![0x21, 0x89, 0xF1, 0x91, 0x00, 0x00, 0x00, 0x00]
+            ]
+        );
+        assert_eq!(
+            elm.link().elm.module.as_ref().unwrap().received,
+            [FOUR_DIDS.to_vec()]
+        );
+    }
+
+    #[test]
+    fn a_request_of_7_bytes_or_less_stays_one_frame_when_forced() {
+        let mut elm = warmed(adapter(true), true);
+        let before = commands(&elm).len();
+        elm.send(&request(7)).unwrap();
+        assert_eq!(elm.link().elm.sent.last(), Some(&(REQUEST_ID, read_of(7))));
+        let sent = since(&elm, before);
+        assert!(
+            !sent
+                .iter()
+                .any(|c| c.starts_with("ATCAF") || c.starts_with("STPX")),
+            "{sent:?}"
+        );
+    }
+
+    #[test]
+    fn the_longest_request_goes_in_segments_and_one_byte_more_is_refused() {
+        let mut elm = warmed(adapter(true), true);
+        let answer = exchange_one(&mut elm, &request(44));
+        assert_eq!(answer, Response::new(REPLY_ID, ANSWER.to_vec()));
+        assert_eq!(frames_received(&elm).len(), 7);
+        let written = elm.link().written.len();
+        let err = elm.send(&request(45)).unwrap_err();
+        assert!(err.to_string().contains("doesn't fit"), "{err}");
+        assert_eq!(elm.link().written.len(), written);
+    }
+
+    #[test]
+    fn every_check_of_segmenting_applies_to_an_stn_too() {
+        // Nothing is written, though `STPX` would have taken each of these (the first one needs
+        // an early echo, too).
+        let mut no_pp26 = adapter(true);
+        no_pp26.pps = Some(vec!["09:00 F  24:00 F  25:00 F  29:FF F".to_owned()]);
+        let mut cold = connect(adapter(true));
+        cold.segment_on_stn(true);
+        let cases: Vec<(&str, Elm<FakeLink>, Approved, &str)> = vec![
+            (
+                "no early echo seen yet",
+                cold,
+                request(9),
+                "echoes each character",
+            ),
+            (
+                "a module whose reply ID isn't known",
+                warmed(adapter(true), true),
+                approve(Target::Physical(0x710), &read_of(9)),
+                "no one module's flow control",
+            ),
+            ("PP 26 missing", warmed(no_pp26, true), request(9), "PP 26"),
+        ];
+        for (what, mut elm, refused, says) in cases {
+            let written = elm.link().written.len();
+            let err = elm.send(&refused).unwrap_err();
+            assert!(matches!(err, Error::Adapter(_)), "{what}: {err}");
+            assert!(err.to_string().contains(says), "{what}: {err}");
+            assert_eq!(elm.link().written.len(), written, "{what} wrote");
+        }
+    }
+
+    #[test]
+    fn turning_the_option_off_goes_back_to_stpx_after_caf1() {
+        let mut elm = warmed(adapter(true), true);
+        exchange_one(&mut elm, &request(9));
+        elm.segment_on_stn(false);
+        let before = commands(&elm).len();
+        exchange_one(&mut elm, &approve(Target::Physical(REQUEST_ID), &FOUR_DIDS));
+        let sent = since(&elm, before);
+        let caf1 = sent.iter().position(|c| c == "ATCAF1").expect("ATCAF1");
+        let stpx = sent.iter().position(|c| c == STPX_LINE).expect("STPX");
+        assert!(caf1 < stpx, "{sent:?}");
+    }
+
+    #[test]
+    fn a_plain_elm327_segments_whether_or_not_the_option_is_set() {
+        for forced in [false, true] {
+            let mut elm = warmed(adapter(false), forced);
+            exchange_one(&mut elm, &approve(Target::Physical(REQUEST_ID), &FOUR_DIDS));
+            assert_eq!(frames_received(&elm).len(), 2, "forced {forced}");
+        }
+    }
+
+    // ---- the audit log ----------------------------------------------------------------------
+
+    fn settings(events: &[LinkEvent]) -> Vec<(&str, &str)> {
+        events
+            .iter()
+            .filter_map(|event| match event {
+                LinkEvent::Setting { name, value, .. } => Some((name.as_str(), value.as_str())),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn setting_the_option_is_an_event_on_an_stn_and_on_a_plain_elm327() {
+        for stn in [true, false] {
+            let mut elm = connect(adapter(stn));
+            elm.take_events();
+            elm.segment_on_stn(true);
+            let events = elm.take_events();
+            assert_eq!(settings(&events), [("segment-on-stn", "on")], "stn {stn}");
+            elm.segment_on_stn(false);
+            let events = elm.take_events();
+            assert_eq!(settings(&events), [("segment-on-stn", "off")], "stn {stn}");
+        }
+    }
+
+    #[test]
+    fn the_audit_log_says_the_option_was_set_before_the_first_request() {
+        let log = std::env::temp_dir().join(format!(
+            "obdcracker-transport-{}-forced-caf0.jsonl",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&log);
+        {
+            let mut elm = connect(adapter(true));
+            elm.segment_on_stn(true);
+            let mut audited = Audited::open(&log, elm, "fake").unwrap();
+            audited
+                .send(&approve(Target::Physical(0x7E0), &[0x09, 0x02]))
+                .unwrap();
+            while audited.recv(Duration::from_secs(1)).is_ok() {}
+        }
+        let audit = std::fs::read_to_string(&log).unwrap();
+        let _ = std::fs::remove_file(&log);
+        let lines: Vec<serde_json::Value> = audit
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        let setting = lines
+            .iter()
+            .position(|v| v["dir"] == "setting")
+            .expect("a setting line");
+        let tx = lines.iter().position(|v| v["dir"] == "tx").unwrap();
+        assert!(setting < tx, "{lines:?}");
+        assert_eq!(lines[setting]["name"], "segment-on-stn");
+        assert_eq!(lines[setting]["value"], "on");
+        assert_eq!(lines.iter().filter(|v| v["dir"] == "setting").count(), 1);
+    }
+}
+
 mod response_pending {
     use super::*;
 

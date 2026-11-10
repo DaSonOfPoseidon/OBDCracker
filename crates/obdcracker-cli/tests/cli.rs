@@ -462,6 +462,11 @@ fn wifi_adapter_with_vins(vin: impl Fn(u32) -> Vec<u8> + Send + 'static) -> Sock
 fn wifi_adapter_answering(
     answer: impl FnMut(u32, &[u8]) -> Vec<(u32, Vec<u8>)> + Send + 'static,
 ) -> SocketAddr {
+    wifi_elm(FakeElm::new(Box::new(answer)))
+}
+
+// `elm` served over TCP, as set up by the test.
+fn wifi_elm(mut elm: FakeElm) -> SocketAddr {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap();
     std::thread::spawn(move || {
@@ -469,7 +474,6 @@ fn wifi_adapter_answering(
         stream
             .set_read_timeout(Some(Duration::from_millis(10)))
             .unwrap();
-        let mut elm = FakeElm::new(Box::new(answer));
         let mut buf = [0; 256];
         loop {
             match stream.read(&mut buf) {
@@ -1773,4 +1777,528 @@ fn sim_scan_with_tp20_discovery_calls_the_listed_addresses_it_tried_silent() {
         "{stdout}"
     );
     assert!(stdout.lines().any(|l| l == "  05 silent"), "{stdout}");
+}
+
+// ---- read-dids and --elm-segmenting ---------------------------------------------------------
+
+mod read_dids {
+    use super::*;
+    use fake_elm::Module;
+
+    // The A7 profile's transmission: F187 and F191 are 11 bytes, F189 4 and F190 17; F188 isn't
+    // listed.
+    const KNOWN: &str = "F187,F189,F190,F191";
+    const FOUR: [u8; 9] = [0x22, 0xF1, 0x87, 0xF1, 0x89, 0xF1, 0x90, 0xF1, 0x91];
+
+    fn data(fill: u8, len: usize) -> Vec<u8> {
+        vec![fill; len]
+    }
+
+    // What the transmission answers `22 F187 F189 F190 F191` with.
+    fn four_dids_reply() -> Vec<u8> {
+        let mut reply = vec![0x62];
+        for (did, len) in [(0xF187u16, 11), (0xF189, 4), (0xF190, 17), (0xF191, 11)] {
+            reply.extend(did.to_be_bytes());
+            reply.extend(data(0x41, len));
+        }
+        reply
+    }
+
+    // `elm` with a transmission at 7E1/7E9 that answers a read of F187 (what the command sends
+    // first) and `request` with `answer`.
+    fn with_transmission(request: Vec<u8>, answer: Vec<u8>) -> FakeElm {
+        let responder = move |header: u32, sent: &[u8]| match (header, sent) {
+            (0x7E1, [0x22, 0xF1, 0x87]) => {
+                let mut reply = vec![0x62, 0xF1, 0x87];
+                reply.extend(data(0x41, 11));
+                vec![(0x7E9, reply)]
+            }
+            (0x7E1, sent) if sent == request => vec![(0x7E9, answer.clone())],
+            _ => Vec::new(),
+        };
+        FakeElm::new(Box::new(responder)).with_module(Module::new(0x7E1, 0x7E9))
+    }
+
+    fn adapter(stn: bool, answer: Vec<u8>) -> SocketAddr {
+        let mut elm = with_transmission(FOUR.to_vec(), answer);
+        if stn {
+            elm.sti = Some("STN1155 v5.6.19".into());
+        }
+        wifi_elm(elm)
+    }
+
+    fn read_dids(addr: SocketAddr, log: &std::path::Path, extra: &[&str], dids: &str) -> Output {
+        let addr = addr.to_string();
+        let mut args = vec!["--tcp", &addr, "--profile", "a7"];
+        args.extend(extra);
+        args.extend(["--audit-log", log.to_str().unwrap()]);
+        args.extend(["read-dids", "--module", "transmission", "--did", dids]);
+        obdcracker(&args)
+    }
+
+    // `dir` and the command, payload or setting name of each line of the audit log.
+    fn audit_story(log: &std::path::Path) -> Vec<String> {
+        std::fs::read_to_string(log)
+            .unwrap()
+            .lines()
+            .map(|line| {
+                let v: serde_json::Value = serde_json::from_str(line).unwrap();
+                let dir = v["dir"].as_str().unwrap();
+                let rest = ["cmd", "payload", "name"]
+                    .iter()
+                    .find_map(|key| v[key].as_str())
+                    .unwrap_or("");
+                format!("{dir} {rest}")
+            })
+            .collect()
+    }
+
+    fn position(story: &[String], line: &str) -> usize {
+        story
+            .iter()
+            .position(|s| s == line)
+            .unwrap_or_else(|| panic!("{line} not in {story:?}"))
+    }
+
+    fn hex(byte: &str, len: usize) -> String {
+        vec![byte; len].join(" ")
+    }
+
+    #[test]
+    fn a_plain_elm327_sends_the_request_in_frames_after_a_one_did_read() {
+        let log = temp_log("read-dids-plain");
+        let out = read_dids(adapter(false, four_dids_reply()), &log, &[], KNOWN);
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(out.status.success(), "{stderr}");
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert_eq!(
+            stdout,
+            format!(
+                "7E9 transmission F187 [{}]\n7E9 transmission F189 [{}]\n\
+                 7E9 transmission F190 [{}]\n7E9 transmission F191 [{}]\n",
+                hex("41", 11),
+                hex("41", 4),
+                hex("41", 17),
+                hex("41", 11)
+            )
+        );
+        let story = audit_story(&log);
+        // The first request shows the adapter echoes as it reads, which a request in frames needs.
+        let warm_up = position(&story, "tx 22 F1 87");
+        let request = position(&story, "tx 22 F1 87 F1 89 F1 90 F1 91");
+        assert!(warm_up < request, "{story:?}");
+        assert_eq!(story.iter().filter(|s| s.starts_with("tx ")).count(), 2);
+        let first_frame = position(&story, "tx_frame 10 09 22 F1 87 F1 89 F1");
+        let last_frame = position(&story, "tx_frame 21 90 F1 91 00 00 00 00");
+        assert!(
+            request < first_frame && first_frame < last_frame,
+            "{story:?}"
+        );
+        assert!(story.contains(&"cmd ATCAF0".to_owned()), "{story:?}");
+        // Nothing was set: the default is the driver's own.
+        assert!(!story.iter().any(|s| s.starts_with("setting")), "{story:?}");
+    }
+
+    #[test]
+    fn an_stn_sends_it_as_stpx_unless_told_to_use_caf0() {
+        let log = temp_log("read-dids-stn");
+        let out = read_dids(adapter(true, four_dids_reply()), &log, &[], KNOWN);
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let story = audit_story(&log);
+        assert!(story.contains(&"tx 22 F1 87 F1 89 F1 90 F1 91".to_owned()));
+        assert!(
+            !story.iter().any(|s| s.starts_with("tx_frame")),
+            "{story:?}"
+        );
+        assert!(!story.contains(&"cmd ATCAF0".to_owned()), "{story:?}");
+        assert!(!story.iter().any(|s| s.starts_with("setting")), "{story:?}");
+
+        for method in ["stpx", "caf0"] {
+            let log = temp_log(&format!("read-dids-stn-{method}"));
+            let out = read_dids(
+                adapter(true, four_dids_reply()),
+                &log,
+                &["--elm-segmenting", method],
+                KNOWN,
+            );
+            assert!(
+                out.status.success(),
+                "{method}: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+            let story = audit_story(&log);
+            let setting = position(&story, "setting segment-on-stn");
+            // Before the first request, whichever it is.
+            let first = story.iter().position(|s| s.starts_with("tx ")).unwrap();
+            assert!(setting < first, "{method}: {story:?}");
+            let framed = story.iter().any(|s| s.starts_with("tx_frame 10 09"));
+            assert_eq!(framed, method == "caf0", "{method}: {story:?}");
+        }
+    }
+
+    #[test]
+    fn the_log_records_how_it_was_set() {
+        for (method, value) in [("caf0", "on"), ("stpx", "off")] {
+            let log = temp_log("read-dids-setting-value");
+            let out = read_dids(
+                adapter(true, four_dids_reply()),
+                &log,
+                &["--elm-segmenting", method],
+                KNOWN,
+            );
+            assert!(out.status.success());
+            let audit = std::fs::read_to_string(&log).unwrap();
+            let line = format!(r#""dir":"setting","name":"segment-on-stn","value":"{value}""#);
+            assert!(
+                audit.lines().any(|l| l.contains(&line)),
+                "{method}: {audit}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_reply_that_doesnt_fit_is_reported_and_fails() {
+        // F189 is missing from the answer, as a module may leave out a DID it doesn't have.
+        let mut missing = vec![0x62, 0xF1, 0x87];
+        missing.extend(data(0x41, 11));
+        missing.extend([0xF1, 0x90]);
+        missing.extend(data(0x41, 17));
+        missing.extend([0xF1, 0x91]);
+        missing.extend(data(0x41, 11));
+        // Bytes after the last DID.
+        let mut extra = four_dids_reply();
+        extra.push(0x00);
+        for (what, reply) in [("a missing DID", missing), ("extra bytes", extra)] {
+            let log = temp_log("read-dids-misfit");
+            let out = read_dids(adapter(false, reply), &log, &[], KNOWN);
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            assert_eq!(out.status.code(), Some(1), "{what}: {stdout}");
+            assert!(
+                stdout.starts_with(
+                    "7E9 transmission F187 F189 F190 F191 (reply is malformed: 62 F1 87"
+                ),
+                "{what}: {stdout}"
+            );
+            // Nothing of it is shown as a value.
+            assert!(!stdout.contains("F187 ["), "{what}: {stdout}");
+        }
+    }
+
+    #[test]
+    fn a_did_without_a_profile_length_leaves_the_rest_unsplit() {
+        // F188 isn't in the profile: F187 splits, and the rest is shown as the module sent it.
+        let mut reply = vec![0x62, 0xF1, 0x87];
+        reply.extend(data(0x41, 11));
+        reply.extend([0xF1, 0x88, 0x01, 0x02]);
+        reply.extend([0xF1, 0x89]);
+        reply.extend(data(0x42, 4));
+        reply.extend([0xF1, 0x91]);
+        reply.extend(data(0x43, 11));
+        let request = vec![0x22, 0xF1, 0x87, 0xF1, 0x88, 0xF1, 0x89, 0xF1, 0x91];
+        let addr = wifi_elm(with_transmission(request, reply));
+        let log = temp_log("read-dids-unsplit");
+        let out = read_dids(addr, &log, &[], "F187,F188,F189,F191");
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(out.status.success(), "{stderr}");
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        let lines: Vec<&str> = stdout.lines().collect();
+        assert_eq!(lines.len(), 2, "{stdout}");
+        assert_eq!(
+            lines[0],
+            format!("7E9 transmission F187 [{}]", hex("41", 11))
+        );
+        assert!(
+            lines[1].starts_with("7E9 transmission F188 F189 F191 not split"),
+            "{stdout}"
+        );
+        let rest = format!(
+            "[F1 88 01 02 F1 89 {} F1 91 {}]",
+            hex("42", 4),
+            hex("43", 11)
+        );
+        assert!(lines[1].ends_with(&rest), "{stdout}");
+    }
+
+    #[test]
+    fn a_refusal_is_shown_by_name_and_fails() {
+        let elm = FakeElm::new(Box::new(|header, request| match (header, request) {
+            (0x7E1, [0x22, 0xF1, 0x87]) => vec![(0x7E9, vec![0x7F, 0x22, 0x31])],
+            _ => Vec::new(),
+        }))
+        .with_module(Module::new(0x7E1, 0x7E9));
+        let log = temp_log("read-dids-refused");
+        let out = read_dids(wifi_elm(elm), &log, &[], "F187");
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert_eq!(out.status.code(), Some(1), "{stdout}");
+        assert_eq!(
+            stdout,
+            "7E9 transmission F187 (service 0x22 refused: request out of range (0x31))\n"
+        );
+    }
+
+    #[test]
+    fn a_read_of_up_to_three_dids_is_one_request_with_no_warm_up() {
+        let log = temp_log("read-dids-one");
+        let out = read_dids(adapter(false, four_dids_reply()), &log, &[], "F187");
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let story = audit_story(&log);
+        assert_eq!(story.iter().filter(|s| s.starts_with("tx ")).count(), 1);
+        assert_eq!(
+            String::from_utf8_lossy(&out.stdout),
+            format!("7E9 transmission F187 [{}]\n", hex("41", 11))
+        );
+    }
+
+    #[test]
+    fn a_list_that_cant_be_read_sends_no_warm_up_either() {
+        let dids = |count: u16| {
+            (0..count)
+                .map(|n| format!("F1{n:02X}"))
+                .collect::<Vec<_>>()
+                .join(",")
+        };
+        for (what, list, says) in [
+            ("22 DIDs", dids(22), "too many"),
+            ("a repeat", "F187,F189,F190,F191,F187".to_owned(), "twice"),
+        ] {
+            let log = temp_log("read-dids-bad-list");
+            let out = read_dids(adapter(false, four_dids_reply()), &log, &[], &list);
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            assert_eq!(out.status.code(), Some(2), "{what}: {stderr}");
+            assert!(stderr.contains(says), "{what}: {stderr}");
+            let story = audit_story(&log);
+            assert!(
+                !story.iter().any(|s| s.starts_with("tx")),
+                "{what}: {story:?}"
+            );
+        }
+    }
+
+    // A transmission that answers the request of four DIDs, and the one-DID read before it with
+    // `warm_up` (nothing, if that's empty).
+    fn answering_the_warm_up_with(warm_up: Vec<u8>) -> SocketAddr {
+        let reply = four_dids_reply();
+        wifi_elm(
+            FakeElm::new(Box::new(move |header, request| match (header, request) {
+                (0x7E1, [0x22, 0xF1, 0x87]) if !warm_up.is_empty() => {
+                    vec![(0x7E9, warm_up.clone())]
+                }
+                (0x7E1, request) if request == FOUR => vec![(0x7E9, reply.clone())],
+                _ => Vec::new(),
+            }))
+            .with_module(Module::new(0x7E1, 0x7E9)),
+        )
+    }
+
+    #[test]
+    fn a_warm_up_nobody_answers_stops_before_the_long_request() {
+        // Its late answer could be taken for the long request's.
+        let log = temp_log("read-dids-silent-warm-up");
+        let out = read_dids(answering_the_warm_up_with(Vec::new()), &log, &[], KNOWN);
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert_eq!(out.status.code(), Some(1), "{stderr}");
+        assert!(stderr.contains("wasn't sent"), "{stderr}");
+        assert_eq!(out.stdout.len(), 0);
+        let story = audit_story(&log);
+        assert_eq!(story.iter().filter(|s| s.starts_with("tx ")).count(), 1);
+        assert!(
+            !story.iter().any(|s| s.starts_with("tx_frame")),
+            "{story:?}"
+        );
+    }
+
+    #[test]
+    fn a_refused_warm_up_is_an_answer_and_the_request_goes_on() {
+        let log = temp_log("read-dids-refused-warm-up");
+        let out = read_dids(
+            answering_the_warm_up_with(vec![0x7F, 0x22, 0x31]),
+            &log,
+            &[],
+            KNOWN,
+        );
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(out.status.success(), "{stderr}");
+        let story = audit_story(&log);
+        assert_eq!(story.iter().filter(|s| s.starts_with("tx ")).count(), 2);
+        assert!(
+            story.iter().any(|s| s.starts_with("tx_frame 10 09")),
+            "{story:?}"
+        );
+    }
+
+    #[test]
+    fn the_dry_run_prints_the_frames_and_sends_nothing() {
+        let out = obdcracker(&[
+            "--dry-run",
+            "--profile",
+            "a7",
+            "read-dids",
+            "--module",
+            "transmission",
+            "--did",
+            KNOWN,
+        ]);
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        // The request once, as two frames: there is no warm-up read.
+        assert_eq!(
+            stdout.lines().filter(|l| l.starts_with("7E1 ")).count(),
+            2,
+            "{stdout}"
+        );
+        assert!(stdout.contains("7E1 10 09 22 F1 87 F1 89 F1"), "{stdout}");
+        assert!(stdout.contains("dry run: nothing was sent"), "{stdout}");
+    }
+
+    #[test]
+    fn the_simulated_car_answers_a_multi_did_read() {
+        let log = temp_log("read-dids-sim");
+        let out = obdcracker(&[
+            "--sim",
+            "a7",
+            "--audit-log",
+            log.to_str().unwrap(),
+            "read-dids",
+            "--module",
+            "transmission",
+            "--did",
+            "F187,F189,F191",
+        ]);
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert!(
+            out.status.success(),
+            "{stdout}{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let ids: Vec<&str> = stdout
+            .lines()
+            .map(|l| l.split_whitespace().nth(2).unwrap())
+            .collect();
+        assert_eq!(ids, ["F187", "F189", "F191"], "{stdout}");
+    }
+
+    #[test]
+    fn what_cant_be_read_is_refused_before_anything_is_sent() {
+        let dids = |count: u16| {
+            (0..count)
+                .map(|n| format!("F1{n:02X}"))
+                .collect::<Vec<_>>()
+                .join(",")
+        };
+        let many = dids(22);
+        for (list, module, says) in [
+            ("", "transmission", "isn't a DID"),
+            ("F187,", "transmission", "isn't a DID"),
+            ("F18", "transmission", "\"F18\" isn't a DID"),
+            ("F18G", "transmission", "\"F18G\" isn't a DID"),
+            ("+187", "transmission", "\"+187\" isn't a DID"),
+            ("F0187", "transmission", "isn't a DID"),
+            ("F187,F189,F187", "transmission", "F187 is named twice"),
+            (&many, "transmission", "22 DIDs in one request is too many"),
+            ("F187", "boot", "has no module named \"boot\""),
+        ] {
+            let out = obdcracker(&[
+                "--dry-run",
+                "--profile",
+                "a7",
+                "read-dids",
+                "--module",
+                module,
+                "--did",
+                list,
+            ]);
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            assert_eq!(out.status.code(), Some(2), "{list:?}: {stderr}");
+            assert!(stderr.contains(says), "{list:?}: {stderr}");
+            assert!(out.stdout.is_empty(), "{list:?}");
+        }
+        // The most.
+        let out = obdcracker(&[
+            "--dry-run",
+            "--profile",
+            "a7",
+            "read-dids",
+            "--module",
+            "transmission",
+            "--did",
+            &dids(21),
+        ]);
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        // No --did, and no profile.
+        let out = obdcracker(&[
+            "--dry-run",
+            "--profile",
+            "a7",
+            "read-dids",
+            "--module",
+            "engine",
+        ]);
+        assert_eq!(out.status.code(), Some(2));
+        let out = obdcracker(&[
+            "--dry-run",
+            "read-dids",
+            "--module",
+            "engine",
+            "--did",
+            "F187",
+        ]);
+        assert_eq!(out.status.code(), Some(2));
+        assert!(String::from_utf8_lossy(&out.stderr).contains("needs a profile"));
+    }
+
+    #[test]
+    fn the_segmenting_flag_is_for_elm_adapters_only() {
+        let combos: [&[&str]; 6] = [
+            &["--gsusb"],
+            &["--socketcan", "can0"],
+            &["--sim", "a7"],
+            &["--dry-run"],
+            &["--gsusb", "--listen-only"],
+            &["--socketcan", "can0", "--bitrate", "500000"],
+        ];
+        for adapter in combos {
+            let mut args = vec!["--elm-segmenting", "caf0"];
+            args.extend(adapter);
+            args.push("vin");
+            let out = obdcracker(&args);
+            assert_eq!(out.status.code(), Some(2), "{args:?}");
+            assert!(
+                String::from_utf8_lossy(&out.stderr).contains("cannot be used with"),
+                "{args:?}: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        }
+        // Only the two methods.
+        let out = obdcracker(&["--elm-segmenting", "caf1", "--tcp", "127.0.0.1:1", "vin"]);
+        assert_eq!(out.status.code(), Some(2));
+        assert!(String::from_utf8_lossy(&out.stderr).contains("stpx"));
+    }
+
+    #[test]
+    fn the_flag_doesnt_apply_to_commands_that_send_nothing_through_it() {
+        // `adapter` sends no request, and `update` uses no adapter.
+        let addr = wifi_adapter().to_string();
+        let out = obdcracker(&["--tcp", &addr, "--elm-segmenting", "caf0", "adapter"]);
+        assert_eq!(out.status.code(), Some(2));
+        assert!(String::from_utf8_lossy(&out.stderr).contains("--elm-segmenting doesn't apply"));
+        let out = obdcracker(&["--elm-segmenting", "caf0", "update"]);
+        assert_eq!(out.status.code(), Some(2));
+        assert!(String::from_utf8_lossy(&out.stderr).contains("--elm-segmenting"));
+    }
 }

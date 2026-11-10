@@ -205,6 +205,9 @@ pub struct Elm<L> {
     // Whether `AT CAF0` is on to send a request in segments, which `send` switches lazily
     // (docs/design/elm-caf0-segmenting.md, section 8).
     segmenting: bool,
+    // Whether a request over 7 bytes goes through the segmenting path on an STN too, which has
+    // `STPX` (`segment_on_stn`).
+    segment_on_stn: bool,
     // Whether `AT R0` was written and no `OK` to `ATR1` has followed (section 7).
     responses_off: bool,
     // The byte the adapter pads with (PP 26), or `None` if `ATPPS` didn't list it.
@@ -363,6 +366,7 @@ impl<L: Link> Elm<L> {
             bits29: false,
             raw: false,
             segmenting: false,
+            segment_on_stn: false,
             responses_off: false,
             filler: None,
             hold_until: None,
@@ -1356,8 +1360,8 @@ impl<L: Link> Transport for Elm<L> {
         let long = !raw && payload.len() > single;
         // Longer requests go out as `STPX` on an STN (docs/elm327.md#multi-frame-requests), and
         // on any other adapter as raw frames written with `AT CAF0`
-        // (docs/design/elm-caf0-segmenting.md).
-        let stpx = long && self.stn.is_some();
+        // (docs/design/elm-caf0-segmenting.md), which an STN takes too once `segment_on_stn` is on.
+        let stpx = long && self.stn.is_some() && !self.segment_on_stn;
         if payload.is_empty() || (raw && payload.len() > 8) || (!raw && payload.len() > STPX_MAX) {
             return Err(Error::Adapter(format!(
                 "a {}-byte request doesn't fit this driver's limit ({STPX_MAX} bytes where it \
@@ -1646,6 +1650,25 @@ impl<L: Link> Elm<L> {
     pub fn tighten_segment_bounds(&mut self, gap: Duration, transfer: Duration) {
         self.segment_gap = self.segment_gap.min(gap);
         self.segment_transfer = self.segment_transfer.min(transfer);
+    }
+
+    /// Sends a request of 8 to 44 bytes the way a plain ELM327 must, as raw frames written with
+    /// `AT CAF0` (with every check of
+    /// [`docs/design/elm-caf0-segmenting.md`](https://github.com/DaSonOfPoseidon/OBDCracker/blob/main/docs/design/elm-caf0-segmenting.md),
+    /// section 1), instead of as `STPX`, which an STN would use. It is off by default, and for
+    /// testing that path on the one adapter that has both: a plain ELM327 segments whether this
+    /// is set or not, and a request of 1 to 7 bytes goes as one frame either way.
+    ///
+    /// Each call adds a [`LinkEvent::Setting`] named `segment-on-stn` ([`Transport::take_events`]),
+    /// whatever the adapter, so an audit log that opens after this call says how a request was
+    /// sent before the first one.
+    pub fn segment_on_stn(&mut self, on: bool) {
+        self.segment_on_stn = on;
+        self.note(LinkEvent::Setting {
+            at: SystemTime::now(),
+            name: "segment-on-stn".to_owned(),
+            value: if on { "on" } else { "off" }.to_owned(),
+        });
     }
 
     // Section 1: what must hold before anything is written for a request over 7 bytes on an

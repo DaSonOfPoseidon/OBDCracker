@@ -7,7 +7,7 @@
 | `obdcracker` | Facade for importers: re-exports the crates below (`sim` behind a feature) |
 | `obdcracker-core` | Pure `no_std` codecs: CAN, ISO-TP, VW TP2.0 ([`tp20.md`](tp20.md)), OBD-II, UDS, KWP2000 |
 | `obdcracker-safety` | Tiered policy and `Approved` |
-| `obdcracker-transport` | `Transport` trait and adapter backends; scan and sweep ([scanning](scanning.md)), VW TP2.0 channels ([tp20](tp20.md)), the raw-CAN core ([raw-can](raw-can.md)) |
+| `obdcracker-transport` | `Transport` trait and adapter backends; scan, sweep and multi-DID reads ([scanning](scanning.md)), VW TP2.0 channels ([tp20](tp20.md)), the raw-CAN core ([raw-can](raw-can.md)) |
 | `obdcracker-profile` | Vehicle profiles: module addresses, addressing, protocol and DIDs, as TOML data |
 | `obdcracker-sim` | Simulated ECUs for tests: a profile plus a fixture of what each module answers (built in: `a7`); the fixture format is in [`fixtures.md`](fixtures.md) |
 | `obdcracker-cli` | The `obdcracker` command-line tool |
