@@ -1280,6 +1280,10 @@ pub struct FakeLink {
     /// Waits this long before delivering the next write of exactly these bytes, as a slow link
     /// would.
     pub slow_write_of: Option<(Vec<u8>, Duration)>,
+    /// After the write with this index in `writes`, the next reads each wait this long first,
+    /// in order: a link or adapter slow to answer.
+    pub slow_reads_after: Option<(usize, VecDeque<Duration>)>,
+    slow_reads: VecDeque<Duration>,
 }
 
 impl FakeLink {
@@ -1301,6 +1305,8 @@ impl FakeLink {
             fail_writes: false,
             kill_after_writes: None,
             slow_write_of: None,
+            slow_reads_after: None,
+            slow_reads: VecDeque::new(),
         }
     }
 
@@ -1336,6 +1342,14 @@ impl Link for FakeLink {
         self.written.extend_from_slice(bytes);
         let number = self.writes.len();
         self.writes.push(bytes.to_vec());
+        if self
+            .slow_reads_after
+            .as_ref()
+            .is_some_and(|(at, _)| *at == number)
+            && let Some((_, delays)) = self.slow_reads_after.take()
+        {
+            self.slow_reads = delays;
+        }
         let mut bytes = bytes.to_vec();
         if self.corrupt_write_at.is_some_and(|(at, _, _)| at == number)
             && let Some((_, index, bits)) = self.corrupt_write_at.take()
@@ -1360,6 +1374,9 @@ impl Link for FakeLink {
     fn read(&mut self, buf: &mut [u8], timeout: Duration, _driver: Driver) -> io::Result<usize> {
         if self.closed {
             return Err(io::ErrorKind::BrokenPipe.into());
+        }
+        if let Some(delay) = self.slow_reads.pop_front() {
+            std::thread::sleep(delay);
         }
         if !self.inject.is_empty() {
             let n = buf.len().min(self.inject.len());

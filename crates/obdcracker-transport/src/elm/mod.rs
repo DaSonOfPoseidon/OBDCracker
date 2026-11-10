@@ -1926,7 +1926,12 @@ impl<L: Link> Elm<L> {
         let mut read_on = false;
         while listening && accepted.is_none() && (problem.is_none() || read_on) {
             match self.next_request_event(deadline)? {
-                None => problem = Some(self.transfer_limit(t)),
+                // The limit ends the wait, prompt or not: the listen is stopped below, which
+                // reads the prompt with a wait of its own.
+                None => {
+                    problem.get_or_insert(self.transfer_limit(t));
+                    read_on = false;
+                }
                 Some(Event::Overlong) => {
                     return Err(Stop::Broken(
                         self.break_down("the adapter printed an overlong line".into()),
@@ -1940,6 +1945,8 @@ impl<L: Link> Elm<L> {
                 Some(Event::Line(text)) => match self.reply_line(&text)? {
                     None => {}
                     Some(Line::Frame(frame)) => {
+                        // What the module's N_Cr counts from, however the request ends.
+                        t.last_event = Instant::now();
                         self.note(LinkEvent::Frame {
                             at: self.event_at.time,
                             sent: false,

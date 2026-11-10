@@ -2930,6 +2930,44 @@ mod caf0 {
     }
 
     #[test]
+    fn the_hold_counts_from_the_flow_control_not_the_first_frame() {
+        // The flow control comes 900 ms after the first frame, with an extra frame behind it that
+        // fails the request. The module keeps the half transfer for 1 s from the flow control, so
+        // the next request waits 1.25 s from it, not from the first frame.
+        let positions = write_positions();
+        let extra = vec![0x03, 0x7F, 0x19, 0x78, 0, 0, 0, 0];
+        let mut elm = answering_with(vec![flow_control_frame(0, 0, 0), extra]);
+        let at = elm.link().writes.len() + positions[0] + 1;
+        elm.link_mut().slow_reads_after = Some((at, [Duration::from_millis(900)].into()));
+        assert!(elm.send(&request(14)).is_err());
+        let first_frame = module_of(&elm).frames[0].0;
+        module_mut(&mut elm).flow_control = vec![(REPLY_ID, flow_control_frame(0, 0, 0))];
+        exchange_one(&mut elm, &request(14));
+        assert!(first_frame.elapsed() >= Duration::from_millis(2100));
+    }
+
+    #[test]
+    fn a_status_whose_prompt_comes_after_the_limit_is_still_a_failure_of_that_request() {
+        // `BUS BUSY` is read, and the transfer limit passes before the adapter's prompt is read.
+        // The wait ends at the limit, and the prompt is read while the listen is stopped.
+        let positions = write_positions();
+        let mut busy = module();
+        busy.status_on_frame = Some((1, "BUS BUSY".to_owned()));
+        let mut elm = warmed(adapter(busy, &ANSWER));
+        elm.tighten_segment_bounds(SEGMENT_GAP, Duration::from_millis(200));
+        elm.link_mut().chunk = 10;
+        let at = elm.link().writes.len() + positions[0] + 1;
+        elm.link_mut().slow_reads_after = Some((at, [Duration::from_millis(400)].into()));
+        let started = Instant::now();
+        let err = elm.send(&request(14)).unwrap_err();
+        assert!(err.to_string().contains("BUS BUSY"), "{err}");
+        // Not the 7 s of silence that breaks the driver down.
+        assert!(started.elapsed() < Duration::from_secs(3));
+        elm.send(&approve(Target::Physical(0x7E0), &[0x09, 0x02]))
+            .unwrap();
+    }
+
+    #[test]
     fn one_to_ten_waits_before_continue_to_send_are_taken() {
         assert_eq!(SEGMENT_MAX_WAITS, 10);
         for n in [0, 1, 10] {
