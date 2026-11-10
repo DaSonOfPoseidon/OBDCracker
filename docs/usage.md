@@ -231,7 +231,12 @@ answers, it shows the channel it gave, a refusal or the bytes it sent. It then c
 each module that gave a channel, it opens one again, asks for VAG's diagnostic session (`10 89`, which the modules want
 before they answer reads: car session 9's module 52 answered `1A 9B` with `7F 1A 11` without it), reads the module's
 identification (KWP2000 `1A 9B`), showing the bytes and their printable text, and closes the channel, which ends the
-session ([how](tp20.md#data-transfer)). The output ends with the session the read ran in: `(session 89)` if the
+session ([how](tp20.md#data-transfer)). A module that answers `1A 9B` with `7F 1A 11` (service not supported, whatever the
+session) is asked on the same channel for its part number (`22 F1 87`) and its ODX name (`22 F1 9E`) instead, one request
+each, since KWP2000's `22` takes one identifier. Each is a line of its own, `TP2.0 52 F187 "4G8959802B"`: the text if it's
+printable (the padding a module adds is dropped), the bytes in brackets if not, `(empty)` for no value, `refused (...)` or
+`not read (...)` otherwise, with the reply's bytes if it isn't `62` and the ID asked for. A read that fails closes the
+channel, so the next is shown as not read without being sent. Any other refusal of `1A 9B` sends no `22`. The `1A 9B` line ends with the session the read ran in: `(session 89)` if the
 module answered exactly `50 89`, else `(default session: ...)` with why (`10 89` refused with its code, not answered,
 or answered with other bytes), and the read is still tried, on a new channel if the failed request closed the first. A record that doesn't start with
 the `9B` it answers is shown as not read, with its bytes. An adapter failure on a channel ends the scan with an error.

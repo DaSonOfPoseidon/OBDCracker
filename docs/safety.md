@@ -35,7 +35,7 @@ Each tier above read-only needs a cargo feature, an explicit runtime unlock, and
 
 | Tier | UDS and OBD-II | KWP2000 | Status |
 |---|---|---|---|
-| T0 Read | OBD-II modes 01/03/09, UDS 0x22, 0x19, 0x3E, 0x10 (default/extended session) | 0x1A, 0x21, 0x17, 0x18, 0x3E; on a TP2.0 channel only, 0x10 89 (VAG session) | allowed |
+| T0 Read | OBD-II modes 01/03/09, UDS 0x22, 0x19, 0x3E, 0x10 (default/extended session) | 0x1A, 0x21, 0x22 (exactly one 2-byte common ID), 0x17, 0x18, 0x3E; on a TP2.0 channel only, 0x10 89 (VAG session) | allowed |
 | T1 Clear DTCs | UDS 0x14, OBD-II mode 04 | 0x14 | planned |
 | T2 Coding | UDS 0x2E, 0x27 | 0x2E, 0x3B, 0x27, 0x10 87 (adjustment session) | planned; needs a backup of the current value |
 | T3 Flash | programming session, 0x31, 0x34/0x36/0x37, 0x11 | 0x10 85/86 (programming, development), 0x11, 0x31-0x3A, 0x3D | **hard-banned** until a separate design doc exists; will need a full backup of the current image |
@@ -44,7 +44,9 @@ Anything else is rejected, including KWP2000's IO control (0x30), memory reads (
 banned and locked ones: ISO 14230-3 leaves what each value means to the manufacturer. The one exception is VAG's
 `10 89`, a read **only on an open TP2.0 channel** (`approve_tp20_request`, exactly those two bytes): TP2.0 is used only
 by the VW Group, whose modules answer `1A 9B` with `7F 1A 11` until they've entered it. `approve` still refuses it for
-KWP2000, so no other make can reach it. The session ends when the channel closes (`A8`), and the coding, adaptation and
+KWP2000, so no other make can reach it. KWP2000's `22` is a read of exactly one 2-byte common identifier (`scan --discover-tp20` reads a
+module that refuses `1A 9B` as not supported this way, #317); none, half of one or
+more than one is refused, since a second would put two records in one reply. The session ends when the channel closes (`A8`), and the coding, adaptation and
 clearing requests it may let a module accept stay locked by their own tiers.
 
 ## Addressing
