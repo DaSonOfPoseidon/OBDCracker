@@ -225,6 +225,19 @@ pub enum LinkEvent {
         /// The line as the adapter printed it.
         line: String,
     },
+    /// A CAN frame an adapter driver wrote itself, or read as a module's flow control, while it
+    /// sent a request in segments (`docs/design/elm-caf0-segmenting.md`, section 9). The request
+    /// is logged once, as the payload; these show the frames that went out for it.
+    Frame {
+        /// When the frame's carriage return was written, or when the driver read the frame.
+        at: SystemTime,
+        /// Whether the driver wrote the frame (it may be on the bus) rather than read it.
+        sent: bool,
+        /// The frame's CAN ID.
+        id: u32,
+        /// The frame's 8 data bytes, as written or read.
+        data: Vec<u8>,
+    },
     /// How many events, or lines the adapter printed, were dropped because there was no room to
     /// keep them until something took them.
     Lost(usize),

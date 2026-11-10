@@ -303,6 +303,36 @@ fn events_left_after_the_wrapper_is_gone_can_be_logged_alone() {
     );
 }
 
+#[test]
+fn a_frame_a_driver_wrote_or_read_is_logged_with_its_id_and_data() {
+    let log = temp_log("frames");
+    let at = std::time::UNIX_EPOCH + Duration::from_millis(1234);
+    let events = vec![
+        LinkEvent::Frame {
+            at,
+            sent: true,
+            id: 0x7E1,
+            data: vec![0x10, 0x09, 0x22, 0xF1, 0x87, 0xF1, 0x88, 0xF1],
+        },
+        LinkEvent::Frame {
+            at,
+            sent: false,
+            id: 0x17FE_0076,
+            data: vec![0x30, 0x00, 0x03, 0, 0, 0, 0, 0],
+        },
+    ];
+    log_events(&log, "usb-serial", events).unwrap();
+    let audit = std::fs::read_to_string(&log).unwrap();
+    let lines: Vec<_> = audit.lines().collect();
+    assert_eq!(
+        lines,
+        [
+            r#"{"ts_ms":1234,"dir":"tx_frame","id":"7E1","payload":"10 09 22 F1 87 F1 88 F1","link":"usb-serial"}"#,
+            r#"{"ts_ms":1234,"dir":"rx_frame","id":"17FE0076","payload":"30 00 03 00 00 00 00 00","link":"usb-serial"}"#,
+        ]
+    );
+}
+
 struct FailsToSettle;
 
 impl Transport for FailsToSettle {

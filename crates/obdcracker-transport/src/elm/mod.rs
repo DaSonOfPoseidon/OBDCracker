@@ -110,6 +110,14 @@ const MONITOR_STN: &str = "STM";
 // section 8.9), which discards it. No single flipped bit of it is a hex digit, and if the prompt
 // came first, `KILL`'s `X\r` ends the line it starts so the adapter refuses it.
 const INTERRUPT: &[u8] = b"X";
+/// The longest the driver lets pass between two frames of a request it sends in segments.
+pub const SEGMENT_GAP: Duration = Duration::from_millis(500);
+/// The longest a request sent in segments may take from its first frame to its last.
+pub const SEGMENT_TRANSFER: Duration = Duration::from_secs(30);
+/// How long the driver writes nothing after a transfer it stopped part-way.
+pub const SEGMENT_HOLD: Duration = Duration::from_millis(1250);
+/// The most wait flow controls in a row the driver takes.
+pub const SEGMENT_MAX_WAITS: u8 = 10;
 // Characters in a printed consecutive frame, `7E8 21 41 41 41 41 41 41 41 \r`, and with a 29-bit
 // ID, `17 FE 00 76 21 41 41 41 41 41 41 41 \r`.
 const FRAME_LINE: u32 = 29;
@@ -404,6 +412,10 @@ impl<L: Link> Elm<L> {
         self.adaptive = Some(wanted);
         Ok(())
     }
+
+    /// Shortens the bounds on sending a request in segments, for tests of the driver.
+    #[doc(hidden)]
+    pub fn tighten_segment_bounds(&mut self, _gap: Duration, _transfer: Duration) {}
 
     /// Timing for [`crate::exchange`] through this adapter. The adapter's prompt ends a request,
     /// so P2 and P2* are only outer bounds, about 7 minutes; an adapter that goes quiet

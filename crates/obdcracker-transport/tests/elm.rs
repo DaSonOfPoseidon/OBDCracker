@@ -142,7 +142,8 @@ mod setup {
         elm.send(&approve(Target::Physical(0x714), &[0x22, 0xF1, 0x87]))
             .unwrap();
         while elm.recv(Duration::from_secs(1)).is_ok() {}
-        // A multi-frame request: only an STN sends it, as `STPX`, and the plain adapter refuses.
+        // A multi-frame request: an STN sends it as `STPX`, and a plain adapter in segments
+        // (its module here sends no flow control, so it fails).
         let long = approve(
             Target::Physical(0x7E0),
             &[0x22, 0xF1, 0x87, 0xF1, 0x88, 0xF1, 0x89, 0xF1, 0x91],
@@ -1989,19 +1990,6 @@ mod requests {
     }
 
     #[test]
-    fn refuses_a_request_longer_than_one_frame_and_writes_nothing() {
-        let mut elm = connect(car());
-        let written = elm.link().written.len();
-        let long = approve(
-            Target::Physical(0x7E0),
-            &[0x22, 0xF1, 0x87, 0xF1, 0x89, 0xF1, 0x90, 0xF1, 0x91],
-        );
-        let err = elm.send(&long).unwrap_err();
-        assert!(matches!(err, Error::Adapter(_)), "{err}");
-        assert_eq!(elm.link().written.len(), written);
-    }
-
-    #[test]
     fn sends_a_full_seven_byte_frame() {
         let mut elm = connect(car());
         let seven = approve(
@@ -2123,16 +2111,6 @@ mod stpx {
         elm.link_mut().writes.clear();
         elm.send(&four_dids()).unwrap();
         assert_eq!(elm.link().writes, [LINE.to_vec(), b"\r".to_vec()]);
-    }
-
-    #[test]
-    fn a_plain_elm327_refuses_a_long_request_and_writes_nothing() {
-        let mut elm = warmed(car());
-        let written = elm.link().written.len();
-        let err = elm.send(&four_dids()).unwrap_err();
-        assert!(err.to_string().contains("STN"), "{err}");
-        assert_eq!(elm.link().written.len(), written);
-        assert_eq!(elm.link().elm.sent.len(), 1);
     }
 
     #[test]
@@ -2311,6 +2289,1120 @@ mod stpx {
             "{audit}"
         );
         assert!(!audit.contains("STPX"), "{audit}");
+    }
+}
+
+// A plain ELM327 sends a request of 8 to 44 bytes as raw frames written with `AT CAF0`
+// (docs/design/elm-caf0-segmenting.md). The fake's `Module` receives them as an ECU does.
+mod caf0 {
+    use obdcracker_transport::LinkEvent;
+    use obdcracker_transport::elm::{
+        SEGMENT_GAP, SEGMENT_HOLD, SEGMENT_MAX_WAITS, SEGMENT_TRANSFER,
+    };
+    use support::fake_elm::{Module, flow_control_frame};
+
+    use super::*;
+
+    const REQUEST_ID: u32 = 0x7E1;
+    const REPLY_ID: u32 = 0x7E9;
+    const ANSWER: [u8; 3] = [0x59, 0x02, 0xFF];
+    const FOUR_DIDS: [u8; 9] = [0x22, 0xF1, 0x87, 0xF1, 0x88, 0xF1, 0x89, 0xF1, 0x91];
+
+    // `len` bytes of a `19` read, which the policy takes at any length: after its third byte,
+    // byte n is n.
+    fn read_of(len: usize) -> Vec<u8> {
+        (0..len)
+            .map(|n| match n {
+                0 => 0x19,
+                1 => 0x02,
+                2 => 0xFF,
+                n => u8::try_from(n).unwrap(),
+            })
+            .collect()
+    }
+
+    fn request(len: usize) -> Approved {
+        approve(Target::Physical(REQUEST_ID), &read_of(len))
+    }
+
+    fn module() -> Module {
+        Module::new(REQUEST_ID, REPLY_ID)
+    }
+
+    // A plain ELM327 with `module`, which answers every request it receives whole with `answer`
+    // (nothing, if that's empty).
+    fn adapter(module: Module, answer: &[u8]) -> FakeElm {
+        let answer = answer.to_vec();
+        FakeElm::new(Box::new(move |header, _| {
+            if header == REQUEST_ID && !answer.is_empty() {
+                vec![(REPLY_ID, answer.clone())]
+            } else {
+                Vec::new()
+            }
+        }))
+        .with_module(module)
+    }
+
+    // Connected and past a first request, so the driver has seen the adapter echo each character
+    // as it reads it.
+    fn warmed(adapter: FakeElm) -> Elm<FakeLink> {
+        let mut elm = connect(adapter);
+        elm.send(&approve(Target::Physical(0x7E0), &[0x09, 0x02]))
+            .unwrap();
+        while elm.recv(Duration::from_secs(1)).is_ok() {}
+        elm
+    }
+
+    fn standard() -> Elm<FakeLink> {
+        warmed(adapter(module(), &ANSWER))
+    }
+
+    fn module_of(elm: &Elm<FakeLink>) -> &Module {
+        elm.link().elm.module.as_ref().unwrap()
+    }
+
+    fn module_mut(elm: &mut Elm<FakeLink>) -> &mut Module {
+        elm.link_mut().elm.module.as_mut().unwrap()
+    }
+
+    // Every frame the module received.
+    fn received(elm: &Elm<FakeLink>) -> Vec<Vec<u8>> {
+        module_of(elm)
+            .frames
+            .iter()
+            .map(|(_, data)| data.clone())
+            .collect()
+    }
+
+    // `payload` as frames, from ISO 15765-2 and not from core's `Segmenter`: a first frame with
+    // the length and 6 bytes, then 7 bytes a frame numbered from 1, each padded with `filler`.
+    fn golden(payload: &[u8], filler: u8) -> Vec<Vec<u8>> {
+        let len = payload.len();
+        let mut first = vec![0x10 | u8::try_from(len >> 8).unwrap(), len.to_le_bytes()[0]];
+        first.extend(&payload[..6]);
+        let mut frames = vec![first];
+        for (n, chunk) in payload[6..].chunks(7).enumerate() {
+            let mut frame = vec![0x20 | u8::try_from((n + 1) & 0x0F).unwrap()];
+            frame.extend(chunk);
+            frame.resize(8, filler);
+            frames.push(frame);
+        }
+        frames
+    }
+
+    // The line the driver writes for a frame: 16 digits.
+    fn line(frame: &[u8]) -> Vec<u8> {
+        hex(frame).replace(' ', "").into_bytes()
+    }
+
+    // Sends `request`, reads the answer and what follows it.
+    fn exchange_one(elm: &mut Elm<FakeLink>, request: &Approved) -> Response {
+        elm.send(request).unwrap();
+        let answer = elm.recv(Duration::from_secs(1)).unwrap();
+        while elm.recv(Duration::from_millis(100)).is_ok() {}
+        answer
+    }
+
+    fn since(elm: &Elm<FakeLink>, before: usize) -> Vec<String> {
+        commands(elm)[before..].to_vec()
+    }
+
+    fn count(commands: &[String], command: &str) -> usize {
+        commands.iter().filter(|c| *c == command).count()
+    }
+
+    fn gaps(elm: &Elm<FakeLink>) -> Vec<Duration> {
+        let times: Vec<Instant> = module_of(elm).frames.iter().map(|(at, _)| *at).collect();
+        times.windows(2).map(|w| w[1] - w[0]).collect()
+    }
+
+    // ---- what is refused, with nothing written -------------------------------------------
+
+    #[test]
+    fn refuses_what_it_cant_send_in_segments_and_writes_nothing() {
+        let cases: Vec<(&str, Elm<FakeLink>, Approved, &str)> = vec![
+            (
+                "before any request showed the adapter echoes as it reads",
+                connect(adapter(module(), &ANSWER)),
+                request(9),
+                "echoes each character",
+            ),
+            (
+                "an adapter that echoes whole lines",
+                {
+                    let mut late = adapter(module(), &ANSWER);
+                    late.echo_at_line_end = true;
+                    warmed(late)
+                },
+                request(9),
+                "echoes each character",
+            ),
+            ("45 bytes", standard(), request(45), "doesn't fit"),
+            (
+                "a module whose reply ID isn't known",
+                standard(),
+                approve(Target::Physical(0x710), &read_of(9)),
+                "no one module's flow control",
+            ),
+            (
+                "PP 26 missing from the summary",
+                {
+                    let mut elm = adapter(module(), &ANSWER);
+                    elm.pps = Some(vec!["09:00 F  24:00 F  25:00 F  29:FF F".to_owned()]);
+                    warmed(elm)
+                },
+                request(9),
+                "PP 26",
+            ),
+        ];
+        for (what, mut elm, refused, says) in cases {
+            let written = elm.link().written.len();
+            let sent = elm.link().elm.sent.len();
+            let err = elm.send(&refused).unwrap_err();
+            assert!(matches!(err, Error::Adapter(_)), "{what}: {err}");
+            assert!(err.to_string().contains(says), "{what}: {err}");
+            assert_eq!(elm.link().written.len(), written, "{what} wrote");
+            assert_eq!(elm.link().elm.sent.len(), sent, "{what} sent");
+            // Still usable.
+            elm.send(&approve(Target::Physical(0x7E0), &[0x09, 0x02]))
+                .unwrap();
+        }
+    }
+
+    #[test]
+    fn a_request_of_up_to_7_bytes_stays_one_frame() {
+        let mut elm = standard();
+        let seven = approve(Target::Physical(REQUEST_ID), &read_of(7));
+        let before = commands(&elm).len();
+        elm.send(&seven).unwrap();
+        assert_eq!(elm.link().elm.sent.last(), Some(&(REQUEST_ID, read_of(7))));
+        assert!(!since(&elm, before).iter().any(|c| c.starts_with("ATCAF")));
+    }
+
+    // ---- the frames -----------------------------------------------------------------------
+
+    #[test]
+    fn writes_the_frames_of_the_golden_table() {
+        for payload in [
+            read_of(8),
+            FOUR_DIDS.to_vec(),
+            read_of(13),
+            read_of(14),
+            read_of(44),
+        ] {
+            let mut elm = standard();
+            let answer = exchange_one(&mut elm, &approve(Target::Physical(REQUEST_ID), &payload));
+            assert_eq!(answer, Response::new(REPLY_ID, ANSWER.to_vec()));
+            assert_eq!(
+                received(&elm),
+                golden(&payload, 0x00),
+                "{}-byte request",
+                payload.len()
+            );
+            assert_eq!(module_of(&elm).received, std::slice::from_ref(&payload));
+            // Each frame is a line of 16 digits, written with no carriage return and then that.
+            let writes = &elm.link().writes;
+            for frame in golden(&payload, 0x00) {
+                let at = writes.iter().position(|w| *w == line(&frame)).unwrap();
+                assert_eq!(writes[at + 1], b"\r", "{frame:02X?}");
+            }
+        }
+        let mut elm = standard();
+        exchange_one(&mut elm, &approve(Target::Physical(REQUEST_ID), &FOUR_DIDS));
+        assert_eq!(
+            received(&elm),
+            [
+                [0x10, 0x09, 0x22, 0xF1, 0x87, 0xF1, 0x88, 0xF1],
+                [0x21, 0x89, 0xF1, 0x91, 0x00, 0x00, 0x00, 0x00]
+            ]
+        );
+        let mut elm = standard();
+        exchange_one(&mut elm, &request(14));
+        assert_eq!(
+            received(&elm)[2],
+            [0x22, 0x0D, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]
+        );
+    }
+
+    #[test]
+    fn writes_the_commands_of_the_design_in_order() {
+        // 14 bytes: a first frame, a consecutive frame inside the block, and the last one.
+        let mut elm = standard();
+        let before = commands(&elm).len();
+        exchange_one(&mut elm, &request(14));
+        assert_eq!(
+            since(&elm, before),
+            [
+                "ATCAF0",
+                "ATSH7E1",
+                "ATFCSH7E1",
+                "ATFCSD300003",
+                "ATFCSM1",
+                "ATCRA7E9",
+                "100E1902FF030405",
+                "ATR0",
+                "21060708090A0B0C",
+                "ATR1",
+                "220D000000000000",
+            ]
+        );
+        // One `X` stopped the listen after the first frame.
+        assert_eq!(elm.link().elm.interrupted, 1);
+        assert!(elm.link().elm.settings.responses);
+
+        // 8 to 13 bytes have no frame inside a block: no `AT R0` or `AT R1`.
+        let mut elm = standard();
+        let before = commands(&elm).len();
+        exchange_one(&mut elm, &request(9));
+        let sent = since(&elm, before);
+        assert_eq!(count(&sent, "ATR0") + count(&sent, "ATR1"), 0, "{sent:?}");
+        assert_eq!(sent.iter().filter(|c| c.starts_with("ATCAF")).count(), 1);
+    }
+
+    #[test]
+    fn pads_with_the_adapters_filler_byte() {
+        // PP 26 on, `AA`.
+        let mut on = adapter(module(), &ANSWER);
+        on.pp.push((0x26, 0xAA));
+        let mut elm = warmed(on);
+        exchange_one(&mut elm, &request(14));
+        assert_eq!(received(&elm), golden(&read_of(14), 0xAA));
+        assert_eq!(received(&elm)[2][7], 0xAA);
+
+        // PP 26 listed but off, at its factory value `00`, and an adapter with no parameters.
+        let mut off = adapter(module(), &ANSWER);
+        off.pps = Some(vec![
+            "09:00 F  24:00 F  25:00 F  26:55 F  29:FF F".to_owned(),
+        ]);
+        let mut clone = adapter(module(), &ANSWER);
+        clone.unsupported.push("ATPPS".into());
+        for adapter in [off, clone] {
+            let mut elm = warmed(adapter);
+            exchange_one(&mut elm, &request(14));
+            assert_eq!(received(&elm), golden(&read_of(14), 0x00));
+        }
+    }
+
+    #[test]
+    fn a_29_bit_request_goes_in_frames_too() {
+        let ids = ModuleIds {
+            request: 0x17FC_0076,
+            reply: 0x17FE_0076,
+        };
+        let adapter = FakeElm::new(Box::new(|header, _| {
+            if header == 0x17FC_0076 {
+                vec![(0x17FE_0076, ANSWER.to_vec())]
+            } else {
+                Vec::new()
+            }
+        }))
+        .with_module(Module::new(0x17FC_0076, 0x17FE_0076));
+        let mut elm = warmed(adapter);
+        let policy = Policy::read_only().narrowed_to(&[ids]).unwrap();
+        let payload = read_of(14);
+        let approved = policy
+            .approve(Protocol::Uds, Target::Physical29(ids.request), &payload)
+            .unwrap();
+        let answer = exchange_one(&mut elm, &approved);
+        assert_eq!(answer, Response::new(0x17FE_0076, ANSWER.to_vec()));
+        assert_eq!(received(&elm), golden(&payload, 0x00));
+        assert!(elm.link().elm.settings.bits29());
+    }
+
+    // ---- a misheard line never reaches the bus ---------------------------------------------
+
+    // Flips bit `bit` of byte `index` of the next write of `bytes`, and sends `payload`.
+    fn flipped(
+        payload: &[u8],
+        bytes: &[u8],
+        index: usize,
+        bit: u8,
+    ) -> (Elm<FakeLink>, Result<(), Error>) {
+        let mut elm = standard();
+        elm.link_mut().corrupt_write_of = Some((bytes.to_vec(), index, 1 << bit));
+        let result = elm.send(&approve(Target::Physical(REQUEST_ID), payload));
+        assert!(elm.link().corrupt_write_of.is_none(), "{bytes:02X?}");
+        (elm, result)
+    }
+
+    #[test]
+    fn no_single_bit_error_in_a_frame_line_puts_another_frame_on_the_bus() {
+        // Every bit of every digit of every frame line of a 14-byte request: the echo shows the
+        // flip before the carriage return, so the line is ended with `XX`, the adapter refuses
+        // it, and the driver stops. A flip of a letter's case is the same digit.
+        let payload = read_of(14);
+        let frames = golden(&payload, 0x00);
+        std::thread::scope(|scope| {
+            for (k, frame) in frames.iter().enumerate() {
+                let (payload, frames) = (&payload, &frames);
+                scope.spawn(move || {
+                    let bytes = line(frame);
+                    for index in 0..bytes.len() {
+                        for bit in 0..8 {
+                            let (mut elm, result) = flipped(payload, &bytes, index, bit);
+                            let what = format!("frame {k} digit {index} bit {bit}");
+                            if result.is_ok() {
+                                assert!(bit == 5 && bytes[index].is_ascii_alphabetic(), "{what}");
+                                assert_eq!(received(&elm), *frames, "{what}");
+                            } else {
+                                // The frames before it, and nothing from it on.
+                                assert_eq!(received(&elm), frames[..k], "{what}");
+                                assert_eq!(elm.link().elm.sent.len(), 1 + k, "{what}");
+                                assert!(commands(&elm).last().unwrap().ends_with("XX"), "{what}");
+                                let written = elm.link().written.len();
+                                assert!(elm.send(&request(14)).is_err(), "{what}");
+                                assert_eq!(elm.link().written.len(), written, "{what}");
+                            }
+                        }
+                    }
+                });
+            }
+        });
+    }
+
+    // Where the writes of a clean 14-byte request are: the index among the writes since the
+    // request began of each frame's digits.
+    fn write_positions() -> Vec<usize> {
+        let mut elm = standard();
+        let before = elm.link().writes.len();
+        exchange_one(&mut elm, &request(14));
+        let writes = &elm.link().writes[before..];
+        golden(&read_of(14), 0x00)
+            .iter()
+            .map(|f| writes.iter().position(|w| *w == line(f)).unwrap())
+            .collect()
+    }
+
+    #[test]
+    fn a_flipped_carriage_return_leaves_the_frame_unsent() {
+        // The line is held in the adapter, unsent, and the driver gives up on it: after 7 s of
+        // silence for the first frame, 2 s for one inside a block. The last frame's send
+        // returns, and its answer never comes.
+        let frames = golden(&read_of(14), 0x00);
+        let positions = write_positions();
+        std::thread::scope(|scope| {
+            for k in 0..frames.len() {
+                for bit in 0..8 {
+                    let (frames, positions) = (&frames, &positions);
+                    scope.spawn(move || {
+                        let mut elm = standard();
+                        let at = elm.link().writes.len() + positions[k] + 1;
+                        elm.link_mut().corrupt_write_at = Some((at, 0, 1 << bit));
+                        let result = elm.send(&request(14));
+                        assert!(elm.link().corrupt_write_at.is_none());
+                        assert_eq!(result.is_ok(), k == 2, "frame {k} bit {bit}");
+                        assert_eq!(received(&elm), frames[..k], "frame {k} bit {bit}");
+                        assert!(elm.recv(Duration::from_millis(300)).is_err());
+                        assert_eq!(received(&elm), frames[..k], "frame {k} bit {bit}");
+                    });
+                }
+            }
+        });
+    }
+
+    #[test]
+    fn a_clone_that_ignores_caf0_sends_no_consecutive_frame() {
+        // It answers `OK` to `AT CAF0` and stays in `AT CAF1`. A real ELM327 refuses the 8-byte
+        // line with `?`, which stops the driver; a clone that sends the 8 bytes sends one frame
+        // of service 0x10 (diagnostic session control) with the length as its session, which the
+        // module answers with something that isn't flow control. Either way no consecutive frame
+        // is sent, and nothing but that one frame is on the bus.
+        for sends_it in [false, true] {
+            let mut clone = adapter(module(), &ANSWER);
+            clone.ignores_caf0 = true;
+            clone.takes_eight_bytes_in_caf1 = sends_it;
+            let mut elm = warmed(clone);
+            let sent = elm.link().elm.sent.len();
+            let err = elm.send(&request(14)).unwrap_err();
+            assert!(matches!(err, Error::Adapter(_)), "{err}");
+            let on_bus = &elm.link().elm.sent[sent..];
+            assert_eq!(on_bus.len(), usize::from(sends_it), "{on_bus:02X?}");
+            assert_eq!(module_of(&elm).frames, []);
+            // A `?` leaves the driver stopped; the other is only that request's failure, so the
+            // next request is tried (and fails the same way).
+            let written = elm.link().written.len();
+            assert!(elm.send(&request(9)).is_err());
+            assert_eq!(elm.link().written.len() > written, sends_it);
+        }
+    }
+
+    #[test]
+    fn a_misheard_switch_of_caf0_never_reaches_the_bus() {
+        // `ATCAF0` going in and `ATCAF1` coming out are written like a request, their echo checked
+        // before the carriage return.
+        let single = approve(Target::Physical(0x7E0), &[0x09, 0x02]);
+        for (command, leaving) in [("ATCAF0", false), ("ATCAF1", true)] {
+            for index in 0..command.len() {
+                for bit in 0..8 {
+                    let mut elm = standard();
+                    if leaving {
+                        exchange_one(&mut elm, &request(9));
+                    }
+                    let sent = elm.link().elm.sent.len();
+                    elm.link_mut().corrupt_write_of =
+                        Some((command.as_bytes().to_vec(), index, 1 << bit));
+                    let result = if leaving {
+                        elm.send(&single)
+                    } else {
+                        elm.send(&request(9))
+                    };
+                    assert!(elm.link().corrupt_write_of.is_none(), "{command}");
+                    let on_bus = &elm.link().elm.sent[sent..];
+                    if result.is_ok() {
+                        assert_eq!(bit, 5, "{command} {index}");
+                    } else {
+                        assert_eq!(on_bus, [], "{command} {index} {bit}");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_misheard_r0_r1_or_x_never_puts_another_frame_on_the_bus() {
+        let payload = read_of(14);
+        let frames = golden(&payload, 0x00);
+        // `ATR0` goes in before frame 2 and `ATR1` before frame 3: after either flip only the
+        // frames already sent are on the bus. Its carriage return is part of the line.
+        std::thread::scope(|scope| {
+            for (command, before) in [("ATR0\r", 1), ("ATR1\r", 2)] {
+                for index in 0..command.len() {
+                    for bit in 0..8 {
+                        let (payload, frames) = (&payload, &frames);
+                        scope.spawn(move || {
+                            let (elm, result) = flipped(payload, command.as_bytes(), index, bit);
+                            let what = format!("{command:?} byte {index} bit {bit}");
+                            if result.is_ok() {
+                                // Only the case of a letter is a flip the adapter takes as the
+                                // same command.
+                                assert_eq!(bit, 5, "{what}");
+                                assert_eq!(received(&elm), *frames, "{what}");
+                            } else {
+                                assert_eq!(received(&elm), frames[..before], "{what}");
+                            }
+                        });
+                    }
+                }
+            }
+        });
+        // `X` is any byte to the adapter, which stops listening for it whatever it is.
+        for bit in 0..8 {
+            let (mut elm, result) = flipped(&payload, b"X", 0, bit);
+            assert!(result.is_ok(), "bit {bit}");
+            assert_eq!(received(&elm), frames, "bit {bit}");
+            assert_eq!(elm.recv(Duration::from_secs(1)).unwrap().source, REPLY_ID);
+        }
+    }
+
+    // ---- a link that fails mid-transfer ----------------------------------------------------
+
+    #[test]
+    fn a_link_that_fails_mid_transfer_stops_the_driver_and_writes_nothing_more() {
+        let positions = write_positions();
+        // After the carriage return of frame 2, and after the echo of frame 3 (its digits are
+        // written, its carriage return isn't): the first two frames are on the bus either way.
+        for allowed in [positions[1] + 2, positions[2] + 1] {
+            let mut elm = standard();
+            let writes = elm.link().writes.len();
+            elm.link_mut().kill_after_writes = Some(allowed);
+            let err = elm.send(&request(14)).unwrap_err();
+            assert!(err.to_string().contains("link"), "{err}");
+            assert_eq!(received(&elm), golden(&read_of(14), 0x00)[..2]);
+            assert_eq!(elm.link().writes.len() - writes, allowed);
+            // The driver is stopped, and there is no link to put `AT R1` back on.
+            let written = elm.link().written.len();
+            assert!(elm.send(&request(9)).is_err());
+            assert_eq!(elm.link().written.len(), written);
+        }
+    }
+
+    // ---- flow control ----------------------------------------------------------------------
+
+    // The adapter after `frames` as the module's flow control.
+    fn answering_with(frames: Vec<Vec<u8>>) -> Elm<FakeLink> {
+        warmed(adapter(module().with_flow_frames(frames), &ANSWER))
+    }
+
+    fn waits(n: usize) -> Vec<Vec<u8>> {
+        let mut frames = vec![flow_control_frame(1, 0, 0); n];
+        frames.push(flow_control_frame(0, 0, 0));
+        frames
+    }
+
+    #[test]
+    fn only_a_clean_flow_control_lets_the_transfer_go_on() {
+        let single_frame = vec![0x03, 0x7F, 0x10, 0x12, 0, 0, 0, 0];
+        let first_frame = vec![0x10, 0x09, 0x62, 0xF1, 0x87, 0xF1, 0x88, 0xF1];
+        let consecutive = vec![0x21, 0x89, 0xF1, 0x91, 0, 0, 0, 0];
+        let extra = vec![0x03, 0x7F, 0x19, 0x78, 0, 0, 0, 0];
+        let cases: Vec<(&str, Vec<Vec<u8>>, &str)> = vec![
+            ("none", vec![], "NO DATA"),
+            (
+                "a single frame",
+                vec![single_frame],
+                "instead of flow control",
+            ),
+            (
+                "a first frame",
+                vec![first_frame],
+                "instead of flow control",
+            ),
+            (
+                "a consecutive frame",
+                vec![consecutive],
+                "instead of flow control",
+            ),
+            ("status 3", vec![flow_control_frame(3, 0, 0)], "can't use"),
+            ("status 8", vec![flow_control_frame(8, 0, 0)], "can't use"),
+            ("status 15", vec![flow_control_frame(15, 0, 0)], "can't use"),
+            ("2 bytes", vec![vec![0x30, 0x00]], "can't use"),
+            ("overflow", vec![flow_control_frame(2, 0, 0)], "overflow"),
+            ("11 waits", waits(11), "more than 10 wait"),
+            (
+                "continue then another frame",
+                vec![flow_control_frame(0, 0, 0), extra],
+                "after its flow control",
+            ),
+            (
+                "two continues",
+                vec![flow_control_frame(0, 0, 0), flow_control_frame(0, 0, 0)],
+                "after its flow control",
+            ),
+        ];
+        for (what, script, says) in cases {
+            let mut elm = answering_with(script);
+            let Err(err) = elm.send(&request(14)) else {
+                panic!("{what}: the request was sent");
+            };
+            assert!(matches!(err, Error::Adapter(_)), "{what}: {err}");
+            assert!(err.to_string().contains(says), "{what}: {err}");
+            // Only the first frame went out, and the adapter is back at its prompt.
+            assert_eq!(received(&elm).len(), 1, "{what}");
+            assert!(!elm.link().elm.has_output(), "{what}");
+            assert!(elm.link().elm.settings.responses, "{what}");
+        }
+    }
+
+    #[test]
+    fn one_to_ten_waits_before_continue_to_send_are_taken() {
+        assert_eq!(SEGMENT_MAX_WAITS, 10);
+        for n in [0, 1, 10] {
+            let mut elm = answering_with(waits(n));
+            let answer = exchange_one(&mut elm, &request(14));
+            assert_eq!(answer.source, REPLY_ID, "{n} waits");
+            assert_eq!(received(&elm), golden(&read_of(14), 0x00), "{n} waits");
+        }
+    }
+
+    #[test]
+    fn a_flow_control_from_the_wrong_id_breaks_the_driver_down() {
+        // An adapter that lost its filter prints a frame from outside it.
+        let mut stray = module();
+        stray.flow_control = vec![(0x7EA, flow_control_frame(0, 0, 0))];
+        stray.unfiltered = true;
+        let mut elm = warmed(adapter(stray, &ANSWER));
+        let err = elm.send(&request(14)).unwrap_err();
+        assert!(err.to_string().contains("receive filter"), "{err}");
+        assert_eq!(received(&elm).len(), 1);
+        let written = elm.link().written.len();
+        assert!(elm.send(&request(9)).is_err());
+        assert_eq!(elm.link().written.len(), written);
+    }
+
+    #[test]
+    fn another_nodes_frames_are_hidden_by_the_receive_filter() {
+        let mut busy = module();
+        busy.other_nodes = vec![
+            (0x7EA, flow_control_frame(2, 0, 0)),
+            (0x7E8, flow_control_frame(0, 0, 0)),
+        ];
+        let mut elm = warmed(adapter(busy, &ANSWER));
+        let answer = exchange_one(&mut elm, &request(14));
+        assert_eq!(answer.source, REPLY_ID);
+        assert_eq!(received(&elm), golden(&read_of(14), 0x00));
+    }
+
+    #[test]
+    fn an_adapter_that_ends_its_listen_with_the_flow_control_is_handled() {
+        // An STN-like listen that ends at its prompt after one frame: the `X` then has nothing
+        // to stop. And a timeout that runs out just as the `X` is written: the prompt comes first
+        // and the byte starts a line, which is ended so the adapter refuses it.
+        for ends_on_write in [false, true] {
+            let mut fake = adapter(module(), &ANSWER);
+            fake.listen_one_frame = !ends_on_write;
+            fake.listen_ends_on_write = ends_on_write;
+            let mut elm = warmed(fake);
+            let before = commands(&elm).len();
+            let answer = exchange_one(&mut elm, &request(14));
+            assert_eq!(answer.source, REPLY_ID, "{ends_on_write}");
+            assert_eq!(received(&elm), golden(&read_of(14), 0x00));
+            let sent = since(&elm, before);
+            assert_eq!(count(&sent, "XX"), usize::from(ends_on_write), "{sent:?}");
+            assert_eq!(elm.link().elm.interrupted, 0);
+        }
+    }
+
+    // ---- block size and STmin ---------------------------------------------------------------
+
+    #[test]
+    fn follows_the_block_size_of_the_flow_control() {
+        // 41 bytes: a first frame and 5 consecutive ones.
+        let payload = read_of(41);
+        for (block_size, flow_controls, r0) in [(0, 1, 1), (1, 5, 0), (2, 3, 2)] {
+            let mut elm = warmed(adapter(module().with_flow(block_size, 0), &ANSWER));
+            let before = commands(&elm).len();
+            let answer = exchange_one(&mut elm, &approve(Target::Physical(REQUEST_ID), &payload));
+            assert_eq!(answer.source, REPLY_ID);
+            assert_eq!(
+                received(&elm),
+                golden(&payload, 0x00),
+                "block size {block_size}"
+            );
+            let sent = since(&elm, before);
+            // One `X` for each flow control; `AT R0` before each run of frames inside a block.
+            assert_eq!(elm.link().elm.interrupted, flow_controls, "{block_size}");
+            assert_eq!(
+                count(&sent, "ATR0"),
+                r0,
+                "block size {block_size}: {sent:?}"
+            );
+            assert_eq!(
+                count(&sent, "ATR1"),
+                r0,
+                "block size {block_size}: {sent:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn keeps_the_gap_the_flow_control_asks_for() {
+        // 27 bytes: a first frame and 3 consecutive ones, so two gaps between consecutive frames.
+        for (st_min, least) in [
+            (0x00, Duration::ZERO),
+            (0x05, Duration::from_millis(5)),
+            (0x7F, Duration::from_millis(127)),
+            // 500 µs is rounded up to the 1 ms the driver can keep.
+            (0xF5, Duration::from_millis(1)),
+            // Reserved values are the longest gap.
+            (0x80, Duration::from_millis(127)),
+            (0xFA, Duration::from_millis(127)),
+        ] {
+            let mut elm = warmed(adapter(module().with_flow(0, st_min), &ANSWER));
+            exchange_one(&mut elm, &request(27));
+            let gaps = gaps(&elm);
+            assert_eq!(gaps.len(), 3);
+            for gap in &gaps[1..] {
+                assert!(*gap >= least, "STmin {st_min:#04X}: {gaps:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn keeps_the_gap_across_every_flow_control_wait() {
+        // Block size 1: each consecutive frame is the last of its block and waits for a flow
+        // control, but is still 127 ms after the one before it, which on a fast link the `X` and
+        // the write would otherwise use up.
+        let mut elm = warmed(adapter(module().with_flow(1, 0x7F), &ANSWER));
+        exchange_one(&mut elm, &request(27));
+        let gaps = gaps(&elm);
+        assert_eq!(gaps.len(), 3);
+        for gap in &gaps[1..] {
+            assert!(*gap >= Duration::from_millis(127), "{gaps:?}");
+        }
+    }
+
+    // ---- bounds ----------------------------------------------------------------------------
+
+    #[test]
+    fn the_bounds_are_the_designs() {
+        assert_eq!(SEGMENT_GAP, Duration::from_millis(500));
+        assert_eq!(SEGMENT_TRANSFER, Duration::from_secs(30));
+        assert_eq!(SEGMENT_HOLD, Duration::from_millis(1250));
+    }
+
+    // The digits of frame `k` (counting from 0) of a request of `len` bytes.
+    fn digits(len: usize, k: usize) -> Vec<u8> {
+        line(&golden(&read_of(len), 0x00)[k])
+    }
+
+    #[test]
+    fn a_frame_that_would_go_more_than_500_ms_after_the_last_is_killed() {
+        // 21 bytes: a first frame and 3 consecutive ones, the first two inside the block (`AT
+        // R0`). Each case delays the digits of one consecutive frame on a slow link, so the
+        // gap before it has passed by the time its echo is checked.
+        for slow in [1, 2, 3] {
+            let mut elm = warmed(adapter(module(), &ANSWER));
+            // A longer bound can't be set.
+            elm.tighten_segment_bounds(Duration::from_secs(10), Duration::from_secs(100));
+            elm.link_mut().slow_write_of = Some((digits(21, slow), Duration::from_millis(600)));
+            let err = elm.send(&request(21)).unwrap_err();
+            assert!(
+                err.to_string()
+                    .contains(&format!("before frame {} of 4", slow + 1)),
+                "{err}"
+            );
+            // The slow frame never reached the bus; the line was ended with `XX`.
+            assert_eq!(
+                received(&elm),
+                golden(&read_of(21), 0x00)[..slow],
+                "frame {slow}"
+            );
+            let killed = format!("{}XX", String::from_utf8(digits(21, slow)).unwrap());
+            assert!(commands(&elm).contains(&killed), "{:?}", commands(&elm));
+            // `AT R1` is back whatever the state it was in, and the adapter is at its prompt.
+            assert!(elm.link().elm.settings.responses);
+            assert!(!elm.link().elm.has_output());
+        }
+    }
+
+    #[test]
+    fn a_transfer_that_takes_longer_than_its_limit_stops() {
+        // Each consecutive frame waits 127 ms for the one before, so the fifth is due after
+        // 381 ms: past a shortened limit of 330 ms, which the fourth, due after 254 ms, meets.
+        let mut elm = warmed(adapter(module().with_flow(0, 0x7F), &ANSWER));
+        elm.tighten_segment_bounds(SEGMENT_GAP, Duration::from_millis(330));
+        let err = elm.send(&request(41)).unwrap_err();
+        assert!(err.to_string().contains("took more than 330 ms"), "{err}");
+        // The first four frames went out, and the adapter was put back to waiting for replies.
+        assert_eq!(received(&elm), golden(&read_of(41), 0x00)[..4]);
+        assert!(elm.link().elm.settings.responses);
+    }
+
+    #[test]
+    fn the_next_request_waits_out_a_stopped_transfer_and_one_after_a_success_doesnt() {
+        // A first frame the module accepted and a flow control that never lets the rest go: the
+        // module keeps the half transfer and ignores a first frame until it drops it after 1 s.
+        let mut stuck = module().with_flow_frames(waits(11));
+        stuck.ignores_first_frame_while_receiving = true;
+        let mut elm = warmed(adapter(stuck, &ANSWER));
+        assert!(elm.send(&request(14)).is_err());
+        let first_frame = module_of(&elm).frames[0].0;
+        module_mut(&mut elm).flow_control = vec![(REPLY_ID, flow_control_frame(0, 0, 0))];
+        // It waits, then its first frame meets a module that has dropped the old one.
+        let answer = exchange_one(&mut elm, &request(14));
+        assert!(first_frame.elapsed() >= SEGMENT_HOLD);
+        assert_eq!(answer.source, REPLY_ID);
+        assert_eq!(module_of(&elm).dropped, 1);
+
+        // Nothing is held after a success.
+        let started = Instant::now();
+        exchange_one(&mut elm, &request(14));
+        assert!(started.elapsed() < Duration::from_millis(500));
+    }
+
+    // ---- `AT R0` is put back ---------------------------------------------------------------
+
+    #[test]
+    fn at_r1_is_back_after_every_failure_with_at_r0_on() {
+        // 21 bytes: frames 2 and 3 are inside a block, so `AT R0` is on when the 3rd is
+        // written. Each status ends the request, leaves the driver usable, and `AT R1` is back.
+        for status in ["BUS BUSY", "BUFFER FULL", "DATA ERROR"] {
+            let mut broken = module();
+            broken.status_on_frame = Some((3, status.to_owned()));
+            let mut elm = warmed(adapter(broken, &ANSWER));
+            let before = commands(&elm).len();
+            let err = elm.send(&request(21)).unwrap_err();
+            assert!(
+                err.to_string()
+                    .contains(&format!("{status} while sending frame 3 of 4")),
+                "{err}"
+            );
+            let sent = since(&elm, before);
+            assert_eq!(sent.last().map(String::as_str), Some("ATR1"), "{sent:?}");
+            assert!(elm.link().elm.settings.responses, "{status}");
+            assert_eq!(received(&elm).len(), 2, "{status}");
+        }
+        // Anything else leaves the adapter in an unknown state.
+        let mut can_error = module();
+        can_error.status_on_frame = Some((3, "CAN ERROR".to_owned()));
+        let mut elm = warmed(adapter(can_error, &ANSWER));
+        assert!(elm.send(&request(21)).is_err());
+        let written = elm.link().written.len();
+        assert!(elm.send(&request(9)).is_err());
+        assert_eq!(elm.link().written.len(), written);
+    }
+
+    #[test]
+    fn a_frame_in_at_r0_is_not_the_modules_to_send() {
+        // The adapter isn't listening in `AT R0`, so a module that prints a frame anyway has
+        // broken the transfer.
+        let mut chatty = module();
+        chatty.status_on_frame = Some((3, "7E9 03 7F 19 78 00 00 00 00".to_owned()));
+        let mut elm = warmed(adapter(chatty, &ANSWER));
+        let err = elm.send(&request(21)).unwrap_err();
+        assert!(err.to_string().contains("after its flow control"), "{err}");
+        assert!(elm.link().elm.settings.responses);
+    }
+
+    #[test]
+    fn a_refused_at_r1_breaks_the_driver_down() {
+        let mut elm = warmed(adapter(module(), &ANSWER));
+        elm.link_mut().slow_write_of = Some((digits(21, 2), Duration::from_millis(600)));
+        elm.link_mut().elm.unsupported.push("ATR1".into());
+        let err = elm.send(&request(21)).unwrap_err();
+        assert!(
+            err.to_string().contains("wouldn't go back to waiting"),
+            "{err}"
+        );
+        let written = elm.link().written.len();
+        assert!(elm.send(&request(9)).is_err());
+        assert_eq!(elm.link().written.len(), written);
+    }
+
+    // ---- the answer ------------------------------------------------------------------------
+
+    #[test]
+    fn a_multi_frame_answer_gets_the_adapters_flow_control_to_the_request_id() {
+        let answer: Vec<u8> = (0..20).map(|n| 0x40 + n).collect();
+        let mut elm = warmed(adapter(module(), &answer));
+        let got = exchange_one(&mut elm, &request(14));
+        assert_eq!(got, Response::new(REPLY_ID, answer));
+        // The module goes on only if the flow control came to its own request ID.
+        assert_eq!(elm.link().elm.flow_control_ids, [REQUEST_ID]);
+    }
+
+    #[test]
+    fn a_negative_response_and_a_single_frame_answer_are_read_as_always() {
+        for answer in [vec![0x7F, 0x19, 0x31], vec![0x59, 0x02, 0xFF, 0x01]] {
+            let mut elm = warmed(adapter(module(), &answer));
+            assert_eq!(
+                exchange_one(&mut elm, &request(14)),
+                Response::new(REPLY_ID, answer)
+            );
+        }
+    }
+
+    #[test]
+    fn what_a_clone_in_caf0_prints_in_an_answer_is_dealt_with() {
+        // `CAF0` prints a frame whose PCI byte is invalid, which `CAF1` would hide: dropped, so
+        // the request times out as it would have.
+        let mut invalid = module();
+        invalid.after_answer = vec!["7E9 40 00 00 00 00 00 00 00".to_owned()];
+        let mut elm = warmed(adapter(invalid, &[]));
+        elm.send(&request(14)).unwrap();
+        assert_eq!(elm.recv(Duration::from_secs(1)), Err(Error::Timeout));
+        // A remote frame is text, and unexpected output stops the driver.
+        let mut remote = module();
+        remote.after_answer = vec!["7E9 RTR".to_owned()];
+        let mut elm = warmed(adapter(remote, &[]));
+        elm.send(&request(14)).unwrap();
+        let err = elm.recv(Duration::from_secs(1)).unwrap_err();
+        assert!(err.to_string().contains("unexpected output"), "{err}");
+        let written = elm.link().written.len();
+        assert!(elm.send(&request(9)).is_err());
+        assert_eq!(elm.link().written.len(), written);
+        // A reply marked `<DATA ERROR` fails that request only.
+        let mut data_error = module();
+        data_error.after_answer = vec!["7E9 59 02 FF <DATA ERROR".to_owned()];
+        let mut elm = warmed(adapter(data_error, &[]));
+        elm.send(&request(14)).unwrap();
+        let err = elm.recv(Duration::from_secs(1)).unwrap_err();
+        assert!(err.to_string().contains("DATA ERROR"), "{err}");
+    }
+
+    // ---- modes -----------------------------------------------------------------------------
+
+    #[test]
+    fn a_single_frame_request_after_a_segmented_one_switches_back_first() {
+        let mut elm = standard();
+        exchange_one(&mut elm, &request(9));
+        // Lazily: nothing was written right after the request.
+        assert!(!commands(&elm).last().unwrap().starts_with("ATCAF"));
+        assert!(!elm.link().elm.settings.caf);
+        let before = commands(&elm).len();
+        elm.send(&approve(Target::Physical(0x7E0), &[0x09, 0x02]))
+            .unwrap();
+        let sent = since(&elm, before);
+        assert_eq!(sent.first().map(String::as_str), Some("ATCAF1"), "{sent:?}");
+        assert!(elm.link().elm.settings.caf);
+        // The single frame went out with its PCI byte.
+        assert_eq!(elm.link().elm.sent.last(), Some(&(0x7E0, vec![0x09, 0x02])));
+    }
+
+    #[test]
+    fn two_segmented_requests_in_a_row_switch_once() {
+        let mut elm = standard();
+        let before = commands(&elm).len();
+        exchange_one(&mut elm, &request(9));
+        exchange_one(&mut elm, &request(14));
+        exchange_one(&mut elm, &request(44));
+        let sent = since(&elm, before);
+        assert_eq!(count(&sent, "ATCAF0"), 1, "{sent:?}");
+        assert_eq!(count(&sent, "ATCAF1"), 0, "{sent:?}");
+        // A plain ELM327 is paced, so adaptive timing is never on to be switched.
+        assert!(!sent.iter().any(|c| c.starts_with("ATAT")), "{sent:?}");
+    }
+
+    // A module for the segmented request and one for a TP2.0 channel setup.
+    fn mixed() -> FakeElm {
+        FakeElm::new(Box::new(|header, request| match (header, request) {
+            (0x200, [0x5F, 0xC0, ..]) => {
+                vec![(0x25F, vec![0x00, 0xD0, 0x00, 0x03, 0x40, 0x07, 0x01])]
+            }
+            (REQUEST_ID, _) => vec![(REPLY_ID, ANSWER.to_vec())],
+            _ => Vec::new(),
+        }))
+        .with_module(module())
+    }
+
+    fn open_tp20(elm: &mut Elm<FakeLink>) {
+        elm.send(&Policy::read_only().approve_tp20_setup(0x5F).unwrap())
+            .unwrap();
+        while elm.recv(Duration::from_secs(1)).is_ok() {}
+    }
+
+    #[test]
+    fn a_tp20_session_and_a_segmented_request_pass_through_plain_iso_tp() {
+        // Segmented, then TP2.0: `ATCAF1` first, then the raw mode switch.
+        let mut elm = warmed(mixed());
+        let start = commands(&elm).len();
+        exchange_one(&mut elm, &request(9));
+        let before = commands(&elm).len();
+        open_tp20(&mut elm);
+        let sent = since(&elm, before);
+        assert_eq!(
+            sent[..5],
+            ["ATCAF1", "ATCFC0", "ATV1", "ATCAF0", "ATCSM0"],
+            "{sent:?}"
+        );
+        assert!(!elm.link().elm.settings.caf && !elm.link().elm.settings.cfc);
+        // And back: the raw mode is left, then `ATCAF0` for the segments.
+        let before = commands(&elm).len();
+        let answer = exchange_one(&mut elm, &request(9));
+        assert_eq!(answer.source, REPLY_ID);
+        let sent = since(&elm, before);
+        assert_eq!(
+            sent[..5],
+            ["ATCAF1", "ATV0", "ATCFC1", "ATCSM1", "ATCAF0"],
+            "{sent:?}"
+        );
+        let settings = &elm.link().elm.settings;
+        // Segmenting needs the adapter's own flow control and no variable DLC, as it is.
+        assert!(!settings.caf && settings.cfc && !settings.variable_dlc);
+        assert_eq!(received(&elm).len(), 4);
+        // Adaptive timing is off on a paced adapter all along, so no switch is written.
+        assert!(!since(&elm, start).iter().any(|c| c.starts_with("ATAT")));
+    }
+
+    // ---- the audit log ---------------------------------------------------------------------
+
+    fn audit_of(
+        elm: Elm<FakeLink>,
+        name: &str,
+        run: impl FnOnce(&mut Audited<Elm<FakeLink>>),
+    ) -> Vec<serde_json::Value> {
+        let log = std::env::temp_dir().join(format!(
+            "obdcracker-transport-{}-caf0-{name}.jsonl",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&log);
+        {
+            let mut audited = Audited::open(&log, elm, "fake").unwrap();
+            run(&mut audited);
+        }
+        let audit = std::fs::read_to_string(&log).unwrap();
+        let _ = std::fs::remove_file(&log);
+        audit
+            .lines()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect()
+    }
+
+    // What each line of the log says after the request: the command, or the direction and payload.
+    fn story(lines: &[serde_json::Value]) -> Vec<String> {
+        let tx = lines.iter().position(|v| v["dir"] == "tx").unwrap();
+        lines[tx..]
+            .iter()
+            .map(|v| match v["dir"].as_str().unwrap() {
+                "cmd" => format!("cmd {}", v["cmd"].as_str().unwrap()),
+                dir => format!("{dir} {}", v["payload"].as_str().unwrap_or("")),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn the_audit_log_shows_the_request_once_then_every_frame_and_flow_control() {
+        let lines = audit_of(standard(), "order", |elm| {
+            elm.send(&request(14)).unwrap();
+            while elm.recv(Duration::from_secs(1)).is_ok() {}
+        });
+        let story = story(&lines);
+        let frames: Vec<String> = golden(&read_of(14), 0x00).iter().map(|f| hex(f)).collect();
+        // The request comes first, once, with the payload; the frames follow it.
+        assert_eq!(story[0], format!("tx {}", hex(&read_of(14))));
+        assert_eq!(story.iter().filter(|s| s.starts_with("tx ")).count(), 1);
+        // The commands, frames and flow control, in the order they happened.
+        let expected = [
+            "cmd ATCAF0".to_owned(),
+            format!("tx_frame {}", frames[0]),
+            format!("rx_frame {}", hex(&flow_control_frame(0, 0, 0))),
+            "cmd X".to_owned(),
+            "cmd ATR0".to_owned(),
+            format!("tx_frame {}", frames[1]),
+            "cmd ATR1".to_owned(),
+            format!("tx_frame {}", frames[2]),
+            format!("rx {}", hex(&ANSWER)),
+        ];
+        let mut rest = story.iter();
+        for event in &expected {
+            assert!(
+                rest.any(|s| s == event),
+                "{event} not in order in {story:?}"
+            );
+        }
+        let ids: Vec<&str> = lines
+            .iter()
+            .filter(|v| v["dir"].as_str().is_some_and(|d| d.ends_with("_frame")))
+            .map(|v| v["id"].as_str().unwrap())
+            .collect();
+        assert_eq!(ids, ["7E1", "7E9", "7E1", "7E1"]);
+    }
+
+    #[test]
+    fn a_stopped_transfer_leaves_every_frame_in_the_log() {
+        let lines = audit_of(answering_with(waits(11)), "partial", |elm| {
+            assert!(elm.send(&request(14)).is_err());
+        });
+        let story = story(&lines);
+        let tx_frames = story.iter().filter(|s| s.starts_with("tx_frame")).count();
+        let rx_frames = story.iter().filter(|s| s.starts_with("rx_frame")).count();
+        assert_eq!((tx_frames, rx_frames), (1, 11), "{story:?}");
+        assert!(lines.iter().any(|v| v["dir"] == "err"), "{story:?}");
+    }
+
+    #[test]
+    fn a_killed_line_is_logged_as_a_command_not_a_frame() {
+        let mut elm = standard();
+        let bytes = digits(14, 1);
+        elm.link_mut().corrupt_write_of = Some((bytes.clone(), 3, 0x01));
+        let lines = audit_of(elm, "killed", |elm| {
+            assert!(elm.send(&request(14)).is_err());
+        });
+        let story = story(&lines);
+        // The first frame is a frame; the second was written as digits and never sent.
+        assert_eq!(
+            story.iter().filter(|s| s.starts_with("tx_frame")).count(),
+            1
+        );
+        // What the driver wrote, which the adapter heard differently.
+        let written = String::from_utf8(bytes).unwrap();
+        assert!(story.contains(&format!("cmd {written}")), "{story:?}");
+    }
+
+    #[test]
+    fn events_past_the_limit_are_counted_lost_in_order() {
+        // Block size 1 gives a 44-byte request about 20 events; none are taken.
+        let mut elm = warmed(adapter(module().with_flow(1, 0), &ANSWER));
+        for _ in 0..250 {
+            exchange_one(&mut elm, &request(44));
+        }
+        let events = elm.take_events();
+        assert!(
+            matches!(events.last(), Some(LinkEvent::Lost(n)) if *n > 0),
+            "{}",
+            events.len()
+        );
+        assert!(events.len() > obdcracker_transport::elm::MAX_EVENTS);
     }
 }
 
