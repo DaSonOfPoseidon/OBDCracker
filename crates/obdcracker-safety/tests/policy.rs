@@ -11,8 +11,8 @@ const ENGINE: Target = Target::Physical(0x7E0);
 const READ_SERVICES: [u8; 7] = [0x01, 0x03, 0x09, 0x10, 0x19, 0x22, 0x3E];
 const FLASH_SERVICES: [u8; 7] = [0x11, 0x31, 0x34, 0x35, 0x36, 0x37, 0x3D];
 // KWP2000 (ISO 14230-3): ReadStatusOfDTC, ReadDTCByStatus, ReadEcuIdentification,
-// ReadDataByLocalIdentifier, TesterPresent.
-const KWP2000_READ_SERVICES: [u8; 5] = [0x17, 0x18, 0x1A, 0x21, 0x3E];
+// ReadDataByLocalIdentifier, ReadDataByCommonIdentifier (one ID), TesterPresent.
+const KWP2000_READ_SERVICES: [u8; 6] = [0x17, 0x18, 0x1A, 0x21, 0x22, 0x3E];
 // Every read each protocol approves, one example of each form, for the cross-protocol check.
 const UDS_READS: &[&[u8]] = &[
     &[0x01, 0x0C],
@@ -38,6 +38,7 @@ const KWP2000_READS: &[&[u8]] = &[
     &[0x18, 0x02],
     &[0x1A, 0x9B],
     &[0x21, 0x01],
+    &[0x22, 0xF1, 0x87],
     &[0x3E],
     &[0x3E, 0x01],
     &[0x3E, 0x02],
@@ -140,11 +141,13 @@ const KWP2000_LOCKED: &[(&[u8], Tier)] = &[
 #[test]
 fn approves_kwp2000_reads_on_a_physical_address() {
     for payload in [
-        &[0x1A, 0x9B][..],               // ReadEcuIdentification: VAG's identification
-        &[0x21, 0x01],                   // ReadDataByLocalIdentifier
-        &[0x18, 0x02, 0xFF, 0x00],       // ReadDTCByStatus: stored DTCs, all groups
+        &[0x1A, 0x9B][..],   // ReadEcuIdentification: VAG's identification
+        &[0x21, 0x01],       // ReadDataByLocalIdentifier
+        &[0x22, 0xF1, 0x87], // ReadDataByCommonIdentifier: one ID
+        &[0x22, 0xF1, 0x9E],
+        &[0x18, 0x02, 0xFF, 0x00], // ReadDTCByStatus: stored DTCs, all groups
         &[0x18, 0x02, 0xFF, 0xFF, 0x00], // the widths are the manufacturer's
-        &[0x17, 0xFF, 0x00],             // ReadStatusOfDTC
+        &[0x17, 0xFF, 0x00],       // ReadStatusOfDTC
         &[0x17, 0xFF],
         &[0x3E],       // TesterPresent
         &[0x3E, 0x01], // TesterPresent, response required
@@ -205,9 +208,8 @@ fn rejects_kwp2000_services_that_drive_the_car_or_arent_reads() {
         &[0x85, 0x02],                   // ControlDTCSetting
         &[0x83, 0x00],                   // AccessTimingParameters
         &[0x20],                         // StopDiagnosticSession
-        &[0x22, 0xF1, 0x90],             // a UDS read is no KWP2000 read
-        &[0x19, 0x02, 0xAF],
-        &[0x09, 0x02], // OBD-II modes aren't KWP2000
+        &[0x19, 0x02, 0xAF],             // a UDS read is no KWP2000 read
+        &[0x09, 0x02],                   // OBD-II modes aren't KWP2000
         &[0x01, 0x00],
     ] {
         assert_eq!(
@@ -226,9 +228,13 @@ fn rejects_malformed_kwp2000_reads() {
         &[0x1A, 0x9B, 0x00], // trailing byte
         &[0x21],             // no local ID
         &[0x21, 0x01, 0x02],
-        &[0x18],       // no status or group
-        &[0x17],       // no group
-        &[0x3E, 0x03], // unknown responseRequired
+        &[0x22],                         // no common ID
+        &[0x22, 0xF1],                   // half an ID
+        &[0x22, 0xF1, 0x87, 0x00],       // a third byte
+        &[0x22, 0xF1, 0x87, 0xF1, 0x9E], // two IDs: one read asks for one
+        &[0x18],                         // no status or group
+        &[0x17],                         // no group
+        &[0x3E, 0x03],                   // unknown responseRequired
         &[0x3E, 0x01, 0x00],
         &[0x10], // no session
         &[0x10, 0x87, 0x00],
@@ -1054,7 +1060,17 @@ fn a_tp20_channel_carries_only_what_the_kwp2000_policy_allows() {
         );
     }
     // UDS-only reads aren't KWP2000 reads.
-    for request in [&[0x22, 0xF1, 0x87][..], &[0x19, 0x02, 0xAF]] {
+    assert_eq!(
+        policy.approve_tp20_request(&channel, 0, &[0x19, 0x02, 0xAF]),
+        Err(Rejection::NotAllowed)
+    );
+    // One common ID per read: none, half of one, a third byte, or two IDs.
+    for request in [
+        &[0x22][..],
+        &[0x22, 0xF1],
+        &[0x22, 0xF1, 0x87, 0x00],
+        &[0x22, 0xF1, 0x87, 0xF1],
+    ] {
         assert_eq!(
             policy.approve_tp20_request(&channel, 0, request),
             Err(Rejection::NotAllowed),
@@ -1148,4 +1164,43 @@ proptest! {
             prop_assert!(addresses.contains(&address));
         }
     }
+}
+
+#[test]
+fn a_common_id_read_goes_only_to_modules_the_policy_allows() {
+    // On a TP2.0 channel the module is the one the setup was approved for.
+    let narrowed = Policy::read_only().narrowed_to_tp20(&[0x5F]);
+    let setup = narrowed.approve_tp20_setup(0x5F).unwrap();
+    let channel = narrowed
+        .tp20_channel(&setup, 0x25F, &channel_reply(0x300, 0x740))
+        .unwrap();
+    assert_eq!(
+        narrowed
+            .approve_tp20_request(&channel, 0, &[0x22, 0xF1, 0x87])
+            .map(|approved| (approved.tier(), approved.payload().to_vec())),
+        Ok((Tier::Read, vec![0x10, 0x00, 0x03, 0x22, 0xF1, 0x87]))
+    );
+    assert_eq!(
+        narrowed.approve_tp20_setup(0x52),
+        Err(Rejection::WrongTarget)
+    );
+    // And a KWP2000 read on a CAN ID is bound by the profile's modules like any other request.
+    assert_eq!(
+        a7().approve(
+            Protocol::Kwp2000,
+            Target::Physical(0x7E0),
+            &[0x22, 0xF1, 0x87]
+        )
+        .map(|approved| approved.tier()),
+        Ok(Tier::Read)
+    );
+    assert_eq!(
+        a7().approve(
+            Protocol::Kwp2000,
+            Target::Physical(0x7A0),
+            &[0x22, 0xF1, 0x87]
+        )
+        .map(|approved| approved.tier()),
+        Err(Rejection::WrongTarget)
+    );
 }

@@ -1685,6 +1685,7 @@ fn dry_run_scan_discover_tp20_lists_the_channel_setups() {
     assert!(stdout.contains("200 72 C0 00 10 00 03 01"), "{stdout}");
     assert!(stdout.contains("200 7F C0 00 10 00 03 01"), "{stdout}");
     assert!(stdout.contains("A8 (disconnect)"), "{stdout}");
+    assert!(stdout.contains("22 F1 87 and 22 F1 9E"), "{stdout}");
     // Nothing was sent, so nothing could answer.
     assert!(!stdout.contains("addresses answered"), "{stdout}");
     assert!(

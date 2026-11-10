@@ -11,7 +11,7 @@ use clap::parser::ValueSource;
 use clap::{ArgGroup, CommandFactory, FromArgMatches, Parser, Subcommand, ValueEnum};
 use obdcracker_core::obd;
 use obdcracker_core::response::{self, Error as ReplyError, Nrc};
-use obdcracker_core::uds::{DiagnosticSession, UdsDtc};
+use obdcracker_core::uds::{self, DiagnosticSession, UdsDtc};
 use obdcracker_profile::{Decode, DidSession, Profile, Protocol};
 use obdcracker_safety::{ModuleIds, Policy};
 use obdcracker_sim::SimBus;
@@ -169,7 +169,9 @@ enum Command {
         /// profile's TP2.0 list (on the A7, the modules silent on ISO-TP and others the gateway
         /// lists), show the channel each one gives, and close it again (A8). Then read each
         /// module's identification (KWP2000 1A 9B, after VAG's session request 10 89) on a
-        /// channel of its own, closed the same way.
+        /// channel of its own, closed the same way. A module that answers 1A 9B with "service
+        /// not supported" is asked on that channel for its part number (22 F1 87) and ODX name
+        /// (22 F1 9E) instead.
         /// An ELM adapter must echo each character as it reads it, such as an `OBDLink` EX;
         /// --gsusb and --socketcan send the frames themselves
         #[arg(long)]
@@ -1596,11 +1598,7 @@ fn run_scan<T: Transport>(
             Err(code) => return code,
         }
         if cli.dry_run {
-            println!(
-                "a live TP2.0 pass also sends, on each channel a module gives: A8 (disconnect); \
-                 then it opens the channel again to read the module's identification: A0, 10 89 \
-                 (VAG's session) and 1A 9B in one data frame each, an ACK of each that asks, and A8"
-            );
+            println!("{TP20_DRY_RUN_NOTE}");
         }
     }
     if let (Some(profile), Some(scanned)) = (profile_of(cli), &scanned) {
@@ -1784,6 +1782,12 @@ fn tp20_addresses(cli: &Cli) -> Result<Vec<u8>, String> {
     Ok(addresses)
 }
 
+// What a dry-run TP2.0 pass says a live one also sends.
+const TP20_DRY_RUN_NOTE: &str = "a live TP2.0 pass also sends, on each channel a module gives: A8 \
+    (disconnect); then it opens the channel again to read the module's identification: A0, 10 89 \
+    (VAG's session) and 1A 9B in one data frame each, an ACK of each that asks, and A8; a module \
+    that refuses 1A 9B as not supported is also asked 22 F1 87 and 22 F1 9E, the same way";
+
 // Sends a TP2.0 channel setup to each address and closes each channel a module gives, printing
 // what each module that answered did. Returns the addresses that did.
 fn discover_tp20_modules<T: Transport>(
@@ -1831,12 +1835,19 @@ fn discover_tp20_modules<T: Transport>(
         for module in &found {
             if matches!(module.answer, Answer::Channel(_)) {
                 // The adapter's state is unknown after it fails, so nothing more is sent.
-                let shown = tp20_identification(transport, policy, module.address, timing)
-                    .map_err(|e| {
+                let read = tp20_identification(transport, policy, module.address, timing).map_err(
+                    |e| {
                         eprintln!("TP2.0 {:02X} identification: {e}", module.address);
                         ExitCode::FAILURE
-                    })?;
-                println!("TP2.0 {:02X} identification: {shown}", module.address);
+                    },
+                )?;
+                println!(
+                    "TP2.0 {:02X} identification: {}",
+                    module.address, read.shown
+                );
+                for line in &read.common_ids {
+                    println!("TP2.0 {:02X} {line}", module.address);
+                }
             }
         }
     }
@@ -1850,16 +1861,30 @@ const TP20_IDENTIFICATION: [u8; 2] = [0x1A, 0x9B];
 // it ends when the channel closes.
 const TP20_SESSION: [u8; 2] = [0x10, 0x89];
 
+// The common identifiers read from a module that refuses `1A 9B` with "service not supported":
+// the part number (F187) and the ODX name (F19E), as in UDS. Each is its own request, since a
+// KWP2000 `22` takes one.
+const TP20_COMMON_IDS: [u16; 2] = [0xF187, 0xF19E];
+
+// What a TP2.0 module's identification read came to.
+struct Identification {
+    // The `1A 9B` line, with the session it was read in.
+    shown: String,
+    // One line for each common identifier read after the module refused `1A 9B`, if it did.
+    common_ids: Vec<String>,
+}
+
 // Reads a TP2.0 module's identification on a channel of its own, after asking for VAG's session,
 // and says what came back and which session it was read in. A module that doesn't enter the
 // session is still read in the default one, on a new channel if the failed request closed the
-// first. An adapter failure, opening, reading or closing, is the error.
+// first. A module that answers `1A 9B` with `7F 1A 11` is asked for its common identifiers on
+// the same channel. An adapter failure, opening, reading or closing, is the error.
 fn tp20_identification<T: Transport>(
     transport: &mut T,
     policy: &Policy,
     address: u8,
     timing: Timing,
-) -> Result<String, tp20::ChannelError> {
+) -> Result<Identification, tp20::ChannelError> {
     match identification_on_channel(transport, policy, address, timing, None)? {
         Identified::Shown(shown) => Ok(shown),
         // A request that fails (no answer in time, a message that doesn't answer it) closes the
@@ -1874,7 +1899,7 @@ fn tp20_identification<T: Transport>(
 }
 
 enum Identified {
-    Shown(String),
+    Shown(Identification),
     // The channel closed after the session request failed, for this reason.
     SessionLost(String),
 }
@@ -1892,9 +1917,12 @@ fn identification_on_channel<T: Transport>(
         Ok(session) => session,
         Err(e @ tp20::ChannelError::Transport(_)) => return Err(e),
         Err(e) => {
-            return Ok(Identified::Shown(match default_session {
-                None => format!("no channel ({e})"),
-                Some(why) => format!("no channel ({e}) (default session: {why})"),
+            return Ok(Identified::Shown(Identification {
+                shown: match default_session {
+                    None => format!("no channel ({e})"),
+                    Some(why) => format!("no channel ({e}) (default session: {why})"),
+                },
+                common_ids: Vec::new(),
             }));
         }
     };
@@ -1920,6 +1948,24 @@ fn identification_on_channel<T: Transport>(
         },
     };
     let read = session.request(&TP20_IDENTIFICATION);
+    // Only that refusal: any other says something else is wrong, which `22` wouldn't fix. The
+    // answer is checked as a refusal of `1A` exactly, as the line below shows it.
+    let refused_1a = matches!(
+        read.as_deref().map(|answer| response::positive(TP20_IDENTIFICATION[0], answer)),
+        Ok(Err(ReplyError::Negative(refusal))) if refusal.nrc == Nrc::ServiceNotSupported
+    );
+    let mut common_ids = Vec::new();
+    if refused_1a {
+        for id in TP20_COMMON_IDS {
+            let [high, low] = id.to_be_bytes();
+            // After an error the channel is closed, so the next read says so without sending.
+            common_ids.push(match session.request(&[COMMON_ID_READ, high, low]) {
+                Err(e @ tp20::ChannelError::Transport(_)) => return Err(e),
+                Err(e) => format!("{id:04X} not read ({e})"),
+                Ok(answer) => show_common_id(id, &answer),
+            });
+        }
+    }
     let closed = session.close();
     if let Err(e @ tp20::ChannelError::Transport(_)) = read {
         return Err(e);
@@ -1956,10 +2002,38 @@ fn identification_on_channel<T: Transport>(
             }
         },
     };
-    Ok(Identified::Shown(match in_session {
-        Ok(()) => format!("{shown} (session 89)"),
-        Err(why) => format!("{shown} (default session: {why})"),
+    Ok(Identified::Shown(Identification {
+        shown: match in_session {
+            Ok(()) => format!("{shown} (session 89)"),
+            Err(why) => format!("{shown} (default session: {why})"),
+        },
+        common_ids,
     }))
+}
+
+// KWP2000's `ReadDataByCommonIdentifier`.
+const COMMON_ID_READ: u8 = 0x22;
+
+// A module's answer to the read of common identifier `id`, as a line. ECU replies are untrusted,
+// so it must be `62` and `id` echoed exactly; whatever follows is the module's data, shown as text
+// if it's printable (the way a UDS text DID is) and as bytes if not.
+fn show_common_id(id: u16, answer: &[u8]) -> String {
+    match response::positive(COMMON_ID_READ, answer) {
+        Err(ReplyError::Negative(refusal)) => format!("{id:04X} refused ({})", refusal.nrc),
+        Err(e) => format!("{id:04X} not read ({e}) [{}]", hex(answer)),
+        Ok(rest) => match rest.split_first_chunk::<2>() {
+            Some((echo, data)) if *echo == id.to_be_bytes() => match uds::decode_text(data) {
+                // Nothing, or only padding: no value set.
+                Ok("") => format!("{id:04X} (empty)"),
+                Ok(text) => format!("{id:04X} \"{text}\""),
+                Err(_) => format!("{id:04X} [{}]", hex(data)),
+            },
+            _ => format!(
+                "{id:04X} not read (not an answer for {id:04X}) [{}]",
+                hex(answer)
+            ),
+        },
+    }
 }
 
 // The command that ran, with its `--range` starting at `from`, for a shell to run again: a
@@ -2415,7 +2489,8 @@ mod tests {
     use super::socketcan_unconfirmed_warning;
     use super::{
         Cli, Discovery, configured_bitrate, dtc_out_of_step_note, gateway_list_lines,
-        gsusb_bitrate, resume_command, run_scan, sweep_out_of_step_note, tp20_identification,
+        gsusb_bitrate, resume_command, run_scan, show_common_id, sweep_out_of_step_note,
+        tp20_identification,
     };
 
     fn compared(address: u8, request_id: Option<u16>, status: ListedAs) -> Compared {
@@ -2502,12 +2577,13 @@ mod tests {
         bus
     }
 
-    // The requests the tester sent on the channel, in order: `10 89` and `1A 9B` as their bytes.
+    // The requests the tester sent on the channel, in order: `10 89`, `1A 9B` and the `22` reads
+    // as their bytes.
     fn requests(sent: &[Approved]) -> Vec<Vec<u8>> {
         sent.iter()
             .filter(|request| request.target() == Target::Tp20Channel(0x740))
             .filter_map(|request| request.payload().get(3..).map(<[u8]>::to_vec))
-            .filter(|bytes| matches!(bytes.first(), Some(0x10 | 0x1A)))
+            .filter(|bytes| matches!(bytes.first(), Some(0x10 | 0x1A | 0x22)))
             .collect()
     }
 
@@ -2540,14 +2616,18 @@ mod tests {
         let policy = obdcracker_safety::Policy::read_only();
         let mut bus = a7_with_tp20();
         assert_eq!(
-            tp20_identification(&mut bus, &policy, 0x5F, Timing::default()).unwrap(),
+            tp20_identification(&mut bus, &policy, 0x5F, Timing::default())
+                .unwrap()
+                .shown,
             "[5A 9B 34 47 30 39 30 37 34 30 31] \"4G0907401\" (session 89)"
         );
         // The session comes first, and nothing else is sent before the read.
         assert_eq!(requests(bus.sent()), [vec![0x10, 0x89], vec![0x1A, 0x9B]],);
         // A module with no identification refuses the read, in the session it entered.
         let mut bus = tp20_module(Some(&[0x50, 0x89]), &[0x7F, 0x1A, 0x12]);
-        let shown = tp20_identification(&mut bus, &policy, 0x5F, Timing::default()).unwrap();
+        let shown = tp20_identification(&mut bus, &policy, 0x5F, Timing::default())
+            .unwrap()
+            .shown;
         assert!(
             shown.starts_with("refused (") && shown.ends_with(") (session 89)"),
             "{shown}"
@@ -2561,7 +2641,9 @@ mod tests {
         // No answer for `10 89` is `7F 10 11`, and a refusal of its own is one too.
         for session in [None, Some(&[0x7F, 0x10, 0x12][..])] {
             let mut bus = tp20_module(session, record);
-            let shown = tp20_identification(&mut bus, &policy, 0x5F, Timing::default()).unwrap();
+            let shown = tp20_identification(&mut bus, &policy, 0x5F, Timing::default())
+                .unwrap()
+                .shown;
             assert!(
                 shown.starts_with("[5A 9B 34 47 30 39 30 37 34 30 31] \"4G0907401\" (default session: 10 89 refused ("),
                 "{shown}"
@@ -2570,7 +2652,9 @@ mod tests {
         }
         // And one that refuses both says both.
         let mut bus = tp20_module(None, &[0x7F, 0x1A, 0x11]);
-        let shown = tp20_identification(&mut bus, &policy, 0x5F, Timing::default()).unwrap();
+        let shown = tp20_identification(&mut bus, &policy, 0x5F, Timing::default())
+            .unwrap()
+            .shown;
         assert!(
             shown.starts_with("refused (") && shown.contains("(default session: 10 89 refused ("),
             "{shown}"
@@ -2601,7 +2685,9 @@ mod tests {
             ..Timing::default()
         };
         let mut bus = LosesSessionRequest(tp20_module(Some(&[0x50, 0x89]), b"\x5A\x9B4G0907401"));
-        let shown = tp20_identification(&mut bus, &policy, 0x5F, timing).unwrap();
+        let shown = tp20_identification(&mut bus, &policy, 0x5F, timing)
+            .unwrap()
+            .shown;
         assert!(
             shown.starts_with("[5A 9B 34 47 30 39 30 37 34 30 31] \"4G0907401\" (default session: 10 89 not answered ("),
             "{shown}"
@@ -2628,7 +2714,9 @@ mod tests {
             (&[0x50], "10 89 answered 50"),
         ] {
             let mut bus = tp20_module(Some(answer), record);
-            let got = tp20_identification(&mut bus, &policy, 0x5F, Timing::default()).unwrap();
+            let got = tp20_identification(&mut bus, &policy, 0x5F, Timing::default())
+                .unwrap()
+                .shown;
             assert_eq!(
                 got,
                 format!(
@@ -2650,10 +2738,249 @@ mod tests {
         ] {
             let mut bus = tp20_module(Some(&[0x50, 0x89]), record);
             assert_eq!(
-                tp20_identification(&mut bus, &policy, 0x5F, Timing::default()).unwrap(),
+                tp20_identification(&mut bus, &policy, 0x5F, Timing::default())
+                    .unwrap()
+                    .shown,
                 format!("{shown} (session 89)")
             );
         }
+    }
+
+    // A module at 0x5F that enters VAG's session, refuses `1A 9B` as not supported, and answers
+    // the common-ID reads with these.
+    fn refuses_1a(part: &[u8], odx: &[u8]) -> SimBus {
+        let mut bus = tp20_module(Some(&[0x50, 0x89]), &[0x7F, 0x1A, 0x11]);
+        bus.add_tp20_answer(0x5F, &[0x22, 0xF1, 0x87], part)
+            .unwrap();
+        bus.add_tp20_answer(0x5F, &[0x22, 0xF1, 0x9E], odx).unwrap();
+        bus
+    }
+
+    #[test]
+    fn a_module_that_refuses_1a_as_not_supported_is_read_by_common_id() {
+        let policy = obdcracker_safety::Policy::read_only();
+        let mut bus = refuses_1a(b"\x62\xF1\x874G8959802B", b"\x62\xF1\x9E8P0959802   ");
+        let read = tp20_identification(&mut bus, &policy, 0x5F, Timing::default()).unwrap();
+        assert!(
+            read.shown.starts_with("refused (") && read.shown.ends_with(") (session 89)"),
+            "{}",
+            read.shown
+        );
+        // The padding a module adds isn't part of the text.
+        assert_eq!(
+            read.common_ids,
+            ["F187 \"4G8959802B\"", "F19E \"8P0959802\""]
+        );
+        // On the one channel, after the session and the refused read, one ID per request.
+        let sent = bus.sent();
+        assert_eq!(
+            requests(sent),
+            [
+                vec![0x10, 0x89],
+                vec![0x1A, 0x9B],
+                vec![0x22, 0xF1, 0x87],
+                vec![0x22, 0xF1, 0x9E],
+            ]
+        );
+        let setups = sent
+            .iter()
+            .filter(|request| matches!(request.target(), Target::Tp20Setup(0x5F)))
+            .count();
+        assert_eq!((setups, disconnects(sent)), (1, 1));
+    }
+
+    #[test]
+    fn a_module_that_refuses_the_session_and_1a_is_still_read_by_common_id() {
+        let policy = obdcracker_safety::Policy::read_only();
+        let mut bus = tp20_module(None, &[0x7F, 0x1A, 0x11]);
+        bus.add_tp20_answer(0x5F, &[0x22, 0xF1, 0x87], b"\x62\xF1\x874G8959802B")
+            .unwrap();
+        bus.add_tp20_answer(0x5F, &[0x22, 0xF1, 0x9E], b"\x62\xF1\x9E8P0959802")
+            .unwrap();
+        let read = tp20_identification(&mut bus, &policy, 0x5F, Timing::default()).unwrap();
+        assert!(
+            read.shown.contains("(default session: 10 89 refused ("),
+            "{}",
+            read.shown
+        );
+        assert_eq!(
+            read.common_ids,
+            ["F187 \"4G8959802B\"", "F19E \"8P0959802\""]
+        );
+    }
+
+    #[test]
+    fn a_common_id_that_isnt_text_is_shown_as_bytes_and_an_empty_one_as_empty() {
+        let policy = obdcracker_safety::Policy::read_only();
+        let mut bus = refuses_1a(
+            &[0x62, 0xF1, 0x87, 0xFF, 0x00, 0x01],
+            &[0x62, 0xF1, 0x9E, 0x20],
+        );
+        let read = tp20_identification(&mut bus, &policy, 0x5F, Timing::default()).unwrap();
+        assert_eq!(read.common_ids, ["F187 [FF 00 01]", "F19E (empty)"]);
+        let mut bus = refuses_1a(&[0x62, 0xF1, 0x87], &[0x7F, 0x22, 0x31]);
+        let read = tp20_identification(&mut bus, &policy, 0x5F, Timing::default()).unwrap();
+        assert_eq!(read.common_ids[0], "F187 (empty)");
+        assert!(
+            read.common_ids[1].starts_with("F19E refused ("),
+            "{:?}",
+            read.common_ids
+        );
+    }
+
+    #[test]
+    fn a_module_with_no_answer_for_the_common_ids_refuses_them_and_is_still_closed() {
+        let policy = obdcracker_safety::Policy::read_only();
+        let mut bus = tp20_module(Some(&[0x50, 0x89]), &[0x7F, 0x1A, 0x11]);
+        let read = tp20_identification(&mut bus, &policy, 0x5F, Timing::default()).unwrap();
+        assert_eq!(read.common_ids.len(), 2);
+        assert!(
+            read.common_ids
+                .iter()
+                .all(|line| line.contains(" refused ("))
+        );
+        assert_eq!(disconnects(bus.sent()), 1);
+    }
+
+    #[test]
+    fn only_not_supported_sends_the_common_id_reads() {
+        let policy = obdcracker_safety::Policy::read_only();
+        // Wrong format (0x12), conditions not correct (0x22), not in this session (0x7F), and an
+        // answer: none of them is "this module has no 1A".
+        for record in [
+            &[0x7F, 0x1A, 0x12][..],
+            &[0x7F, 0x1A, 0x22],
+            &[0x7F, 0x1A, 0x7F],
+            b"\x5A\x9B4G0907401",
+        ] {
+            let mut bus = tp20_module(Some(&[0x50, 0x89]), record);
+            bus.add_tp20_answer(0x5F, &[0x22, 0xF1, 0x87], b"\x62\xF1\x87X")
+                .unwrap();
+            let read = tp20_identification(&mut bus, &policy, 0x5F, Timing::default()).unwrap();
+            assert!(read.common_ids.is_empty(), "{record:02X?}");
+            assert_eq!(
+                requests(bus.sent()),
+                [vec![0x10, 0x89], vec![0x1A, 0x9B]],
+                "{record:02X?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_common_id_answer_is_checked_exactly() {
+        for (answer, shown) in [
+            (&[0x62, 0xF1, 0x87, 0x41, 0x42][..], "F187 \"AB\""),
+            (&[0x62, 0xF1, 0x87], "F187 (empty)"),
+            (&[0x62, 0xF1, 0x87, 0x00, 0x20], "F187 (empty)"),
+            (&[0x62, 0xF1, 0x87, 0x41, 0x00, 0x42], "F187 [41 00 42]"),
+            (&[0x62, 0xF1, 0x87, 0xC3, 0xA9], "F187 [C3 A9]"),
+            (
+                &[0x62, 0xF1, 0x88, 0x41],
+                "F187 not read (not an answer for F187) [62 F1 88 41]",
+            ),
+            (
+                &[0x62, 0xF1],
+                "F187 not read (not an answer for F187) [62 F1]",
+            ),
+            (&[0x62], "F187 not read (not an answer for F187) [62]"),
+            (
+                &[0x5A, 0x9B, 0x41],
+                "F187 not read (reply is for another service (0x5A)) [5A 9B 41]",
+            ),
+            (
+                &[0x7F, 0x1A, 0x31],
+                "F187 not read (reply is for another service (0x7F)) [7F 1A 31]",
+            ),
+            (&[], "F187 not read (reply is too short) []"),
+        ] {
+            assert_eq!(show_common_id(0xF187, answer), shown, "{answer:02X?}");
+        }
+        assert!(show_common_id(0xF187, &[0x7F, 0x22, 0x31]).starts_with("F187 refused ("));
+    }
+
+    // The adapter fails on the second common-ID read (data frame 10 00 03 22 F1 9E).
+    struct FailsOnTheSecondId(SimBus);
+
+    impl Transport for FailsOnTheSecondId {
+        fn send(&mut self, request: &Approved) -> Result<(), Error> {
+            if request.target() == Target::Tp20Channel(0x740)
+                && request.payload().ends_with(&[0x22, 0xF1, 0x9E])
+            {
+                return Err(Error::Adapter("the link went away".into()));
+            }
+            self.0.send(request)
+        }
+
+        fn recv(&mut self, timeout: Duration) -> Result<Response, Error> {
+            self.0.recv(timeout)
+        }
+    }
+
+    #[test]
+    fn an_adapter_failure_between_the_common_id_reads_is_the_error() {
+        let policy = obdcracker_safety::Policy::read_only();
+        let mut bus = FailsOnTheSecondId(refuses_1a(
+            b"\x62\xF1\x874G8959802B",
+            b"\x62\xF1\x9E8P0959802",
+        ));
+        let failed = tp20_identification(&mut bus, &policy, 0x5F, Timing::default());
+        assert!(
+            matches!(
+                failed,
+                Err(obdcracker_transport::tp20::ChannelError::Transport(_))
+            ),
+            "{:?}",
+            failed.map(|read| read.common_ids)
+        );
+    }
+
+    // The adapter loses the first common-ID read (data frame 10 00 03 22 F1 87), so nothing
+    // answers it and the channel is lost between the reads.
+    struct LosesTheFirstId(SimBus);
+
+    impl Transport for LosesTheFirstId {
+        fn send(&mut self, request: &Approved) -> Result<(), Error> {
+            if request.target() == Target::Tp20Channel(0x740)
+                && request.payload().ends_with(&[0x22, 0xF1, 0x87])
+            {
+                return Ok(());
+            }
+            self.0.send(request)
+        }
+
+        fn recv(&mut self, timeout: Duration) -> Result<Response, Error> {
+            self.0.recv(timeout)
+        }
+    }
+
+    #[test]
+    fn a_channel_lost_during_the_first_common_id_read_is_reported_for_both() {
+        let policy = obdcracker_safety::Policy::read_only();
+        let timing = Timing {
+            p2: Duration::from_millis(20),
+            ..Timing::default()
+        };
+        let mut bus = LosesTheFirstId(refuses_1a(
+            b"\x62\xF1\x874G8959802B",
+            b"\x62\xF1\x9E8P0959802",
+        ));
+        let read = tp20_identification(&mut bus, &policy, 0x5F, timing).unwrap();
+        assert!(
+            read.common_ids[0].starts_with("F187 not read ("),
+            "{:?}",
+            read.common_ids
+        );
+        assert!(
+            read.common_ids[1].starts_with("F19E not read ("),
+            "{:?}",
+            read.common_ids
+        );
+        // The second read sent nothing, and the channel was closed once.
+        assert_eq!(
+            on_channel(bus.0.sent(), &[0x10, 0x00, 0x03, 0x22, 0xF1, 0x9E]),
+            0
+        );
+        assert_eq!(disconnects(bus.0.sent()), 1);
     }
 
     // Discovery works, then the adapter fails on the first frame on a channel.
