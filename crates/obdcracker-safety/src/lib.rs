@@ -439,7 +439,13 @@ impl Policy {
 
     /// A KWP2000 `request` on a channel a module opened, as one data frame with sequence number
     /// `sequence` that asks for an ACK ([`tp20::data_frame`]). The request is checked against
-    /// the KWP2000 allowlist and tiers, as [`Policy::approve`] checks it.
+    /// the KWP2000 allowlist and tiers, as [`Policy::approve`] checks it, except for one more
+    /// read: exactly `10 89`, VAG's diagnostic session, which the modules answer in only after
+    /// they've entered it (`1A 9B` gets `7F 1A 11` before). ISO 14230-3 leaves session values
+    /// from 0x80 to the manufacturer, so [`Policy::approve`] refuses it for KWP2000 in general;
+    /// only the VW Group uses TP2.0, so a channel is where it's known to mean that. The session
+    /// ends when the channel closes, and what a module lets it do beyond reads stays locked by
+    /// its own tier.
     ///
     /// # Errors
     ///
@@ -452,7 +458,11 @@ impl Policy {
         sequence: u8,
         request: &[u8],
     ) -> Result<Approved, Rejection> {
-        let tier = classify_kwp2000(request).ok_or(Rejection::NotAllowed)?;
+        let tier = if request == TP20_VAG_SESSION {
+            Tier::Read
+        } else {
+            classify_kwp2000(request).ok_or(Rejection::NotAllowed)?
+        };
         if tier == Tier::Flash {
             return Err(Rejection::Banned);
         }
@@ -565,6 +575,8 @@ const MAX_11_BIT: u32 = 0x7FF;
 const TP20_TESTER: u8 = 0x00;
 const TP20_FIRST_BROADCAST: u8 = 0xF0;
 const TP20_TESTER_RECEIVE_ID: u32 = 0x300;
+// VAG's diagnostic session, a read on a TP2.0 channel only: see `Policy::approve_tp20_request`.
+const TP20_VAG_SESSION: [u8; 2] = [0x10, 0x89];
 // 29-bit request and reply ranges: see docs/safety.md#addressing.
 const ISO_29_BIT_REQUEST: u32 = 0x18DA_00F1;
 const ISO_29_BIT_REPLY: u32 = 0x18DA_F100;

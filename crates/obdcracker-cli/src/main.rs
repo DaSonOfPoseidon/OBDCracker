@@ -150,7 +150,8 @@ enum Command {
         /// After the scan, look for VW TP2.0 modules: send a channel setup to each address in the
         /// profile's TP2.0 list (on the A7, the modules silent on ISO-TP and others the gateway
         /// lists), show the channel each one gives, and close it again (A8). Then read each
-        /// module's identification (KWP2000 1A 9B) on a channel of its own, closed the same way.
+        /// module's identification (KWP2000 1A 9B, after VAG's session request 10 89) on a
+        /// channel of its own, closed the same way.
         /// An ELM adapter must echo each character as it reads it, such as an `OBDLink` EX;
         /// --gsusb and --socketcan send the frames themselves
         #[arg(long)]
@@ -1416,8 +1417,8 @@ fn run_scan<T: Transport>(
         if cli.dry_run {
             println!(
                 "a live TP2.0 pass also sends, on each channel a module gives: A8 (disconnect); \
-                 then it opens the channel again to read the module's identification: A0 \
-                 (parameters), 1A 9B in one data frame, an ACK of each frame that asks, and A8"
+                 then it opens the channel again to read the module's identification: A0, 10 89 \
+                 (VAG's session) and 1A 9B in one data frame each, an ACK of each that asks, and A8"
             );
         }
     }
@@ -1664,18 +1665,78 @@ fn discover_tp20_modules<T: Transport>(
 // VAG's ECU identification (KWP2000 `ReadEcuIdentification`, option 0x9B).
 const TP20_IDENTIFICATION: [u8; 2] = [0x1A, 0x9B];
 
-// Reads a TP2.0 module's identification on a channel of its own, and says what came back. An
-// adapter failure, opening, reading or closing, is the error.
+// VAG's diagnostic session: the modules refuse reads (`7F 1A 11`) until they've entered it, and
+// it ends when the channel closes.
+const TP20_SESSION: [u8; 2] = [0x10, 0x89];
+
+// Reads a TP2.0 module's identification on a channel of its own, after asking for VAG's session,
+// and says what came back and which session it was read in. A module that doesn't enter the
+// session is still read in the default one, on a new channel if the failed request closed the
+// first. An adapter failure, opening, reading or closing, is the error.
 fn tp20_identification<T: Transport>(
     transport: &mut T,
     policy: &Policy,
     address: u8,
     timing: Timing,
 ) -> Result<String, tp20::ChannelError> {
+    match identification_on_channel(transport, policy, address, timing, None)? {
+        Identified::Shown(shown) => Ok(shown),
+        // A request that fails (no answer in time, a message that doesn't answer it) closes the
+        // channel, so the default-session read gets one of its own.
+        Identified::SessionLost(why) => {
+            match identification_on_channel(transport, policy, address, timing, Some(why))? {
+                Identified::Shown(shown) => Ok(shown),
+                Identified::SessionLost(_) => unreachable!("a read in the default session"),
+            }
+        }
+    }
+}
+
+enum Identified {
+    Shown(String),
+    // The channel closed after the session request failed, for this reason.
+    SessionLost(String),
+}
+
+// One channel: asks for the session, unless `default_session` says why that failed on an earlier
+// channel, and reads the identification.
+fn identification_on_channel<T: Transport>(
+    transport: &mut T,
+    policy: &Policy,
+    address: u8,
+    timing: Timing,
+    default_session: Option<String>,
+) -> Result<Identified, tp20::ChannelError> {
     let mut session = match ChannelSession::open(transport, policy, address, timing) {
         Ok(session) => session,
         Err(e @ tp20::ChannelError::Transport(_)) => return Err(e),
-        Err(e) => return Ok(format!("no channel ({e})")),
+        Err(e) => {
+            return Ok(Identified::Shown(match default_session {
+                None => format!("no channel ({e})"),
+                Some(why) => format!("no channel ({e}) (default session: {why})"),
+            }));
+        }
+    };
+    // The answer's echo is checked exactly: ECU replies are untrusted, and only `50 89` says the
+    // session was entered.
+    let in_session = match default_session {
+        Some(why) => Err(why),
+        None => match session.request(&TP20_SESSION) {
+            Err(e @ tp20::ChannelError::Transport(_)) => return Err(e),
+            Err(e @ tp20::ChannelError::Rejected(_)) => Err(format!("10 89 not sent ({e})")),
+            Err(e) => {
+                // The channel is closed by now.
+                let _ = session.close();
+                return Ok(Identified::SessionLost(format!("10 89 not answered ({e})")));
+            }
+            Ok(answer) => match response::positive(TP20_SESSION[0], &answer) {
+                Ok([echo]) if *echo == TP20_SESSION[1] => Ok(()),
+                Err(ReplyError::Negative(refusal)) => {
+                    Err(format!("10 89 refused ({})", refusal.nrc))
+                }
+                _ => Err(format!("10 89 answered {}", hex(&answer))),
+            },
+        },
     };
     let read = session.request(&TP20_IDENTIFICATION);
     let closed = session.close();
@@ -1685,7 +1746,7 @@ fn tp20_identification<T: Transport>(
     if let Err(e @ tp20::ChannelError::Transport(_)) = closed {
         return Err(e);
     }
-    Ok(match read {
+    let shown = match read {
         Err(e) => format!("not read ({e})"),
         Ok(answer) => match response::positive(TP20_IDENTIFICATION[0], &answer) {
             Err(ReplyError::Negative(refusal)) => format!("refused ({})", refusal.nrc),
@@ -1713,7 +1774,11 @@ fn tp20_identification<T: Transport>(
                 format!("[{}] \"{text}\"", hex(&answer))
             }
         },
-    })
+    };
+    Ok(Identified::Shown(match in_session {
+        Ok(()) => format!("{shown} (session 89)"),
+        Err(why) => format!("{shown} (default session: {why})"),
+    }))
 }
 
 // The command that ran, with its `--range` starting at `from`, for a shell to run again: a
@@ -2231,7 +2296,38 @@ mod tests {
         .unwrap();
         bus.add_tp20_answer(0x5F, &[0x1A, 0x9B], b"\x5A\x9B4G0907401")
             .unwrap();
+        // Session 9: it refuses `1A 9B` until the tester has sent `10 89`.
+        bus.add_tp20_answer(0x5F, &[0x10, 0x89], &[0x50, 0x89])
+            .unwrap();
+        bus.require_tp20_session(0x5F).unwrap();
         bus
+    }
+
+    // A module at 0x5F that answers `1A 9B` with `record` and `10 89` with `session`, if any.
+    fn tp20_module(session: Option<&[u8]>, record: &[u8]) -> SimBus {
+        let mut bus = SimBus::builtin("a7").unwrap();
+        bus.add_tp20(
+            0x5F,
+            Channel {
+                send_id: 0x740,
+                receive_id: 0x300,
+            },
+        )
+        .unwrap();
+        bus.add_tp20_answer(0x5F, &[0x1A, 0x9B], record).unwrap();
+        if let Some(session) = session {
+            bus.add_tp20_answer(0x5F, &[0x10, 0x89], session).unwrap();
+        }
+        bus
+    }
+
+    // The requests the tester sent on the channel, in order: `10 89` and `1A 9B` as their bytes.
+    fn requests(sent: &[Approved]) -> Vec<Vec<u8>> {
+        sent.iter()
+            .filter(|request| request.target() == Target::Tp20Channel(0x740))
+            .filter_map(|request| request.payload().get(3..).map(<[u8]>::to_vec))
+            .filter(|bytes| matches!(bytes.first(), Some(0x10 | 0x1A)))
+            .collect()
     }
 
     fn scan(bus: &mut impl Transport, discover: bool) -> ExitCode {
@@ -2264,20 +2360,101 @@ mod tests {
         let mut bus = a7_with_tp20();
         assert_eq!(
             tp20_identification(&mut bus, &policy, 0x5F, Timing::default()).unwrap(),
-            "[5A 9B 34 47 30 39 30 37 34 30 31] \"4G0907401\""
+            "[5A 9B 34 47 30 39 30 37 34 30 31] \"4G0907401\" (session 89)"
         );
-        // A module with no identification refuses the read.
-        let mut bus = SimBus::builtin("a7").unwrap();
-        bus.add_tp20(
-            0x5F,
-            Channel {
-                send_id: 0x740,
-                receive_id: 0x300,
-            },
-        )
-        .unwrap();
+        // The session comes first, and nothing else is sent before the read.
+        assert_eq!(requests(bus.sent()), [vec![0x10, 0x89], vec![0x1A, 0x9B]],);
+        // A module with no identification refuses the read, in the session it entered.
+        let mut bus = tp20_module(Some(&[0x50, 0x89]), &[0x7F, 0x1A, 0x12]);
         let shown = tp20_identification(&mut bus, &policy, 0x5F, Timing::default()).unwrap();
-        assert!(shown.starts_with("refused ("), "{shown}");
+        assert!(
+            shown.starts_with("refused (") && shown.ends_with(") (session 89)"),
+            "{shown}"
+        );
+    }
+
+    #[test]
+    fn a_module_that_refuses_the_session_is_still_read_in_the_default_one() {
+        let policy = obdcracker_safety::Policy::read_only();
+        let record = b"\x5A\x9B4G0907401";
+        // No answer for `10 89` is `7F 10 11`, and a refusal of its own is one too.
+        for session in [None, Some(&[0x7F, 0x10, 0x12][..])] {
+            let mut bus = tp20_module(session, record);
+            let shown = tp20_identification(&mut bus, &policy, 0x5F, Timing::default()).unwrap();
+            assert!(
+                shown.starts_with("[5A 9B 34 47 30 39 30 37 34 30 31] \"4G0907401\" (default session: 10 89 refused ("),
+                "{shown}"
+            );
+            assert_eq!(requests(bus.sent()), [vec![0x10, 0x89], vec![0x1A, 0x9B]]);
+        }
+        // And one that refuses both says both.
+        let mut bus = tp20_module(None, &[0x7F, 0x1A, 0x11]);
+        let shown = tp20_identification(&mut bus, &policy, 0x5F, Timing::default()).unwrap();
+        assert!(
+            shown.starts_with("refused (") && shown.contains("(default session: 10 89 refused ("),
+            "{shown}"
+        );
+    }
+
+    // The adapter loses the tester's `10 89` (data frame 10 00 02 10 89), so nothing answers it.
+    struct LosesSessionRequest(SimBus);
+
+    impl Transport for LosesSessionRequest {
+        fn send(&mut self, request: &Approved) -> Result<(), Error> {
+            if request.payload() == [0x10, 0x00, 0x02, 0x10, 0x89] {
+                return Ok(());
+            }
+            self.0.send(request)
+        }
+
+        fn recv(&mut self, timeout: Duration) -> Result<Response, Error> {
+            self.0.recv(timeout)
+        }
+    }
+
+    #[test]
+    fn a_session_request_nothing_answers_is_followed_by_a_read_on_a_new_channel() {
+        let policy = obdcracker_safety::Policy::read_only();
+        let timing = Timing {
+            p2: Duration::from_millis(20),
+            ..Timing::default()
+        };
+        let mut bus = LosesSessionRequest(tp20_module(Some(&[0x50, 0x89]), b"\x5A\x9B4G0907401"));
+        let shown = tp20_identification(&mut bus, &policy, 0x5F, timing).unwrap();
+        assert!(
+            shown.starts_with("[5A 9B 34 47 30 39 30 37 34 30 31] \"4G0907401\" (default session: 10 89 not answered ("),
+            "{shown}"
+        );
+        // Two channels were opened, and each closed.
+        let sent = bus.0.sent();
+        let setups = sent
+            .iter()
+            .filter(|request| matches!(request.target(), Target::Tp20Setup(0x5F)))
+            .count();
+        assert_eq!(setups, 2);
+        assert_eq!(on_channel(sent, &[0xA8]), 2);
+        assert_eq!(on_channel(sent, &[0x10, 0x00, 0x02, 0x1A, 0x9B]), 1);
+    }
+
+    #[test]
+    fn a_session_answer_that_isnt_50_89_isnt_taken_as_entered() {
+        let policy = obdcracker_safety::Policy::read_only();
+        let record = b"\x5A\x9B4G0907401";
+        // The wrong session echoed, and trailing bytes after the right one.
+        for (answer, shown) in [
+            (&[0x50, 0x81][..], "10 89 answered 50 81"),
+            (&[0x50, 0x89, 0x00], "10 89 answered 50 89 00"),
+            (&[0x50], "10 89 answered 50"),
+        ] {
+            let mut bus = tp20_module(Some(answer), record);
+            let got = tp20_identification(&mut bus, &policy, 0x5F, Timing::default()).unwrap();
+            assert_eq!(
+                got,
+                format!(
+                    "[5A 9B 34 47 30 39 30 37 34 30 31] \"4G0907401\" (default session: {shown})"
+                )
+            );
+        }
     }
 
     #[test]
@@ -2290,19 +2467,10 @@ mod tests {
             ),
             (&b"\x5A"[..], "not read (no option) [5A]"),
         ] {
-            let mut bus = SimBus::builtin("a7").unwrap();
-            bus.add_tp20(
-                0x5F,
-                Channel {
-                    send_id: 0x740,
-                    receive_id: 0x300,
-                },
-            )
-            .unwrap();
-            bus.add_tp20_answer(0x5F, &[0x1A, 0x9B], record).unwrap();
+            let mut bus = tp20_module(Some(&[0x50, 0x89]), record);
             assert_eq!(
                 tp20_identification(&mut bus, &policy, 0x5F, Timing::default()).unwrap(),
-                shown
+                format!("{shown} (session 89)")
             );
         }
     }
@@ -2362,7 +2530,8 @@ mod tests {
         assert_eq!(scan(&mut bus, false), ExitCode::SUCCESS);
         assert_eq!(disconnects(bus.0.sent()), 2);
         // Each channel a module gives is read for its identification.
-        assert_eq!(on_channel(bus.0.sent(), &[0x10, 0x00, 0x02, 0x1A, 0x9B]), 1);
+        assert_eq!(on_channel(bus.0.sent(), &[0x10, 0x00, 0x02, 0x10, 0x89]), 1);
+        assert_eq!(on_channel(bus.0.sent(), &[0x11, 0x00, 0x02, 0x1A, 0x9B]), 1);
         // With nothing on TP2.0 either, nothing answered.
         let mut bus = Tp20Only(SimBus::builtin("a7").unwrap());
         assert_eq!(scan(&mut bus, false), ExitCode::FAILURE);
