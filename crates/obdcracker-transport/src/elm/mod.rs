@@ -9,7 +9,10 @@ pub mod codec;
 use std::collections::VecDeque;
 use std::time::{Duration, Instant, SystemTime};
 
-use obdcracker_core::isotp::{Addressing, MAX_SHORT_PAYLOAD, Progress, Reassembler};
+use obdcracker_core::isotp::{
+    self, Addressing, CAN_DLC, FlowControl, FlowStatus, MAX_SHORT_PAYLOAD, Progress, Reassembler,
+    Segmenter, Step,
+};
 use obdcracker_safety::{Approved, Protocol, Target};
 
 use crate::link::{Driver, Link, LinkKind};
@@ -110,13 +113,21 @@ const MONITOR_STN: &str = "STM";
 // section 8.9), which discards it. No single flipped bit of it is a hex digit, and if the prompt
 // came first, `KILL`'s `X\r` ends the line it starts so the adapter refuses it.
 const INTERRUPT: &[u8] = b"X";
-/// The longest the driver lets pass between two frames of a request it sends in segments.
+// The programmable parameter that holds the byte the adapter pads a short CAN frame with
+// (datasheet p. 68).
+const FILLER_PP: u8 = 0x26;
+/// The longest the driver lets pass between two frames of a request it sends in segments,
+/// measured from the carriage return of the frame before (or from reading the flow control, for
+/// the first consecutive frame): half of ISO 15765-2's `N_Cr`, 1 s. A frame that would go later is
+/// killed instead ([`docs/design/elm-caf0-segmenting.md`](https://github.com/DaSonOfPoseidon/OBDCracker/blob/main/docs/design/elm-caf0-segmenting.md), section 6).
 pub const SEGMENT_GAP: Duration = Duration::from_millis(500);
 /// The longest a request sent in segments may take from its first frame to its last.
 pub const SEGMENT_TRANSFER: Duration = Duration::from_secs(30);
-/// How long the driver writes nothing after a transfer it stopped part-way.
+/// How long the driver writes nothing after a transfer it stopped part-way: `N_Cr` plus 250 ms, so
+/// the module has dropped the part it received (section 7).
 pub const SEGMENT_HOLD: Duration = Duration::from_millis(1250);
-/// The most wait flow controls in a row the driver takes.
+/// The most wait flow controls in a row the driver takes before it gives up on a request it
+/// sends in segments.
 pub const SEGMENT_MAX_WAITS: u8 = 10;
 // Characters in a printed consecutive frame, `7E8 21 41 41 41 41 41 41 41 \r`, and with a 29-bit
 // ID, `17 FE 00 76 21 41 41 41 41 41 41 41 \r`.
@@ -142,9 +153,13 @@ const STN_UNPACED_RATE: u32 = 115_200 / 10;
 /// (`OBDLink` adapters, which call themselves v1.4b). Older chips refuse it, and
 /// [`Elm::connect`] fails.
 ///
-/// A request must fit one CAN frame (up to 7 bytes), or on an STN chip that echoes each character
-/// as it reads it (such as an `OBDLink`), up to 44 bytes as an `STPX` command, which segments it
-/// ([`docs/elm327.md#multi-frame-requests`](https://github.com/DaSonOfPoseidon/OBDCracker/blob/main/docs/elm327.md#multi-frame-requests)).
+/// A request must fit one CAN frame (up to 7 bytes), or on an adapter that has shown it echoes each
+/// character as it reads it, be up to 44 bytes: an STN chip (such as an `OBDLink`) sends it as an
+/// `STPX` command, which segments it
+/// ([`docs/elm327.md#multi-frame-requests`](https://github.com/DaSonOfPoseidon/OBDCracker/blob/main/docs/elm327.md#multi-frame-requests)),
+/// and any other adapter has the driver write its ISO-TP frames itself with `AT CAF0`, for a
+/// module whose reply ID is known
+/// ([`docs/design/elm-caf0-segmenting.md`](https://github.com/DaSonOfPoseidon/OBDCracker/blob/main/docs/design/elm-caf0-segmenting.md)).
 /// Anything else is refused before anything is written. Multi-frame replies are reassembled per
 /// module, for up to 16 modules per request.
 /// Replies still arriving at the next request are dropped and reported as [`LinkEvent`]s,
@@ -187,6 +202,22 @@ pub struct Elm<L> {
     bits29: bool,
     // Whether the adapter sends raw frames ([`RAW_ON`]), for VW TP2.0.
     raw: bool,
+    // Whether `AT CAF0` is on to send a request in segments, which `send` switches lazily
+    // (docs/design/elm-caf0-segmenting.md, section 8).
+    segmenting: bool,
+    // Whether `AT R0` was written and no `OK` to `ATR1` has followed (section 7).
+    responses_off: bool,
+    // The byte the adapter pads with (PP 26), or `None` if `ATPPS` didn't list it.
+    filler: Option<u8>,
+    // After a transfer stopped part-way, nothing is written before this (section 7).
+    hold_until: Option<Instant>,
+    // The bounds on a transfer in segments; tests may only tighten them
+    // ([`Elm::tighten_segment_bounds`]).
+    segment_gap: Duration,
+    segment_transfer: Duration,
+    // Lines `interrupt` reads before the adapter's `STOPPED`, instead of reporting them as
+    // unread, while a caller wants to see them.
+    caught: Option<Vec<String>>,
     // Whether the adapter's adaptive timing (`AT AT1`) is on, as far as we know: `None` while a
     // command that may have changed it is unanswered, so the next `sync_adaptive` sends it again.
     adaptive: Option<bool>,
@@ -331,6 +362,13 @@ impl<L: Link> Elm<L> {
             header: None,
             bits29: false,
             raw: false,
+            segmenting: false,
+            responses_off: false,
+            filler: None,
+            hold_until: None,
+            segment_gap: SEGMENT_GAP,
+            segment_transfer: SEGMENT_TRANSFER,
+            caught: None,
             adaptive: None,
             patient: false,
             flow: None,
@@ -382,16 +420,17 @@ impl<L: Link> Elm<L> {
         elm.sync_adaptive()
     }
 
-    // Whether the adapter should learn how long to wait (`AT AT1`). Not while pacing, in raw mode
-    // or in a patient window: each needs it to wait its whole timeout after a frame, and a
+    // Whether the adapter should learn how long to wait (`AT AT1`). Not while pacing, in raw mode,
+    // segmenting (a learned timeout could end the wait for a slow module's flow control, #218) or
+    // in a patient window: each needs it to wait its whole timeout after a frame, and a
     // learned one from the fast setup replies ended the wait for a TP2.0 module's data after
     // its ACK (#218).
     fn adaptive_wanted(&self) -> bool {
-        self.pace.is_none() && !self.raw && !self.patient
+        self.pace.is_none() && !self.raw && !self.segmenting && !self.patient
     }
 
     // Sends `AT AT0` or `AT AT1` if the adapter isn't in the state `adaptive_wanted` names. Every
-    // change to `pace`, `raw` or `patient` calls this after making it.
+    // change to `pace`, `raw`, `segmenting` or `patient` calls this after making it.
     fn sync_adaptive(&mut self) -> Result<(), Error> {
         let wanted = self.adaptive_wanted();
         if self.adaptive == Some(wanted) {
@@ -412,10 +451,6 @@ impl<L: Link> Elm<L> {
         self.adaptive = Some(wanted);
         Ok(())
     }
-
-    /// Shortens the bounds on sending a request in segments, for tests of the driver.
-    #[doc(hidden)]
-    pub fn tighten_segment_bounds(&mut self, _gap: Duration, _transfer: Duration) {}
 
     /// Timing for [`crate::exchange`] through this adapter. The adapter's prompt ends a request,
     /// so P2 and P2* are only outer bounds, about 7 minutes; an adapter that goes quiet
@@ -537,9 +572,12 @@ impl<L: Link> Elm<L> {
     fn check_defaults(&mut self) -> Result<(), Error> {
         let lines = self.command("ATPPS")?;
         if lines.iter().map(String::as_str).eq(["?"]) {
+            // No parameters: the factory filler.
+            self.filler = Some(0x00);
             return Ok(());
         }
         let mut seen = Vec::new();
+        let mut filler = None;
         for line in &lines {
             let mut words = line.split_whitespace();
             while let Some(word) = words.next() {
@@ -555,6 +593,9 @@ impl<L: Link> Elm<L> {
                     return Err(self.break_down(format!("unexpected answer to ATPPS: {line}")));
                 };
                 seen.push(pp);
+                if pp == FILLER_PP {
+                    filler = Some(if on { value } else { 0x00 });
+                }
                 if let Some((_, default, what)) = KEPT_DEFAULTS.iter().find(|(p, ..)| *p == pp)
                     && on
                     && value != *default
@@ -569,6 +610,8 @@ impl<L: Link> Elm<L> {
         if let Some((pp, ..)) = KEPT_DEFAULTS.iter().find(|(pp, ..)| !seen.contains(pp)) {
             return Err(self.break_down(format!("ATPPS didn't list PP {pp:02X}")));
         }
+        // A summary without PP 26 only refuses sending in segments (`check_segmenting`).
+        self.filler = filler;
         Ok(())
     }
 
@@ -796,6 +839,14 @@ impl<L: Link> Elm<L> {
     // Reports a line nobody read. A monitor's `BUFFER FULL` means frames were lost: the caller
     // is told once the monitor has stopped (`take_overflow`).
     fn unread(&mut self, text: String) {
+        if let Some(caught) = &mut self.caught {
+            // The first is what matters, and an adapter that never stops printing must not
+            // fill memory.
+            if caught.len() < MAX_ANSWER_LINES {
+                caught.push(text);
+            }
+            return;
+        }
         if self.monitoring && matches!(parse_line(&text), Line::Status(Status::BufferFull)) {
             self.monitor_overflow = true;
         }
@@ -1303,24 +1354,23 @@ impl<L: Link> Transport for Elm<L> {
         // A TP2.0 channel frame goes out as it is, with CAN auto formatting off.
         let raw = request.protocol() == Protocol::Tp20Channel;
         let single = Addressing::Normal.max_single_frame();
-        // Longer requests go out as `STPX` on an STN that has shown it echoes each character as
-        // it reads it (docs/elm327.md#multi-frame-requests).
-        let stpx = !raw && payload.len() > single;
+        let long = !raw && payload.len() > single;
+        // Longer requests go out as `STPX` on an STN (docs/elm327.md#multi-frame-requests), and
+        // on any other adapter as raw frames written with `AT CAF0`
+        // (docs/design/elm-caf0-segmenting.md).
+        let stpx = long && self.stn.is_some();
         if payload.is_empty() || (raw && payload.len() > 8) || (!raw && payload.len() > STPX_MAX) {
             return Err(Error::Adapter(format!(
-                "a {}-byte request doesn't fit this driver's limit ({} bytes on an STN, {single} \
-                 on other adapters)",
+                "a {}-byte request doesn't fit this driver's limit ({STPX_MAX} bytes where it \
+                 sends in segments, {single} on other adapters)",
                 payload.len(),
-                STPX_MAX,
             )));
         }
-        if stpx && self.stn.is_none() {
-            return Err(Error::Adapter(format!(
-                "a {}-byte request doesn't fit one CAN frame, and only an STN adapter sends \
-                 multi-frame requests",
-                payload.len()
-            )));
-        }
+        let segments = if long && !stpx {
+            Some(self.check_segmenting(request)?)
+        } else {
+            None
+        };
         if stpx && self.early_echo != Some(true) {
             return Err(Error::Adapter(format!(
                 "a {}-byte request needs an adapter that echoes each character as it reads it \
@@ -1329,6 +1379,13 @@ impl<L: Link> Transport for Elm<L> {
                 payload.len()
             )));
         }
+        // A transfer that stopped part-way: the module drops what it got before anything else is
+        // written (docs/design/elm-caf0-segmenting.md, section 7).
+        if let Some(until) = self.hold_until.take()
+            && let Some(wait) = until.checked_duration_since(Instant::now())
+        {
+            std::thread::sleep(wait);
+        }
         // A module on a TP2.0 channel waits only its T1 (about 100 ms) for an ACK, and the
         // adapter listens for its whole timeout after a frame (docs/elm327.md#vw-tp20-channel-frames).
         if raw && self.raw && self.busy && matches!(request.target(), Target::Tp20Channel(_)) {
@@ -1336,6 +1393,18 @@ impl<L: Link> Transport for Elm<L> {
             self.interrupt()?;
         }
         self.ready()?;
+        // A transfer that couldn't put `AT R1` back must not leave the adapter deaf to this
+        // request's answer.
+        if self.responses_off {
+            self.restore_responses()?;
+        }
+        // A single frame written in `CAF0` would go out raw, with no PCI byte, so every request
+        // that isn't sent in segments finds `AT CAF0` off (section 8).
+        if self.segmenting && segments.is_none() {
+            self.guarded_command("ATCAF1")?;
+            self.segmenting = false;
+            self.sync_adaptive()?;
+        }
         if self.raw != raw {
             for command in if raw { RAW_ON } else { RAW_OFF } {
                 self.guarded_command(command)?;
@@ -1344,9 +1413,17 @@ impl<L: Link> Transport for Elm<L> {
             self.raw = raw;
             self.sync_adaptive()?;
         }
+        if segments.is_some() && !self.segmenting {
+            self.guarded_command("ATCAF0")?;
+            self.segmenting = true;
+            self.sync_adaptive()?;
+        }
         self.set_target(request)?;
         // A setting command's prompt may have been followed by a reset.
         self.check_idle()?;
+        if let Some(segments) = segments {
+            return self.send_in_segments(request, segments);
+        }
         let digits = hex(payload).replace(' ', "");
         let line = if stpx {
             format!("STPX d:{digits}")
@@ -1486,6 +1563,574 @@ impl<L: Link> Transport for Elm<L> {
                 },
             }
         }
+    }
+}
+
+// What `check_segmenting` found out about a request that can go in segments.
+#[derive(Debug, Clone, Copy)]
+struct Segments {
+    // The module's reply ID, which recognises its flow control.
+    reply: u32,
+    // The byte that pads a short frame to 8 bytes (PP 26).
+    filler: u8,
+}
+
+// Why a transfer in segments stopped.
+enum Stop {
+    // The adapter's state is unknown: the driver stops everything.
+    Broken(Error),
+    // The request failed with the adapter back at its prompt, and the driver goes on once the
+    // module has dropped what it received (docs/design/elm-caf0-segmenting.md, section 7).
+    Failed(String),
+}
+
+impl From<Error> for Stop {
+    fn from(error: Error) -> Self {
+        Self::Broken(error)
+    }
+}
+
+// What a frame read while waiting for flow control means.
+enum Next {
+    // Continue to send: the transfer goes on.
+    Accepted(FlowControl),
+    // A wait: keep listening.
+    Wait,
+    // The request fails.
+    Problem(String),
+}
+
+// How far a transfer in segments has got.
+struct Transfer {
+    // The request's length, and how many frames it takes.
+    len: usize,
+    frames: usize,
+    request_id: u32,
+    reply: u32,
+    filler: u8,
+    // Frames whose carriage return has been written.
+    written: usize,
+    // When the first frame's carriage return was written.
+    started: Option<Instant>,
+    // The last carriage return written or flow control read: what the module's N_Cr counts from.
+    last_event: Instant,
+    // The last consecutive frame's carriage return: what STmin counts from.
+    last_consecutive: Option<Instant>,
+}
+
+// The gap a flow control's STmin asks for, which the driver can only keep to the millisecond:
+// 100 to 900 µs (`0xF1..=0xF9`) rounds up.
+fn pause(st_min: Duration) -> Duration {
+    if st_min.is_zero() {
+        st_min
+    } else {
+        st_min.max(Duration::from_millis(1))
+    }
+}
+
+fn describe(duration: Duration) -> String {
+    if duration.subsec_nanos() == 0 {
+        format!("{} s", duration.as_secs())
+    } else {
+        format!("{} ms", duration.as_millis())
+    }
+}
+
+// Sending a request of 8 to 44 bytes as raw frames written with `AT CAF0`, the way
+// docs/design/elm-caf0-segmenting.md sections 1 to 8 say.
+impl<L: Link> Elm<L> {
+    /// Shortens the bounds on sending a request in segments, for tests of the driver: the longest
+    /// gap between two frames ([`SEGMENT_GAP`]) and the longest transfer ([`SEGMENT_TRANSFER`]).
+    /// A longer bound is ignored, so no caller can loosen what keeps a module's half-received
+    /// request from being acted on.
+    #[doc(hidden)]
+    pub fn tighten_segment_bounds(&mut self, gap: Duration, transfer: Duration) {
+        self.segment_gap = self.segment_gap.min(gap);
+        self.segment_transfer = self.segment_transfer.min(transfer);
+    }
+
+    // Section 1: what must hold before anything is written for a request over 7 bytes on an
+    // adapter that isn't an STN.
+    fn check_segmenting(&self, request: &Approved) -> Result<Segments, Error> {
+        let len = request.payload().len();
+        if self.early_echo != Some(true) {
+            return Err(Error::Adapter(format!(
+                "a {len}-byte request needs an adapter that echoes each character as it reads it \
+                 (such as an OBDLink), and this one hasn't shown it does; send a single-frame \
+                 request first"
+            )));
+        }
+        let Some(reply) = request.reply_id() else {
+            return Err(Error::Adapter(format!(
+                "a {len}-byte request to {:03X} can't be sent in segments: there is no one \
+                 module's flow control to wait for",
+                request.target().can_id()
+            )));
+        };
+        let Some(filler) = self.filler else {
+            return Err(Error::Adapter(
+                "ATPPS didn't list PP 26, the filler byte, so the padding of a request sent in \
+                 segments is unknown"
+                    .into(),
+            ));
+        };
+        Ok(Segments { reply, filler })
+    }
+
+    fn send_in_segments(&mut self, request: &Approved, segments: Segments) -> Result<(), Error> {
+        let payload = request.payload();
+        let mut segmenter = Segmenter::new(payload, Addressing::Normal).map_err(|e| {
+            Error::Adapter(format!(
+                "a {}-byte request can't be sent in segments: {e}",
+                payload.len()
+            ))
+        })?;
+        let mut transfer = Transfer {
+            len: payload.len(),
+            frames: 1 + payload
+                .len()
+                .saturating_sub(CAN_DLC - 2)
+                .div_ceil(CAN_DLC - 1),
+            request_id: request.target().can_id(),
+            reply: segments.reply,
+            filler: segments.filler,
+            written: 0,
+            started: None,
+            last_event: Instant::now(),
+            last_consecutive: None,
+        };
+        match self.transfer(&mut segmenter, &mut transfer) {
+            Ok(()) => {
+                self.drop_senders();
+                Ok(())
+            }
+            Err(Stop::Broken(error)) => Err(error),
+            Err(Stop::Failed(why)) => Err(self.stop_transfer(&transfer, why)),
+        }
+    }
+
+    // Writes the frames `segmenter` gives, reading the module's flow control where it asks for
+    // it. Returns once the last frame is written, which the adapter answers as it does any request.
+    fn transfer(&mut self, segmenter: &mut Segmenter<'_>, t: &mut Transfer) -> Result<(), Stop> {
+        loop {
+            match segmenter.step() {
+                Step::Send(frame) => {
+                    // A frame that isn't the last of its block asks the module for no reply, so
+                    // the adapter needn't wait for one (section 3).
+                    let inside = matches!(segmenter.clone().step(), Step::Send(_));
+                    self.write_segment(segmenter, t, frame.as_bytes(), inside)?;
+                    if inside {
+                        self.finish_unanswered_frame(t)?;
+                    }
+                }
+                Step::WaitForFlowControl => self.await_flow_control(segmenter, t)?,
+                Step::Done => return Ok(()),
+                Step::Aborted => {
+                    return Err(Stop::Failed(format!(
+                        "{:03X} can't take a {}-byte request (flow control said overflow); \
+                         nothing more was sent",
+                        t.reply, t.len
+                    )));
+                }
+            }
+        }
+    }
+
+    // Section 4: one frame, its digits echoed before its carriage return. `inside` says the
+    // adapter shouldn't wait for a reply to it (`AT R0`).
+    fn write_segment(
+        &mut self,
+        segmenter: &Segmenter<'_>,
+        t: &mut Transfer,
+        frame: &[u8],
+        inside: bool,
+    ) -> Result<(), Stop> {
+        let number = t.written + 1;
+        self.set_responses(!inside)?;
+        // STmin is counted from the previous consecutive frame, across any flow control wait.
+        if let Some(last) = t.last_consecutive
+            && let Some(wait) =
+                (last + pause(segmenter.st_min())).checked_duration_since(Instant::now())
+        {
+            std::thread::sleep(wait);
+        }
+        if let Some(started) = t.started
+            && started.elapsed() > self.segment_transfer
+        {
+            return Err(Stop::Failed(self.transfer_limit(t)));
+        }
+        let mut data = frame.to_vec();
+        data.resize(CAN_DLC, t.filler);
+        let line = hex(&data).replace(' ', "");
+        let at = SystemTime::now();
+        let echoed = self
+            .write(line.as_bytes())
+            .and_then(|()| self.check_early_echo(&line));
+        if let Err(error) = echoed {
+            // The adapter may have heard something else, so the line is reported as it was written.
+            self.note(LinkEvent::Command {
+                at,
+                command: line,
+                answer: Vec::new(),
+            });
+            return Err(Stop::Broken(error));
+        }
+        if number > 1 {
+            let waited = t.last_event.elapsed();
+            if waited >= self.segment_gap {
+                self.kill_line(&line)?;
+                return Err(Stop::Failed(format!(
+                    "{} ms passed before frame {number} of {} could be sent, and a module drops a \
+                     transfer after 1000 ms between frames; nothing more was sent",
+                    waited.as_millis(),
+                    t.frames
+                )));
+            }
+        }
+        let wrote = self.write(b"\r");
+        let sent_at = Instant::now();
+        // Noted however the write ended: the frame may be on the bus.
+        self.note(LinkEvent::Frame {
+            at: SystemTime::now(),
+            sent: true,
+            id: t.request_id,
+            data,
+        });
+        wrote?;
+        t.written = number;
+        t.started.get_or_insert(sent_at);
+        t.last_event = sent_at;
+        if number > 1 {
+            t.last_consecutive = Some(sent_at);
+        }
+        self.sent = Some((sent_at, self.printed));
+        self.drained = sent_at;
+        self.quiet = Duration::ZERO;
+        self.echo = Some(line);
+        self.busy = true;
+        self.listen = false;
+        Ok(())
+    }
+
+    // Ends a line whose digits were echoed but that took too long to send, so the adapter
+    // refuses it whole.
+    fn kill_line(&mut self, line: &str) -> Result<(), Stop> {
+        let command = format!("{line}XX");
+        let at = SystemTime::now();
+        let mut answer = Vec::new();
+        let killed = self
+            .write(KILL)
+            .and_then(|()| self.read_answer(&command, &mut answer));
+        self.note(LinkEvent::Command {
+            at,
+            command,
+            answer: answer.clone(),
+        });
+        killed?;
+        if answer.iter().map(String::as_str).eq(["?"]) {
+            Ok(())
+        } else {
+            Err(Stop::Broken(self.break_down(format!(
+                "the adapter didn't refuse {line}XX: {}",
+                answer.join(" / ")
+            ))))
+        }
+    }
+
+    // Reads what a frame sent with `AT R0` prints, which is its echo and the prompt (section 3).
+    fn finish_unanswered_frame(&mut self, t: &Transfer) -> Result<(), Stop> {
+        let deadline = Instant::now() + COMMAND_WAIT;
+        let mut problem = None;
+        loop {
+            match self.next_request_event(deadline)? {
+                None => {
+                    return Err(Stop::Broken(self.break_down(format!(
+                        "the adapter never printed its prompt after frame {} of {}",
+                        t.written, t.frames
+                    ))));
+                }
+                Some(Event::Prompt) => {
+                    self.prompt_after_request()?;
+                    self.busy = false;
+                    break;
+                }
+                Some(Event::Overlong) => {
+                    return Err(Stop::Broken(
+                        self.break_down("the adapter printed an overlong line".into()),
+                    ));
+                }
+                Some(Event::Line(text)) => match self.reply_line(&text)? {
+                    None => {}
+                    Some(Line::Frame(_)) => {
+                        problem.get_or_insert(format!(
+                            "{:03X} sent {text} after its flow control, before the rest of the \
+                             request; nothing more was sent",
+                            t.reply
+                        ));
+                    }
+                    Some(Line::Status(status)) => {
+                        if let Some(why) = self.status_while_sending(status, t)? {
+                            problem.get_or_insert(why);
+                        }
+                    }
+                    Some(Line::Ok | Line::Text(_)) => {
+                        return Err(Stop::Broken(
+                            self.break_down(format!("unexpected output from the adapter: {text}")),
+                        ));
+                    }
+                },
+            }
+        }
+        problem.map_or(Ok(()), |why| Err(Stop::Failed(why)))
+    }
+
+    // A status line while frames go out: a failure of this request only, or one that leaves the
+    // adapter in an unknown state. `None` for a line that means nothing here.
+    fn status_while_sending(
+        &mut self,
+        status: Status,
+        t: &Transfer,
+    ) -> Result<Option<String>, Error> {
+        match status {
+            Status::BusBusy | Status::BufferFull | Status::DataError => Ok(Some(format!(
+                "the adapter said {status} while sending frame {} of {}; nothing more was sent",
+                t.written, t.frames
+            ))),
+            Status::ActAlert => Ok(None),
+            other => Err(self.break_down(format!("the adapter said {other}"))),
+        }
+    }
+
+    // Section 5: reads what the adapter prints after a frame until it has the module's flow
+    // control, then stops its listen. Exactly one `ContinueToSend`, after at most
+    // `SEGMENT_MAX_WAITS` waits, and nothing else passes.
+    fn await_flow_control(
+        &mut self,
+        segmenter: &mut Segmenter<'_>,
+        t: &mut Transfer,
+    ) -> Result<(), Stop> {
+        let deadline = t.started.unwrap_or_else(Instant::now) + self.segment_transfer;
+        let ordinal = if t.written == 1 {
+            "the first frame".to_owned()
+        } else {
+            format!("frame {}", t.written)
+        };
+        let mut waits = 0;
+        let mut accepted = None;
+        let mut problem = None;
+        let mut no_data = false;
+        let mut listening = true;
+        // A status such as `BUS BUSY` comes with the adapter's prompt: read on to it. Anything
+        // else that fails the request leaves the adapter listening, and it's stopped below.
+        let mut read_on = false;
+        while listening && accepted.is_none() && (problem.is_none() || read_on) {
+            match self.next_request_event(deadline)? {
+                None => problem = Some(self.transfer_limit(t)),
+                Some(Event::Overlong) => {
+                    return Err(Stop::Broken(
+                        self.break_down("the adapter printed an overlong line".into()),
+                    ));
+                }
+                Some(Event::Prompt) => {
+                    self.prompt_after_request()?;
+                    self.busy = false;
+                    listening = false;
+                }
+                Some(Event::Line(text)) => match self.reply_line(&text)? {
+                    None => {}
+                    Some(Line::Frame(frame)) => {
+                        self.note(LinkEvent::Frame {
+                            at: self.event_at.time,
+                            sent: false,
+                            id: frame.id(),
+                            data: frame.data().to_vec(),
+                        });
+                        let next =
+                            Self::flow_control_in(frame.data(), &text, &ordinal, t, &mut waits);
+                        match next {
+                            Next::Accepted(fc) => {
+                                self.accept(segmenter, fc)?;
+                                accepted = Some(Instant::now());
+                            }
+                            Next::Wait => {}
+                            Next::Problem(why) => {
+                                problem.get_or_insert(why);
+                            }
+                        }
+                    }
+                    Some(Line::Status(Status::NoData)) => no_data = true,
+                    Some(Line::Status(status)) => {
+                        if let Some(why) = self.status_while_sending(status, t)? {
+                            problem.get_or_insert(why);
+                            read_on = true;
+                        }
+                    }
+                    Some(Line::Ok | Line::Text(_)) => {
+                        return Err(Stop::Broken(
+                            self.break_down(format!("unexpected output from the adapter: {text}")),
+                        ));
+                    }
+                },
+            }
+        }
+        let caught = if listening {
+            self.stop_listening()?
+        } else {
+            Vec::new()
+        };
+        if let Some(why) = problem {
+            return Err(Stop::Failed(why));
+        }
+        self.check_caught(&caught, t)?;
+        let Some(at) = accepted else {
+            let said = if no_data {
+                " (the adapter said NO DATA)"
+            } else {
+                ""
+            };
+            return Err(Stop::Failed(format!(
+                "{:03X} sent no flow control for {ordinal} of a {}-byte request{said}; nothing \
+                 more was sent",
+                t.reply, t.len
+            )));
+        };
+        t.last_event = at;
+        Ok(())
+    }
+
+    // Stops the adapter's listen (section 3) and returns what it printed before it heard the stop.
+    fn stop_listening(&mut self) -> Result<Vec<String>, Error> {
+        self.caught = Some(Vec::new());
+        let stopped = self.interrupt();
+        let caught = self.caught.take().unwrap_or_default();
+        stopped?;
+        // Its prompt may have come first, still to be read.
+        if self.busy {
+            self.ready()?;
+        }
+        Ok(caught)
+    }
+
+    // A frame the module sent after the flow control it was waited for, or a status, fails the
+    // request.
+    fn check_caught(&mut self, caught: &[String], t: &Transfer) -> Result<(), Stop> {
+        for text in caught {
+            match parse_line(text) {
+                Line::Frame(_) => {
+                    return Err(Stop::Failed(format!(
+                        "{:03X} sent {text} after its flow control, before the rest of the \
+                         request; nothing more was sent",
+                        t.reply
+                    )));
+                }
+                // The adapter's listen ended as it was stopped.
+                Line::Status(Status::NoData) => {}
+                Line::Status(status) => {
+                    if let Some(why) = self.status_while_sending(status, t)? {
+                        return Err(Stop::Failed(why));
+                    }
+                }
+                _ => {}
+            }
+        }
+        Ok(())
+    }
+
+    // What a frame printed while the driver waits for flow control means.
+    fn flow_control_in(
+        data: &[u8],
+        text: &str,
+        ordinal: &str,
+        t: &Transfer,
+        waits: &mut u8,
+    ) -> Next {
+        let reply = t.reply;
+        match isotp::Frame::parse(data, Addressing::Normal) {
+            Ok(isotp::Frame::FlowControl(fc)) => match fc.status {
+                FlowStatus::ContinueToSend => Next::Accepted(fc),
+                FlowStatus::Wait => {
+                    *waits = waits.saturating_add(1);
+                    if *waits > SEGMENT_MAX_WAITS {
+                        Next::Problem(format!(
+                            "{reply:03X} kept a {}-byte request waiting: more than \
+                             {SEGMENT_MAX_WAITS} wait flow controls in a row; nothing more was \
+                             sent",
+                            t.len
+                        ))
+                    } else {
+                        Next::Wait
+                    }
+                }
+                FlowStatus::Overflow => Next::Problem(format!(
+                    "{reply:03X} can't take a {}-byte request (flow control said overflow); \
+                     nothing more was sent",
+                    t.len
+                )),
+            },
+            Err(_) if data.first().is_some_and(|pci| pci >> 4 == 3) => Next::Problem(format!(
+                "{reply:03X} sent a flow control frame this driver can't use: {text}; nothing \
+                 more was sent"
+            )),
+            _ => Next::Problem(format!(
+                "{reply:03X} answered {ordinal} of a {}-byte request with {text} instead of \
+                 flow control; nothing more was sent",
+                t.len
+            )),
+        }
+    }
+
+    // Hands the flow control that lets the transfer go on to the segmenter.
+    fn accept(&mut self, segmenter: &mut Segmenter<'_>, fc: FlowControl) -> Result<(), Stop> {
+        segmenter.flow_control(fc).map_err(|e| {
+            Stop::Broken(self.break_down(format!("the flow control doesn't fit the transfer: {e}")))
+        })
+    }
+
+    fn transfer_limit(&self, t: &Transfer) -> String {
+        format!(
+            "a {}-byte request took more than {} to send; nothing more was sent",
+            t.len,
+            describe(self.segment_transfer)
+        )
+    }
+
+    // `AT R0` for a frame the module doesn't answer, `AT R1` for one it does. `responses_off` is
+    // set before `ATR0` is written, since a command that fails may still have taken effect.
+    fn set_responses(&mut self, on: bool) -> Result<(), Error> {
+        if self.responses_off != on {
+            return Ok(());
+        }
+        if on {
+            return self.restore_responses();
+        }
+        self.responses_off = true;
+        self.expect_ok("ATR0")
+    }
+
+    fn restore_responses(&mut self) -> Result<(), Error> {
+        let lines = self.command("ATR1")?;
+        if lines.iter().map(String::as_str).eq(["OK"]) {
+            self.responses_off = false;
+            return Ok(());
+        }
+        Err(self.break_down(format!(
+            "the adapter wouldn't go back to waiting for replies: {}",
+            lines.join(" / ")
+        )))
+    }
+
+    // Section 7: a transfer that stopped part-way sends nothing more, puts the adapter back to
+    // waiting for replies, and holds the next request until the module has dropped what it got.
+    fn stop_transfer(&mut self, t: &Transfer, why: String) -> Error {
+        if self.responses_off
+            && let Err(error) = self.restore_responses()
+        {
+            return error;
+        }
+        if t.started.is_some() {
+            self.hold_until = Some(t.last_event + SEGMENT_HOLD);
+        }
+        Error::Adapter(why)
     }
 }
 
