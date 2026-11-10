@@ -21,10 +21,10 @@ from developers being careful.
   the receive ID the setup asked for (0x300), into an `OpenTp20Channel`, which nothing else can build. Every frame
   on a channel needs one: `approve_tp20_parameters` (`A0`), `approve_tp20_keep_alive` (`A3`), `approve_tp20_ack`
   (`B<n>`), `approve_tp20_disconnect` (`A8`), and `approve_tp20_request`, which checks a KWP2000 request against the
-  KWP2000 allowlist and tiers, as `approve` would, and wraps it in one data frame (at most 5 bytes). Each needs that
-  receive ID and a send ID in 0x300..=0x7FF (below it are the car's own frames and the setup range), not an OBD-II ID
-  and, once a profile narrows the policy, no ID of that profile's modules, since a frame there would reach that
-  module. `approve` refuses them all, and refuses any service request to a TP2.0 target.
+  KWP2000 allowlist and tiers, as `approve` would, plus VAG's `10 89` session (see [Tiers](#tiers)), and wraps it in one
+  data frame (at most 5 bytes). Each needs that receive ID and a send ID in 0x300..=0x7FF (below it are the car's own
+  frames and the setup range), not an OBD-II ID and, once a profile narrows the policy, no ID of that profile's modules,
+  since a frame there would reach that module. `approve` refuses them all, and refuses any service request to a TP2.0 target.
 - A [vehicle profile](profiles.md) can only narrow what the policy allows, never widen it. That includes the TP2.0
   addresses: a profile without a TP2.0 list allows no channel setup.
 - The policy applies to programs that [import the crates](library.md) too. There is no raw-frame escape hatch.
@@ -35,14 +35,17 @@ Each tier above read-only needs a cargo feature, an explicit runtime unlock, and
 
 | Tier | UDS and OBD-II | KWP2000 | Status |
 |---|---|---|---|
-| T0 Read | OBD-II modes 01/03/09, UDS 0x22, 0x19, 0x3E, 0x10 (default/extended session) | 0x1A, 0x21, 0x17, 0x18, 0x3E | allowed |
+| T0 Read | OBD-II modes 01/03/09, UDS 0x22, 0x19, 0x3E, 0x10 (default/extended session) | 0x1A, 0x21, 0x17, 0x18, 0x3E; on a TP2.0 channel only, 0x10 89 (VAG session) | allowed |
 | T1 Clear DTCs | UDS 0x14, OBD-II mode 04 | 0x14 | planned |
 | T2 Coding | UDS 0x2E, 0x27 | 0x2E, 0x3B, 0x27, 0x10 87 (adjustment session) | planned; needs a backup of the current value |
 | T3 Flash | programming session, 0x31, 0x34/0x36/0x37, 0x11 | 0x10 85/86 (programming, development), 0x11, 0x31-0x3A, 0x3D | **hard-banned** until a separate design doc exists; will need a full backup of the current image |
 
 Anything else is rejected, including KWP2000's IO control (0x30), memory reads (0x23) and every session other than the
-banned and locked ones: ISO 14230-3 leaves what each value means to the manufacturer, so VAG's `10 89` will need a
-rule of its own.
+banned and locked ones: ISO 14230-3 leaves what each value means to the manufacturer. The one exception is VAG's
+`10 89`, a read **only on an open TP2.0 channel** (`approve_tp20_request`, exactly those two bytes): TP2.0 is used only
+by the VW Group, whose modules answer `1A 9B` with `7F 1A 11` until they've entered it. `approve` still refuses it for
+KWP2000, so no other make can reach it. The session ends when the channel closes (`A8`), and the coding, adaptation and
+clearing requests it may let a module accept stay locked by their own tiers.
 
 ## Addressing
 

@@ -42,6 +42,9 @@ const KWP2000_READS: &[&[u8]] = &[
     &[0x3E, 0x01],
     &[0x3E, 0x02],
 ];
+// Reads only a VW TP2.0 channel carries: VAG's diagnostic session (the standard leaves 0x80.. to the
+// manufacturer), which plain KWP2000 doesn't allow.
+const TP20_ONLY_READS: &[&[u8]] = &[&[0x10, 0x89]];
 // ECUReset, the routines by local ID and by address, RequestDownload/Upload, TransferData,
 // RequestTransferExit, WriteMemoryByAddress.
 const KWP2000_FLASH_SERVICES: [u8; 12] = [
@@ -974,6 +977,21 @@ fn kwp2000_reads_go_on_an_open_tp20_channel_as_one_data_frame() {
             "{read:02X?}"
         );
     }
+    for read in TP20_ONLY_READS {
+        assert_eq!(
+            policy
+                .approve_tp20_request(&channel, 0x0, read)
+                .map(|approved| (approved.tier(), approved.payload().to_vec())),
+            Ok((Tier::Read, [&[0x10, 0x00, 0x02][..], read].concat())),
+            "{read:02X?}"
+        );
+        // Plain KWP2000, which any make may speak, still refuses it.
+        assert_eq!(
+            Policy::read_only().approve(Protocol::Kwp2000, ENGINE, read),
+            Err(Rejection::NotAllowed),
+            "{read:02X?}"
+        );
+    }
     // Five bytes fit one frame; six don't, and the sequence number is 4 bits.
     let five = [0x18, 0x02, 0xFF, 0xFF, 0x00];
     assert!(policy.approve_tp20_request(&channel, 0xF, &five).is_ok());
@@ -1016,6 +1034,23 @@ fn a_tp20_channel_carries_only_what_the_kwp2000_policy_allows() {
             policy.approve_tp20_request(&channel, 0, &[0x10, session]),
             Err(Rejection::Banned),
             "{session:02X}"
+        );
+    }
+    // VAG's `10 89` is exactly those two bytes: another session value, or anything after it,
+    // isn't it.
+    for request in [
+        &[0x10, 0x89, 0x00][..],
+        &[0x10, 0x89, 0x89],
+        &[0x10],
+        &[0x10, 0x81],
+        &[0x10, 0x88],
+        &[0x10, 0x8A],
+        &[0x10, 0xC0],
+    ] {
+        assert_eq!(
+            policy.approve_tp20_request(&channel, 0, request),
+            Err(Rejection::NotAllowed),
+            "{request:02X?}"
         );
     }
     // UDS-only reads aren't KWP2000 reads.
@@ -1093,6 +1128,10 @@ proptest! {
         let channel = opened(&policy, 0x300, 0x740).unwrap();
         let on_channel = policy.approve_tp20_request(&channel, sequence, &request);
         match policy.approve(Protocol::Kwp2000, ENGINE, &request) {
+            // The one request a channel allows and plain KWP2000 doesn't.
+            Err(Rejection::NotAllowed) if request == [0x10, 0x89] => {
+                prop_assert_eq!(on_channel.map(|approved| approved.tier()), Ok(Tier::Read));
+            }
             Ok(direct) if request.len() <= 5 => {
                 prop_assert_eq!(on_channel.map(|approved| approved.tier()), Ok(direct.tier()));
             }
