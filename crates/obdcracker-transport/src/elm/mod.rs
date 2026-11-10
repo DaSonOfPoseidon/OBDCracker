@@ -215,8 +215,8 @@ pub struct Elm<L> {
     // ([`Elm::tighten_segment_bounds`]).
     segment_gap: Duration,
     segment_transfer: Duration,
-    // Lines `interrupt` reads before the adapter's `STOPPED`, instead of reporting them as
-    // unread, while a caller wants to see them.
+    // Lines `interrupt` reads before the adapter's `STOPPED`, kept for a caller that fails the
+    // request on them. They are reported as unread all the same.
     caught: Option<Vec<String>>,
     // Whether the adapter's adaptive timing (`AT AT1`) is on, as far as we know: `None` while a
     // command that may have changed it is unanswered, so the next `sync_adaptive` sends it again.
@@ -839,13 +839,12 @@ impl<L: Link> Elm<L> {
     // Reports a line nobody read. A monitor's `BUFFER FULL` means frames were lost: the caller
     // is told once the monitor has stopped (`take_overflow`).
     fn unread(&mut self, text: String) {
-        if let Some(caught) = &mut self.caught {
-            // The first is what matters, and an adapter that never stops printing must not
-            // fill memory.
-            if caught.len() < MAX_ANSWER_LINES {
-                caught.push(text);
-            }
-            return;
+        // The caller sees it too, but it is reported all the same: the audit log shows what was
+        // heard (docs/pitfalls.md). An adapter that never stops printing mustn't fill memory.
+        if let Some(caught) = &mut self.caught
+            && caught.len() < MAX_ANSWER_LINES
+        {
+            caught.push(text.clone());
         }
         if self.monitoring && matches!(parse_line(&text), Line::Status(Status::BufferFull)) {
             self.monitor_overflow = true;
@@ -1862,6 +1861,7 @@ impl<L: Link> Elm<L> {
                 Some(Event::Line(text)) => match self.reply_line(&text)? {
                     None => {}
                     Some(Line::Frame(_)) => {
+                        self.note(left_over(self.event_at.time, text.clone()));
                         problem.get_or_insert(format!(
                             "{:03X} sent {text} after its flow control, before the rest of the \
                              request; nothing more was sent",
@@ -1869,6 +1869,7 @@ impl<L: Link> Elm<L> {
                         ));
                     }
                     Some(Line::Status(status)) => {
+                        self.note(left_over(self.event_at.time, text));
                         if let Some(why) = self.status_while_sending(status, t)? {
                             problem.get_or_insert(why);
                         }
@@ -1958,9 +1959,11 @@ impl<L: Link> Elm<L> {
                             }
                         }
                     }
-                    Some(Line::Status(Status::NoData)) => no_data = true,
                     Some(Line::Status(status)) => {
-                        if let Some(why) = self.status_while_sending(status, t)? {
+                        self.note(left_over(self.event_at.time, text));
+                        if status == Status::NoData {
+                            no_data = true;
+                        } else if let Some(why) = self.status_while_sending(status, t)? {
                             problem.get_or_insert(why);
                             read_on = true;
                         }

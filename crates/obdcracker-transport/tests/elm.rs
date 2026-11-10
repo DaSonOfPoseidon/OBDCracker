@@ -2883,6 +2883,52 @@ mod caf0 {
         }
     }
 
+    // The unread and status lines among the events taken.
+    fn heard_besides_frames(elm: &mut Elm<FakeLink>) -> Vec<String> {
+        elm.take_events()
+            .into_iter()
+            .filter_map(|event| match event {
+                LinkEvent::Unread { line, .. } => Some(format!("unread {line}")),
+                LinkEvent::Status { line, .. } => Some(format!("status {line}")),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_line_that_fails_the_request_is_still_in_the_events() {
+        // After the flow control, before the adapter's `STOPPED`: the frame is evidence of what
+        // the module did, so it is reported as unread though the request fails on it.
+        let extra = vec![0x03, 0x7F, 0x19, 0x78, 0, 0, 0, 0];
+        let mut elm = answering_with(vec![flow_control_frame(0, 0, 0), extra]);
+        elm.take_events();
+        assert!(elm.send(&request(14)).is_err());
+        assert_eq!(
+            heard_besides_frames(&mut elm),
+            ["unread 7E9 03 7F 19 78 00 00 00 00"]
+        );
+        // No flow control: the adapter's `NO DATA` is the answer.
+        let mut elm = answering_with(vec![]);
+        elm.take_events();
+        assert!(elm.send(&request(14)).is_err());
+        assert_eq!(heard_besides_frames(&mut elm), ["status NO DATA"]);
+        // In `AT R0`, where the adapter listens for nothing, a status and a frame.
+        for (printed, logged) in [
+            ("BUS BUSY", "status BUS BUSY"),
+            (
+                "7E9 03 7F 19 78 00 00 00 00",
+                "unread 7E9 03 7F 19 78 00 00 00 00",
+            ),
+        ] {
+            let mut stopped = module();
+            stopped.status_on_frame = Some((3, printed.to_owned()));
+            let mut elm = warmed(adapter(stopped, &ANSWER));
+            elm.take_events();
+            assert!(elm.send(&request(21)).is_err());
+            assert_eq!(heard_besides_frames(&mut elm), [logged]);
+        }
+    }
+
     #[test]
     fn one_to_ten_waits_before_continue_to_send_are_taken() {
         assert_eq!(SEGMENT_MAX_WAITS, 10);
