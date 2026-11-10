@@ -137,6 +137,9 @@ pub enum Status {
     BusError,
     /// `CAN ERROR`: the CAN controller couldn't start, send or receive.
     CanError,
+    /// `FC RX TIMEOUT`: an STN sent the first frame of a multi-frame request, and no flow control
+    /// came back in time; nothing more was sent.
+    FcRxTimeout,
     /// `DATA ERROR`, or a frame marked `<DATA ERROR`: a reply that couldn't be recovered.
     DataError,
     /// A frame marked `<RX ERROR`: an error in the received CAN data.
@@ -190,6 +193,7 @@ impl std::fmt::Display for Status {
             Self::BusBusy => "BUS BUSY",
             Self::BusError => "BUS ERROR",
             Self::CanError => "CAN ERROR",
+            Self::FcRxTimeout => "FC RX TIMEOUT",
             Self::DataError => "DATA ERROR",
             Self::RxError => "RX ERROR",
             Self::FbError => "FB ERROR",
@@ -247,6 +251,7 @@ fn parse_status(line: &str) -> Option<Status> {
         "BUS BUSY" => Status::BusBusy,
         "BUS ERROR" => Status::BusError,
         "CAN ERROR" => Status::CanError,
+        "FC RX TIMEOUT" => Status::FcRxTimeout,
         "DATA ERROR" => Status::DataError,
         "FB ERROR" => Status::FbError,
         "LV RESET" => Status::LvReset,

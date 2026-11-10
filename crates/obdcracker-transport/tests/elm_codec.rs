@@ -208,6 +208,7 @@ mod statuses {
             ("BUS BUSY", Status::BusBusy),
             ("BUS ERROR", Status::BusError),
             ("CAN ERROR", Status::CanError),
+            ("FC RX TIMEOUT", Status::FcRxTimeout),
             ("DATA ERROR", Status::DataError),
             ("FB ERROR", Status::FbError),
             ("LV RESET", Status::LvReset),
@@ -221,6 +222,15 @@ mod statuses {
         ] {
             assert_eq!(parse_line(text), Line::Status(status), "{text:?}");
         }
+    }
+
+    #[test]
+    fn fc_rx_timeout_prints_as_the_adapter_does() {
+        assert_eq!(Status::FcRxTimeout.to_string(), "FC RX TIMEOUT");
+        assert_eq!(
+            parse_line(&Status::FcRxTimeout.to_string()),
+            Line::Status(Status::FcRxTimeout)
+        );
     }
 
     #[test]
@@ -239,6 +249,9 @@ mod statuses {
             "ERR941",
             "ERR+9",
             "NO DATA!",
+            "FC RX TIMEOUTX",
+            "FC RX",
+            "fc rx timeout",
         ] {
             assert_eq!(parse_line(text), Line::Text(text.to_owned()), "{text:?}");
         }
@@ -258,6 +271,7 @@ mod statuses {
         for status in [
             Status::NoData,
             Status::CanError,
+            Status::FcRxTimeout,
             Status::BusError,
             Status::Unknown,
         ] {
@@ -270,6 +284,7 @@ mod statuses {
         assert!(!Status::NoData.is_failure());
         assert!(!Status::Stopped.is_failure());
         assert!(Status::CanError.is_failure());
+        assert!(Status::FcRxTimeout.is_failure());
         assert!(Status::Unknown.is_failure());
         assert!(Status::Internal(0x94).is_failure());
     }
