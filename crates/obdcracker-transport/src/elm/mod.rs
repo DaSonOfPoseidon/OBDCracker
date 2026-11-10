@@ -1648,6 +1648,9 @@ impl<L: Link> Elm<L> {
         self.segment_transfer = self.segment_transfer.min(transfer);
     }
 
+    /// Stub for the first test commit.
+    pub fn segment_on_stn(&mut self, _on: bool) {}
+
     // Section 1: what must hold before anything is written for a request over 7 bytes on an
     // adapter that isn't an STN.
     fn check_segmenting(&self, request: &Approved) -> Result<Segments, Error> {

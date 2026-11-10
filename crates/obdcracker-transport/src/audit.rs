@@ -95,6 +95,14 @@ impl<T: Transport> Audited<T> {
                     at,
                     &frame_fields(if sent { "tx_frame" } else { "rx_frame" }, id, &data),
                 )?,
+                LinkEvent::Setting { at, name, value } => self.write_at(
+                    at,
+                    &format!(
+                        r#""dir":"setting","name":"{}","value":"{}""#,
+                        json_escape(&name),
+                        json_escape(&value)
+                    ),
+                )?,
                 LinkEvent::Lost(count) => {
                     self.write(&format!(r#""dir":"lost","count":{count}"#))?;
                 }

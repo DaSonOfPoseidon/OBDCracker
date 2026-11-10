@@ -238,6 +238,16 @@ pub enum LinkEvent {
         /// The frame's 8 data bytes, as written or read.
         data: Vec<u8>,
     },
+    /// A setting of the driver that changes how it sends requests, such as forcing a segmenting
+    /// path on an adapter that has its own. Logged so a log can say how a frame was sent.
+    Setting {
+        /// When it was set.
+        at: SystemTime,
+        /// The setting's name, such as `segment-on-stn`.
+        name: String,
+        /// What it was set to, such as `on`.
+        value: String,
+    },
     /// How many events, or lines the adapter printed, were dropped because there was no room to
     /// keep them until something took them.
     Lost(usize),
