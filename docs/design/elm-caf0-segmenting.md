@@ -228,10 +228,10 @@ a transfer that is going right; if it aborts, the missing answer is the evidence
   A value `0xF1..=0xF9` is 100 to 900 µs and the driver rounds it up to 1 ms; a reserved value (`0x80..=0xF0`,
   `0xFA..=0xFF`) is 127 ms, as ISO 15765-2 requires and core's `decode_st_min` does. The driver measures from when it
   wrote the previous frame's carriage return and waits before writing the next frame's first character (so the gap is
-  at least STmin plus the time the line takes to write). The timestamp is kept across flow control waits, and the
-  newest flow control's STmin applies, so with block size 1 and STmin 127 ms every consecutive frame is still 127 ms
-  after the one before it, however short the `X` and the write are on a fast link. Only the first consecutive frame
-  of the whole transfer isn't held: no consecutive frame precedes it.
+  at least STmin plus the time the line takes to write). The timestamp is kept across flow control waits, and the STmin
+  of the newest ContinueToSend applies (a Wait's is ignored), so with block size 1 and STmin 127 ms every consecutive
+  frame is still 127 ms after the one before it, however short the `X` and the write are on a fast link. Only the
+  first consecutive frame of the whole transfer isn't held: no consecutive frame precedes it.
 - **The gap bound.** Every gap between two frames the driver writes, from one carriage return to the next, or from
   reading the flow control to the first consecutive frame's, must stay under **500 ms**, half of N_Cr, which allows for the
   adapter's handling and a late wake-up of the host. The check is made after the digits are echoed and **before the carriage
