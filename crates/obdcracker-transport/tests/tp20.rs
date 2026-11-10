@@ -263,7 +263,7 @@ fn a_refused_request_sends_nothing_and_leaves_the_channel_open() {
             &[0x14, 0xFF, 0x00],
             Rejection::Locked(obdcracker_safety::Tier::ClearDtc),
         ),
-        (&[0x22, 0xF1, 0x87], Rejection::NotAllowed),
+        (&[0x19, 0x02, 0xAF], Rejection::NotAllowed),
         (&[0x18, 0x02, 0xFF, 0xFF, 0x00, 0x00], Rejection::NotAllowed),
     ] {
         assert_eq!(
