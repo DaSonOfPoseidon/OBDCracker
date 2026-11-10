@@ -227,8 +227,10 @@ a transfer that is going right; if it aborts, the missing answer is the evidence
   A value `0xF1..=0xF9` is 100 to 900 µs and the driver rounds it up to 1 ms; a reserved value (`0x80..=0xF0`,
   `0xFA..=0xFF`) is 127 ms, as ISO 15765-2 requires and core's `decode_st_min` does. The driver measures from when it
   wrote the previous frame's carriage return and waits before writing the next frame's first character (so the gap is
-  at least STmin plus the time the line takes to write). The first consecutive frame after a flow control isn't held
-  for it: STmin is between consecutive frames, and the `X` and `AT R0` come first anyway.
+  at least STmin plus the time the line takes to write). The timestamp is kept across flow control waits, and the
+  newest flow control's STmin applies, so with block size 1 and STmin 127 ms every consecutive frame is still 127 ms
+  after the one before it, however short the `X` and the write are on a fast link. Only the first consecutive frame
+  of the whole transfer isn't held: no consecutive frame precedes it.
 - **The gap bound.** Every gap between two frames the driver writes, from one carriage return to the next, or from
   reading the flow control to the first consecutive frame's, must stay under **500 ms**, half of N_Cr, which allows for the
   adapter's handling and a late wake-up of the host. The check is made after the digits are echoed and **before the carriage
@@ -383,6 +385,8 @@ In `tests/elm.rs` against `fake_elm.rs`, which first has to learn the adapter's 
   11 waits then `CTS`; `CTS` then an extra frame before `STOPPED`; the `X` meeting the prompt (the `XX` path).
 - **Block size 0 and 1**, and 2 with 5 consecutive frames; STmin `0`, `0x05`, `0x7F`, `0xF5` (rounded up to 1 ms),
   `0x80` and `0xFA` (127 ms): the gap between carriage returns, with a clock the test sets, is at least the STmin.
+  Block size 1 with STmin `0x7F` on a fast link: the gap between every pair of consecutive frames, across each flow
+  control wait, is at least 127 ms.
 - **Bounds**: a link that is slow enough to exceed 500 ms between two frames (the frame isn't sent, the line is killed);
   the 30 s transfer limit and the 1.25 s hold (they are fields with defaults the test can shorten, and one test checks
   the defaults); a request right after a failed one waits out the hold, and one after a success doesn't.
@@ -453,4 +457,5 @@ Because the OBDLink is an STN, this doesn't test a plain ELM327's `AT R0` or `X`
 4. **Whether the engine's silence (#306) is padding.** A first frame padded with `00` goes to the transmission and the
    gateway in the car test; if they answer here and not to `STPX`, the STN's own padding is the suspect.
 5. **STmin before the first consecutive frame.** ISO 15765-2 puts STmin between consecutive frames; a module that also
-   wants it after its flow control would be seen as the transfer stalling, not as a bad frame, and the car test shows it.
+   wants it between its flow control and the first consecutive frame would see a frame that came too early, and the
+   car test shows it.
