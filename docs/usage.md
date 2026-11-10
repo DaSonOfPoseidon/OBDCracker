@@ -297,6 +297,11 @@ DIDs: 9 bytes, so it goes out in segments. The DIDs are four hex digits each, co
 must hold them: 1 to 21 (a request of at most 43 bytes, under the driver's 44), with no repeats. The policy approves the
 request as it does any other, the profile can only narrow it, and nothing is sent if it refuses.
 
+Through an ELM327 (`--serial` or `--tcp`), a read of 4 or more DIDs first sends a read of the first DID alone, since the
+adapter sends a request over 7 bytes in segments only once an earlier request has shown that it echoes each character.
+If the module doesn't answer that read, the long request isn't sent. Every other backend (`--gsusb`, `--socketcan`,
+`--sim`) sends the one request. `--dry-run` has no backend, so it says both.
+
 The reply doesn't say where one DID's data ends, so it is split only as far as the profile gives lengths. Each DID
 whose length the profile gives is printed as `<ID> <module> <DID> [bytes]`. From the first DID with no length that isn't
 the last, the rest is printed whole, as `<ID> <module> <DIDs> not split, as the profile gives no length for the first
