@@ -31,6 +31,7 @@ mod mock;
     expect(dead_code, reason = "no backend uses it without a feature")
 )]
 mod raw;
+pub mod read_dids;
 pub mod scan;
 mod session;
 pub mod sweep;
