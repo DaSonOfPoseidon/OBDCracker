@@ -204,6 +204,7 @@ pub fn kwp2000_answers(request: &[u8], reply: &[u8]) -> bool {
         [NEGATIVE, ..] => false,
         [first, echo @ ..] if *first == sid.wrapping_add(POSITIVE_OFFSET) => match sid {
             0x21 => echo.first().is_some_and(|got| asked.first() == Some(got)),
+            0x22 => echo.first_chunk::<2>().is_some_and(|got| asked == got),
             _ => true,
         },
         _ => false,
