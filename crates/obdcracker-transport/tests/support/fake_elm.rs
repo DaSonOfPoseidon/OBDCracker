@@ -121,6 +121,14 @@ pub struct FakeElm {
     /// so the STN prints `FC RX TIMEOUT` and its prompt, as the engine ECU of the A7 did (#215,
     /// #306).
     pub no_flow_control: bool,
+    /// A module that takes a request written as raw frames with `AT CAF0` and answers it
+    /// ([`Module`]).
+    pub module: Option<Module>,
+    /// A clone that answers `OK` to `AT CAF0` and stays in `AT CAF1`.
+    pub ignores_caf0: bool,
+    /// With `ignores_caf0`, a clone that takes a line of 8 bytes in `AT CAF1` instead of
+    /// refusing it, and sends it as the data of one frame.
+    pub takes_eight_bytes_in_caf1: bool,
 }
 
 // The adapter's output buffer, in bytes (ELM327DS v2.0, p. 80).
@@ -167,6 +175,10 @@ pub struct Settings {
     /// Whether a monitor acknowledges the frames it hears (`STCMM 1`, or `AT CSM 0` on an
     /// ELM327); off, the default, it is silent on the bus (STN FRPM, section 8.8).
     pub monitor_ack: bool,
+    /// Whether the adapter waits for a reply after sending a request (`AT R1`, the default).
+    /// With `AT R0` it returns to its prompt at once, and a frame the module sends then is lost
+    /// (datasheet p. 23).
+    pub responses: bool,
 }
 
 impl Settings {
@@ -218,6 +230,7 @@ impl Default for Settings {
             cfc: true,
             variable_dlc: false,
             monitor_ack: false,
+            responses: true,
         }
     }
 }
@@ -266,6 +279,9 @@ impl FakeElm {
             mute: Vec::new(),
             empty_answers: false,
             no_flow_control: false,
+            module: None,
+            ignores_caf0: false,
+            takes_eight_bytes_in_caf1: false,
         }
     }
 
@@ -489,7 +505,7 @@ impl FakeElm {
                 true
             }
             "CAF0" | "CAF1" => {
-                self.settings.caf = cmd == "CAF1";
+                self.settings.caf = cmd == "CAF1" || self.ignores_caf0;
                 true
             }
             "CFC0" | "CFC1" => {
@@ -517,7 +533,11 @@ impl FakeElm {
                 self.settings.headers = cmd == "H1";
                 true
             }
-            "R1" | "AT0" | "AT1" | "STFF" => true,
+            "R0" | "R1" => {
+                self.settings.responses = cmd == "R1";
+                true
+            }
+            "AT0" | "AT1" | "STFF" => true,
             "FCSM0" => {
                 self.settings.fc_mode = 0;
                 true
@@ -624,18 +644,35 @@ impl FakeElm {
     }
 
     fn request(&mut self, hex_text: &str) {
-        let bytes = match parse_hex(hex_text) {
+        let mut bytes = match parse_hex(hex_text) {
             // With CAN auto formatting on, a request is one single frame: 1 to 7 bytes. Off, it's
             // the frame's data as it is: 1 to 8.
             Some(bytes) if (1..=7).contains(&bytes.len()) => bytes,
             Some(bytes) if !self.settings.caf && bytes.len() == 8 => bytes,
+            Some(bytes) if self.takes_eight_bytes_in_caf1 && bytes.len() == 8 => bytes,
             _ => {
                 self.print("?");
                 self.prompt();
                 return;
             }
         };
-        self.transmit(bytes);
+        if !self.settings.caf && !self.settings.variable_dlc {
+            bytes.resize(8, self.filler());
+        }
+        let header = self.settings.request_id();
+        if !self.settings.caf && self.module.as_ref().is_some_and(|m| m.request_id == header) {
+            self.module_frame(header, &bytes);
+        } else {
+            self.transmit(bytes);
+        }
+    }
+
+    // The byte the adapter pads a short frame with: PP 26, 0x00 unless it's turned on.
+    fn filler(&self) -> u8 {
+        self.pp
+            .iter()
+            .find(|(pp, _)| *pp == 0x26)
+            .map_or(0x00, |&(_, value)| value)
     }
 
     // `STPX d:<hex>`, the only form the driver writes (STN FRPM, section 8.6): an STN sends up
@@ -664,17 +701,45 @@ impl FakeElm {
     // Puts a request on the bus and prints its answer.
     fn transmit(&mut self, mut bytes: Vec<u8>) {
         if !self.settings.caf && !self.settings.variable_dlc {
-            bytes.resize(8, 0x00);
+            bytes.resize(8, self.filler());
         }
         // Recorded even without a protocol: a real adapter would then search for one, sending
         // probe frames.
         let header = self.settings.request_id();
         self.sent.push((header, bytes.clone()));
-        if !matches!(self.settings.protocol.as_deref(), Some("6" | "7")) {
-            self.print("CAN ERROR");
+        if !self.has_protocol() {
+            return;
+        }
+        if !self.settings.responses {
             self.prompt();
             return;
         }
+        self.answer(header, &bytes, false);
+    }
+
+    // Whether a protocol is set; if not, prints what the adapter does instead of sending.
+    fn has_protocol(&mut self) -> bool {
+        let set = matches!(self.settings.protocol.as_deref(), Some("6" | "7"));
+        if !set {
+            self.print("CAN ERROR");
+            self.prompt();
+        }
+        set
+    }
+
+    // Prints what the modules answer to a request on the bus. `logical` says each reply is a
+    // whole payload for the fake to put in frames (a module's answer to a request it received
+    // in segments), not one frame's data as it is.
+    fn answer(&mut self, header: u32, bytes: &[u8], logical: bool) {
+        let bytes = bytes.to_vec();
+        let extra = if logical {
+            self.module
+                .as_ref()
+                .map(|m| m.after_answer.clone())
+                .unwrap_or_default()
+        } else {
+            Vec::new()
+        };
         // The receive filter hides frames from other IDs, and the adapter sends no flow control
         // for what it doesn't show.
         let replies: Vec<_> = (self.responder)(header, &bytes)
@@ -688,8 +753,8 @@ impl FakeElm {
         }
         // A listen that hears nothing ends with `NO DATA` at its timeout, which this fake never
         // reaches while listening.
-        let one_frame = self.listen_raw && self.listen_one_frame && !self.settings.caf;
-        if replies.is_empty() && !one_frame {
+        let one_frame = !logical && self.listen_raw && self.listen_one_frame && !self.settings.caf;
+        if replies.is_empty() && !one_frame && extra.is_empty() {
             self.print("NO DATA");
         }
         let gap_us = self.st_min_us().max(FRAME_TIME_US);
@@ -699,12 +764,13 @@ impl FakeElm {
         let mut lines = Vec::new();
         for (index, (source, payload)) in replies.into_iter().enumerate() {
             // Off, each reply is one frame's data as it is.
-            let mut frames = if self.settings.caf {
+            let mut frames = if self.settings.caf || logical {
                 frames(&payload)
             } else {
                 vec![payload.iter().copied().take(8).collect()]
             };
-            if !self.settings.caf
+            if !logical
+                && !self.settings.caf
                 && self.settings.cfc
                 && payload.first().is_some_and(|b| b >> 4 == 1)
             {
@@ -760,11 +826,14 @@ impl FakeElm {
             self.print(&line);
             printed += 1;
         }
+        for line in extra {
+            self.print(&line);
+        }
         self.schedule_late_frames(header, &bytes);
         if one_frame && printed > 0 {
             // The listen ended with its first frame.
             self.prompt();
-        } else if self.listen_raw && !self.settings.caf {
+        } else if !logical && self.listen_raw && !self.settings.caf {
             self.listening = true;
         } else if !self.hang_after_request {
             self.prompt();
@@ -894,6 +963,248 @@ impl FakeElm {
     }
 }
 
+/// A flow control frame's data, padded to 8 bytes: `status` 0 is continue to send, 1 wait, 2
+/// overflow.
+pub fn flow_control_frame(status: u8, block_size: u8, st_min: u8) -> Vec<u8> {
+    vec![0x30 | status, block_size, st_min, 0, 0, 0, 0, 0]
+}
+
+// A transfer in progress in a [`Module`].
+struct Partial {
+    data: Vec<u8>,
+    len: usize,
+    next_seq: u8,
+    in_block: usize,
+    last: Instant,
+}
+
+/// A module that takes a request written as raw frames with `AT CAF0`, as an ECU takes one in
+/// ISO-TP frames, and answers it with whatever the fake's responder gives for the whole request.
+/// It asks for the rest of a request with `flow_control` after the first frame and after every
+/// block, drops a transfer that waits longer than `n_cr` for its next frame, and records what
+/// reached it. What it prints reaches the host only while the adapter listens (`AT R1`) and the
+/// receive filter shows it.
+#[allow(clippy::struct_excessive_bools)]
+pub struct Module {
+    /// The ID it listens on, which the adapter's header must be.
+    pub request_id: u32,
+    /// The ID its flow control and answer come from.
+    pub reply_id: u32,
+    /// The frames it prints after a first frame and after each block's last frame: the ID
+    /// each comes from and its data. The block size is that of the last continue-to-send.
+    pub flow_control: Vec<(u32, Vec<u8>)>,
+    /// How long it waits for a consecutive frame before it drops the transfer (ISO 15765-2's
+    /// `N_Cr`, 1 s).
+    pub n_cr: Duration,
+    /// It takes a first frame while a transfer is in progress for a consecutive frame's
+    /// mistake and ignores it, as a receiver that isn't told to start over does.
+    pub ignores_first_frame_while_receiving: bool,
+    /// Frames of another module on the bus, printed with each flow control: the receive filter
+    /// should hide them.
+    pub other_nodes: Vec<(u32, Vec<u8>)>,
+    /// Print its frames whatever the receive filter says, as an adapter that lost its filter does.
+    pub unfiltered: bool,
+    /// The adapter prints this for the nth frame line it is given (counting from 1) instead of
+    /// sending it, as `BUS BUSY` would.
+    pub status_on_frame: Option<(usize, String)>,
+    /// Lines the adapter prints after the answer to the last frame, before its prompt.
+    pub after_answer: Vec<String>,
+    /// The requests it has received whole.
+    pub received: Vec<Vec<u8>>,
+    /// Every frame that reached it, and when.
+    pub frames: Vec<(Instant, Vec<u8>)>,
+    /// Transfers it dropped: its timer ran out, or a consecutive frame was out of order.
+    pub dropped: usize,
+    attempts: usize,
+    partial: Option<Partial>,
+}
+
+impl Module {
+    /// A module that answers every first frame with continue-to-send, block size 0 and `STmin` 0.
+    pub fn new(request_id: u32, reply_id: u32) -> Self {
+        Self {
+            request_id,
+            reply_id,
+            flow_control: vec![(reply_id, flow_control_frame(0, 0, 0))],
+            n_cr: Duration::from_secs(1),
+            ignores_first_frame_while_receiving: false,
+            other_nodes: Vec::new(),
+            unfiltered: false,
+            status_on_frame: None,
+            after_answer: Vec::new(),
+            received: Vec::new(),
+            frames: Vec::new(),
+            dropped: 0,
+            attempts: 0,
+            partial: None,
+        }
+    }
+
+    /// Asks for `block_size` frames at a time, `st_min` apart.
+    pub fn with_flow(mut self, block_size: u8, st_min: u8) -> Self {
+        self.flow_control = vec![(self.reply_id, flow_control_frame(0, block_size, st_min))];
+        self
+    }
+
+    /// Prints these frames, from `reply_id`, as its flow control.
+    pub fn with_flow_frames(mut self, frames: Vec<Vec<u8>>) -> Self {
+        self.flow_control = frames.into_iter().map(|f| (self.reply_id, f)).collect();
+        self
+    }
+
+    // What a frame that reaches the module does: whether it asks for flow control, and the request
+    // it completes.
+    fn receive(&mut self, bytes: &[u8], now: Instant) -> (bool, Option<Vec<u8>>) {
+        self.frames.push((now, bytes.to_vec()));
+        if self
+            .partial
+            .as_ref()
+            .is_some_and(|p| now.duration_since(p.last) > self.n_cr)
+        {
+            self.partial = None;
+            self.dropped += 1;
+        }
+        let block_size = self.block_size();
+        let mut flow_due = false;
+        let mut message = None;
+        match bytes[0] >> 4 {
+            0 => {
+                let len = usize::from(bytes[0] & 0x0F);
+                if (1..=7).contains(&len) {
+                    message = Some(bytes[1..=len].to_vec());
+                    self.partial = None;
+                }
+            }
+            1 => {
+                if self.partial.is_none() || !self.ignores_first_frame_while_receiving {
+                    self.partial = Some(Partial {
+                        data: bytes[2..].to_vec(),
+                        len: usize::from(bytes[0] & 0x0F) << 8 | usize::from(bytes[1]),
+                        next_seq: 1,
+                        in_block: 0,
+                        last: now,
+                    });
+                    flow_due = true;
+                }
+            }
+            2 => {
+                if let Some(partial) = self.partial.as_mut() {
+                    if bytes[0] & 0x0F == partial.next_seq {
+                        partial.data.extend_from_slice(&bytes[1..]);
+                        partial.next_seq = (partial.next_seq + 1) & 0x0F;
+                        partial.in_block += 1;
+                        partial.last = now;
+                        if partial.data.len() >= partial.len {
+                            partial.data.truncate(partial.len);
+                            message = self.partial.take().map(|p| p.data);
+                        } else if block_size != 0 && partial.in_block == block_size {
+                            partial.in_block = 0;
+                            flow_due = true;
+                        }
+                    } else {
+                        self.partial = None;
+                        self.dropped += 1;
+                    }
+                }
+            }
+            _ => {}
+        }
+        if let Some(message) = &message {
+            self.received.push(message.clone());
+        }
+        (flow_due, message)
+    }
+
+    // The frames it prints when it asks for flow control, with the other nodes' that go with them.
+    fn printed_flow(&self) -> Vec<(u32, Vec<u8>)> {
+        self.flow_control
+            .iter()
+            .chain(&self.other_nodes)
+            .cloned()
+            .collect()
+    }
+
+    fn block_size(&self) -> usize {
+        self.flow_control
+            .iter()
+            .rev()
+            .find(|(_, data)| data.first() == Some(&0x30))
+            .and_then(|(_, data)| data.get(1))
+            .map_or(0, |&bs| usize::from(bs))
+    }
+}
+
+impl FakeElm {
+    /// Takes `module`'s request as frames: see [`Module`].
+    pub fn with_module(mut self, module: Module) -> Self {
+        self.module = Some(module);
+        self
+    }
+
+    // One frame line written with `AT CAF0` to the module's request ID.
+    fn module_frame(&mut self, header: u32, bytes: &[u8]) {
+        if let Some(module) = self.module.as_mut() {
+            module.attempts += 1;
+            let shown = module
+                .status_on_frame
+                .clone()
+                .filter(|(nth, _)| *nth == module.attempts);
+            if let Some((_, text)) = shown {
+                self.print(&text);
+                self.prompt();
+                return;
+            }
+        }
+        self.sent.push((header, bytes.to_vec()));
+        if !self.has_protocol() {
+            return;
+        }
+        let Some(module) = self.module.as_mut() else {
+            return;
+        };
+        let (flow_due, message) = module.receive(bytes, Instant::now());
+        let unfiltered = module.unfiltered;
+        let flow = if flow_due {
+            module.printed_flow()
+        } else {
+            Vec::new()
+        };
+        let responses = self.settings.responses;
+        let mut printed = 0;
+        for (id, data) in flow {
+            let shown = unfiltered || self.settings.shows(id);
+            if !responses {
+                // The adapter isn't listening: the module sent it for nobody.
+                if shown {
+                    self.lost_frames.push((id, data));
+                }
+            } else if shown {
+                let line = self.frame_line(id, &data);
+                self.print(&line);
+                printed += 1;
+            }
+        }
+        if let Some(message) = message {
+            if responses {
+                self.answer(header, &message, true);
+            } else {
+                self.prompt();
+            }
+        } else if !responses {
+            self.prompt();
+        } else if printed == 0 {
+            // Nothing came before the adapter's timeout.
+            self.print("NO DATA");
+            self.prompt();
+        } else if self.listen_one_frame {
+            self.prompt();
+        } else {
+            // It listens on until its timeout, which the host cuts short with a byte.
+            self.listening = true;
+        }
+    }
+}
+
 // Three hex digits, or six or eight (a 29-bit header's low 24 bits, or a whole 29-bit ID).
 fn parse_id(text: &str) -> Option<u32> {
     (matches!(text.len(), 3 | 6 | 8) && text.bytes().all(|b| b.is_ascii_hexdigit()))
@@ -954,6 +1265,9 @@ pub struct FakeLink {
     pub corrupt_next_write: Option<(usize, u8)>,
     /// Flips these bits of this byte of the next write of exactly these bytes.
     pub corrupt_write_of: Option<(Vec<u8>, usize, u8)>,
+    /// Flips these bits of this byte of the write with this index in `writes`, counting from
+    /// the first write on the link.
+    pub corrupt_write_at: Option<(usize, usize, u8)>,
     /// Bytes that arrive at these times, whatever the adapter prints. A read waits for the next
     /// one, up to its timeout.
     pub scheduled: VecDeque<(std::time::Instant, Vec<u8>)>,
@@ -961,6 +1275,15 @@ pub struct FakeLink {
     pub byte_rate: Option<u32>,
     /// When set, every write fails, though reads still work.
     pub fail_writes: bool,
+    /// The link goes down after this many more writes: the next one and every read fail.
+    pub kill_after_writes: Option<usize>,
+    /// Waits this long before delivering the next write of exactly these bytes, as a slow link
+    /// would.
+    pub slow_write_of: Option<(Vec<u8>, Duration)>,
+    /// After the write with this index in `writes`, the next reads each wait this long first,
+    /// in order: a link or adapter slow to answer.
+    pub slow_reads_after: Option<(usize, VecDeque<Duration>)>,
+    slow_reads: VecDeque<Duration>,
 }
 
 impl FakeLink {
@@ -976,9 +1299,14 @@ impl FakeLink {
             inject: Vec::new(),
             corrupt_next_write: None,
             corrupt_write_of: None,
+            corrupt_write_at: None,
             scheduled: VecDeque::new(),
             byte_rate: Some(115_200 / 10),
             fail_writes: false,
+            kill_after_writes: None,
+            slow_write_of: None,
+            slow_reads_after: None,
+            slow_reads: VecDeque::new(),
         }
     }
 
@@ -996,9 +1324,38 @@ impl Link for FakeLink {
         if self.closed || self.fail_writes {
             return Err(io::ErrorKind::BrokenPipe.into());
         }
+        if let Some(left) = &mut self.kill_after_writes {
+            if *left == 0 {
+                self.closed = true;
+                return Err(io::ErrorKind::BrokenPipe.into());
+            }
+            *left -= 1;
+        }
+        if self
+            .slow_write_of
+            .as_ref()
+            .is_some_and(|(of, _)| of == bytes)
+            && let Some((_, wait)) = self.slow_write_of.take()
+        {
+            std::thread::sleep(wait);
+        }
         self.written.extend_from_slice(bytes);
+        let number = self.writes.len();
         self.writes.push(bytes.to_vec());
+        if self
+            .slow_reads_after
+            .as_ref()
+            .is_some_and(|(at, _)| *at == number)
+            && let Some((_, delays)) = self.slow_reads_after.take()
+        {
+            self.slow_reads = delays;
+        }
         let mut bytes = bytes.to_vec();
+        if self.corrupt_write_at.is_some_and(|(at, _, _)| at == number)
+            && let Some((_, index, bits)) = self.corrupt_write_at.take()
+        {
+            bytes[index] ^= bits;
+        }
         if let Some((index, bits)) = self.corrupt_next_write.take() {
             bytes[index] ^= bits;
         }
@@ -1017,6 +1374,9 @@ impl Link for FakeLink {
     fn read(&mut self, buf: &mut [u8], timeout: Duration, _driver: Driver) -> io::Result<usize> {
         if self.closed {
             return Err(io::ErrorKind::BrokenPipe.into());
+        }
+        if let Some(delay) = self.slow_reads.pop_front() {
+            std::thread::sleep(delay);
         }
         if !self.inject.is_empty() {
             let n = buf.len().min(self.inject.len());

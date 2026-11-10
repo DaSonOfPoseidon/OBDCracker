@@ -412,6 +412,12 @@ Each entry names the class, what to check, and where it bit us.
   datasheet feature that does it and turn each off, and make the fake adapter do what the real one does by default
   (PR #149).
 
+- **A read path that collects lines to fail on them must still log them.** The segmenting driver stops the adapter's
+  listen after the flow control and fails the request if the module printed another frame first, but it kept those
+  lines for itself, so the frame that failed the request, and the `NO DATA` or `BUS BUSY` that ended another, were in no
+  audit event. Anything a loop reads and acts on is reported as it would have been had nobody acted on it (`unread` or
+  `status`, or the frame event for a frame it uses), and a test takes the events after each failure (#214).
+
 - **A filter set for replies also hides what you sent.** The kernel applies a SocketCAN socket's receive filter to the
   copies of its own frames, so with the transport's filter on the reply IDs the driver's echo of a request (the only
   proof it went out) never arrived, and every write timed out. The port adds the sent frame's own ID to the kernel's

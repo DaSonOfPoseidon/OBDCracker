@@ -1,7 +1,8 @@
 # Design: sending requests over 7 bytes on an ELM327 with `AT CAF0`
 
-Status: **proposed, not implemented.** This note is for approval before any code (#214). It is unit 1 of 3: unit 2
-builds it, unit 3 (#308) adds an option that forces it on an STN so the OBDLink can test it.
+Status: **approved as written by the user (2026-11-10) and implemented (#214).** It was unit 1 of 3: unit 2 built it
+([`elm327.md`](../elm327.md#multi-frame-requests-on-a-plain-elm327) says what the driver does), unit 3 (#308) adds an
+option that forces it on an STN so the OBDLink can test it.
 
 A plain ELM327 sends one CAN frame per request line (up to 7 bytes) and has no segmenting of its own, so the driver
 refuses a request longer than that ([`elm327.md`](../elm327.md#limits)): a UDS `22` read of 4 DIDs is 9 bytes and can't
@@ -444,10 +445,10 @@ Because the OBDLink is an STN, this doesn't test a plain ELM327's `AT R0` or `X`
    could still falsify: that a line sent in `R0` prints only its echo and the prompt; that the adapter prints a
    `CAF0`-sent first frame's flow control and then keeps listening, so `X` is needed; that `X` stops that listen with
    `STOPPED` (DSJ p. 9 says it will); that a clone honours `AT R0` and `AT CAF0` (the first is made safe above, the second
-   by the first frame, but a clone that doesn't implement `AT R0` makes every transfer fail on the gap bound). When
-   unit 2 lands, `adapters.md` should say "datasheet only" for plain ELM327s. **Your call:** ship it on for plain ELM327s
-   anyway (the failure modes are closed: refusal, a failed request, or a stopped driver), or keep it off until someone
-   runs a plain ELM327 or a clone through it.
+   by the first frame, but a clone that doesn't implement `AT R0` makes every transfer fail on the gap bound).
+   `adapters.md` says "datasheet only" for plain ELM327s. **Answered (2026-11-10): on by default for plain ELM327s**,
+   with that wording, because the failure modes are closed: a refusal, a failed request, or a stopped driver. Unit 3 is
+   what forces it on an STN; nothing here turns it off.
 2. **The datasheet edition.** Pages in this note are DSJ's (v2.1); `elm327.md` cites v2.0's. The behaviours used here
    are in v1.0 to v1.1, but v2.0's own edition wasn't available to check, and fixing `elm327.md`'s pages is out of this
    note's scope.

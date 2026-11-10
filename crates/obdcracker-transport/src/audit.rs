@@ -12,7 +12,9 @@ use crate::{Error, LinkEvent, Response, Transport, hex};
 /// Lines file. Requests are logged before they are sent, so a send that crashes the program is
 /// still on record, and so are the flow control frames a transport sends while it receives
 /// ([`Transport::recv_logged`]), as `"dir":"tx"`. After every call it also logs the transport's
-/// [`LinkEvent`]s: commands to the adapter (`"dir":"cmd"`), reply lines nobody read before the
+/// [`LinkEvent`]s: commands to the adapter (`"dir":"cmd"`), the frames a driver wrote to send a
+/// request in segments and the flow control it read (`"dir":"tx_frame"` and `"dir":"rx_frame"`,
+/// with the ID and the 8 data bytes as `"payload"`), reply lines nobody read before the
 /// next request (`"dir":"unread"`), status lines that ended a request, such as `NO DATA`
 /// (`"dir":"status"`), and how many events were lost (`"dir":"lost"`). Each line's `ts_ms` is
 /// when it happened (for a reply line, when the driver read it from the link), so an event can
@@ -88,6 +90,10 @@ impl<T: Transport> Audited<T> {
                 LinkEvent::Status { at, line } => self.write_at(
                     at,
                     &format!(r#""dir":"status","line":"{}""#, json_escape(&line)),
+                )?,
+                LinkEvent::Frame { at, sent, id, data } => self.write_at(
+                    at,
+                    &frame_fields(if sent { "tx_frame" } else { "rx_frame" }, id, &data),
                 )?,
                 LinkEvent::Lost(count) => {
                     self.write(&format!(r#""dir":"lost","count":{count}"#))?;
