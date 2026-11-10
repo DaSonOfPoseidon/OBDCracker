@@ -2136,6 +2136,91 @@ mod read_dids {
     }
 
     #[test]
+    fn the_simulated_car_gets_a_long_request_with_no_warm_up() {
+        let log = temp_log("read-dids-sim-long");
+        let out = obdcracker(&[
+            "--sim",
+            "a7",
+            "--audit-log",
+            log.to_str().unwrap(),
+            "read-dids",
+            "--module",
+            "transmission",
+            "--did",
+            KNOWN,
+        ]);
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert!(
+            out.status.success(),
+            "{stdout}{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let sent: Vec<String> = audit_story(&log)
+            .into_iter()
+            .filter(|s| s.starts_with("tx "))
+            .collect();
+        assert_eq!(sent, ["tx 22 F1 87 F1 89 F1 90 F1 91"], "{sent:?}");
+    }
+
+    #[test]
+    fn three_dids_on_the_simulated_car_are_one_request() {
+        let log = temp_log("read-dids-sim-three");
+        let out = obdcracker(&[
+            "--sim",
+            "a7",
+            "--audit-log",
+            log.to_str().unwrap(),
+            "read-dids",
+            "--module",
+            "transmission",
+            "--did",
+            "F187,F189,F191",
+        ]);
+        assert!(out.status.success());
+        let sent: Vec<String> = audit_story(&log)
+            .into_iter()
+            .filter(|s| s.starts_with("tx "))
+            .collect();
+        assert_eq!(sent, ["tx 22 F1 87 F1 89 F1 91"], "{sent:?}");
+    }
+
+    #[test]
+    fn the_dry_run_says_when_the_warm_up_is_sent() {
+        let run = |dids: &str| {
+            let out = obdcracker(&[
+                "--dry-run",
+                "--profile",
+                "a7",
+                "read-dids",
+                "--module",
+                "transmission",
+                "--did",
+                dids,
+            ]);
+            assert!(out.status.success());
+            String::from_utf8_lossy(&out.stdout).into_owned()
+        };
+        let long = run(KNOWN);
+        assert!(
+            long.contains(
+                "through an ELM327 a live read first sends a one-DID read of F187, then the \
+                 request once"
+            ),
+            "{long}"
+        );
+        assert!(
+            long.contains("other adapters send the request once"),
+            "{long}"
+        );
+        let short = run("F187,F189,F191");
+        assert!(
+            short.contains("a live read sends the request once"),
+            "{short}"
+        );
+        assert!(!short.contains("one-DID read"), "{short}");
+    }
+
+    #[test]
     fn the_dry_run_prints_the_frames_and_sends_nothing() {
         let out = obdcracker(&[
             "--dry-run",
