@@ -22,7 +22,7 @@
 
 ## Design notes
 
-- [ELM327 requests over 7 bytes with `AT CAF0`](design/elm-caf0-segmenting.md): proposed (#214), for approval before code
+- [ELM327 requests over 7 bytes with `AT CAF0`](design/elm-caf0-segmenting.md): approved and built (#214); forcing it on an STN is #308
 
 ## Contributing
 

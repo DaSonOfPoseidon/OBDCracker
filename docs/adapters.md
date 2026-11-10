@@ -7,7 +7,7 @@ adapter's command set. The ELM driver takes any two-way byte stream, so serial, 
 |---|---|---|---|---|
 | `mock` | none (tests) | — | all | done |
 | `sim` | none: a simulated car from a vehicle profile and a fixture (`--sim a7`) | — | all | done |
-| `elm` | ELM327 v2.0+ / STN (e.g. OBDLink EX, MX+, CX) | USB serial, Wi-Fi (TCP); Bluetooth LE and Classic planned | all | done for USB serial and TCP; three read-only sessions on the A7 over USB (OBDLink EX). Clones that refuse `AT CRA` with `X` digits are refused at connect ([clone policy](elm327.md#clones)). Multi-frame requests (`STPX`) on STN only, checked on an OBDLink EX (STN2232 v5.12.4, #215) |
+| `elm` | ELM327 v2.0+ / STN (e.g. OBDLink EX, MX+, CX) | USB serial, Wi-Fi (TCP); Bluetooth LE and Classic planned | all | done for USB serial and TCP; three read-only sessions on the A7 over USB (OBDLink EX). Clones that refuse `AT CRA` with `X` digits are refused at connect ([clone policy](elm327.md#clones)). Multi-frame requests: `STPX` on an STN, checked on an OBDLink EX (STN2232 v5.12.4, #215); on a plain ELM327 as raw frames with `AT CAF0`, from the datasheet only, not yet run on one (#214) |
 | `gsusb` | CANable / candleLight (USB-C) and an OBD2-to-DB9 cable | USB | all | built on `nusb`, ISO-TP and VW TP2.0, with listen-only mode and a [bitrate check](gsusb.md#the-bitrate-check) before it goes on the bus; tested against a fake device, not yet on hardware ([details](gsusb.md)) |
 | `socketcan` | any SocketCAN interface: a CANable on the kernel's `gs_usb` driver, PCAN-USB, Kvaser, a Pi CAN HAT, `vcan` | kernel | Linux | raw CAN on the [shared ISO-TP and VW TP2.0 core](raw-can.md), with listen-only mode; reads the interface's state, bitrate and modes and never changes them; run against `vcan` and a fake, not yet on a real controller ([details](socketcan.md)) |
 | `j2534` | J2534 pass-thru (Tactrix OpenPort, Toyota Mini VCI, VAS 5054A clones) | vendor DLL | Windows | later |
@@ -19,8 +19,10 @@ the audit log records which link a session used.
 ## The ELM driver
 
 The ELM driver sends single-frame requests (up to 7 bytes: the OBD-II reads, and UDS 0x22 with up to 3 DIDs), and on
-an STN chip that echoes as it reads (such as the OBDLink EX) longer ones, up to 44 bytes, as `STPX`
-([details](elm327.md#multi-frame-requests)). It never lets the adapter search for a protocol, and stops if the
+an adapter that echoes as it reads longer ones, up to 44 bytes: as `STPX` on an STN chip such as the OBDLink EX
+([details](elm327.md#multi-frame-requests)), and on a plain ELM327 as raw ISO-TP frames it writes itself with `AT CAF0`,
+to a module whose reply ID is known ([details](elm327.md#multi-frame-requests-on-a-plain-elm327)). The second follows the
+datasheet and has not run on a plain ELM327 or a clone yet. It never lets the adapter search for a protocol, and stops if the
 adapter stops answering. On a plain ELM327 it paces a physical request's long reply to the link's speed, so its
 512-byte buffer doesn't overflow (down to about 2300 baud).
 Broadcasts can't be paced, so `scan`, `fingerprint` and `vin` ask each ECU for its long replies (mode 09 PIDs 02, 04, 06
