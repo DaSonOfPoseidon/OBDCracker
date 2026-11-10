@@ -643,6 +643,7 @@ mod requests {
                 "ATCFC0",
                 "ATV1",
                 "ATCAF0",
+                "ATCSM0",
                 "ATSH200",
                 "ATCRA25F",
                 "5FC00010000301",
@@ -654,6 +655,7 @@ mod requests {
                 "ATCAF1",
                 "ATV0",
                 "ATCFC1",
+                "ATCSM1",
                 "ATSH7E0",
                 "ATCRA7E8",
                 "0902",
@@ -689,36 +691,41 @@ mod requests {
     fn a_misheard_mode_switch_never_reaches_the_bus() {
         // Every bit of every character of every switch command: the echo shows the flip before
         // the carriage return, so the line is ended with `XX` and the adapter refuses it.
+        // The monitor's ACK setting differs by adapter: `AT CSM` on an ELM327, `STCMM` on an STN.
         let read = approve(Target::Physical(0x7E0), &[0x09, 0x02]);
-        for (leaving, command) in RAW_ON
-            .iter()
-            .map(|command| (false, command))
-            .chain(RAW_OFF.iter().map(|command| (true, command)))
-        {
-            for index in 0..command.len() {
-                for bit in 0..8 {
-                    let mut elm = connect(tp20_car());
-                    elm.send(&read).unwrap();
-                    while elm.recv(Duration::from_secs(1)).is_ok() {}
-                    let setup = Policy::read_only().approve_tp20_setup(0x5F).unwrap();
-                    if leaving {
-                        elm.send(&setup).unwrap();
+        for (stn, ack_on, ack_off) in [(false, "ATCSM0", "ATCSM1"), (true, "STCMM1", "STCMM0")] {
+            let on = RAW_ON.into_iter().chain([ack_on]).map(|c| (false, c));
+            let off = RAW_OFF.into_iter().chain([ack_off]).map(|c| (true, c));
+            for (leaving, command) in on.chain(off) {
+                for index in 0..command.len() {
+                    for bit in 0..8 {
+                        let mut car = tp20_car();
+                        if stn {
+                            car.sti = Some("STN2232 v5.12.4".into());
+                        }
+                        let mut elm = connect(car);
+                        elm.send(&read).unwrap();
                         while elm.recv(Duration::from_secs(1)).is_ok() {}
-                    }
-                    let sent = elm.link().elm.sent.len();
-                    elm.link_mut().corrupt_write_of =
-                        Some((command.as_bytes().to_vec(), index, 1 << bit));
-                    let request = if leaving { &read } else { &setup };
-                    let result = elm.send(request);
-                    assert!(elm.link().corrupt_write_of.is_none(), "{command}");
-                    let on_bus = &elm.link().elm.sent[sent..];
-                    // A flip of a letter's case is the same command to the adapter: then only
-                    // the request itself goes out. Any other flip is caught before the return.
-                    if result.is_ok() {
-                        assert_eq!(bit, 5, "{command} {index}");
-                        assert_eq!(on_bus.len(), 1, "{command} {index}");
-                    } else {
-                        assert_eq!(on_bus, [], "{command} {index} {bit}");
+                        let setup = Policy::read_only().approve_tp20_setup(0x5F).unwrap();
+                        if leaving {
+                            elm.send(&setup).unwrap();
+                            while elm.recv(Duration::from_secs(1)).is_ok() {}
+                        }
+                        let sent = elm.link().elm.sent.len();
+                        elm.link_mut().corrupt_write_of =
+                            Some((command.as_bytes().to_vec(), index, 1 << bit));
+                        let request = if leaving { &read } else { &setup };
+                        let result = elm.send(request);
+                        assert!(elm.link().corrupt_write_of.is_none(), "{command}");
+                        let on_bus = &elm.link().elm.sent[sent..];
+                        // A flip of a letter's case is the same command to the adapter: then only
+                        // the request itself goes out. Any other flip is caught before the return.
+                        if result.is_ok() {
+                            assert_eq!(bit, 5, "{command} {index}");
+                            assert_eq!(on_bus.len(), 1, "{command} {index}");
+                        } else {
+                            assert_eq!(on_bus, [], "{command} {index} {bit}");
+                        }
                     }
                 }
             }
@@ -798,6 +805,7 @@ mod requests {
                 "ATCFC0",
                 "ATV1",
                 "ATCAF0",
+                "STCMM1",
                 "ATAT0",
                 "ATSH200",
                 "ATCRA25F",
@@ -809,7 +817,7 @@ mod requests {
         assert_eq!(
             commands(&elm)[before..],
             [
-                "ATCAF1", "ATV0", "ATCFC1", "ATAT1", "ATSH7E0", "ATCRA7E8", "0902"
+                "ATCAF1", "ATV0", "ATCFC1", "STCMM0", "ATAT1", "ATSH7E0", "ATCRA7E8", "0902"
             ]
         );
         // And off again for the next channel.
@@ -1269,6 +1277,8 @@ mod requests {
         // After the module's ACK, and after the first frame of the ACK's reply.
         assert_eq!(count(&elm, "STM"), 2, "{:?}", commands(&elm));
         assert_eq!(count(&elm, "STMA") + count(&elm, "ATMA"), 0);
+        // The ACK setting is sent once with raw mode, not for each monitor.
+        assert_eq!(count(&elm, "STCMM1"), 1);
     }
 
     #[test]
@@ -1562,6 +1572,191 @@ mod requests {
                 }
             }
         }
+    }
+
+    // The A7's passenger door module on session 9: it refuses `1A 9B` with `7F 1A 11` in one
+    // frame (`300 10 00 03 7F 1A 11`), due 5 ms after the adapter starts monitoring. The module
+    // sends a frame again until someone acknowledges it (#301).
+    fn refusing_stn() -> FakeElm {
+        let mut car = one_frame_stn_from_monitor(Duration::from_millis(5));
+        car.delayed = Some(Box::new(|header, request| match (header, request) {
+            (0x740, [0x10, 0x00, 0x02, 0x1A, 0x9B]) => vec![(
+                Duration::from_millis(5),
+                0x300,
+                vec![0x10, 0x00, 0x03, 0x7F, 0x1A, 0x11],
+            )],
+            _ => Vec::new(),
+        }));
+        car
+    }
+
+    const REFUSAL: [u8; 6] = [0x10, 0x00, 0x03, 0x7F, 0x1A, 0x11];
+
+    fn unread_lines(elm: &mut Elm<FakeLink>) -> Vec<String> {
+        use obdcracker_transport::LinkEvent;
+        elm.take_events()
+            .into_iter()
+            .filter_map(|e| match e {
+                LinkEvent::Unread { line, .. } => Some(line),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_silent_monitor_gets_session_9s_can_error_instead_of_the_answer() {
+        // An adapter that takes the ACK setting but stays silent anyway: the module repeats its
+        // frame, nothing acknowledges it, and the adapter says `CAN ERROR`. The wait fails with
+        // that, as it did on the car, and no repeat is returned as an answer.
+        let mut car = refusing_stn();
+        car.monitor_ignores_ack = true;
+        let mut elm = with_echo_shown(car);
+        request_sent(&mut elm);
+        let err = elm.recv(Duration::from_secs(1)).unwrap_err();
+        assert!(err.to_string().contains("CAN ERROR"), "{err}");
+        elm.settle().unwrap();
+        let repeats = unread_lines(&mut elm);
+        assert_eq!(repeats.len(), support::fake_elm::UNACKED_REPEATS);
+        assert!(
+            repeats
+                .iter()
+                .all(|l| l.trim_end() == "300 10 00 03 7F 1A 11"),
+            "{repeats:?}"
+        );
+    }
+
+    #[test]
+    fn the_monitor_acknowledges_so_the_module_s_answer_arrives_once() {
+        let mut elm = with_echo_shown(refusing_stn());
+        request_sent(&mut elm);
+        assert_eq!(elm.recv(Duration::from_secs(1)).unwrap().payload, REFUSAL);
+        assert!(matches!(
+            elm.recv(Duration::from_millis(50)),
+            Err(Error::Timeout)
+        ));
+        elm.settle().unwrap();
+        assert_eq!(unread_lines(&mut elm), Vec::<String>::new());
+        assert_eq!(elm.link().elm.lost_frames, []);
+        // `STCMM1` went out with raw mode, long before the first `STM`: nothing but the monitor
+        // itself sits between the module's ACK and the answer.
+        let log = commands(&elm);
+        let ack = log.iter().position(|c| c == "STCMM1").unwrap();
+        let monitor = log.iter().position(|c| c == "STM").unwrap();
+        assert!(ack < monitor, "{log:?}");
+        assert_eq!(log[monitor - 1], "1000021A9B");
+    }
+
+    #[test]
+    fn a_plain_elm_acknowledges_with_atcsm0_and_the_answer_arrives_once() {
+        let mut car = refusing_stn();
+        car.sti = None;
+        let mut elm = with_echo_shown(car);
+        request_sent(&mut elm);
+        assert_eq!(elm.recv(Duration::from_secs(1)).unwrap().payload, REFUSAL);
+        assert!(matches!(
+            elm.recv(Duration::from_millis(50)),
+            Err(Error::Timeout)
+        ));
+        let log = commands(&elm);
+        let ack = log.iter().position(|c| c == "ATCSM0").unwrap();
+        let monitor = log.iter().position(|c| c == "ATMA").unwrap();
+        assert!(ack < monitor, "{log:?}");
+        assert_eq!(count(&elm, "STCMM1"), 0);
+    }
+
+    #[test]
+    fn the_ack_setting_follows_raw_mode_once_in_and_once_out() {
+        for (stn, on, off) in [(true, "STCMM1", "STCMM0"), (false, "ATCSM0", "ATCSM1")] {
+            let mut car = tp20_car();
+            if stn {
+                car.sti = Some("STN2232 v5.12.4".into());
+            }
+            let mut elm = with_echo_shown(car);
+            let before = commands(&elm).len();
+            open_tp20(&mut elm);
+            // A second channel finds raw mode on already.
+            open_tp20(&mut elm);
+            let entered = &commands(&elm)[before..];
+            assert_eq!(
+                entered.iter().filter(|c| *c == on).count(),
+                1,
+                "{entered:?}"
+            );
+            assert_eq!(entered.iter().filter(|c| *c == off).count(), 0);
+            // Right after the third switch, ahead of the header and anything a frame needs.
+            let at = entered.iter().position(|c| c == on).unwrap();
+            assert_eq!(entered[at - 1], "ATCAF0", "{entered:?}");
+            assert!(elm.link().elm.settings.monitor_ack);
+            // Leaving raw mode puts the silent default back, once.
+            let before = commands(&elm).len();
+            read_vin(&mut elm);
+            let left = &commands(&elm)[before..];
+            assert_eq!(left.iter().filter(|c| *c == off).count(), 1, "{left:?}");
+            assert_eq!(left.iter().filter(|c| *c == on).count(), 0);
+            assert!(!elm.link().elm.settings.monitor_ack);
+        }
+    }
+
+    #[test]
+    fn the_ack_setting_is_an_adapter_command_in_the_audit_events() {
+        use obdcracker_transport::LinkEvent;
+        let mut elm = with_echo_shown(unpaced_tp20_car());
+        elm.take_events();
+        open_tp20(&mut elm);
+        let logged: Vec<(String, Vec<String>)> = elm
+            .take_events()
+            .into_iter()
+            .filter_map(|e| match e {
+                LinkEvent::Command {
+                    command, answer, ..
+                } => Some((command, answer)),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            logged.contains(&("STCMM1".to_owned(), vec!["OK".to_owned()])),
+            "{logged:?}"
+        );
+    }
+
+    #[test]
+    fn an_adapter_that_refuses_the_ack_setting_fails_closed_before_any_channel_frame() {
+        // A clone without `AT CSM`, or an STN that doesn't know `STCMM`: a silent monitor would
+        // hear nothing but `CAN ERROR`, so the setup isn't sent and nothing more is written.
+        for (stn, command) in [(true, "STCMM1"), (false, "ATCSM0")] {
+            let mut car = tp20_car();
+            if stn {
+                car.sti = Some("STN2232 v5.12.4".into());
+            }
+            car.unsupported.push(command.to_owned());
+            let mut elm = with_echo_shown(car);
+            let sent = elm.link().elm.sent.len();
+            let setup = Policy::read_only().approve_tp20_setup(0x5F).unwrap();
+            let err = elm.send(&setup).unwrap_err();
+            let shown = err.to_string();
+            assert!(shown.contains(command), "{shown}");
+            assert!(shown.contains("doesn't support"), "{shown}");
+            assert_eq!(elm.link().elm.sent.len(), sent, "{command}");
+            let written = elm.link().written.len();
+            assert!(elm.send(&setup).is_err());
+            assert_eq!(elm.link().written.len(), written);
+            assert_eq!(elm.link().elm.sent.len(), sent);
+        }
+    }
+
+    #[test]
+    fn a_refused_restore_of_the_silent_default_fails_the_switch_back() {
+        let mut car = tp20_car();
+        car.sti = Some("STN2232 v5.12.4".into());
+        car.unsupported.push("STCMM0".to_owned());
+        let mut elm = with_echo_shown(car);
+        open_tp20(&mut elm);
+        let sent = elm.link().elm.sent.len();
+        let err = elm
+            .send(&approve(Target::Physical(0x7E0), &[0x09, 0x02]))
+            .unwrap_err();
+        assert!(err.to_string().contains("STCMM0"), "{err}");
+        assert_eq!(elm.link().elm.sent.len(), sent);
     }
 
     fn busy_bus() -> FakeElm {

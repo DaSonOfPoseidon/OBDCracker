@@ -39,6 +39,13 @@ const KEPT_DEFAULTS: &[(u8, u8, &str)] = &[
 // Raw frames for VW TP2.0 and back; the order matters (docs/elm327.md#vw-tp20-channel-frames).
 const RAW_ON: [&str; 3] = ["ATCFC0", "ATV1", "ATCAF0"];
 const RAW_OFF: [&str; 3] = ["ATCAF1", "ATV0", "ATCFC1"];
+// Whether the monitor acknowledges the frames it hears, set after `RAW_ON` and put back to the
+// silent default after `RAW_OFF`: `STCMM 1`/`0` on an STN (OBDLink FRPM, section 8.8), `AT CSM 0`/`1`
+// on an ELM327 (silent monitoring off/on). Behind a gateway the adapter is the only other node on
+// the diagnostic bus, and a module repeats a frame nobody acknowledges until the adapter reports
+// `CAN ERROR` (docs/elm327.md#vw-tp20-channel-frames). Each has two or more non-hex letters.
+const MONITOR_ACK_ELM: [&str; 2] = ["ATCSM0", "ATCSM1"];
+const MONITOR_ACK_STN: [&str; 2] = ["STCMM1", "STCMM0"];
 
 // `AT CRA` patterns (docs/elm327.md#receive-filter): every diagnostic reply ID, and every
 // OBD-II emissions ECU's; for 29-bit IDs, every ISO 15765-4 reply to the tester and every VAG one.
@@ -589,6 +596,16 @@ impl<L: Link> Elm<L> {
         self.read_answer(command, lines)
     }
 
+    // The setting that makes the monitor acknowledge frames (`acknowledge`), or silent again.
+    fn monitor_ack_command(&self, acknowledge: bool) -> &'static str {
+        let commands = if self.stn.is_some() {
+            MONITOR_ACK_STN
+        } else {
+            MONITOR_ACK_ELM
+        };
+        commands[usize::from(!acknowledge)]
+    }
+
     // For a command whose only non-hex letter is its `T` (`ATCAF0`): written like a request, so
     // a flipped bit is caught before the carriage return. Needs an adapter that has shown it
     // echoes characters as it reads them.
@@ -618,7 +635,7 @@ impl<L: Link> Elm<L> {
         if lines.iter().map(String::as_str).eq(["OK"]) {
             Ok(())
         } else {
-            Err(self.break_down(format!("{command} failed: {}", lines.join(" / "))))
+            Err(self.break_down(self.refusal(command, &lines)))
         }
     }
 
@@ -684,16 +701,19 @@ impl<L: Link> Elm<L> {
         if lines.iter().map(String::as_str).eq(["OK"]) {
             return Ok(());
         }
-        Err(
-            self.break_down(if lines.iter().map(String::as_str).eq(["?"]) {
-                format!(
-                    "the adapter doesn't support {command}{}",
-                    self.needs_hint(command)
-                )
-            } else {
-                format!("{command} failed: {}", lines.join(" / "))
-            }),
-        )
+        Err(self.break_down(self.refusal(command, &lines)))
+    }
+
+    // Why a setting command didn't answer `OK`.
+    fn refusal(&self, command: &str, lines: &[String]) -> String {
+        if lines.iter().map(String::as_str).eq(["?"]) {
+            format!(
+                "the adapter doesn't support {command}{}",
+                self.needs_hint(command)
+            )
+        } else {
+            format!("{command} failed: {}", lines.join(" / "))
+        }
     }
 
     // `X` digits in `AT CRA` arrived in ELM327 v2.0, and most clones claiming it refuse them.
@@ -704,6 +724,11 @@ impl<L: Link> Elm<L> {
                  says it's {}, but many clones claim a version they don't implement",
                 self.banner
             )
+        } else if MONITOR_ACK_ELM.contains(&command) || MONITOR_ACK_STN.contains(&command) {
+            // Raw mode isn't entered: its monitor couldn't hear a module's answer.
+            "; without it the adapter's monitor wouldn't acknowledge a module's frames, and the \
+             module would repeat each one until the adapter said CAN ERROR"
+                .to_owned()
         } else {
             String::new()
         }
@@ -1303,6 +1328,7 @@ impl<L: Link> Transport for Elm<L> {
             for command in if raw { RAW_ON } else { RAW_OFF } {
                 self.guarded_command(command)?;
             }
+            self.guarded_command(self.monitor_ack_command(raw))?;
             self.raw = raw;
             self.sync_adaptive()?;
         }
@@ -1409,8 +1435,8 @@ impl<L: Link> Transport for Elm<L> {
                     // The adapter stopped listening before the caller's wait ran out. Whatever
                     // the module sends from now on is lost unless the adapter listens again, and
                     // sending anything to make it would be a frame on the channel (an `A3` the
-                    // module may answer by dropping it, #227): monitor instead, which transmits
-                    // nothing.
+                    // module may answer by dropping it, #227): monitor instead, which sends no
+                    // frame, only the CAN ACK bits `monitor_ack_command` turns on (#301).
                     if listen && Instant::now() < deadline {
                         self.start_monitor()?;
                         continue;

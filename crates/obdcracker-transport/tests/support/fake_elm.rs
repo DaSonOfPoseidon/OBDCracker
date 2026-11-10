@@ -81,6 +81,13 @@ pub struct FakeElm {
     // `ATMA` on an STN passes every ID whatever `ATCRA` says (STN FRPM, section 7.3); `STM` uses
     // the filters as set.
     monitor_all: bool,
+    /// The adapter is one of two nodes on the bus, as behind a gateway: a module's frame that
+    /// nobody acknowledges is sent again and again, until the adapter prints `CAN ERROR`. Only a
+    /// monitor that is silent on the bus (`monitor_ack` off) leaves a frame unacknowledged; a
+    /// listen after a request always acknowledges (session 9, #301).
+    pub two_node_bus: bool,
+    /// The adapter takes the monitor ACK setting and says `OK`, but its monitor stays silent.
+    pub monitor_ignores_ack: bool,
     /// Programmable parameters turned on, and their values (datasheet pp. 57-61). The rest are
     /// off, at their factory values.
     pub pp: Vec<(u8, u8)>,
@@ -114,6 +121,9 @@ pub struct FakeElm {
 
 // The adapter's output buffer, in bytes (ELM327DS v2.0, p. 80).
 pub const OUTPUT_BUFFER: usize = 512;
+// How many times a module sent a frame nobody acknowledged before the adapter gave up (car
+// session 9: `300 10 00 03 7F 1A 11`, 31 times).
+pub const UNACKED_REPEATS: usize = 31;
 // How long a CAN frame takes on the bus at 500 kbit/s, about 130 bits with stuffing, in µs.
 const FRAME_TIME_US: u64 = 260;
 
@@ -150,6 +160,9 @@ pub struct Settings {
     /// Variable DLC (`AT V1`); off, the default, every request is padded to 8 bytes, even with
     /// `CAF0` (datasheet pp. 27, 46).
     pub variable_dlc: bool,
+    /// Whether a monitor acknowledges the frames it hears (`STCMM 1`, or `AT CSM 0` on an
+    /// ELM327); off, the default, it is silent on the bus (STN FRPM, section 8.8).
+    pub monitor_ack: bool,
 }
 
 impl Settings {
@@ -200,6 +213,7 @@ impl Default for Settings {
             caf: true,
             cfc: true,
             variable_dlc: false,
+            monitor_ack: false,
         }
     }
 }
@@ -234,6 +248,8 @@ impl FakeElm {
             lost_frames: Vec::new(),
             monitoring: false,
             monitor_all: false,
+            two_node_bus: true,
+            monitor_ignores_ack: false,
             pp: Vec::new(),
             pps: None,
             after_echo: Vec::new(),
@@ -395,6 +411,15 @@ impl FakeElm {
                 self.print("?");
                 self.prompt();
             }
+        } else if let Some(mode) = line.strip_prefix("STCMM") {
+            // An STN's CAN monitoring mode: 0 silent, 1 a normal node that acknowledges, 2 silent
+            // and receiving frames with errors (STN FRPM, section 8.8).
+            let ok = self.sti.is_some() && matches!(mode, "0" | "1" | "2");
+            if ok {
+                self.settings.monitor_ack = mode == "1";
+            }
+            self.print(if ok { "OK" } else { "?" });
+            self.prompt();
         } else if line == "STI" {
             let reply = self.sti.clone().unwrap_or_else(|| "?".into());
             self.print(&reply);
@@ -464,6 +489,11 @@ impl FakeElm {
             }
             "CFC0" | "CFC1" => {
                 self.settings.cfc = cmd == "CFC1";
+                true
+            }
+            "CSM0" | "CSM1" => {
+                // Silent monitoring off (the monitor acknowledges) or on, the default.
+                self.settings.monitor_ack = cmd == "CSM0";
                 true
             }
             "V0" | "V1" => {
@@ -794,7 +824,19 @@ impl FakeElm {
             }
             if self.listening || self.monitoring {
                 let line = self.frame_line(id, &data);
-                self.print(&line);
+                let acked = self.listening
+                    || (self.settings.monitor_ack && !self.monitor_ignores_ack)
+                    || !self.two_node_bus;
+                if acked {
+                    self.print(&line);
+                } else {
+                    // The module sends the frame again each time nobody acknowledges it. The
+                    // adapter reports the error first, then prints what it heard (session 9).
+                    self.print("CAN ERROR");
+                    for _ in 0..UNACKED_REPEATS {
+                        self.print(&line);
+                    }
+                }
                 if self.listening && self.listen_one_frame {
                     self.listening = false;
                     self.prompt();
