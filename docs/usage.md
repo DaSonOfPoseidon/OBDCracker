@@ -217,7 +217,7 @@ before they answer reads: car session 9's module 52 answered `1A 9B` with `7F 1A
 identification (KWP2000 `1A 9B`), showing the bytes and their printable text, and closes the channel, which ends the
 session ([how](tp20.md#data-transfer)). The output ends with the session the read ran in: `(session 89)` if the
 module answered exactly `50 89`, else `(default session: ...)` with why (`10 89` refused with its code, not answered,
-or answered with other bytes), and the read is still tried. A record that doesn't start with
+or answered with other bytes), and the read is still tried, on a new channel if the failed request closed the first. A record that doesn't start with
 the `9B` it answers is shown as not read, with its bytes. An adapter failure on a channel ends the scan with an error.
 The modules aren't scanned otherwise. A disconnect goes
 only on a channel a module gave in answer to its setup, answered on 0x300 as the setup asked, and never on an ID

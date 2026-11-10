@@ -1671,31 +1671,71 @@ const TP20_SESSION: [u8; 2] = [0x10, 0x89];
 
 // Reads a TP2.0 module's identification on a channel of its own, after asking for VAG's session,
 // and says what came back and which session it was read in. A module that doesn't enter the
-// session is still read in the default one. An adapter failure, opening, reading or closing, is
-// the error.
+// session is still read in the default one, on a new channel if the failed request closed the
+// first. An adapter failure, opening, reading or closing, is the error.
 fn tp20_identification<T: Transport>(
     transport: &mut T,
     policy: &Policy,
     address: u8,
     timing: Timing,
 ) -> Result<String, tp20::ChannelError> {
+    match identification_on_channel(transport, policy, address, timing, None)? {
+        Identified::Shown(shown) => Ok(shown),
+        // A request that fails (no answer in time, a message that doesn't answer it) closes the
+        // channel, so the default-session read gets one of its own.
+        Identified::SessionLost(why) => {
+            match identification_on_channel(transport, policy, address, timing, Some(why))? {
+                Identified::Shown(shown) => Ok(shown),
+                Identified::SessionLost(_) => unreachable!("a read in the default session"),
+            }
+        }
+    }
+}
+
+enum Identified {
+    Shown(String),
+    // The channel closed after the session request failed, for this reason.
+    SessionLost(String),
+}
+
+// One channel: asks for the session, unless `default_session` says why that failed on an earlier
+// channel, and reads the identification.
+fn identification_on_channel<T: Transport>(
+    transport: &mut T,
+    policy: &Policy,
+    address: u8,
+    timing: Timing,
+    default_session: Option<String>,
+) -> Result<Identified, tp20::ChannelError> {
     let mut session = match ChannelSession::open(transport, policy, address, timing) {
         Ok(session) => session,
         Err(e @ tp20::ChannelError::Transport(_)) => return Err(e),
-        Err(e) => return Ok(format!("no channel ({e})")),
+        Err(e) => {
+            return Ok(Identified::Shown(match default_session {
+                None => format!("no channel ({e})"),
+                Some(why) => format!("no channel ({e}) (default session: {why})"),
+            }));
+        }
     };
-    let entered = session.request(&TP20_SESSION);
-    if let Err(e @ tp20::ChannelError::Transport(_)) = entered {
-        return Err(e);
-    }
     // The answer's echo is checked exactly: ECU replies are untrusted, and only `50 89` says the
     // session was entered.
-    let in_session = match &entered {
-        Err(e) => Err(format!("10 89 not answered ({e})")),
-        Ok(answer) => match response::positive(TP20_SESSION[0], answer) {
-            Ok([echo]) if *echo == TP20_SESSION[1] => Ok(()),
-            Err(ReplyError::Negative(refusal)) => Err(format!("10 89 refused ({})", refusal.nrc)),
-            _ => Err(format!("10 89 answered {}", hex(answer))),
+    let in_session = match default_session {
+        Some(why) => Err(why),
+        None => match session.request(&TP20_SESSION) {
+            Err(e @ tp20::ChannelError::Transport(_)) => return Err(e),
+            Err(e @ tp20::ChannelError::Rejected(_)) => Err(format!("10 89 not sent ({e})")),
+            Err(e) => {
+                // The channel is closed by now.
+                let _ = session.close();
+                return Ok(Identified::SessionLost(format!("10 89 not answered ({e})")));
+            }
+            Ok(answer) => match response::positive(TP20_SESSION[0], &answer) {
+                Ok([echo]) if *echo == TP20_SESSION[1] => Ok(()),
+                Err(ReplyError::Negative(refusal)) => {
+                    Err(format!("10 89 refused ({})", refusal.nrc))
+                }
+                _ => Err(format!("10 89 answered {}", hex(&answer))),
+            },
         },
     };
     let read = session.request(&TP20_IDENTIFICATION);
@@ -1735,10 +1775,10 @@ fn tp20_identification<T: Transport>(
             }
         },
     };
-    Ok(match in_session {
+    Ok(Identified::Shown(match in_session {
         Ok(()) => format!("{shown} (session 89)"),
         Err(why) => format!("{shown} (default session: {why})"),
-    })
+    }))
 }
 
 // The command that ran, with its `--range` starting at `from`, for a shell to run again: a
@@ -2354,6 +2394,46 @@ mod tests {
             shown.starts_with("refused (") && shown.contains("(default session: 10 89 refused ("),
             "{shown}"
         );
+    }
+
+    // The adapter loses the tester's `10 89` (data frame 10 00 02 10 89), so nothing answers it.
+    struct LosesSessionRequest(SimBus);
+
+    impl Transport for LosesSessionRequest {
+        fn send(&mut self, request: &Approved) -> Result<(), Error> {
+            if request.payload() == [0x10, 0x00, 0x02, 0x10, 0x89] {
+                return Ok(());
+            }
+            self.0.send(request)
+        }
+
+        fn recv(&mut self, timeout: Duration) -> Result<Response, Error> {
+            self.0.recv(timeout)
+        }
+    }
+
+    #[test]
+    fn a_session_request_nothing_answers_is_followed_by_a_read_on_a_new_channel() {
+        let policy = obdcracker_safety::Policy::read_only();
+        let timing = Timing {
+            p2: Duration::from_millis(20),
+            ..Timing::default()
+        };
+        let mut bus = LosesSessionRequest(tp20_module(Some(&[0x50, 0x89]), b"\x5A\x9B4G0907401"));
+        let shown = tp20_identification(&mut bus, &policy, 0x5F, timing).unwrap();
+        assert!(
+            shown.starts_with("[5A 9B 34 47 30 39 30 37 34 30 31] \"4G0907401\" (default session: 10 89 not answered ("),
+            "{shown}"
+        );
+        // Two channels were opened, and each closed.
+        let sent = bus.0.sent();
+        let setups = sent
+            .iter()
+            .filter(|request| matches!(request.target(), Target::Tp20Setup(0x5F)))
+            .count();
+        assert_eq!(setups, 2);
+        assert_eq!(on_channel(sent, &[0xA8]), 2);
+        assert_eq!(on_channel(sent, &[0x10, 0x00, 0x02, 0x1A, 0x9B]), 1);
     }
 
     #[test]
