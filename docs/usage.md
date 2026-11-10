@@ -305,7 +305,9 @@ profile).
 
 An ELM327 sends a request over 7 bytes in segments only on an adapter that has shown it echoes each character as it
 reads it, and its first request shows that, so with 4 or more DIDs the command first reads the first DID alone (a single
-frame to the same module, through the same policy) and then sends the whole read: the audit log has both. `--dry-run`
+frame to the same module, through the same policy) and then sends the whole read: the audit log has both. A list the
+command would refuse is refused before that first read. If the first read gets no answer, the whole read isn't sent
+(status 1), since the module's late answer could be taken for the whole read's; a refusal counts as an answer. `--dry-run`
 prints the frames of the whole request only, and `--elm-segmenting caf0` chooses how an STN sends it
 ([above](#sending-a-long-request-on-an-stn---elm-segmenting)).
 

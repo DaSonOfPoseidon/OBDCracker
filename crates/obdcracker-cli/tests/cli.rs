@@ -2058,6 +2058,83 @@ mod read_dids {
     }
 
     #[test]
+    fn a_list_that_cant_be_read_sends_no_warm_up_either() {
+        let dids = |count: u16| {
+            (0..count)
+                .map(|n| format!("F1{n:02X}"))
+                .collect::<Vec<_>>()
+                .join(",")
+        };
+        for (what, list, says) in [
+            ("22 DIDs", dids(22), "too many"),
+            ("a repeat", "F187,F189,F190,F191,F187".to_owned(), "twice"),
+        ] {
+            let log = temp_log("read-dids-bad-list");
+            let out = read_dids(adapter(false, four_dids_reply()), &log, &[], &list);
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            assert_eq!(out.status.code(), Some(2), "{what}: {stderr}");
+            assert!(stderr.contains(says), "{what}: {stderr}");
+            let story = audit_story(&log);
+            assert!(
+                !story.iter().any(|s| s.starts_with("tx")),
+                "{what}: {story:?}"
+            );
+        }
+    }
+
+    // A transmission that answers the request of four DIDs, and the one-DID read before it with
+    // `warm_up` (nothing, if that's empty).
+    fn answering_the_warm_up_with(warm_up: Vec<u8>) -> SocketAddr {
+        let reply = four_dids_reply();
+        wifi_elm(
+            FakeElm::new(Box::new(move |header, request| match (header, request) {
+                (0x7E1, [0x22, 0xF1, 0x87]) if !warm_up.is_empty() => {
+                    vec![(0x7E9, warm_up.clone())]
+                }
+                (0x7E1, request) if request == FOUR => vec![(0x7E9, reply.clone())],
+                _ => Vec::new(),
+            }))
+            .with_module(Module::new(0x7E1, 0x7E9)),
+        )
+    }
+
+    #[test]
+    fn a_warm_up_nobody_answers_stops_before_the_long_request() {
+        // Its late answer could be taken for the long request's.
+        let log = temp_log("read-dids-silent-warm-up");
+        let out = read_dids(answering_the_warm_up_with(Vec::new()), &log, &[], KNOWN);
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert_eq!(out.status.code(), Some(1), "{stderr}");
+        assert!(stderr.contains("wasn't sent"), "{stderr}");
+        assert_eq!(out.stdout.len(), 0);
+        let story = audit_story(&log);
+        assert_eq!(story.iter().filter(|s| s.starts_with("tx ")).count(), 1);
+        assert!(
+            !story.iter().any(|s| s.starts_with("tx_frame")),
+            "{story:?}"
+        );
+    }
+
+    #[test]
+    fn a_refused_warm_up_is_an_answer_and_the_request_goes_on() {
+        let log = temp_log("read-dids-refused-warm-up");
+        let out = read_dids(
+            answering_the_warm_up_with(vec![0x7F, 0x22, 0x31]),
+            &log,
+            &[],
+            KNOWN,
+        );
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(out.status.success(), "{stderr}");
+        let story = audit_story(&log);
+        assert_eq!(story.iter().filter(|s| s.starts_with("tx ")).count(), 2);
+        assert!(
+            story.iter().any(|s| s.starts_with("tx_frame 10 09")),
+            "{story:?}"
+        );
+    }
+
+    #[test]
     fn the_dry_run_prints_the_frames_and_sends_nothing() {
         let out = obdcracker(&[
             "--dry-run",

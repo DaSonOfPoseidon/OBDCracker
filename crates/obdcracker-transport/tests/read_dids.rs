@@ -7,7 +7,7 @@ use std::time::Duration;
 use obdcracker_core::response::{Error as ReplyError, NegativeResponse, Nrc};
 use obdcracker_safety::{Approved, ModuleIds, Policy, Rejection};
 use obdcracker_transport::fingerprint::{ReadError, UdsModule};
-use obdcracker_transport::read_dids::{DidsData, MAX_DIDS, ReadDidsError, read_dids};
+use obdcracker_transport::read_dids::{DidsData, MAX_DIDS, ReadDidsError, check_dids, read_dids};
 use obdcracker_transport::{Error, Response, Timing, Transport, hex};
 use proptest::prelude::*;
 
@@ -166,6 +166,20 @@ fn refuses_no_dids_and_a_repeated_did_before_sending() {
         Err(ReadDidsError::Duplicate(0x0000))
     );
     assert_eq!(car.sent.len(), 0);
+}
+
+#[test]
+fn a_list_can_be_checked_without_a_transport() {
+    assert_eq!(check_dids(&[]), Err(ReadDidsError::NoDids));
+    assert_eq!(check_dids(&[0xF187]), Ok(()));
+    let most: Vec<u16> = (0..21).map(|n| 0xF100 + n).collect();
+    assert_eq!(check_dids(&most), Ok(()));
+    let too_many: Vec<u16> = (0..22).map(|n| 0xF100 + n).collect();
+    assert_eq!(check_dids(&too_many), Err(ReadDidsError::TooMany(22)));
+    assert_eq!(
+        check_dids(&[0xF187, 0xF188, 0xF188]),
+        Err(ReadDidsError::Duplicate(0xF188))
+    );
 }
 
 #[test]

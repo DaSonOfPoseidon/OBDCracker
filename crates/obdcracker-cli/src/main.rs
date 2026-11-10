@@ -22,7 +22,7 @@ use obdcracker_transport::fingerprint::{self, DidValue, Fingerprint, ReadError, 
 use obdcracker_transport::gateway::{self, Compared, GatewayTables, ListedAs, Tried};
 use obdcracker_transport::gsusb::{self, BitrateCheck, BitrateSource, ConnectError, GsUsb};
 use obdcracker_transport::link::{self, FindAdapterError, Link, SerialLink, TcpLink};
-use obdcracker_transport::read_dids::{self, DidsData, ReadDidsError};
+use obdcracker_transport::read_dids::{self, DidsData};
 use obdcracker_transport::scan::{
     self, DidFormat, ExtraDid, PidValue, Scan, ScanModule, ScanOptions,
 };
@@ -1215,6 +1215,11 @@ fn run_read_dids<T: Transport>(
             return ExitCode::from(2);
         }
     };
+    // Before anything is sent, the warm-up included.
+    if let Err(e) = read_dids::check_dids(dids) {
+        eprintln!("{e}");
+        return ExitCode::from(2);
+    }
     let lengths = module_did_lengths(cli, name);
     let length_of = |did: u16| {
         lengths
@@ -1225,22 +1230,30 @@ fn run_read_dids<T: Transport>(
     // An ELM327 sends a request over 7 bytes in segments only once it has shown that it echoes
     // each character as it reads it, and its first request shows that. So a request that long
     // follows a read of its first DID alone: a single frame, the same module, the same policy.
-    if dids.len() > SINGLE_FRAME_DIDS
-        && !cli.dry_run
-        && let Err(e) =
-            read_dids::read_dids(transport, &policy, &module, &dids[..1], length_of, timing)
-    {
-        eprintln!("{e}");
-        return ExitCode::FAILURE;
+    // Only a definite answer lets the long request go: after silence, the module's late answer
+    // could be taken for the long request's.
+    if dids.len() > SINGLE_FRAME_DIDS && !cli.dry_run {
+        match read_dids::read_dids(transport, &policy, &module, &dids[..1], length_of, timing) {
+            Ok(Err(e @ (ReadError::NoReply | ReadError::StillPending))) => {
+                eprintln!(
+                    "{} didn't answer the first read of {:04X} ({e}), so the request of {} DIDs \
+                     wasn't sent: its late answer could be taken for that request's. Connect \
+                     again and retry",
+                    module.name,
+                    dids[0],
+                    dids.len()
+                );
+                return ExitCode::FAILURE;
+            }
+            Ok(_) => {}
+            Err(e) => {
+                eprintln!("{e}");
+                return ExitCode::FAILURE;
+            }
+        }
     }
     let read = match read_dids::read_dids(transport, &policy, &module, dids, length_of, timing) {
         Ok(read) => read,
-        Err(
-            e @ (ReadDidsError::NoDids | ReadDidsError::TooMany(_) | ReadDidsError::Duplicate(_)),
-        ) => {
-            eprintln!("{e}");
-            return ExitCode::from(2);
-        }
         Err(e) => {
             eprintln!("{e}");
             return ExitCode::FAILURE;

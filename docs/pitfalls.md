@@ -418,6 +418,8 @@ Each entry names the class, what to check, and where it bit us.
   with one long request, would have been refused every time (#308). For each feature that depends on state the
   driver learns, run it as the first and only request of a connection (the TCP fake in `cli.rs`, not `warmed`), and
   have the command send the cheapest safe request first where it can't.
+  That first request is a request like any other: check the input before it, and don't go on after it went
+  unanswered (a late answer to it could pass for the next one's).
 
 - **A read path that collects lines to fail on them must still log them.** The segmenting driver stops the adapter's
   listen after the flow control and fails the request if the module printed another frame first, but it kept those

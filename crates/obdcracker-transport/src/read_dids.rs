@@ -59,6 +59,27 @@ pub struct DidsData {
     pub unsplit: Vec<u8>,
 }
 
+/// Checks a list of DIDs for [`read_dids`] without sending anything, so a caller that sends
+/// something first can refuse a bad list before it does.
+///
+/// # Errors
+///
+/// [`ReadDidsError::NoDids`], [`ReadDidsError::TooMany`] or [`ReadDidsError::Duplicate`].
+pub fn check_dids(dids: &[u16]) -> Result<(), ReadDidsError> {
+    if dids.is_empty() {
+        return Err(ReadDidsError::NoDids);
+    }
+    if dids.len() > MAX_DIDS {
+        return Err(ReadDidsError::TooMany(dids.len()));
+    }
+    for (index, did) in dids.iter().enumerate() {
+        if dids[..index].contains(did) {
+            return Err(ReadDidsError::Duplicate(*did));
+        }
+    }
+    Ok(())
+}
+
 /// Reads `dids` from `module` with one request, `22` and each DID in order.
 ///
 /// A reply doesn't say where one DID's data ends, so `length_of` gives each DID's length where it
@@ -88,17 +109,7 @@ pub fn read_dids<T: Transport + ?Sized>(
     length_of: impl Fn(u16) -> Option<usize>,
     timing: Timing,
 ) -> Result<Result<DidsData, ReadError>, ReadDidsError> {
-    if dids.is_empty() {
-        return Err(ReadDidsError::NoDids);
-    }
-    if dids.len() > MAX_DIDS {
-        return Err(ReadDidsError::TooMany(dids.len()));
-    }
-    for (index, did) in dids.iter().enumerate() {
-        if dids[..index].contains(did) {
-            return Err(ReadDidsError::Duplicate(*did));
-        }
-    }
+    check_dids(dids)?;
     let mut payload = vec![READ_DATA_BY_IDENTIFIER];
     payload.extend(dids.iter().flat_map(|did| did.to_be_bytes()));
     let request = policy
