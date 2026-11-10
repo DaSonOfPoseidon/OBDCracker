@@ -3,11 +3,14 @@
 # The first four modules come from public VAG UDS references, and the second read-only session
 # (#49) confirmed them. The rest are what `scan --discover` found in the third (#54, engine idling).
 # Every module answered on its request and reply IDs: a VAG reply ID is the request ID + 0x6A,
-# except for the OBD-II pairs. A module's VAG address is given only where a source confirms it:
-# the head-up display's 0x82 is from an Audi bulletin (J898, "diag. addr. 0082"). Brakes 03, acc 13,
+# except for the OBD-II pairs. A module's VAG address is given only where a source confirms it, except the
+# seven unconfirmed ones named below: the head-up display's 0x82 is from an Audi bulletin (J898, "diag. addr. 0082"). Brakes 03, acc 13,
 # acc 2 8B, sensor cluster 3B, steering 44 and image processing 8E are from the gateway's installed-
 # module list in car session 6 (#124): its 2A2A table gives each address and its 2A2C table the same
-# slot's request ID (0x713, 0x757, 0x756, 0x721, 0x712, 0x758). The other modules have none yet.
+# slot's request ID (0x713, 0x757, 0x756, 0x721, 0x712, 0x758). Airbag 15, climate 08, parking brake 53,
+# headlight range 55, tire pressure 65, camera 6C and rear lid 6D are also in its 2A2A table, but its 2A2C
+# table has no request ID for their slots, so their match to these modules is unconfirmed on the car (#231).
+# The other modules have none yet.
 # Standard identification DIDs (0xF180..=0xF19F) need no entry; they're listed here to give their
 # length, which lets a scan read several in one request. Each length is the data (not the whole
 # reply) this car's module sent in #49 or #54, so it holds for these ECU variants (part numbers),
@@ -477,6 +480,7 @@ length = 10
 
 [[module]]
 name = "airbag"
+vag_address = 0x15
 request_id = 0x715
 response_id = 0x77F
 protocol = "uds"
@@ -804,6 +808,7 @@ length = 9
 
 [[module]]
 name = "rear lid"
+vag_address = 0x6D
 request_id = 0x723
 response_id = 0x78D
 protocol = "uds"
@@ -894,6 +899,7 @@ length = 5
 
 [[module]]
 name = "camera"
+vag_address = 0x6C
 request_id = 0x726
 response_id = 0x790
 protocol = "uds"
@@ -1008,6 +1014,7 @@ length = 2
 
 [[module]]
 name = "tire pressure"
+vag_address = 0x65
 request_id = 0x72A
 response_id = 0x794
 protocol = "uds"
@@ -1068,6 +1075,7 @@ length = 14
 
 [[module]]
 name = "climate"
+vag_address = 0x08
 request_id = 0x746
 response_id = 0x7B0
 protocol = "uds"
@@ -1122,6 +1130,7 @@ length = 5
 
 [[module]]
 name = "parking brake"
+vag_address = 0x53
 request_id = 0x752
 response_id = 0x7BC
 protocol = "uds"
@@ -1170,6 +1179,7 @@ length = 14
 
 [[module]]
 name = "headlight range"
+vag_address = 0x55
 request_id = 0x754
 response_id = 0x7BE
 protocol = "uds"
