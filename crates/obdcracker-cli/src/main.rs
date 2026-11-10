@@ -383,7 +383,7 @@ fn main() -> ExitCode {
         ExitCode::from(2)
     } else if let Some(profile) = &cli.sim {
         match SimBus::builtin(profile) {
-            Ok(car) => run(&cli, car, "sim", Timing::default()),
+            Ok(car) => run(&cli, car, "sim", Timing::default(), false),
             Err(e) => {
                 eprintln!("can't build the simulated car: {e}");
                 ExitCode::FAILURE
@@ -395,6 +395,7 @@ fn main() -> ExitCode {
             DryRun::new(std::io::stdout()),
             "dry-run",
             Timing::default(),
+            false,
         )
     } else {
         match find_adapter() {
@@ -618,13 +619,13 @@ fn open_socketcan(cli: &Cli, interface: &str) -> ExitCode {
             );
         }
     }
-    run(cli, adapter, &link, Timing::default())
+    run(cli, adapter, &link, Timing::default(), false)
 }
 
 // Runs the command, then takes the controller off the bus explicitly, so a reset that fails is
 // reported: a controller left on the bus keeps acknowledging frames.
 fn run_gsusb(cli: &Cli, mut adapter: GsUsb, link: &str) -> ExitCode {
-    let code = run(cli, Borrowed(&mut adapter), link, Timing::default());
+    let code = run(cli, Borrowed(&mut adapter), link, Timing::default(), false);
     match adapter.close() {
         Ok(events) => {
             // The reset is a command to the adapter, so it is logged like the rest.
@@ -786,10 +787,11 @@ fn adapter<L: Link>(cli: &Cli, link: L) -> ExitCode {
     if let Some(method) = cli.elm_segmenting {
         elm.segment_on_stn(method == ElmSegmenting::Caf0);
     }
-    run(cli, elm, kind.name(), Elm::<L>::timing())
+    run(cli, elm, kind.name(), Elm::<L>::timing(), true)
 }
 
-fn run<T: Transport>(cli: &Cli, transport: T, link: &str, timing: Timing) -> ExitCode {
+// `elm` is true for the ELM327 driver, the one backend that needs `read-dids`' warm-up.
+fn run<T: Transport>(cli: &Cli, transport: T, link: &str, timing: Timing, elm: bool) -> ExitCode {
     let mut transport = match Audited::open(&cli.audit_log, transport, link) {
         Ok(transport) => transport,
         Err(e) => {
@@ -838,7 +840,7 @@ fn run<T: Transport>(cli: &Cli, transport: T, link: &str, timing: Timing) -> Exi
         return run_dtc(cli, &mut transport, timing, module, *code, *record);
     }
     if let Command::ReadDids { module, did } = &cli.command {
-        return run_read_dids(cli, &mut transport, timing, module, did);
+        return run_read_dids(cli, &mut transport, timing, module, did, elm);
     }
     match cli.command {
         Command::Vin => run_vin(cli, &mut transport, timing),
@@ -1209,6 +1211,7 @@ fn run_read_dids<T: Transport>(
     timing: Timing,
     name: &str,
     dids: &[u16],
+    elm: bool,
 ) -> ExitCode {
     let (module, policy) = match profile_module(cli, name, "read-dids") {
         Ok(found) => found,
@@ -1233,8 +1236,8 @@ fn run_read_dids<T: Transport>(
     // each character as it reads it, and its first request shows that. So a request that long
     // follows a read of its first DID alone: a single frame, the same module, the same policy.
     // Only a definite answer lets the long request go: after silence, the module's late answer
-    // could be taken for the long request's.
-    if dids.len() > SINGLE_FRAME_DIDS && !cli.dry_run {
+    // could be taken for the long request's. No other backend needs it, so it sends nothing extra.
+    if elm && dids.len() > SINGLE_FRAME_DIDS && !cli.dry_run {
         match read_dids::read_dids(transport, &policy, &module, &dids[..1], length_of, timing) {
             Ok(Err(e @ (ReadError::NoReply | ReadError::StillPending))) => {
                 eprintln!(
@@ -1263,9 +1266,19 @@ fn run_read_dids<T: Transport>(
     };
     if cli.dry_run {
         println!("dry run: nothing was sent");
+        // A dry run has no backend, so it can't say which one a live read would use.
+        if dids.len() > SINGLE_FRAME_DIDS {
+            println!(
+                "through an ELM327 a live read first sends a one-DID read of {:04X}, then the \
+                 request once; other adapters send the request once",
+                dids[0]
+            );
+        } else {
+            println!("a live read sends the request once");
+        }
         println!(
-            "a live read sends the request once, to {} ({:03X}), and checks that the reply holds \
-             each DID in order, with its length where the profile gives one",
+            "the request goes to {} ({:03X}), and the reply is checked to hold each DID in order, \
+             with its length where the profile gives one",
             module.name, module.request_id
         );
         return ExitCode::SUCCESS;
