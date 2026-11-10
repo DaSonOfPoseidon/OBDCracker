@@ -74,9 +74,8 @@ fn transmission() -> UdsModule {
 fn lengths(did: u16) -> Option<usize> {
     match did {
         0xF187 => Some(2),
-        0xF188 => Some(1),
+        0xF188 | 0xF191 => Some(1),
         0xF189 => Some(3),
-        0xF191 => Some(1),
         _ => None,
     }
 }
@@ -150,7 +149,7 @@ fn one_did_and_the_most_are_sent_and_one_more_isnt() {
         read(&mut car, &too_many, no_lengths),
         Err(ReadDidsError::TooMany(22))
     );
-    assert!(car.sent.is_empty());
+    assert_eq!(car.sent.len(), 0);
 }
 
 #[test]
@@ -166,7 +165,7 @@ fn refuses_no_dids_and_a_repeated_did_before_sending() {
         read(&mut car, &[0x0000, 0x0000], lengths),
         Err(ReadDidsError::Duplicate(0x0000))
     );
-    assert!(car.sent.is_empty());
+    assert_eq!(car.sent.len(), 0);
 }
 
 #[test]
@@ -181,7 +180,7 @@ fn the_policy_decides_and_nothing_is_sent_when_it_refuses() {
     let mut car = Car::saying(&reply());
     let got = read_dids(&mut car, &policy, &transmission(), &FOUR, lengths, TIMING);
     assert_eq!(got, Err(ReadDidsError::Rejected(Rejection::WrongTarget)));
-    assert!(car.sent.is_empty());
+    assert_eq!(car.sent.len(), 0);
 
     // The broadcast has no one module's reply to check, and the policy refuses it for `22`.
     let broadcast = UdsModule {
@@ -198,7 +197,7 @@ fn the_policy_decides_and_nothing_is_sent_when_it_refuses() {
         TIMING,
     );
     assert!(matches!(got, Err(ReadDidsError::Rejected(_))), "{got:?}");
-    assert!(car.sent.is_empty());
+    assert_eq!(car.sent.len(), 0);
 }
 
 #[test]
@@ -322,7 +321,7 @@ fn a_reply_that_doesnt_fit_is_reported_with_its_bytes_and_not_trusted() {
     );
 
     // Short: the last DID's data is cut off, or the reply stops after an echo.
-    for cut in [15, 14, 13, 5, 3, 1] {
+    for cut in [15, 14, 13, 5, 3] {
         let short = reply()[..cut].to_vec();
         let mut car = Car::saying(&short);
         let (error, bytes) = undecodable(read(&mut car, &FOUR, lengths));
@@ -368,11 +367,11 @@ fn a_reply_with_no_lengths_is_still_checked_as_far_as_it_can_be() {
         undecodable(read(&mut car, &[0xF187], no_lengths)).0,
         ReplyError::TooShort
     );
-    // `62` alone.
+    // `62` alone doesn't echo a DID, so it isn't an answer to this request at all.
     let mut car = Car::saying(&[0x62]);
     assert_eq!(
-        undecodable(read(&mut car, &FOUR, no_lengths)).0,
-        ReplyError::TooShort
+        read(&mut car, &FOUR, no_lengths).unwrap(),
+        Err(ReadError::NoReply)
     );
 }
 

@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use clap::builder::PossibleValuesParser;
 use clap::parser::ValueSource;
-use clap::{ArgGroup, CommandFactory, FromArgMatches, Parser, Subcommand};
+use clap::{ArgGroup, CommandFactory, FromArgMatches, Parser, Subcommand, ValueEnum};
 use obdcracker_core::obd;
 use obdcracker_core::response::{self, Error as ReplyError, Nrc};
 use obdcracker_core::uds::{DiagnosticSession, UdsDtc};
@@ -22,6 +22,7 @@ use obdcracker_transport::fingerprint::{self, DidValue, Fingerprint, ReadError, 
 use obdcracker_transport::gateway::{self, Compared, GatewayTables, ListedAs, Tried};
 use obdcracker_transport::gsusb::{self, BitrateCheck, BitrateSource, ConnectError, GsUsb};
 use obdcracker_transport::link::{self, FindAdapterError, Link, SerialLink, TcpLink};
+use obdcracker_transport::read_dids::{self, DidsData, ReadDidsError};
 use obdcracker_transport::scan::{
     self, DidFormat, ExtraDid, PidValue, Scan, ScanModule, ScanOptions,
 };
@@ -57,6 +58,14 @@ struct Cli {
     /// Use a Wi-Fi ELM327/STN adapter at this address (e.g. 192.168.0.10:35000)
     #[arg(long, value_name = "HOST:PORT", group = "adapter")]
     tcp: Option<String>,
+
+    /// With an ELM327/STN adapter: how a request of 8 to 44 bytes is sent. `stpx` [default] lets
+    /// an STN (an `OBDLink`) segment it itself; `caf0` makes the driver write the frames, as it
+    /// does on a plain ELM327, so that path can be tried on an STN. A plain ELM327 always writes
+    /// the frames, and 1 to 7 bytes are always one frame. Recorded in the audit log
+    #[arg(long, value_enum, value_name = "METHOD",
+          conflicts_with_all = ["dry_run", "sim", "gsusb", "socketcan"])]
+    elm_segmenting: Option<ElmSegmenting>,
 
     /// Use a CANable/candleLight (`gs_usb`) adapter on USB, on the one plugged in or the one with
     /// this serial number (written `--gsusb=SERIAL`, with the `=`). Checks the bitrate listening
@@ -106,6 +115,15 @@ struct Cli {
 
     #[command(subcommand)]
     command: Command,
+}
+
+// How an STN sends a request over 7 bytes (`--elm-segmenting`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum ElmSegmenting {
+    // The STN's own `STPX`, the default
+    Stpx,
+    // The driver's raw frames written with `AT CAF0`, as on a plain ELM327
+    Caf0,
 }
 
 #[derive(Debug, Subcommand)]
@@ -176,6 +194,19 @@ enum Command {
         /// takes up to that long, so give it a narrow range
         #[arg(long)]
         patient: bool,
+    },
+    /// Read several DIDs from a module in one request (UDS 0x22 with each DID), such as
+    /// `--module transmission --did F187,F188,F189,F191`. Reads only. Needs a profile (--profile
+    /// or --sim) that lists the module. The reply is split into DIDs only where the profile gives
+    /// each one's length; what it can't split is shown as the bytes the module sent
+    ReadDids {
+        /// The module's name in the profile, such as "transmission"
+        #[arg(long)]
+        module: String,
+        /// The DIDs to read, in order, as four hex digits each, comma-separated: 1 to 21, no
+        /// repeats
+        #[arg(long, value_delimiter = ',', required = true, value_parser = parse_did)]
+        did: Vec<u16>,
     },
     /// Read one DTC's snapshot records and extended data records from a module (UDS 0x19 04
     /// and 06). Reads only. Needs a profile (--profile or --sim) that lists the module
@@ -253,6 +284,7 @@ fn flag_update_ignores(cli: &Cli, audit_log_given: bool) -> Option<&'static str>
         (cli.sim.is_some(), "--sim"),
         (cli.profile.is_some(), "--profile"),
         (cli.baud.is_some(), "--baud"),
+        (cli.elm_segmenting.is_some(), "--elm-segmenting"),
         (cli.listen_only, "--listen-only"),
         (cli.bitrate.is_some(), "--bitrate"),
         (audit_log_given, "--audit-log"),
@@ -709,6 +741,10 @@ fn ports() -> ExitCode {
 }
 
 fn adapter<L: Link>(cli: &Cli, link: L) -> ExitCode {
+    if let (Command::Adapter, Some(_)) = (&cli.command, cli.elm_segmenting) {
+        eprintln!("`adapter` sends no request, so --elm-segmenting doesn't apply");
+        return ExitCode::from(2);
+    }
     let kind = link.kind();
     let mut elm = match Elm::connect_reporting(link) {
         Ok(elm) => elm,
@@ -743,6 +779,10 @@ fn adapter<L: Link>(cli: &Cli, link: L) -> ExitCode {
                 ExitCode::FAILURE
             }
         };
+    }
+    // Before the audit log opens, so its first lines say how requests will be sent.
+    if let Some(method) = cli.elm_segmenting {
+        elm.segment_on_stn(method == ElmSegmenting::Caf0);
     }
     run(cli, elm, kind.name(), Elm::<L>::timing())
 }
@@ -795,6 +835,9 @@ fn run<T: Transport>(cli: &Cli, transport: T, link: &str, timing: Timing) -> Exi
     {
         return run_dtc(cli, &mut transport, timing, module, *code, *record);
     }
+    if let Command::ReadDids { module, did } = &cli.command {
+        return run_read_dids(cli, &mut transport, timing, module, did);
+    }
     match cli.command {
         Command::Vin => run_vin(cli, &mut transport, timing),
         // Handled before any transport is opened, or above.
@@ -804,6 +847,7 @@ fn run<T: Transport>(cli: &Cli, transport: T, link: &str, timing: Timing) -> Exi
         | Command::Scan { .. }
         | Command::Sweep { .. }
         | Command::Dtc { .. }
+        | Command::ReadDids { .. }
         | Command::Update { .. } => unreachable!(),
     }
 }
@@ -1121,6 +1165,130 @@ fn run_dtc<T: Transport>(
             module.name
         );
         ExitCode::FAILURE
+    }
+}
+
+// The most DIDs a `22` read can name and still fit one CAN frame: 1 + 2 * 3 = 7 bytes.
+const SINGLE_FRAME_DIDS: usize = 3;
+
+// Four hex digits: `F18` could be 0F18 or F180, and a DID read of the wrong one is still a read.
+fn parse_did(text: &str) -> Result<u16, String> {
+    if text.len() == 4 && is_hex(text) {
+        u16::from_str_radix(text, 16).map_err(|e| e.to_string())
+    } else {
+        Err(format!(
+            "{text:?} isn't a DID: give four hex digits, such as F187"
+        ))
+    }
+}
+
+// The length of each DID in the profile's module that gives one, which lets a reply be split.
+fn module_did_lengths(cli: &Cli, name: &str) -> Vec<(u16, usize)> {
+    cli.profile
+        .as_ref()
+        .or(cli.sim.as_ref())
+        .and_then(|profile| Profile::builtin(profile).ok())
+        .and_then(|profile| {
+            let module = profile.module(name)?;
+            Some(
+                module
+                    .dids
+                    .iter()
+                    .filter_map(|did| Some((did.id, usize::from(did.length?))))
+                    .collect(),
+            )
+        })
+        .unwrap_or_default()
+}
+
+fn run_read_dids<T: Transport>(
+    cli: &Cli,
+    transport: &mut T,
+    timing: Timing,
+    name: &str,
+    dids: &[u16],
+) -> ExitCode {
+    let (module, policy) = match profile_module(cli, name, "read-dids") {
+        Ok(found) => found,
+        Err(e) => {
+            eprintln!("{e}");
+            return ExitCode::from(2);
+        }
+    };
+    let lengths = module_did_lengths(cli, name);
+    let length_of = |did: u16| {
+        lengths
+            .iter()
+            .find(|&&(known, _)| known == did)
+            .map(|&(_, length)| length)
+    };
+    // An ELM327 sends a request over 7 bytes in segments only once it has shown that it echoes
+    // each character as it reads it, and its first request shows that. So a request that long
+    // follows a read of its first DID alone: a single frame, the same module, the same policy.
+    if dids.len() > SINGLE_FRAME_DIDS
+        && !cli.dry_run
+        && let Err(e) =
+            read_dids::read_dids(transport, &policy, &module, &dids[..1], length_of, timing)
+    {
+        eprintln!("{e}");
+        return ExitCode::FAILURE;
+    }
+    let read = match read_dids::read_dids(transport, &policy, &module, dids, length_of, timing) {
+        Ok(read) => read,
+        Err(
+            e @ (ReadDidsError::NoDids | ReadDidsError::TooMany(_) | ReadDidsError::Duplicate(_)),
+        ) => {
+            eprintln!("{e}");
+            return ExitCode::from(2);
+        }
+        Err(e) => {
+            eprintln!("{e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    if cli.dry_run {
+        println!("dry run: nothing was sent");
+        println!(
+            "a live read sends the request once, to {} ({:03X}), and checks that the reply holds \
+             each DID in order, with its length where the profile gives one",
+            module.name, module.request_id
+        );
+        return ExitCode::SUCCESS;
+    }
+    let (id, module_name) = (module.response_id, &module.name);
+    match read {
+        Ok(found) => {
+            print_dids_data(id, module_name, dids, &found);
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            println!("{id:03X} {module_name} {} ({e})", did_list(dids));
+            if e == ReadError::NoReply {
+                eprintln!("{module_name} answered nothing: check the ignition and the adapter");
+            }
+            ExitCode::FAILURE
+        }
+    }
+}
+
+fn did_list(dids: &[u16]) -> String {
+    dids.iter()
+        .map(|did| format!("{did:04X}"))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+// Each DID that could be split with its bytes, then the rest as the module sent it.
+fn print_dids_data(id: u32, name: &str, dids: &[u16], found: &DidsData) {
+    for (did, data) in &found.split {
+        println!("{id:03X} {name} {did:04X} [{}]", hex(data));
+    }
+    if !found.unsplit.is_empty() {
+        println!(
+            "{id:03X} {name} {} not split, as the profile gives no length for the first [{}]",
+            did_list(&dids[found.split.len()..]),
+            hex(&found.unsplit)
+        );
     }
 }
 

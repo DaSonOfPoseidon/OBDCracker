@@ -5,9 +5,11 @@
 
 use std::fmt;
 
-use obdcracker_safety::{Policy, Rejection};
+use obdcracker_core::response::{self, Error as ReplyError};
+use obdcracker_core::uds::READ_DATA_BY_IDENTIFIER;
+use obdcracker_safety::{Policy, Protocol, Rejection, Target};
 
-use crate::fingerprint::{ReadError, UdsModule};
+use crate::fingerprint::{FingerprintError, ReadError, UdsModule, ask};
 use crate::{Error, Timing, Transport};
 
 /// The most DIDs one request may name: 1 + 2 * 21 = 43 bytes, under the 44 bytes the ELM327
@@ -60,26 +62,101 @@ pub struct DidsData {
 /// Reads `dids` from `module` with one request, `22` and each DID in order.
 ///
 /// A reply doesn't say where one DID's data ends, so `length_of` gives each DID's length where it
-/// is known (from the vehicle profile; `None`, or 0, for unknown). The reply is checked exactly:
-/// each DID's echo, in request order, and each known length, with nothing left over once every
-/// DID is split. A DID of unknown length can only be split off if it is the last, and takes
+/// is known (from the vehicle profile; `None`, or 0, where it isn't). The reply is checked
+/// exactly: each DID's echo in request order, each known length, and nothing left over once
+/// every DID is split. A DID of unknown length can be split off only if it is the last, and takes
 /// the rest of the reply. From the first unknown one before the last, the rest is
-/// [`DidsData::unsplit`], and only its first byte count is checked. The reply that fails any check is
-/// [`ReadError::Undecodable`], carrying the reply.
+/// [`DidsData::unsplit`], checked only for room for every DID's echo and at least one data byte. A
+/// reply that fails any check is [`ReadError::Undecodable`], carrying the reply.
 ///
 /// The request is approved by `policy` first. Returns the module's answer, or why it gave none.
+///
+/// With 4 or more DIDs the request is over 7 bytes, and an [`crate::elm::Elm`] sends that only
+/// once an earlier request has shown that the adapter echoes each character as it reads it
+/// (otherwise it fails with [`Error::Adapter`], writing nothing): send a single-frame request
+/// first, such as this function with one DID.
 ///
 /// # Errors
 ///
 /// [`ReadDidsError`]: the DID list is empty, too long or has a duplicate, the policy refuses the
 /// request, or the adapter fails.
 pub fn read_dids<T: Transport + ?Sized>(
-    _transport: &mut T,
-    _policy: &Policy,
-    _module: &UdsModule,
-    _dids: &[u16],
-    _length_of: impl Fn(u16) -> Option<usize>,
-    _timing: Timing,
+    transport: &mut T,
+    policy: &Policy,
+    module: &UdsModule,
+    dids: &[u16],
+    length_of: impl Fn(u16) -> Option<usize>,
+    timing: Timing,
 ) -> Result<Result<DidsData, ReadError>, ReadDidsError> {
-    Ok(Err(ReadError::NoReply))
+    if dids.is_empty() {
+        return Err(ReadDidsError::NoDids);
+    }
+    if dids.len() > MAX_DIDS {
+        return Err(ReadDidsError::TooMany(dids.len()));
+    }
+    for (index, did) in dids.iter().enumerate() {
+        if dids[..index].contains(did) {
+            return Err(ReadDidsError::Duplicate(*did));
+        }
+    }
+    let mut payload = vec![READ_DATA_BY_IDENTIFIER];
+    payload.extend(dids.iter().flat_map(|did| did.to_be_bytes()));
+    let request = policy
+        .approve(Protocol::Uds, Target::physical(module.request_id), &payload)
+        .map_err(ReadDidsError::Rejected)?;
+    ask(transport, &request, module.response_id, timing, |reply| {
+        split(reply, dids, &length_of)
+    })
+    .map_err(|e| match e {
+        FingerprintError::Transport(e) => ReadDidsError::Transport(e),
+        // Only an extended session or a policy check yields these, and this asks for neither.
+        e => ReadDidsError::Transport(Error::Adapter(e.to_string())),
+    })
+}
+
+// `reply` against the DIDs asked for, in order.
+fn split(
+    reply: &[u8],
+    dids: &[u16],
+    length_of: &impl Fn(u16) -> Option<usize>,
+) -> Result<DidsData, ReplyError> {
+    let mut rest = response::positive(READ_DATA_BY_IDENTIFIER, reply)?;
+    let mut split = Vec::with_capacity(dids.len());
+    for (index, &did) in dids.iter().enumerate() {
+        let (echo, after) = rest.split_at_checked(2).ok_or(ReplyError::TooShort)?;
+        if echo != did.to_be_bytes() {
+            return Err(ReplyError::Malformed);
+        }
+        match length_of(did).filter(|&length| length > 0) {
+            Some(length) => {
+                let (data, next) = after.split_at_checked(length).ok_or(ReplyError::TooShort)?;
+                split.push((did, data.to_vec()));
+                rest = next;
+            }
+            None if index + 1 == dids.len() => {
+                if after.is_empty() {
+                    return Err(ReplyError::TooShort);
+                }
+                split.push((did, after.to_vec()));
+                rest = &[];
+            }
+            None => {
+                // Each DID still to come needs its echo and a data byte.
+                if rest.len() < 3 * (dids.len() - index) {
+                    return Err(ReplyError::TooShort);
+                }
+                return Ok(DidsData {
+                    split,
+                    unsplit: rest.to_vec(),
+                });
+            }
+        }
+    }
+    if !rest.is_empty() {
+        return Err(ReplyError::Malformed);
+    }
+    Ok(DidsData {
+        split,
+        unsplit: Vec::new(),
+    })
 }
