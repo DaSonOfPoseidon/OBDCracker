@@ -3473,20 +3473,49 @@ mod caf0 {
         assert!(story.contains(&format!("cmd {written}")), "{story:?}");
     }
 
+    // An event as text, without the time it happened at (which differs between runs).
+    fn untimed(event: &LinkEvent) -> String {
+        match event {
+            LinkEvent::Command {
+                command, answer, ..
+            } => format!("command {command} {answer:?}"),
+            LinkEvent::Unread { line, .. } => format!("unread {line}"),
+            LinkEvent::Status { line, .. } => format!("status {line}"),
+            LinkEvent::Frame { sent, id, data, .. } => format!("frame {sent} {id:X} {data:02X?}"),
+            LinkEvent::Setting { name, value, .. } => format!("setting {name} {value}"),
+            LinkEvent::Lost(count) => format!("lost {count}"),
+            other => panic!("an event this test doesn't know: {other:?}"),
+        }
+    }
+
     #[test]
     fn events_past_the_limit_are_counted_lost_in_order() {
-        // Block size 1 gives a 44-byte request about 20 events; none are taken.
-        let mut elm = warmed(adapter(module().with_flow(1, 0), &ANSWER));
+        const MAX: usize = obdcracker_transport::elm::MAX_EVENTS;
+        // Block size 1 gives a 44-byte request about 20 events.
+        let fresh = || warmed(adapter(module().with_flow(1, 0), &ANSWER));
+
+        // Taken after every exchange, nothing is dropped: everything the driver produced, in order.
+        let mut reference = fresh();
+        let mut everything: Vec<String> = reference.take_events().iter().map(untimed).collect();
+        for _ in 0..250 {
+            exchange_one(&mut reference, &request(44));
+            everything.extend(reference.take_events().iter().map(untimed));
+        }
+        assert!(
+            everything.iter().all(|e| !e.starts_with("lost")),
+            "the reference run lost events"
+        );
+        assert!(everything.len() > MAX + 1, "{}", everything.len());
+
+        // Never taken, it keeps the first `MAX` and counts the rest as lost, once, at the end.
+        let mut elm = fresh();
         for _ in 0..250 {
             exchange_one(&mut elm, &request(44));
         }
-        let events = elm.take_events();
-        assert!(
-            matches!(events.last(), Some(LinkEvent::Lost(n)) if *n > 0),
-            "{}",
-            events.len()
-        );
-        assert!(events.len() > obdcracker_transport::elm::MAX_EVENTS);
+        let events: Vec<String> = elm.take_events().iter().map(untimed).collect();
+        assert_eq!(events.len(), MAX + 1);
+        assert_eq!(events[..MAX], everything[..MAX]);
+        assert_eq!(events[MAX], format!("lost {}", everything.len() - MAX));
     }
 }
 
