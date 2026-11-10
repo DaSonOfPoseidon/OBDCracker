@@ -2194,6 +2194,73 @@ mod stpx {
     }
 
     #[test]
+    fn a_module_that_sends_no_flow_control_fails_only_that_request() {
+        // The STN sent the first frame, the engine ECU sent no flow control, and the adapter
+        // printed the echo and then `FC RX TIMEOUT` (OBDLink EX, STN2232 v5.12.4, #215).
+        let mut adapter = stn();
+        adapter.no_flow_control = true;
+        let mut elm = warmed(adapter);
+        elm.send(&four_dids()).unwrap();
+        let err = elm.recv(Duration::from_secs(1)).unwrap_err();
+        assert!(matches!(err, Error::Adapter(_)), "{err}");
+        assert!(err.to_string().contains("FC RX TIMEOUT"), "{err}");
+        assert!(!err.to_string().contains("unexpected output"), "{err}");
+
+        // The adapter is back at its prompt with its settings, so the driver goes on.
+        elm.send(&approve(Target::Physical(0x7E0), &[0x09, 0x02]))
+            .unwrap();
+        while elm.recv(Duration::from_secs(1)).is_ok() {}
+        assert_eq!(elm.link().elm.sent.len(), 3);
+        assert_eq!(elm.link().elm.sent[2], (0x7E0, vec![0x09, 0x02]));
+    }
+
+    #[test]
+    fn the_fc_rx_timeout_reaches_the_audit_log() {
+        let log = std::env::temp_dir().join(format!(
+            "obdcracker-transport-{}-fc-rx-timeout.jsonl",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&log);
+        let mut adapter = stn();
+        adapter.no_flow_control = true;
+        let mut elm = Audited::open(&log, warmed(adapter), "fake").unwrap();
+        elm.send(&four_dids()).unwrap();
+        assert!(elm.recv(Duration::from_secs(1)).is_err());
+        let audit = std::fs::read_to_string(&log).unwrap();
+        let _ = std::fs::remove_file(&log);
+        assert!(audit.contains("FC RX TIMEOUT"), "{audit}");
+    }
+
+    #[test]
+    fn a_line_that_only_looks_like_fc_rx_timeout_still_breaks_the_driver_down() {
+        let mut elm = warmed(stn());
+        elm.link_mut().elm.after_echo = b"FC RX TIMEOUTX\r".to_vec();
+        elm.send(&four_dids()).unwrap();
+        let err = elm.recv(Duration::from_secs(1)).unwrap_err();
+        assert!(err.to_string().contains("unexpected output"), "{err}");
+        let written = elm.link().written.len();
+        assert!(elm.send(&four_dids()).is_err());
+        assert_eq!(elm.link().written.len(), written);
+    }
+
+    #[test]
+    fn the_adapters_refusal_of_a_killed_line_is_not_an_answer() {
+        // The kill's `XX` makes the STN refuse the whole line with `?` (#215). The fake prints it
+        // the same way; the driver has stopped, reads none of it and sends nothing.
+        let mut elm = warmed(stn());
+        elm.link_mut().corrupt_write_of = Some((LINE.to_vec(), 9, 0x01));
+        let err = elm.send(&four_dids()).unwrap_err();
+        assert!(err.to_string().contains("echoed"), "{err}");
+        let heard = elm.link_mut().elm.read(usize::MAX);
+        assert!(heard.windows(2).any(|w| w == b"?\r"), "{heard:?}");
+        assert_eq!(elm.link().elm.sent.len(), 1);
+        let written = elm.link().written.len();
+        assert!(elm.send(&four_dids()).is_err());
+        assert!(elm.recv(Duration::from_millis(50)).is_err());
+        assert_eq!(elm.link().written.len(), written);
+    }
+
+    #[test]
     fn the_longest_request_is_sent_and_one_byte_more_is_refused() {
         // The echoed line has to fit the line splitter: `STPX d:` and up to 44 bytes of digits
         // are 95 characters, and 45 bytes would be 97 over its 96. A `22` read reaches 43 bytes

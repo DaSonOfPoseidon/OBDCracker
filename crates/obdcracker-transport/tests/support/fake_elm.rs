@@ -117,6 +117,10 @@ pub struct FakeElm {
     /// Answer every bus request with an empty line, as clones do when nothing answers
     /// (`0100` → `\r\r>`, python-OBD #205).
     pub empty_answers: bool,
+    /// The module never answers the first frame of a multi-frame `STPX` request with flow control,
+    /// so the STN prints `FC RX TIMEOUT` and its prompt, as the engine ECU of the A7 did (#215,
+    /// #306).
+    pub no_flow_control: bool,
 }
 
 // The adapter's output buffer, in bytes (ELM327DS v2.0, p. 80).
@@ -261,6 +265,7 @@ impl FakeElm {
             unfinished: Vec::new(),
             mute: Vec::new(),
             empty_answers: false,
+            no_flow_control: false,
         }
     }
 
@@ -642,6 +647,12 @@ impl FakeElm {
             .and_then(parse_hex)
             .filter(|bytes| (1..=2048).contains(&bytes.len()));
         match data {
+            Some(bytes) if self.sti.is_some() && self.no_flow_control && bytes.len() > 7 => {
+                // The first frame went out; nothing more does.
+                self.sent.push((self.settings.request_id(), bytes));
+                self.print("FC RX TIMEOUT");
+                self.prompt();
+            }
             Some(bytes) if self.sti.is_some() => self.transmit(bytes),
             _ => {
                 self.print("?");
