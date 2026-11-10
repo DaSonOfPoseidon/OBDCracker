@@ -20,6 +20,10 @@
 - [Fixture files](fixtures.md): what a simulated module answers, field by field
 - [ELM327 notes](elm327.md): the adapter behaviour the `elm` driver relies on, with datasheet pages
 
+## Design notes
+
+- [ELM327 requests over 7 bytes with `AT CAF0`](design/elm-caf0-segmenting.md): proposed (#214), for approval before code
+
 ## Contributing
 
 - [Contributing](CONTRIBUTING.md): how changes land, issues, reviews and commits
