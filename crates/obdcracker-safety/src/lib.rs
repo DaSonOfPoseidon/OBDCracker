@@ -666,8 +666,8 @@ fn classify_kwp2000(payload: &[u8]) -> Option<Tier> {
         // Exactly one option or local ID: a transmission mode after it would ask for periodic
         // replies, not one read.
         0x1A | 0x21 if data.len() == 1 => Tier::Read,
-        // Exactly one 2-byte common identifier, as in UDS: a second would put two records in one
-        // reply, and a record's length is the manufacturer's.
+        // Exactly one 2-byte common identifier: UDS's DID width, but never a list as UDS allows. A
+        // second would put two records in one reply, and a record's length is the manufacturer's.
         0x22 if data.len() == 2 => Tier::Read,
         // SecurityAccess unlocks coding; the writes by common and local ID change it, whatever
         // their record's length.
