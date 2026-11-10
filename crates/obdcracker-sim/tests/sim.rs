@@ -1259,6 +1259,27 @@ mod tp20_reads {
     }
 
     #[test]
+    fn a_module_that_wants_vags_session_refuses_reads_until_it_is_entered() {
+        let (mut bus, identification) = door();
+        assert!(bus.require_tp20_session(DOOR).is_err());
+        bus.add_tp20_answer(DOOR, &[0x10, 0x89], &[0x50, 0x89])
+            .unwrap();
+        assert!(bus.require_tp20_session(0x5F).is_err());
+        bus.require_tp20_session(DOOR).unwrap();
+        let policy = policy();
+        for _ in 0..2 {
+            // Each channel starts in the default session.
+            let mut session =
+                ChannelSession::open(&mut bus, &policy, DOOR, Timing::default()).unwrap();
+            assert_eq!(session.request(&[0x1A, 0x9B]).unwrap(), [0x7F, 0x1A, 0x11]);
+            assert_eq!(session.request(&[0x21, 0x01]).unwrap(), [0x7F, 0x21, 0x11]);
+            assert_eq!(session.request(&[0x10, 0x89]).unwrap(), [0x50, 0x89]);
+            assert_eq!(session.request(&[0x1A, 0x9B]).unwrap(), identification);
+            assert_eq!(session.close(), Ok(Disconnect::Closed));
+        }
+    }
+
+    #[test]
     fn a_tp20_answer_must_answer_a_read_that_fits_one_frame() {
         let (mut bus, _) = door();
         for (address, request, answer) in [
@@ -1270,6 +1291,9 @@ mod tp20_reads {
             (DOOR, &[0x21, 0x03], &[0x61, 0x04]),
             (DOOR, &[0x21, 0x03], &[0x7F, 0x21, 0x78]),
             (DOOR, &[0x21, 0x03], &[]),
+            // VAG's session is exactly `10 89`.
+            (DOOR, &[0x10, 0x81], &[0x50, 0x81]),
+            (DOOR, &[0x10, 0x89, 0x00], &[0x50, 0x89]),
         ] {
             assert!(
                 matches!(

@@ -19,6 +19,10 @@ pub(crate) struct Tp20Module {
     pub(crate) open: bool,
     // KWP2000 requests and the module's answers.
     pub(crate) answers: Vec<(Vec<u8>, Vec<u8>)>,
+    // Whether it refuses everything but `10 89` until the tester has entered that session, and
+    // whether this channel has.
+    pub(crate) needs_session: bool,
+    in_session: bool,
     // Which frame of the next answer the adapter loses, if any.
     pub(crate) lose: Option<usize>,
     // How many frames the tester takes before it wants an ACK, from its `A0`.
@@ -37,6 +41,8 @@ impl Tp20Module {
             channel,
             open: false,
             answers: Vec::new(),
+            needs_session: false,
+            in_session: false,
             lose: None,
             block_size: 15,
             tester_sequence: 0,
@@ -48,6 +54,7 @@ impl Tp20Module {
     // A setup to its address opens a fresh channel.
     pub(crate) fn open(&mut self) {
         self.open = true;
+        self.in_session = false;
         self.block_size = 15;
         self.tester_sequence = 0;
         self.sequence = 0;
@@ -90,11 +97,16 @@ impl Tp20Module {
         }
     }
 
-    fn answer(&self, request: &[u8]) -> Vec<u8> {
+    fn answer(&mut self, request: &[u8]) -> Vec<u8> {
+        let sid = request[0];
+        let session = request == [0x10, 0x89];
+        if self.needs_session && !self.in_session && !session {
+            return vec![0x7F, sid, NOT_SUPPORTED];
+        }
         if let Some((_, answer)) = self.answers.iter().find(|(asked, _)| asked == request) {
+            self.in_session |= session && answer == &[0x50, 0x89];
             return answer.clone();
         }
-        let sid = request[0];
         let known = self.answers.iter().any(|(asked, _)| asked[0] == sid);
         vec![0x7F, sid, if known { OUT_OF_RANGE } else { NOT_SUPPORTED }]
     }

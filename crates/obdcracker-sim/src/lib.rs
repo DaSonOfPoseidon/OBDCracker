@@ -111,7 +111,8 @@ impl From<ProfileError> for FixtureError {
 /// 100 ms, T3 5 ms), KWP2000 requests ([`SimBus::add_tp20_answer`]) in data frames that wait for
 /// the tester's ACK after each block of the tester's block size, and the disconnect, once. A
 /// request it has no answer for gets `7F <service> 31` if it answers that service otherwise,
-/// else `7F <service> 11`.
+/// else `7F <service> 11`. [`SimBus::require_tp20_session`] makes it refuse everything but
+/// VAG's `10 89` until that has had a positive answer on the channel, as the A7's module 52 does.
 #[derive(Debug)]
 pub struct SimBus {
     ecus: Vec<Ecu>,
@@ -285,14 +286,20 @@ impl SimBus {
         let Some(module) = self.tp20.iter_mut().find(|m| m.address == address) else {
             return fault("no such module");
         };
-        let read = Policy::read_only()
-            .approve(
-                obdcracker_safety::Protocol::Kwp2000,
-                Target::Physical(0x7E0),
-                request,
-            )
+        // What the policy sends on a channel, including VAG's `10 89` session.
+        let policy = Policy::read_only();
+        let read = policy
+            .approve_tp20_setup(address)
+            .and_then(|setup| {
+                policy.tp20_channel(
+                    &setup,
+                    tp20::setup_reply_id(address),
+                    &setup_reply(module.channel),
+                )
+            })
+            .and_then(|channel| policy.approve_tp20_request(&channel, 0, request))
             .is_ok_and(|approved| approved.tier() == Tier::Read);
-        if !read || request.len() > tp20::MAX_SINGLE_FRAME {
+        if !read {
             return fault("not a read that fits one frame");
         }
         if module.answers.iter().any(|(asked, _)| asked == request) {
@@ -303,6 +310,33 @@ impl SimBus {
             return fault("not an answer to it");
         }
         module.answers.push((request.to_vec(), answer.to_vec()));
+        Ok(())
+    }
+
+    /// Makes the TP2.0 module at `address` refuse every request but `10 89` with `7F <service>
+    /// 11` on a channel until it has answered `10 89` positively (`50 89`) there, which a new
+    /// channel starts over.
+    ///
+    /// # Errors
+    ///
+    /// [`FixtureError::Value`] if there's no TP2.0 module at `address`, or none of its answers
+    /// is a positive one to `10 89` ([`SimBus::add_tp20_answer`]).
+    pub fn require_tp20_session(&mut self, address: u8) -> Result<(), FixtureError> {
+        let module = self
+            .tp20
+            .iter_mut()
+            .find(|m| m.address == address)
+            .filter(|m| {
+                m.answers
+                    .iter()
+                    .any(|(asked, answer)| asked == &[0x10, 0x89] && answer == &[0x50, 0x89])
+            })
+            .ok_or_else(|| {
+                FixtureError::Value(format!(
+                    "TP2.0 module {address:02X}: no such module, or it doesn't answer 10 89 with 50 89"
+                ))
+            })?;
+        module.needs_session = true;
         Ok(())
     }
 
