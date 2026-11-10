@@ -336,6 +336,14 @@ Each entry names the class, what to check, and where it bit us.
   channel as a test it didn't expect. Make the adapter listen without sending (the driver monitors the bus, `STM` or
   `AT MA`), and check what a mode does with the filter you set: on an STN `AT MA` and `STMA` pass every ID. A state that has no prompt of its own (a monitor) makes every prompt a failure: check each path
   that reads one, not only the wait, or the adapter's cached state outlives a monitor that ended unseen (Codex).
+- **A silent listener on a bus where it's the only receiver makes the sender repeat and error out.** A CAN
+  frame needs one node to acknowledge it. Behind the gateway the diagnostic bus has two nodes, the module and the
+  adapter, so an adapter whose monitor stays silent (`STCMM 0`, `AT CSM 1`, the default) leaves every frame of the
+  module's unacknowledged: the module sent `300 10 00 03 7F 1A 11` 31 times and the adapter said `CAN ERROR`, with
+  the answer never read (car session 9, #301). Silent on the bus is for a bus other nodes already acknowledge on;
+  anything that listens to a module it talks to must acknowledge, and a setting the adapter refuses is a failure,
+  not a reason to listen silently. Check it for any new listen-only or monitor feature (#104, `gsusb` listen-only
+  on the OBD port), and model it in the fake as two nodes, or its tests pass on a bus no car has.
 - **Check that a fix changes what the logs show.** Discovery's "waiting longer" recheck turned adaptive timing off,
   but an STN always waits its whole timeout for a first reply, so in #86 the recheck waited the same 1.09 s per
   silent ID as the first pass (#87). Read the datasheet for what a setting changes, and compare the real audit log's
