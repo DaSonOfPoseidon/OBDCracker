@@ -7,6 +7,7 @@ use obdcracker_safety::{ModuleIds, Policy, Protocol, Rejection, Target};
 use crate::fingerprint::{DidValue, FingerprintError, ReadError, ask, decode_did_value};
 use std::time::Duration;
 
+use crate::voltage::{LowVoltage, VoltageWatch};
 use crate::{Timing, Transport};
 
 /// A module that answered.
@@ -25,6 +26,32 @@ pub struct Found {
 /// slowly (an STN chip can wait this long; a plain ELM327 waits about 1 s at most).
 pub const PATIENT_WAIT: Duration = Duration::from_secs(5);
 
+/// What [`discover_with`] does beyond reading every candidate once at the transport's usual pace.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct DiscoverOptions {
+    /// Wait up to this long for each reply, or as near to it as the transport can
+    /// ([`Transport::patient`]), as [`discover_patiently`] does. `None`, the default, waits as
+    /// usual.
+    pub patient: Option<Duration>,
+    /// Re-check the supply voltage every so many candidates and stop when it is too low
+    /// ([`Discovered::low_voltage`]). The count starts again with each call. `None`, the default,
+    /// never checks.
+    pub voltage_watch: Option<VoltageWatch>,
+}
+
+/// What [`discover_with`] found, and whether it stopped early.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Discovered {
+    /// Each module that answered, in the order the candidates were asked.
+    pub found: Vec<Found>,
+    /// With [`DiscoverOptions::patient`], how long the transport waited for each reply.
+    pub waited: Option<Duration>,
+    /// Set if the supply voltage was too low when [`DiscoverOptions::voltage_watch`] re-checked
+    /// it: the candidates after [`LowVoltage::after`] weren't asked.
+    pub low_voltage: Option<LowVoltage>,
+}
+
 /// [`discover`], waiting up to `wait` for each reply, or as near to it as the transport can
 /// ([`Transport::patient`]). For candidates a quicker pass may have missed. Returns what answered,
 /// and how long the transport waited for each reply. Patience ends afterwards whatever happens,
@@ -40,6 +67,36 @@ pub fn discover_patiently<T: Transport + ?Sized>(
     timing: Timing,
     wait: Duration,
 ) -> Result<(Vec<Found>, Duration), FingerprintError> {
+    let options = DiscoverOptions {
+        patient: Some(wait),
+        ..DiscoverOptions::default()
+    };
+    let discovered = discover_with(transport, policy, candidates, timing, &options)?;
+    Ok((discovered.found, discovered.waited.unwrap_or(wait)))
+}
+
+/// [`discover`] with `options`: patience as [`discover_patiently`] has it, and a watch on the
+/// supply voltage that stops discovery early, keeping what answered.
+///
+/// # Errors
+///
+/// As [`discover_patiently`] when it is patient, else as [`discover`].
+pub fn discover_with<T: Transport + ?Sized>(
+    transport: &mut T,
+    policy: &Policy,
+    candidates: &[ModuleIds],
+    timing: Timing,
+    options: &DiscoverOptions,
+) -> Result<Discovered, FingerprintError> {
+    let Some(wait) = options.patient else {
+        let (found, low_voltage) =
+            discover_watching(transport, policy, candidates, timing, options.voltage_watch)?;
+        return Ok(Discovered {
+            found,
+            waited: None,
+            low_voltage,
+        });
+    };
     let waits = match transport.patient(Some(wait)) {
         Ok(waits) => waits.unwrap_or(wait),
         Err(error) => {
@@ -52,11 +109,15 @@ pub fn discover_patiently<T: Transport + ?Sized>(
         p2: timing.p2.max(waits),
         ..timing
     };
-    let found = discover(transport, policy, candidates, timing);
+    let found = discover_watching(transport, policy, candidates, timing, options.voltage_watch);
     let ended = transport.patient(None).map_err(FingerprintError::Transport);
-    let found = found?;
+    let (found, low_voltage) = found?;
     ended?;
-    Ok((found, waits))
+    Ok(Discovered {
+        found,
+        waited: Some(waits),
+        low_voltage,
+    })
 }
 
 /// Reads the spare part number from each candidate, in order, and returns those that answered.
@@ -72,6 +133,17 @@ pub fn discover<T: Transport + ?Sized>(
     candidates: &[ModuleIds],
     timing: Timing,
 ) -> Result<Vec<Found>, FingerprintError> {
+    discover_watching(transport, policy, candidates, timing, None).map(|(found, _)| found)
+}
+
+// Discovery, stopping early if `watch` finds the supply voltage too low.
+fn discover_watching<T: Transport + ?Sized>(
+    transport: &mut T,
+    policy: &Policy,
+    candidates: &[ModuleIds],
+    timing: Timing,
+    watch: Option<VoltageWatch>,
+) -> Result<(Vec<Found>, Option<LowVoltage>), FingerprintError> {
     let requests = candidates
         .iter()
         .map(|candidate| {
@@ -90,7 +162,12 @@ pub fn discover<T: Transport + ?Sized>(
         })
         .collect::<Result<Vec<_>, _>>()?;
     let mut found = Vec::new();
-    for (candidate, request) in requests {
+    for (done, (candidate, request)) in requests.into_iter().enumerate() {
+        if let Some(low) =
+            watch.and_then(|watch| watch.stop_after(done, || transport.supply_voltage()))
+        {
+            return Ok((found, Some(low)));
+        }
         let part_number = ask(transport, &request, candidate.reply, timing, |payload| {
             decode_did_value(payload, did::SPARE_PART_NUMBER)
         })?;
@@ -102,5 +179,5 @@ pub fn discover<T: Transport + ?Sized>(
             });
         }
     }
-    Ok(found)
+    Ok((found, None))
 }

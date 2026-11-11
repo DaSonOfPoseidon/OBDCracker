@@ -36,6 +36,7 @@ pub mod scan;
 mod session;
 pub mod sweep;
 pub mod tp20;
+pub mod voltage;
 
 pub use audit::{Audited, log_events, log_failure};
 pub use dry_run::DryRun;
