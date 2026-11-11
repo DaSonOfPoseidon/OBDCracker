@@ -1,5 +1,6 @@
 //! The `obdcracker` command-line tool.
 
+mod diff;
 mod json;
 mod update;
 
@@ -144,8 +145,9 @@ struct Cli {
     force_low_voltage: bool,
 
     /// Print one JSON document on stdout instead of text (docs/json.md), for `vin`, `fingerprint`,
-    /// `scan`, `sweep`, `read-dids`, `dtc`, `adapter` and `ports`. Notes and warnings stay on
-    /// stderr. Not with --dry-run, which prints the frames it would send, or `update`
+    /// `scan`, `sweep`, `read-dids`, `dtc`, `adapter` and `ports`, and for the changes `diff`
+    /// finds. Notes and warnings stay on stderr. Not with --dry-run, which prints the frames it
+    /// would send, or `update`
     #[arg(long, conflicts_with = "dry_run")]
     json: bool,
 
@@ -284,6 +286,18 @@ enum Command {
     },
     /// Show what the adapter is and the voltage it sees; sends nothing on the bus
     Adapter,
+    /// Compare two `--json` documents of one command (`vin`, `fingerprint`, `scan`, `sweep` or
+    /// `read-dids`) and print what changed from OLD to NEW: calibration IDs and CVNs, part and
+    /// software numbers, the modules found, DTCs, DIDs. Uses no adapter or audit log. Exits 0 when
+    /// nothing changed, 1 when something did, 2 on an error
+    Diff {
+        /// The earlier document
+        #[arg(value_name = "OLD")]
+        old: PathBuf,
+        /// The later document
+        #[arg(value_name = "NEW")]
+        new: PathBuf,
+    },
 }
 
 // What this binary was built from: the version, and the commit the installer was told (`unknown`
@@ -316,8 +330,8 @@ fn update_version(text: &str) -> Result<update::Version, String> {
 }
 
 // The first flag that picks an adapter, a car's profile or the audit log, none of which `update`
-// uses. `--audit-log` has a default, so only one the user typed counts.
-fn flag_update_ignores(cli: &Cli, audit_log_given: bool) -> Option<&'static str> {
+// or `diff` uses. `--audit-log` has a default, so only one the user typed counts.
+fn flag_adapter_free_ignores(cli: &Cli, audit_log_given: bool) -> Option<&'static str> {
     [
         (cli.serial.is_some(), "--serial"),
         (cli.tcp.is_some(), "--tcp"),
@@ -351,7 +365,7 @@ fn update(cli: &Cli, audit_log_given: bool) -> ExitCode {
         eprintln!("`update` prints text only, so --json doesn't apply");
         return ExitCode::from(2);
     }
-    if let Some(flag) = flag_update_ignores(cli, audit_log_given) {
+    if let Some(flag) = flag_adapter_free_ignores(cli, audit_log_given) {
         eprintln!(
             "`update` uses no adapter or audit log, so {flag} doesn't apply (only --dry-run does)"
         );
@@ -406,6 +420,10 @@ fn main() -> ExitCode {
     if let Command::Update { .. } = cli.command {
         let audit_log_given = matches.value_source("audit_log") == Some(ValueSource::CommandLine);
         return update(&cli, audit_log_given);
+    }
+    if let Command::Diff { old, new } = &cli.command {
+        let audit_log_given = matches.value_source("audit_log") == Some(ValueSource::CommandLine);
+        return diff::run(&cli, audit_log_given, old, new);
     }
     if let Some(port) = &cli.serial {
         open_serial(&cli, port)
@@ -934,7 +952,8 @@ fn run<T: Transport>(cli: &Cli, transport: T, link: &str, timing: Timing, elm: b
         | Command::Sweep { .. }
         | Command::Dtc { .. }
         | Command::ReadDids { .. }
-        | Command::Update { .. } => unreachable!(),
+        | Command::Update { .. }
+        | Command::Diff { .. } => unreachable!(),
     }
 }
 
@@ -3540,15 +3559,18 @@ mod tests {
             &["--force-low-voltage"],
         ] {
             let cli = parse(&[&["obdcracker"], words, &["update"]].concat()).unwrap();
-            let flag = crate::flag_update_ignores(&cli, false);
+            let flag = crate::flag_adapter_free_ignores(&cli, false);
             assert_eq!(flag, Some(words[0]), "{words:?}");
         }
         let cli = parse(&["obdcracker", "update"]).unwrap();
-        assert_eq!(crate::flag_update_ignores(&cli, false), None);
-        assert_eq!(crate::flag_update_ignores(&cli, true), Some("--audit-log"));
+        assert_eq!(crate::flag_adapter_free_ignores(&cli, false), None);
+        assert_eq!(
+            crate::flag_adapter_free_ignores(&cli, true),
+            Some("--audit-log")
+        );
         // --dry-run is the one global flag it uses
         let cli = parse(&["obdcracker", "--dry-run", "update"]).unwrap();
-        assert_eq!(crate::flag_update_ignores(&cli, false), None);
+        assert_eq!(crate::flag_adapter_free_ignores(&cli, false), None);
         assert!(cli.dry_run);
     }
 

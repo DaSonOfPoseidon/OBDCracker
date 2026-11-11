@@ -1,6 +1,7 @@
 //! The document `--json` prints: an envelope around one command's result (`docs/json.md`).
 
 use obdcracker_core::uds::UdsDtc;
+use obdcracker_transport::diff::Change;
 use obdcracker_transport::dtc::DtcDetail;
 use obdcracker_transport::elm::AdapterInfo;
 use obdcracker_transport::fingerprint::{ReadError, UdsModule};
@@ -108,6 +109,14 @@ pub(crate) struct ReadDidsReport {
     pub(crate) dids: Vec<u16>,
     #[serde(with = "json::outcome")]
     pub(crate) read: Result<DidsData, ReadError>,
+}
+
+// What `diff` found. It isn't read back: `diff` refuses a document of its own.
+#[derive(Debug, PartialEq, Serialize)]
+pub(crate) struct DiffReport<'a> {
+    // The command both documents were of.
+    pub(crate) compared: &'a str,
+    pub(crate) changes: &'a [Change],
 }
 
 #[derive(Debug, PartialEq, Serialize, Deserialize)]
