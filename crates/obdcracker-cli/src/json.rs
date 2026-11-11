@@ -73,8 +73,9 @@ pub(crate) fn print<T: Serialize>(command: &str, result: &T) -> bool {
     }
 }
 
-// What `vin` read: each emissions ECU whose reply was a VIN.
-#[derive(Debug, PartialEq, Serialize, Deserialize)]
+// What `diff` reads of a `vin` entry: the ECU and its VIN. The entry has more fields
+// (`crate::vin::VinEntry`), all worked out from the VIN, so they are ignored here.
+#[derive(Debug, PartialEq, Deserialize)]
 pub(crate) struct VinReading {
     #[serde(with = "json::can_id")]
     pub(crate) source: u32,

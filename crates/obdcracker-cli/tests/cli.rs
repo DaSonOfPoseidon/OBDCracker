@@ -135,10 +135,7 @@ fn sim_vin_prints_each_answer_and_audits_each_frame() {
         "{}",
         String::from_utf8_lossy(&out.stderr)
     );
-    assert_eq!(
-        String::from_utf8_lossy(&out.stdout),
-        "7E8 WAU2MBFC6EN093415\n"
-    );
+    assert_eq!(vin_headlines(&out.stdout), "7E8 WAU2MBFC6EN093415\n");
 
     let audit = std::fs::read_to_string(&log).unwrap();
     let lines: Vec<_> = audit.lines().collect();
@@ -441,12 +438,40 @@ fn a_missing_serial_port_is_an_error() {
     assert!(!log.exists());
 }
 
+// The lines of `vin` that name an ECU and its VIN, without the decoded fields indented under each.
+fn vin_headlines(stdout: &[u8]) -> String {
+    let mut headlines = String::new();
+    for line in String::from_utf8_lossy(stdout).lines() {
+        if !line.starts_with(' ') {
+            headlines.push_str(line);
+            headlines.push('\n');
+        }
+    }
+    headlines
+}
+
 // A fake ELM327 on the A7's engine and transmission, served over TCP like a Wi-Fi adapter.
 fn wifi_adapter() -> SocketAddr {
     wifi_adapter_with_vins(|_| VIN.to_vec())
 }
 
 const VIN: &[u8] = b"\x49\x02\x01WAUZZZ4G1EN000000";
+// The A7 in the sim fixture, which the A7 profile fits.
+const A7_VIN: &[u8] = b"WAU2MBFC6EN093415";
+
+// What the A7's engine answers the check of the VIN against `--profile` with: `01 00`, then
+// `09 02` to its own request ID, as a plain ELM327 is asked.
+fn a7_vin_check(header: u32, request: &[u8]) -> Option<Vec<(u32, Vec<u8>)>> {
+    match (header, request) {
+        (0x7DF, [0x01, 0x00]) => Some(vec![(0x7E8, vec![0x41, 0x00, 0x00, 0x00, 0x00, 0x00])]),
+        (0x7E0, [0x09, 0x02]) => {
+            let mut reply = vec![0x49, 0x02, 0x01];
+            reply.extend(A7_VIN);
+            Some(vec![(0x7E8, reply)])
+        }
+        _ => None,
+    }
+}
 
 // A plain ELM327 is paced, so `vin` asks `01 00` first, then each ECU by its own request ID. ECU
 // `n` (0 or 1) answers on 0x7E8 + n with `vin(n)`.
@@ -500,7 +525,7 @@ fn tcp_vin_reads_through_an_elm_adapter_and_warns_about_wireless() {
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(out.status.success(), "{stderr}");
     assert_eq!(
-        String::from_utf8_lossy(&out.stdout),
+        vin_headlines(&out.stdout),
         "7E8 WAUZZZ4G1EN000000\n7E9 WAUZZZ4G1EN000000\n"
     );
     assert!(
@@ -571,10 +596,7 @@ fn a_refusal_beside_a_good_vin_still_succeeds() {
         }
     });
     assert_eq!(out.status.code(), Some(0), "{stderr}");
-    assert_eq!(
-        String::from_utf8_lossy(&out.stdout),
-        "7E8 WAUZZZ4G1EN000000\n"
-    );
+    assert_eq!(vin_headlines(&out.stdout), "7E8 WAUZZZ4G1EN000000\n");
     assert!(stderr.contains("7E9 service 0x09 refused"), "{stderr}");
 }
 
@@ -596,10 +618,7 @@ fn a_malformed_vin_beside_a_good_one_still_fails() {
         }
     });
     assert_eq!(out.status.code(), Some(1), "{stderr}");
-    assert_eq!(
-        String::from_utf8_lossy(&out.stdout),
-        "7E8 WAUZZZ4G1EN000000\n"
-    );
+    assert_eq!(vin_headlines(&out.stdout), "7E8 WAUZZZ4G1EN000000\n");
     assert!(stderr.contains("7E9 reply is malformed"), "{stderr}");
 }
 
@@ -722,11 +741,22 @@ fn dry_run_fingerprint_lists_every_frame_in_order() {
             String::from_utf8_lossy(&out.stderr)
         );
         let stdout = String::from_utf8_lossy(&out.stdout);
-        let mut expected = FINGERPRINT_FRAMES.join("\n");
+        // A given profile first has its VIN check planned and skipped.
+        let mut expected = String::new();
+        if profile.is_some() {
+            expected.push_str(
+                "7DF 02 09 02\ndry run: the car's VIN wasn't compared with the a7 profile\n",
+            );
+        }
+        expected.push_str(&FINGERPRINT_FRAMES.join("\n"));
         expected.push_str("\ndry run: nothing was sent\n");
         assert_eq!(stdout, expected, "{profile:?}");
         let audit = std::fs::read_to_string(&log).unwrap();
-        assert_eq!(audit.lines().count(), 12, "{audit}");
+        assert_eq!(
+            audit.lines().count(),
+            12 + usize::from(profile.is_some()),
+            "{audit}"
+        );
         assert!(
             audit.lines().all(|line| line.contains(r#""dir":"tx""#)),
             "{audit}"
@@ -1809,7 +1839,8 @@ mod read_dids {
     }
 
     // `elm` with a transmission at 7E1/7E9 that answers a read of F187 (what the command sends
-    // first) and `request` with `answer`.
+    // first) and `request` with `answer`, and an engine that gives the A7's VIN to the check of
+    // the VIN against `--profile`.
     fn with_transmission(request: Vec<u8>, answer: Vec<u8>) -> FakeElm {
         let responder = move |header: u32, sent: &[u8]| match (header, sent) {
             (0x7E1, [0x22, 0xF1, 0x87]) => {
@@ -1818,7 +1849,7 @@ mod read_dids {
                 vec![(0x7E9, reply)]
             }
             (0x7E1, sent) if sent == request => vec![(0x7E9, answer.clone())],
-            _ => Vec::new(),
+            _ => a7_vin_check(header, sent).unwrap_or_default(),
         };
         FakeElm::new(Box::new(responder)).with_module(Module::new(0x7E1, 0x7E9))
     }
@@ -1840,7 +1871,8 @@ mod read_dids {
         obdcracker(&args)
     }
 
-    // `dir` and the command, payload or setting name of each line of the audit log.
+    // `dir` and the command, payload or setting name of each line of the audit log, without the
+    // check of the VIN against the profile (`01 00` and `09 02` and their answers).
     fn audit_story(log: &std::path::Path) -> Vec<String> {
         std::fs::read_to_string(log)
             .unwrap()
@@ -1853,6 +1885,11 @@ mod read_dids {
                     .find_map(|key| v[key].as_str())
                     .unwrap_or("");
                 format!("{dir} {rest}")
+            })
+            .filter(|line| {
+                !["tx 01 00", "tx 09 02", "rx 41 00 ", "rx 49 02 "]
+                    .iter()
+                    .any(|check| line.starts_with(check))
             })
             .collect()
     }
@@ -2031,7 +2068,7 @@ mod read_dids {
     fn a_refusal_is_shown_by_name_and_fails() {
         let elm = FakeElm::new(Box::new(|header, request| match (header, request) {
             (0x7E1, [0x22, 0xF1, 0x87]) => vec![(0x7E9, vec![0x7F, 0x22, 0x31])],
-            _ => Vec::new(),
+            _ => a7_vin_check(header, request).unwrap_or_default(),
         }))
         .with_module(Module::new(0x7E1, 0x7E9));
         let log = temp_log("read-dids-refused");
@@ -2096,7 +2133,7 @@ mod read_dids {
                     vec![(0x7E9, warm_up.clone())]
                 }
                 (0x7E1, request) if request == FOUR => vec![(0x7E9, reply.clone())],
-                _ => Vec::new(),
+                _ => a7_vin_check(header, request).unwrap_or_default(),
             }))
             .with_module(Module::new(0x7E1, 0x7E9)),
         )
@@ -2448,9 +2485,41 @@ mod json {
         assert!(out.status.success(), "{}", stderr(&out));
         assert_eq!(
             document(&out, "vin"),
-            json!([{"source": "7E8", "vin": "WAU2MBFC6EN093415"}])
+            json!([{
+                "source": "7E8",
+                "vin": "WAU2MBFC6EN093415",
+                "wmi": "WAU",
+                "vds": "2MBFC",
+                "check_digit": {"found": "6", "computed": "6", "status": "not-required"},
+                "year_code": "E",
+                "model_years": [1984, 2014],
+                "plant": "N",
+                "serial": "093415",
+                "builtin_profiles": ["a7"]
+            }])
         );
         assert_eq!(stderr(&out), "");
+    }
+
+    #[test]
+    fn vin_says_whether_it_fits_the_given_profile() {
+        let out = sim("json-vin-profile", &["--profile", "a7", "vin"]);
+        assert!(out.status.success(), "{}", stderr(&out));
+        let result = document(&out, "vin");
+        assert_eq!(result[0]["profile"], json!({"name": "a7", "fits": true}));
+        // A North American VIN the A7 profile doesn't fit: still exit 0, the VIN was read.
+        let addr =
+            wifi_adapter_with_vins(|_| b"\x49\x02\x011M8GDM9AXKP042788".to_vec()).to_string();
+        let out = obdcracker(&["--tcp", &addr, "--profile", "a7", "--json", "vin"]);
+        assert!(out.status.success(), "{}", stderr(&out));
+        let result = document(&out, "vin");
+        assert_eq!(result[0]["profile"], json!({"name": "a7", "fits": false}));
+        assert_eq!(result[0]["builtin_profiles"], json!([]));
+        assert_eq!(result[0]["model_years"], json!([1989]));
+        assert_eq!(
+            result[0]["check_digit"],
+            json!({"found": "X", "computed": "X", "status": "valid"})
+        );
     }
 
     #[test]
@@ -2465,10 +2534,10 @@ mod json {
         .to_string();
         let out = obdcracker(&["--tcp", &addr, "--json", "vin"]);
         assert_eq!(out.status.code(), Some(1), "{}", stderr(&out));
-        assert_eq!(
-            document(&out, "vin"),
-            json!([{"source": "7E8", "vin": "WAUZZZ4G1EN000000"}])
-        );
+        let result = document(&out, "vin");
+        assert_eq!(result.as_array().unwrap().len(), 1);
+        assert_eq!(result[0]["source"], "7E8");
+        assert_eq!(result[0]["vin"], "WAUZZZ4G1EN000000");
         assert!(
             stderr(&out).contains("7E9 reply is malformed"),
             "{}",
@@ -2841,9 +2910,361 @@ mod json {
     #[test]
     fn without_the_flag_the_text_is_unchanged() {
         let out = obdcracker(&["--sim", "a7", "vin"]);
-        assert_eq!(
-            String::from_utf8_lossy(&out.stdout),
-            "7E8 WAU2MBFC6EN093415\n"
+        assert_eq!(vin_headlines(&out.stdout), "7E8 WAU2MBFC6EN093415\n");
+        assert!(!String::from_utf8_lossy(&out.stdout).starts_with('{'));
+    }
+}
+
+// `vin` decodes the VIN, and a command that reads the car checks it against `--profile` first.
+mod vin_check {
+    use super::*;
+
+    const A7_TEXT: &str = "7E8 WAU2MBFC6EN093415\n\
+         \x20   manufacturer code: WAU\n\
+         \x20   descriptor section: 2MBFC\n\
+         \x20   check digit: 6 (correct; not required outside North America)\n\
+         \x20   model year: E = 1984 or 2014\n\
+         \x20   plant code: N\n\
+         \x20   serial: 093415\n\
+         \x20   matches profile: a7\n";
+
+    fn stderr(out: &Output) -> String {
+        String::from_utf8_lossy(&out.stderr).into_owned()
+    }
+
+    // A fake ELM327 whose engine and transmission (7E8 and 7E9) answer `09 02` with `vins`, one
+    // each, or stay silent for a `None`.
+    fn car_with_vins(vins: [Option<&'static [u8]>; 2]) -> SocketAddr {
+        wifi_adapter_answering(move |header, request| match (header, request) {
+            (0x7DF, [0x01, 0x00]) => (0x7E8..=0x7E9)
+                .map(|id| (id, vec![0x41, 0x00, 0x00, 0x00, 0x00, 0x00]))
+                .collect(),
+            (0x7E0..=0x7E1, [0x09, 0x02]) => vins[usize::try_from(header - 0x7E0).unwrap()]
+                .map(|vin| {
+                    let mut reply = vec![0x49, 0x02, 0x01];
+                    reply.extend(vin);
+                    vec![(header + 8, reply)]
+                })
+                .unwrap_or_default(),
+            _ => Vec::new(),
+        })
+    }
+
+    const TOYOTA: &[u8] = b"4T1BF1FK5EU123456";
+
+    // The payloads of every request in the audit log, in order.
+    fn sent(log: &std::path::Path) -> Vec<String> {
+        std::fs::read_to_string(log)
+            .unwrap()
+            .lines()
+            .filter(|line| line.contains(r#""dir":"tx""#))
+            .map(|line| {
+                let v: serde_json::Value = serde_json::from_str(line).unwrap();
+                v["payload"].as_str().unwrap().to_owned()
+            })
+            .collect()
+    }
+
+    fn with_car(
+        addr: SocketAddr,
+        log: &std::path::Path,
+        flags: &[&str],
+        command: &[&str],
+    ) -> Output {
+        let addr = addr.to_string();
+        let mut args = vec!["--tcp", &addr, "--audit-log", log.to_str().unwrap()];
+        args.extend(flags);
+        args.extend(command);
+        obdcracker(&args)
+    }
+
+    // Each command that reads the car, with a module the A7 profile lists.
+    fn reading_commands() -> Vec<Vec<&'static str>> {
+        vec![
+            vec!["fingerprint"],
+            vec!["scan"],
+            vec!["sweep", "--module", "engine", "--range", "0600-0601"],
+            vec!["read-dids", "--module", "engine", "--did", "F190"],
+            vec!["dtc", "--module", "engine", "--code", "0016A0"],
+        ]
+    }
+
+    #[test]
+    fn vin_prints_the_decoded_fields_and_the_profile_that_fits() {
+        let out = obdcracker(&["--sim", "a7", "vin"]);
+        assert!(out.status.success(), "{}", stderr(&out));
+        assert_eq!(String::from_utf8_lossy(&out.stdout), A7_TEXT);
+    }
+
+    #[test]
+    fn vin_shows_a_wrong_check_digit_and_a_vin_no_profile_fits() {
+        // A synthetic Audi VIN with a wrong check digit (1, not 9), and a North American one.
+        let (out, _) = vin_over_tcp(|_| VIN.to_vec());
+        assert!(out.status.success());
+        let text = String::from_utf8_lossy(&out.stdout);
+        assert!(
+            text.contains("    check digit: 1 (the rest of the VIN gives 9; not required outside North America)\n"),
+            "{text}"
         );
+        let addr = car_with_vins([Some(b"1M8GDM9AXKP042788"), None]).to_string();
+        let out = obdcracker(&["--tcp", &addr, "--profile", "a7", "vin"]);
+        assert!(out.status.success(), "{}", stderr(&out));
+        let text = String::from_utf8_lossy(&out.stdout);
+        assert_eq!(
+            text,
+            "7E8 1M8GDM9AXKP042788\n\
+             \x20   manufacturer code: 1M8\n\
+             \x20   descriptor section: GDM9A\n\
+             \x20   check digit: X (correct)\n\
+             \x20   model year: K = 1989\n\
+             \x20   plant code: P\n\
+             \x20   serial: 042788\n\
+             \x20   no builtin profile matches\n\
+             \x20   does not fit --profile a7\n"
+        );
+    }
+
+    #[test]
+    fn vin_with_a_profile_reads_the_vin_once() {
+        let log = temp_log("vin-profile-once");
+        let out = with_car(
+            car_with_vins([Some(TOYOTA), None]),
+            &log,
+            &["--profile", "a7"],
+            &["vin"],
+        );
+        assert!(out.status.success(), "{}", stderr(&out));
+        // The `vin` command is the reading: no check of its own before it. `01 00` names the two
+        // ECUs, and each is asked once.
+        assert_eq!(sent(&log), ["01 00", "09 02", "09 02"]);
+    }
+
+    #[test]
+    fn a_car_the_profile_fits_goes_on() {
+        let log = temp_log("vin-check-match");
+        let out = with_car(
+            car_with_vins([Some(A7_VIN), None]),
+            &log,
+            &["--profile", "a7"],
+            &["fingerprint"],
+        );
+        assert!(!stderr(&out).contains("refused"), "{}", stderr(&out));
+        let sent = sent(&log);
+        // The check first (`01 00`, then `09 02` to each of the two ECUs), then the fingerprint's
+        // own reads.
+        assert_eq!(sent[..4], ["01 00", "09 02", "09 02", "01 00"]);
+        assert!(sent.contains(&"09 04".to_owned()), "{sent:?}");
+        assert_eq!(sent.iter().filter(|p| *p == "09 02").count(), 2, "{sent:?}");
+    }
+
+    #[test]
+    fn every_command_that_reads_the_car_stops_on_another_cars_vin() {
+        for command in reading_commands() {
+            let log = temp_log("vin-check-mismatch");
+            let out = with_car(
+                car_with_vins([Some(TOYOTA), None]),
+                &log,
+                &["--profile", "a7"],
+                &command,
+            );
+            assert_eq!(out.status.code(), Some(1), "{command:?}: {}", stderr(&out));
+            let stderr = stderr(&out);
+            assert!(
+                stderr.contains("refused: the car's VIN is 4T1BF1FK5EU123456")
+                    && stderr.contains("a7 profile (2014 Audi A7 3.0 TDI (C7))")
+                    && stderr.contains("--ignore-vin-mismatch"),
+                "{command:?}: {stderr}"
+            );
+            assert!(out.stdout.is_empty(), "{command:?}");
+            // Only the VIN check reached the car.
+            assert_eq!(sent(&log), ["01 00", "09 02", "09 02"], "{command:?}");
+        }
+    }
+
+    #[test]
+    fn an_unknown_vin_stops_a_command_like_a_mismatch() {
+        // Nothing answers, or the only answer is a refusal or malformed.
+        let silent = car_with_vins([None, None]);
+        let refused = wifi_adapter_answering(|header, request| match (header, request) {
+            (0x7DF, [0x01, 0x00]) => vec![(0x7E8, vec![0x41, 0x00, 0, 0, 0, 0])],
+            (0x7E0, [0x09, 0x02]) => vec![(0x7E8, vec![0x7F, 0x09, 0x31])],
+            _ => Vec::new(),
+        });
+        let malformed = car_with_vins([Some(b"WAU2MBFC6EN09341!"), None]);
+        for (what, addr) in [
+            ("silent", silent),
+            ("refused", refused),
+            ("malformed", malformed),
+        ] {
+            let log = temp_log("vin-check-unknown");
+            let out = with_car(addr, &log, &["--profile", "a7"], &["fingerprint"]);
+            assert_eq!(out.status.code(), Some(1), "{what}: {}", stderr(&out));
+            assert!(
+                stderr(&out).contains("refused: no ECU gave the car's VIN"),
+                "{what}: {}",
+                stderr(&out)
+            );
+            assert!(!sent(&log).contains(&"09 04".to_owned()), "{what}");
+        }
+    }
+
+    #[test]
+    fn ecus_with_different_vins_stop_a_command_even_when_both_fit() {
+        let log = temp_log("vin-check-conflict");
+        let out = with_car(
+            car_with_vins([Some(A7_VIN), Some(b"WAU2MBFC6EN093416")]),
+            &log,
+            &["--profile", "a7"],
+            &["fingerprint"],
+        );
+        assert_eq!(out.status.code(), Some(1), "{}", stderr(&out));
+        assert!(
+            stderr(&out).contains(
+                "refused: ECUs gave different VINs (WAU2MBFC6EN093415, WAU2MBFC6EN093416)"
+            ),
+            "{}",
+            stderr(&out)
+        );
+        assert!(!sent(&log).contains(&"09 04".to_owned()));
+    }
+
+    #[test]
+    fn two_ecus_with_one_vin_go_on() {
+        let log = temp_log("vin-check-same");
+        let out = with_car(
+            car_with_vins([Some(A7_VIN), Some(A7_VIN)]),
+            &log,
+            &["--profile", "a7"],
+            &["fingerprint"],
+        );
+        assert!(!stderr(&out).contains("refused"), "{}", stderr(&out));
+        assert!(sent(&log).contains(&"09 04".to_owned()));
+    }
+
+    #[test]
+    fn ignoring_the_vin_check_turns_each_stop_into_a_warning() {
+        let silent = car_with_vins([None, None]);
+        let conflict = car_with_vins([Some(A7_VIN), Some(b"WAU2MBFC6EN093416")]);
+        let mismatch = car_with_vins([Some(TOYOTA), None]);
+        for (what, addr, says) in [
+            ("silent", silent, "no ECU gave the car's VIN"),
+            ("conflict", conflict, "ECUs gave different VINs"),
+            ("mismatch", mismatch, "the car's VIN is 4T1BF1FK5EU123456"),
+        ] {
+            let log = temp_log("vin-check-ignored");
+            let out = with_car(
+                addr,
+                &log,
+                &["--profile", "a7", "--ignore-vin-mismatch"],
+                &["fingerprint"],
+            );
+            let stderr = stderr(&out);
+            assert!(
+                stderr.contains(&format!("warning: {says}"))
+                    && stderr.contains("going on because of --ignore-vin-mismatch"),
+                "{what}: {stderr}"
+            );
+            assert!(!stderr.contains("refused"), "{what}: {stderr}");
+            assert!(sent(&log).contains(&"09 04".to_owned()), "{what}");
+        }
+    }
+
+    #[test]
+    fn the_flag_needs_a_profile() {
+        let out = obdcracker(&["--sim", "a7", "--ignore-vin-mismatch", "fingerprint"]);
+        assert_eq!(out.status.code(), Some(2));
+        assert!(stderr(&out).contains("--profile"), "{}", stderr(&out));
+    }
+
+    #[test]
+    fn without_a_profile_nothing_extra_is_sent() {
+        let log = temp_log("vin-check-none");
+        let out = with_car(
+            car_with_vins([Some(TOYOTA), None]),
+            &log,
+            &[],
+            &["fingerprint"],
+        );
+        assert!(!stderr(&out).contains("VIN"), "{}", stderr(&out));
+        assert!(!sent(&log).contains(&"09 02".to_owned()));
+        // The simulated car has the profile it is simulating, not a --profile to check.
+        let log = temp_log("vin-check-sim");
+        obdcracker(&[
+            "--sim",
+            "a7",
+            "--audit-log",
+            log.to_str().unwrap(),
+            "fingerprint",
+        ]);
+        assert!(!sent(&log).contains(&"09 02".to_owned()));
+    }
+
+    #[test]
+    fn the_simulated_a7_passes_its_own_profile_with_one_request() {
+        let log = temp_log("vin-check-sim-a7");
+        let out = obdcracker(&[
+            "--sim",
+            "a7",
+            "--profile",
+            "a7",
+            "--audit-log",
+            log.to_str().unwrap(),
+            "fingerprint",
+        ]);
+        assert!(out.status.success(), "{}", stderr(&out));
+        let sent = sent(&log);
+        assert_eq!(sent[0], "09 02");
+        assert_eq!(sent.iter().filter(|p| *p == "09 02").count(), 1, "{sent:?}");
+    }
+
+    #[test]
+    fn a_bad_argument_is_refused_before_the_vin_is_read() {
+        for command in [
+            vec!["dtc", "--module", "nobody", "--code", "0016A0"],
+            vec!["sweep", "--module", "nobody", "--range", "0600-0601"],
+            vec!["read-dids", "--module", "nobody", "--did", "F190"],
+            vec!["scan", "--patient-ids", "71D"],
+            vec!["scan", "--discover", "--patient-ids", "7E0"],
+            vec!["scan", "--discover", "--patient-ids", "71D,71D"],
+        ] {
+            let log = temp_log("vin-check-bad-args");
+            let out = with_car(
+                car_with_vins([Some(TOYOTA), None]),
+                &log,
+                &["--profile", "a7"],
+                &command,
+            );
+            assert_eq!(out.status.code(), Some(2), "{command:?}: {}", stderr(&out));
+            assert!(
+                !log.exists() || sent(&log).is_empty(),
+                "{command:?}: {:?}",
+                sent(&log)
+            );
+        }
+    }
+
+    #[test]
+    fn a_dry_run_plans_the_vin_request_and_never_stops() {
+        for command in reading_commands() {
+            let mut args = vec!["--dry-run", "--profile", "a7"];
+            args.extend(&command);
+            let out = obdcracker(&args);
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            assert!(
+                out.status.success(),
+                "{command:?}: {stdout}{}",
+                stderr(&out)
+            );
+            assert!(
+                stdout.starts_with(
+                    "7DF 02 09 02\ndry run: the car's VIN wasn't compared with the a7 profile\n"
+                ),
+                "{command:?}: {stdout}"
+            );
+            assert!(!stderr(&out).contains("refused"), "{command:?}");
+        }
+        // Without a profile there is nothing to plan.
+        let out = obdcracker(&["--dry-run", "fingerprint"]);
+        assert!(!String::from_utf8_lossy(&out.stdout).contains("09 02"));
     }
 }
