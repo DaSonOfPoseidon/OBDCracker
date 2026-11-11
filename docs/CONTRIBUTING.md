@@ -65,6 +65,8 @@ Label it `bug`, `documentation` or `enhancement`, and tag what it impacts:
   (another issue, a car session, hardware or a decision), or `status:queued` if it waits only for an earlier
   milestone to close. Milestones are worked in order, so an issue in a later milestone than the earliest open one
   is queued unless the maintainer has pulled it forward. See [Blocked issues](#blocked-issues).
+- **Its priority** (the maintainer sets it): `priority:high`, `priority:medium` or `priority:low`. Ready issues
+  are worked in that order, then oldest first.
 
 Only fix it in the same change if it blocks your task, and then reference it in the commit (`fixes #N`).
 

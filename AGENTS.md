@@ -48,3 +48,7 @@ or anything CI already checks (rustfmt, clippy, tests, cargo-deny).
 
 Classes of bug past reviews caught here are in [`docs/pitfalls.md`](docs/pitfalls.md); check every change
 against them.
+
+## PR loop
+
+- priority labels: `priority:high`, `priority:medium`, `priority:low`
