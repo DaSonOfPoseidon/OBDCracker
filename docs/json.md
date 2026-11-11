@@ -104,8 +104,32 @@ A reply error is `{"Negative": {"sid": "22", "nrc": "31"}}` (a refusal of servic
 A list, one entry for each ECU whose reply was a VIN. An ECU that refused or sent something malformed is on stderr.
 
 ```json
-[{"source": "7E8", "vin": "WAU2MBFC6EN093415"}]
+[{
+  "source": "7E8",
+  "vin": "WAU2MBFC6EN093415",
+  "wmi": "WAU",
+  "vds": "2MBFC",
+  "check_digit": {"found": "6", "computed": "6", "status": "not-required"},
+  "year_code": "E",
+  "model_years": [1984, 2014],
+  "plant": "N",
+  "serial": "093415",
+  "builtin_profiles": ["a7"]
+}]
 ```
+
+`source` and `vin` are the entry's reading; the rest is worked out from the VIN ([`vin`](usage.md#vin) says how), so a
+reader may recompute it, and [`diff`](usage.md#diff) ignores it. Documents from before these fields were added have only
+`source` and `vin`, and read the same: adding fields to an object doesn't change the schema version.
+
+| Field | Meaning |
+|---|---|
+| `wmi`, `vds`, `plant`, `serial` | VIN positions 1 to 3, 4 to 8, 11 and 12 to 17, as written. The meaning of `vds` and `plant` is the manufacturer's |
+| `check_digit` | `found` is position 9; `computed` is the digit the rest of the VIN makes (`0` to `9` or `X`); `status` is `valid` or `invalid` where the manufacturer code is North American (first character 1 to 5), which requires the digit, and `not-required` elsewhere, whether it matches or not |
+| `year_code` | Position 10, as written |
+| `model_years` | The years the code can mean: one in North America (position 7 decides between 1980 to 2009 and 2010 to 2039), both candidates elsewhere, and none for `U`, `Z` and `0`. Earliest first |
+| `builtin_profiles` | The names of the builtin profiles whose `[vin]` table fits the VIN. Empty if none does |
+| `profile` | Only with `--profile`: `{"name": "a7", "fits": true}`. `fits` is `false` when the profile's `[vin]` table doesn't fit the VIN, and `null` when the profile has no such table |
 
 ### `fingerprint`
 

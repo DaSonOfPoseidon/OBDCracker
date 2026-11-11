@@ -97,6 +97,42 @@ crates can send something the policy refuses. Higher tiers will be unlocked by c
 and flashing stays banned until its design doc exists. If you need raw CAN for something else, use your own driver
 alongside this one. See the [safety model](safety.md).
 
+## VINs
+
+`core::vin::decode` splits a VIN into its fields (`wmi`, `vds`, `check_char`, `year_code`, `plant`, `serial`), lists the
+model years its position 10 can mean (`model_years`: one in North America, both candidates elsewhere, none for a code
+that isn't a year) and computes the check digit (`check_digit`, with a status that is `NotRequired` outside North
+America). It takes the VIN a decoder returned, or any text, and refuses what `obd::check_vin` refuses. A profile's `[vin]`
+table says which cars it is for (`Profile::matches_vin`, and `profile::builtins_matching` for the builtin ones), and
+`transport::fingerprint::check_vin` reads the car's VIN and compares it, as the CLI does before a session
+([usage](usage.md#checking-the-car-against---profile)). Its `VinCheck` is `Match`, `Mismatch`, `NoVin`, `Conflicting` or
+`ProfileHasNoVin`, and `VinCheck::passes` is true only for the first and the last: an unknown VIN doesn't pass.
+
+```rust
+use std::time::Duration;
+
+use obdcracker::core::vin;
+use obdcracker::profile::Profile;
+use obdcracker::safety::Policy;
+use obdcracker::transport::fingerprint::{VinCheck, check_vin};
+use obdcracker::transport::{Mock, Response, Timing};
+
+let vin = vin::decode("WAU2MBFC6EN093415").unwrap();
+assert_eq!(vin.wmi(), "WAU");
+assert_eq!(vin.model_years().as_slice(), [1984, 2014]);
+
+let a7 = Profile::builtin("a7").unwrap();
+assert!(a7.matches_vin(&vin));
+
+// A car whose engine answers `09 02` with that VIN.
+let mut car = Mock::default();
+car.queue(Response::new(0x7E8, b"\x49\x02\x01WAU2MBFC6EN093415".to_vec()));
+let timing = Timing { p2: Duration::from_millis(5), ..Timing::default() };
+let checked = check_vin(&mut car, &Policy::read_only(), timing, &a7).unwrap();
+assert_eq!(checked, VinCheck::Match { vin: "WAU2MBFC6EN093415".to_owned() });
+assert!(checked.passes());
+```
+
 ## Extended-session reads
 
 Reads that need the extended diagnostic session go through `transport::ExtendedSession`; `scan::scan_with` uses it

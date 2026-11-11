@@ -35,6 +35,9 @@ Each entry names the class, what to check, and where it bit us.
   every raw value in a range, then filter.
 - **Validate against the real decoder.** Data the tool will decode must pass the decoder that reads it: VIN characters,
   mode 01 PID widths, text DIDs. Round-trip through `obdcracker-core` rather than re-implementing the rule.
+- **A fixed-size array field takes extra elements.** serde reads `[2012, 2014, 2018]` into a `[u16; 2]` without
+  complaint, so a profile's `years = [first, last]` accepted a third number. Read it as a `Vec` and convert
+  (`VinRule::years`), and test a list one element too long and one too short (#102).
 - **Respect the wire format's limits.** A count stored in a `u8` (mode 03, mode 09) or a `u16` (UDS DTC count) caps
   the list. Reject the input; don't saturate with `unwrap_or(MAX)`, which makes two replies contradict each other.
 - **A page limit fails only when a page past it has entries.** A list that fills its last allowed page may end exactly
