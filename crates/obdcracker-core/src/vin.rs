@@ -69,16 +69,17 @@ impl<'a> Vin<'a> {
     }
 
     /// Whether the manufacturer code is North American (first character 1 to 5), where the check
-    /// digit and the position 7 year rule are required.
+    /// digit is required.
     #[must_use]
     pub fn is_north_american(&self) -> bool {
         matches!(self.0.as_bytes()[0], b'1'..=b'5')
     }
 
-    /// The model years position 10 can mean. Its codes repeat every 30 years. In North America a
-    /// digit at position 7 means 1980 to 2009 and a letter 2010 to 2039 (49 CFR 565.15); for every
-    /// other manufacturer code both years are candidates, because nothing in the VIN says which.
-    /// U, Z and 0 are not year codes, so they give none.
+    /// The model years position 10 can mean: its codes repeat every 30 years, so there are two
+    /// candidates, such as 1984 and 2014 for `E`. Position 7 narrows them only for North American
+    /// passenger cars and light trucks (49 CFR 565.15), and a VIN doesn't say which class the
+    /// vehicle is, so both candidates are given for every VIN. U, Z and 0 are not year codes, so
+    /// they give none.
     #[must_use]
     pub fn model_years(&self) -> ModelYears {
         let code = self.0.as_bytes()[9];
@@ -86,21 +87,9 @@ impl<'a> Vin<'a> {
             return ModelYears::default();
         };
         let early = FIRST_YEAR + u16::try_from(index).unwrap_or(0);
-        let late = early + CYCLE;
-        if !self.is_north_american() {
-            return ModelYears {
-                years: [early, late],
-                len: 2,
-            };
-        }
-        let year = if self.0.as_bytes()[6].is_ascii_digit() {
-            early
-        } else {
-            late
-        };
         ModelYears {
-            years: [year, 0],
-            len: 1,
+            years: [early, early + CYCLE],
+            len: 2,
         }
     }
 
@@ -146,7 +135,7 @@ fn value(b: u8) -> u32 {
     }
 }
 
-/// The model years a VIN's position 10 can mean: none, one or two ([`Vin::model_years`]).
+/// The model years a VIN's position 10 can mean: none, or two 30 years apart ([`Vin::model_years`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct ModelYears {
     years: [u16; 2],

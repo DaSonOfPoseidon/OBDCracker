@@ -54,9 +54,8 @@ impl<'a> Decoded<'a> {
         let years = vin.model_years();
         let year = match years.as_slice() {
             [] => format!("{} isn't a model year code", vin.year_code()),
-            [one] => format!("{} = {one}", vin.year_code()),
             [first, second] => format!("{} = {first} or {second}", vin.year_code()),
-            _ => unreachable!("a VIN has at most two candidate years"),
+            _ => unreachable!("a VIN has no candidate years or two"),
         };
         let mut lines = vec![
             format!("    manufacturer code: {}", vin.wmi()),

@@ -41,7 +41,7 @@ builtin profiles that fit. A profile with no `[vin]` table fits no VIN, and the 
 |---|---|
 | `wmi` | The manufacturer codes (VIN positions 1 to 3) the car may have: at least one, each 3 VIN characters (digits and upper case letters except I, O and Q), none twice. Required. |
 | `vds` | A pattern for the descriptor section (positions 4 to 8): 5 characters, each a VIN character or `?` for any one. Optional. |
-| `years` | `[first, last]`: the model years, inclusive, `first` at most `last`, both within 1980 to 2039. A VIN fits if any year its position 10 can mean is in the range, so a VIN from outside North America (two candidate years) fits if either is. A year code that isn't one (`U`, `Z`, `0`) fits no range. Optional. |
+| `years` | `[first, last]`: the model years, inclusive, `first` at most `last`, both within 1980 to 2039. A VIN fits if any year its position 10 can mean is in the range, so a VIN fits if either of its two candidate years is. A year code that isn't one (`U`, `Z`, `0`) fits no range. Optional. |
 
 All the fields given must fit. Validation uses the same VIN character rule as the decoder (`obd::check_vin`), and
 `years` takes exactly two numbers. The table only says which car the profile is for, so like the rest of the profile it

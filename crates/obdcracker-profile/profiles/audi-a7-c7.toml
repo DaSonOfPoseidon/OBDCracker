@@ -27,7 +27,7 @@ bitrate = 500000
 
 # Audi's German manufacturer code and the C7 A7's model years in the US (2012 to 2018). The
 # descriptor section (positions 4 to 8) isn't pinned: only the owner's one car's VIN is known here,
-# and what its positions mean is Audi's. Outside North America position 10 names two years (E is
+# and what its positions mean is Audi's. Position 10 names two years (E is
 # 1984 or 2014), and the range matches either.
 [vin]
 wmi = ["WAU"]

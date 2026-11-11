@@ -127,7 +127,7 @@ reader may recompute it, and [`diff`](usage.md#diff) ignores it. Documents from 
 | `wmi`, `vds`, `plant`, `serial` | VIN positions 1 to 3, 4 to 8, 11 and 12 to 17, as written. The meaning of `vds` and `plant` is the manufacturer's |
 | `check_digit` | `found` is position 9; `computed` is the digit the rest of the VIN makes (`0` to `9` or `X`); `status` is `valid` or `invalid` where the manufacturer code is North American (first character 1 to 5), which requires the digit, and `not-required` elsewhere, whether it matches or not |
 | `year_code` | Position 10, as written |
-| `model_years` | The years the code can mean: one in North America (position 7 decides between 1980 to 2009 and 2010 to 2039), both candidates elsewhere, and none for `U`, `Z` and `0`. Earliest first |
+| `model_years` | The years the code can mean: two, 30 years apart (position 7 narrows them only for some North American vehicle classes, which a VIN does not name), and none for `U`, `Z` and `0`. Earliest first |
 | `builtin_profiles` | The names of the builtin profiles whose `[vin]` table fits the VIN. Empty if none does |
 | `profile` | Only with `--profile`: `{"name": "a7", "fits": true}`. `fits` is `false` when the profile's `[vin]` table doesn't fit the VIN, and `null` when the profile has no such table |
 

@@ -1222,7 +1222,7 @@ fn matches_on_the_vehicle_descriptor_with_wildcards() {
 
 #[test]
 fn matches_a_year_range_when_any_candidate_is_in_it() {
-    // Position 10 'E' is 1984 or 2014 outside North America.
+    // Position 10 'E' is 1984 or 2014.
     let range =
         |first: u16, last: u16| vin_profile(&format!("wmi = [\"WAU\"]\nyears = [{first}, {last}]"));
     assert!(matches(&range(2012, 2018), A7_VIN));
@@ -1247,14 +1247,16 @@ fn a_year_range_never_matches_a_code_that_is_not_a_year() {
 }
 
 #[test]
-fn a_north_american_vin_matches_only_its_one_year() {
-    // Position 7 is a digit in the first VIN (1989, not 2019) and a letter in the second.
-    let recent = vin_profile("wmi = [\"1M8\"]\nyears = [2010, 2030]");
-    assert!(!matches(&recent, "1M8GDM9AXKP042788"));
-    assert!(matches(&recent, "1M8GDMAAXKP042788"));
-    let old = vin_profile("wmi = [\"1M8\"]\nyears = [1980, 2009]");
-    assert!(matches(&old, "1M8GDM9AXKP042788"));
-    assert!(!matches(&old, "1M8GDMAAXKP042788"));
+fn a_north_american_vin_matches_either_candidate_year() {
+    // Position 10 'K' is 1989 or 2019; position 7 doesn't pick one, whatever it is.
+    for text in ["1M8GDM9AXKP042788", "1M8GDMAAXKP042788"] {
+        let recent = vin_profile("wmi = [\"1M8\"]\nyears = [2010, 2030]");
+        assert!(matches(&recent, text), "{text}");
+        let old = vin_profile("wmi = [\"1M8\"]\nyears = [1980, 2009]");
+        assert!(matches(&old, text), "{text}");
+        let between = vin_profile("wmi = [\"1M8\"]\nyears = [1990, 2018]");
+        assert!(!matches(&between, text), "{text}");
+    }
 }
 
 #[test]

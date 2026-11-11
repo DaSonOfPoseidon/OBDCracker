@@ -7,7 +7,7 @@ use obdcracker_core::vin::{CheckStatus, Vin, decode};
 const A7: &str = "WAU2MBFC6EN093415";
 // The 49 CFR 565 example: North America, position 7 a digit, check digit X (10).
 const NA_DIGIT: &str = "1M8GDM9AXKP042788";
-// North America, position 7 a letter, so 2010 to 2039.
+// North America, position 7 a letter.
 const NA_LETTER: &str = "1FTFW1ET9DFC10312";
 
 fn vin(text: &str) -> Vin<'_> {
@@ -58,14 +58,12 @@ fn refuses_what_is_not_a_vin() {
 }
 
 #[test]
-fn one_year_code_names_two_years_outside_north_america() {
+fn one_year_code_names_two_years() {
+    // Position 7 narrows the year only for some North American vehicle classes, which a VIN
+    // doesn't name, so every VIN gives both candidates.
     assert_eq!(years(A7), [1984, 2014]);
-}
-
-#[test]
-fn a_north_american_vin_has_one_year_by_position_7() {
-    assert_eq!(years(NA_DIGIT), [1989]);
-    assert_eq!(years(NA_LETTER), [2013]);
+    assert_eq!(years(NA_DIGIT), [1989, 2019]);
+    assert_eq!(years(NA_LETTER), [1983, 2013]);
 }
 
 #[test]
@@ -74,12 +72,14 @@ fn year_codes_run_a_to_y_then_1_to_9() {
     let codes = "ABCDEFGHJKLMNPRSTVWXY123456789";
     for (i, code) in codes.bytes().enumerate() {
         let i = u16::try_from(i).unwrap();
-        let outside = with(A7, 10, code);
-        assert_eq!(years(&outside), [1980 + i, 2010 + i], "{}", code as char);
-        let old = with(NA_DIGIT, 10, code);
-        assert_eq!(years(&old), [1980 + i], "{}", code as char);
-        let new = with(NA_LETTER, 10, code);
-        assert_eq!(years(&new), [2010 + i], "{}", code as char);
+        for text in [A7, NA_DIGIT, NA_LETTER] {
+            assert_eq!(
+                years(&with(text, 10, code)),
+                [1980 + i, 2010 + i],
+                "{}",
+                code as char
+            );
+        }
     }
 }
 
@@ -93,23 +93,21 @@ fn u_z_and_0_are_not_years() {
 }
 
 #[test]
-fn position_7_decides_for_north_america_only() {
-    // The same year code with a letter at position 7 moves the NA year, and not the other WMIs'.
-    assert_eq!(years(&with(NA_DIGIT, 7, b'A')), [2019]);
-    assert_eq!(years(&with(NA_LETTER, 7, b'0')), [1983]);
-    assert_eq!(years(&with(A7, 7, b'4')), [1984, 2014]);
-    assert_eq!(years(&with(A7, 7, b'F')), [1984, 2014]);
-}
-
-#[test]
-fn north_america_is_wmi_first_character_1_to_5() {
-    for first in *b"12345" {
-        assert_eq!(years(&with(NA_DIGIT, 1, first)).len(), 1);
+fn position_7_and_the_region_do_not_change_the_years() {
+    for position_7 in *b"04AF" {
+        for text in [A7, NA_DIGIT, NA_LETTER] {
+            assert_eq!(
+                years(&with(text, 7, position_7)),
+                years(text),
+                "{}",
+                position_7 as char
+            );
+        }
     }
-    for first in *b"06789ABJSTWZ" {
+    for first in *b"0123456789ABJSTWZ" {
         assert_eq!(
-            years(&with(NA_DIGIT, 1, first)).len(),
-            2,
+            years(&with(NA_DIGIT, 1, first)),
+            [1989, 2019],
             "{}",
             first as char
         );

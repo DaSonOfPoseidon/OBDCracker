@@ -100,7 +100,7 @@ alongside this one. See the [safety model](safety.md).
 ## VINs
 
 `core::vin::decode` splits a VIN into its fields (`wmi`, `vds`, `check_char`, `year_code`, `plant`, `serial`), lists the
-model years its position 10 can mean (`model_years`: one in North America, both candidates elsewhere, none for a code
+model years its position 10 can mean (`model_years`: two candidates 30 years apart, none for a code
 that isn't a year) and computes the check digit (`check_digit`, with a status that is `NotRequired` outside North
 America). It takes the VIN a decoder returned, or any text, and refuses what `obd::check_vin` refuses. A profile's `[vin]`
 table says which cars it is for (`Profile::matches_vin`, and `profile::builtins_matching` for the builtin ones), and

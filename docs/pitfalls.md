@@ -111,6 +111,11 @@ Each entry names the class, what to check, and where it bit us.
   `0664` shared the same covered range, so the "compared less than they read" note compared the result with itself and
   stayed silent. Compare the covered range with each request, not with the other result (#100).
 
+- **A standard's rule for one class of vehicle isn't a rule for the region.** The VIN decoder narrowed a North
+  American VIN's year by position 7, but 49 CFR 565.15 limits that to passenger cars and light trucks, and a VIN
+  doesn't say which class it is, so a motorcycle's year was named with false certainty. When a rule applies only
+  to a class the input can't identify, return every candidate and let the caller match on any (#102, Codex).
+
 - **State computed on read must also be stored.** The sim's `session()` reported a lapsed session as default
   without storing it, so raising S3 afterwards brought the expired session back (#68, Codex). Write the derived
   state back before changing anything it depends on.

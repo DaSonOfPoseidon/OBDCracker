@@ -144,9 +144,9 @@ Prints each ECU's VIN (OBD-II mode 09 PID 02) as a `<reply ID> <VIN>` line, with
 The fields are ISO 3779's: positions 1 to 3, 4 to 8, 9, 10, 11 and 12 to 17. The descriptor section and the plant code
 are shown as written, because what they mean is the manufacturer's.
 
-- **Model year.** Position 10's code repeats every 30 years. In North America (a manufacturer code starting 1 to 5) a
-  digit at position 7 means 1980 to 2009 and a letter 2010 to 2039, so there is one year. Elsewhere nothing in the VIN says
-  which, so both years are shown. `U`, `Z` and `0` aren't year codes.
+- **Model year.** Position 10's code repeats every 30 years, so two years are shown. Position 7 narrows them only for
+  some North American vehicles (passenger cars and light trucks, 49 CFR 565.15), and a VIN doesn't say which class it
+  is, so none is narrowed to one. A profile's `years` range fits if either is in it. `U`, `Z` and `0` aren't year codes.
 - **Check digit.** The digit the other 16 characters make (weights and letter values from 49 CFR 565.15, 10 written as
   `X`) is shown beside the one written. North America requires it, so a wrong one there is called wrong; elsewhere a
   mismatch is only noted, since those VINs needn't have a correct one.

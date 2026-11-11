@@ -2515,7 +2515,7 @@ mod json {
         let result = document(&out, "vin");
         assert_eq!(result[0]["profile"], json!({"name": "a7", "fits": false}));
         assert_eq!(result[0]["builtin_profiles"], json!([]));
-        assert_eq!(result[0]["model_years"], json!([1989]));
+        assert_eq!(result[0]["model_years"], json!([1989, 2019]));
         assert_eq!(
             result[0]["check_digit"],
             json!({"found": "X", "computed": "X", "status": "valid"})
@@ -3016,7 +3016,7 @@ mod vin_check {
              \x20   manufacturer code: 1M8\n\
              \x20   descriptor section: GDM9A\n\
              \x20   check digit: X (correct)\n\
-             \x20   model year: K = 1989\n\
+             \x20   model year: K = 1989 or 2019\n\
              \x20   plant code: P\n\
              \x20   serial: 042788\n\
              \x20   no builtin profile matches\n\
