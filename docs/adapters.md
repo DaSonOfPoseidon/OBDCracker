@@ -16,6 +16,21 @@ adapter's command set. The ELM driver takes any two-way byte stream, so serial, 
 Leaving a wireless adapter plugged in drains the battery and lets anyone in range connect, so the CLI warns about it, and
 the audit log records which link a session used.
 
+## Supply voltage
+
+Which backends can report the voltage on the OBD port, for the [battery guard](safety.md#supply-voltage)
+(`Transport::supply_voltage`):
+
+| Backend | Reports it? |
+|---|---|
+| `elm` (ELM327 and STN) | yes, with `ATRV`. A clone may answer `?`, which is unknown. Not while a VW TP2.0 channel is open or the adapter is monitoring: there it is unknown and nothing is written |
+| `sim` | yes: 12.6 V, or what `--sim-voltage` / `--sim-voltage-drop` (or `SimBus::set_supply_voltage`) say |
+| `gsusb`, `socketcan` | no: always unknown |
+| `dry-run`, `mock` | no: always unknown |
+
+An adapter that reports nothing never passes a [precondition](safety.md#supply-voltage), and a long command on it is
+neither refused nor stopped: the CLI says the battery isn't checked.
+
 ## The ELM driver
 
 The ELM driver sends single-frame requests (up to 7 bytes: the OBD-II reads, and UDS 0x22 with up to 3 DIDs), and on

@@ -13,11 +13,12 @@ use obdcracker_core::obd;
 use obdcracker_core::response::{self, Error as ReplyError, Nrc};
 use obdcracker_core::uds::{self, DiagnosticSession, UdsDtc};
 use obdcracker_profile::{Decode, DidSession, Profile, Protocol};
-use obdcracker_safety::{ModuleIds, Policy, SupplyVoltage};
+use obdcracker_safety::{ModuleIds, Policy, SupplyVoltage, VoltageCheck, VoltageThresholds};
 use obdcracker_sim::SimBus;
-use obdcracker_transport::discover;
+use obdcracker_transport::discover::{self, DiscoverOptions};
 use obdcracker_transport::dtc::{self, RecordData};
 use obdcracker_transport::elm::Elm;
+use obdcracker_transport::elm::codec::parse_voltage;
 use obdcracker_transport::fingerprint::{self, DidValue, Fingerprint, ReadError, UdsModule};
 use obdcracker_transport::gateway::{self, Compared, GatewayTables, ListedAs, Tried};
 use obdcracker_transport::gsusb::{self, BitrateCheck, BitrateSource, ConnectError, GsUsb};
@@ -28,6 +29,7 @@ use obdcracker_transport::scan::{
 };
 use obdcracker_transport::sweep::{self, SweepOptions};
 use obdcracker_transport::tp20::{self, Answer, ChannelSession, Disconnect};
+use obdcracker_transport::voltage::VoltageWatch;
 use obdcracker_transport::{Audited, DryRun, S3, Timing, Transport, hex, log_events, log_failure};
 
 const DEFAULT_BAUD: u32 = 115_200;
@@ -108,6 +110,24 @@ struct Cli {
     #[arg(long, value_name = "PROFILE",
           value_parser = PossibleValuesParser::new(Profile::BUILTIN))]
     profile: Option<String>,
+
+    /// With --sim: the simulated car's battery voltage, such as 11.5 [default: 12.6]. To try the
+    /// low-voltage guard
+    #[arg(long, value_name = "VOLTS", requires = "sim", value_parser = parse_volts,
+          conflicts_with_all = ["serial", "tcp", "dry_run", "gsusb", "socketcan"])]
+    sim_voltage: Option<u32>,
+
+    /// With --sim: the battery voltage drops to VOLTS once REQUESTS requests have been sent, as
+    /// `60:11.5`. To try the guard that stops a long run
+    #[arg(long, value_name = "REQUESTS:VOLTS", requires = "sim", value_parser = parse_volt_drop,
+          conflicts_with_all = ["serial", "tcp", "dry_run", "gsusb", "socketcan"])]
+    sim_voltage_drop: Option<(usize, u32)>,
+
+    /// Go on with a long command (a sweep of over 256 DIDs, `scan --discover --wide`) although the
+    /// adapter reports a battery voltage below 11.8 V, and don't stop it if the voltage drops
+    /// further. The voltage is still read, logged and warned about
+    #[arg(long)]
+    force_low_voltage: bool,
 
     /// Append every request and reply to this JSON Lines file
     #[arg(long, default_value = "obdcracker.audit.jsonl")]
@@ -289,6 +309,9 @@ fn flag_update_ignores(cli: &Cli, audit_log_given: bool) -> Option<&'static str>
         (cli.elm_segmenting.is_some(), "--elm-segmenting"),
         (cli.listen_only, "--listen-only"),
         (cli.bitrate.is_some(), "--bitrate"),
+        (cli.sim_voltage.is_some(), "--sim-voltage"),
+        (cli.sim_voltage_drop.is_some(), "--sim-voltage-drop"),
+        (cli.force_low_voltage, "--force-low-voltage"),
         (audit_log_given, "--audit-log"),
     ]
     .into_iter()
@@ -383,7 +406,15 @@ fn main() -> ExitCode {
         ExitCode::from(2)
     } else if let Some(profile) = &cli.sim {
         match SimBus::builtin(profile) {
-            Ok(car) => run(&cli, car, "sim", Timing::default(), false),
+            Ok(mut car) => {
+                if let Some(millivolts) = cli.sim_voltage {
+                    car.set_supply_voltage(SupplyVoltage::Known { millivolts });
+                }
+                if let Some((requests, millivolts)) = cli.sim_voltage_drop {
+                    car.drop_supply_voltage_after(requests, SupplyVoltage::Known { millivolts });
+                }
+                run(&cli, car, "sim", Timing::default(), false)
+            }
             Err(e) => {
                 eprintln!("can't build the simulated car: {e}");
                 ExitCode::FAILURE
@@ -803,6 +834,12 @@ fn run<T: Transport>(cli: &Cli, transport: T, link: &str, timing: Timing, elm: b
             return ExitCode::FAILURE;
         }
     };
+    // A dry run has no car to measure.
+    if !cli.dry_run
+        && let Err(code) = check_supply(cli, &mut transport)
+    {
+        return code;
+    }
     if let Command::Fingerprint = cli.command {
         return run_fingerprint(cli, &mut transport, timing);
     }
@@ -833,6 +870,7 @@ fn run<T: Transport>(cli: &Cli, transport: T, link: &str, timing: Timing, elm: b
         let mut options = SweepOptions::default();
         options.extended = extended.then(S3::default);
         options.patient = patient.then_some(discover::PATIENT_WAIT);
+        options.voltage_watch = voltage_watch(cli);
         return run_sweep(cli, &mut transport, timing, module, *range, &options);
     }
     if let Command::Dtc {
@@ -858,6 +896,88 @@ fn run<T: Transport>(cli: &Cli, transport: T, link: &str, timing: Timing, elm: b
         | Command::ReadDids { .. }
         | Command::Update { .. } => unreachable!(),
     }
+}
+
+// A sweep of more DIDs than this, or a wide discovery, runs long enough to flatten a battery.
+const LONG_SWEEP_DIDS: u32 = 256;
+
+// What the command is called if it is long, for the refusal that names it.
+fn long_command(cli: &Cli) -> Option<String> {
+    match &cli.command {
+        Command::Sweep {
+            range: (first, last),
+            ..
+        } => {
+            let count = u32::from(*last) - u32::from(*first) + 1;
+            (count > LONG_SWEEP_DIDS).then(|| format!("a sweep of {count} DIDs"))
+        }
+        Command::Scan {
+            discover: true,
+            wide: true,
+            ..
+        } => Some("scan --discover --wide".to_owned()),
+        _ => None,
+    }
+}
+
+// The watch that stops a long command when the voltage drops, unless the user forced it. A short
+// one is neither refused at the start nor stopped partway, so a warning is all it gets.
+fn voltage_watch(cli: &Cli) -> Option<VoltageWatch> {
+    (!cli.force_low_voltage && !cli.dry_run && long_command(cli).is_some())
+        .then(VoltageWatch::default)
+}
+
+// Reads the battery voltage through the audited transport, so it is logged, and says what it
+// means for the command: a note when the adapter can't tell, a warning when it is low, and for a
+// long command a refusal when it is too low, unless forced.
+fn check_supply<T: Transport>(cli: &Cli, transport: &mut T) -> Result<(), ExitCode> {
+    let thresholds = VoltageThresholds::DEFAULT;
+    let supply = match transport.supply_voltage() {
+        Ok(supply) => supply,
+        Err(e) => {
+            eprintln!("note: couldn't read the supply voltage ({e}), so the battery isn't checked");
+            return Ok(());
+        }
+    };
+    let long = long_command(cli);
+    match thresholds.check(supply) {
+        VoltageCheck::Ok => {}
+        VoltageCheck::Unknown => eprintln!(
+            "note: this adapter doesn't report its supply voltage, so the battery isn't checked"
+        ),
+        VoltageCheck::Low => eprintln!(
+            "warning: the supply voltage is {supply}, below {}: with the engine off, a long \
+             session can flatten the battery",
+            volts(thresholds.warn_mv)
+        ),
+        VoltageCheck::TooLow => match long {
+            Some(what) if !cli.force_low_voltage => {
+                eprintln!(
+                    "refused: the supply voltage is {supply}, below {}, and {what} runs long \
+                     enough to flatten the battery. Charge it or run the engine, or give \
+                     --force-low-voltage to go on anyway (it won't stop if the voltage drops \
+                     further)",
+                    volts(thresholds.refuse_mv)
+                );
+                return Err(ExitCode::FAILURE);
+            }
+            Some(_) => eprintln!(
+                "warning: the supply voltage is {supply}, below {}; going on because of \
+                 --force-low-voltage",
+                volts(thresholds.refuse_mv)
+            ),
+            None => eprintln!(
+                "warning: the supply voltage is {supply}, below {}; this command is short, so \
+                 it goes on, but a long one would be refused",
+                volts(thresholds.refuse_mv)
+            ),
+        },
+    }
+    Ok(())
+}
+
+fn volts(millivolts: u32) -> SupplyVoltage {
+    SupplyVoltage::Known { millivolts }
 }
 
 // Each ECU's reply is decoded on its own, so one bad reply doesn't hide the others. An ECU with no
@@ -1062,6 +1182,23 @@ fn parse_record(text: &str) -> Result<u8, String> {
         }
         record => Ok(record),
     }
+}
+
+// Millivolts, from a voltage in volts such as 11.5.
+fn parse_volts(text: &str) -> Result<u32, String> {
+    parse_voltage(text)
+        .ok_or_else(|| format!("'{text}' isn't a voltage in volts, such as 11.5 (0 to 99.999)"))
+}
+
+// `REQUESTS:VOLTS`, such as `60:11.5`.
+fn parse_volt_drop(text: &str) -> Result<(usize, u32), String> {
+    let (requests, volts) = text
+        .split_once(':')
+        .ok_or_else(|| format!("'{text}' isn't REQUESTS:VOLTS, such as 60:11.5"))?;
+    let requests = requests
+        .parse()
+        .map_err(|_| format!("'{requests}' isn't a number of requests"))?;
+    Ok((requests, parse_volts(volts)?))
 }
 
 fn parse_bitrate(text: &str) -> Result<u32, String> {
@@ -1429,9 +1566,16 @@ fn print_sweep(module: &UdsModule, found: &sweep::Sweep, last: u16) -> ExitCode 
                     stop.why,
                     sweep::Why::Module(ReadError::NoReply | ReadError::StillPending)
                         | sweep::Why::Unmatched(_)
+                        | sweep::Why::LowVoltage(_)
                         | sweep::Why::Adapter(_)
                 )
             {
+                if let sweep::Why::LowVoltage(_) = stop.why {
+                    eprintln!(
+                        "stopped to protect the battery: charge it or run the engine before going \
+                         on (--force-low-voltage skips this check)"
+                    );
+                }
                 // An argument that isn't UTF-8 can't be printed as it was given.
                 let ran: Option<Vec<String>> = std::env::args_os()
                     .map(|arg| arg.into_string().ok())
@@ -2143,6 +2287,11 @@ fn discover_modules<T: Transport>(
         )));
     }
     let mut patient = patient_candidates(name, &candidates, patient_ids).map_err(usage)?;
+    let pass = |name, patient| Pass {
+        name,
+        patient,
+        watch: voltage_watch(cli),
+    };
     let policy = profile
         .narrow_for_discovery(Policy::read_only())
         .map_err(|e| usage(format!("profile {name}: {e}")))?;
@@ -2152,8 +2301,7 @@ fn discover_modules<T: Transport>(
         &candidates,
         timing,
         &profile,
-        "discovery",
-        None,
+        &pass("discovery", None),
     )?;
     let known: Vec<ModuleIds> = found.iter().map(module_ids).collect();
     patient.retain(|candidate| !known.contains(candidate));
@@ -2164,8 +2312,7 @@ fn discover_modules<T: Transport>(
             &patient,
             timing,
             &profile,
-            "patient recheck",
-            Some(discover::PATIENT_WAIT),
+            &pass("patient recheck", Some(discover::PATIENT_WAIT)),
         )?;
         found.extend(again);
     }
@@ -2184,8 +2331,7 @@ fn discover_modules<T: Transport>(
                 &recheck,
                 timing,
                 &profile,
-                "recheck",
-                Some(discover::PATIENT_WAIT),
+                &pass("recheck", Some(discover::PATIENT_WAIT)),
             )?;
             found.extend(again);
         }
@@ -2213,8 +2359,7 @@ fn discover_modules<T: Transport>(
         &wide_candidates,
         timing,
         &profile,
-        "wide discovery",
-        Some(discover::PATIENT_WAIT),
+        &pass("wide discovery", Some(discover::PATIENT_WAIT)),
     )?;
     known.extend(more.iter().map(module_ids));
     found.extend(more);
@@ -2239,6 +2384,11 @@ fn discover_29_bit_modules<T: Transport>(
     };
     let profile = Profile::builtin(name).map_err(|e| usage(format!("profile {name}: {e}")))?;
     let candidates = profile.candidates_29bit();
+    let pass = |name, patient| Pass {
+        name,
+        patient,
+        watch: voltage_watch(cli),
+    };
     if candidates.is_empty() {
         return Err(usage(format!(
             "--discover-29bit needs a profile with a 29-bit discovery range, and {name} has none"
@@ -2258,8 +2408,7 @@ fn discover_29_bit_modules<T: Transport>(
         &candidates,
         timing,
         &profile,
-        "29-bit discovery",
-        None,
+        &pass("29-bit discovery", None),
     )?;
     let mut ids: Vec<ModuleIds> = known
         .iter()
@@ -2300,41 +2449,47 @@ fn module_ids(found: &discover::Found) -> ModuleIds {
     }
 }
 
-// One discovery pass over `candidates`, printing each module that answers. A `patient` pass
-// asks the adapter to wait up to that long for each reply, and says how long it really waited.
+// How a discovery pass asks. A `patient` pass asks the adapter to wait up to that long for each
+// reply, and says how long it really waited. A `watch` stops it when the voltage drops.
+struct Pass<'a> {
+    name: &'a str,
+    patient: Option<Duration>,
+    watch: Option<VoltageWatch>,
+}
+
+// One discovery pass over `candidates`, printing each module that answers, those found before a
+// low voltage stopped it included.
 fn discover_pass<T: Transport>(
     transport: &mut T,
     policy: &Policy,
     candidates: &[ModuleIds],
     timing: Timing,
     profile: &Profile,
-    pass: &str,
-    patient: Option<Duration>,
+    pass: &Pass,
 ) -> Result<Vec<discover::Found>, ExitCode> {
-    let failed = |e: fingerprint::FingerprintError| {
-        eprintln!("{e}");
-        ExitCode::FAILURE
-    };
-    let (found, pass) = match patient {
-        Some(wait) => {
-            let (found, waited) =
-                discover::discover_patiently(transport, policy, candidates, timing, wait)
-                    .map_err(failed)?;
+    let mut options = DiscoverOptions::default();
+    options.patient = pass.patient;
+    options.voltage_watch = pass.watch;
+    let discovered = discover::discover_with(transport, policy, candidates, timing, &options)
+        .map_err(|e| {
+            eprintln!("{e}");
+            ExitCode::FAILURE
+        })?;
+    let found = discovered.found;
+    let name = match (pass.patient, discovered.waited) {
+        (Some(wait), Some(waited)) => {
             let most = if waited < wait {
                 ", the most this adapter can"
             } else {
                 ""
             };
-            let secs = waited.as_secs_f64();
-            (
-                found,
-                format!("{pass}, waiting up to {secs:.1} s each{most}"),
+            format!(
+                "{}, waiting up to {:.1} s each{most}",
+                pass.name,
+                waited.as_secs_f64()
             )
         }
-        None => (
-            discover::discover(transport, policy, candidates, timing).map_err(failed)?,
-            pass.to_owned(),
-        ),
+        _ => pass.name.to_owned(),
     };
     for module in &found {
         let listed = profile
@@ -2356,11 +2511,19 @@ fn discover_pass<T: Transport>(
             module.response_id, module.request_id
         );
     }
-    println!(
-        "{pass}: {} of {} request IDs answered",
-        found.len(),
-        candidates.len()
-    );
+    // A pass stopped for the battery asked only the first of its request IDs.
+    let asked = discovered
+        .low_voltage
+        .map_or(candidates.len(), |low| low.after);
+    println!("{name}: {} of {asked} request IDs answered", found.len());
+    if let Some(low) = discovered.low_voltage {
+        eprintln!(
+            "stopped: {low}, and the other {} request IDs weren't asked. Charge the battery or \
+             run the engine before going on (--force-low-voltage skips this check)",
+            candidates.len() - asked
+        );
+        return Err(ExitCode::FAILURE);
+    }
     Ok(found)
 }
 
@@ -3227,6 +3390,7 @@ mod tests {
             &["--baud", "9600"],
             &["--gsusb", "--listen-only"],
             &["--gsusb", "--bitrate", "500000"],
+            &["--force-low-voltage"],
         ] {
             let cli = parse(&[&["obdcracker"], words, &["update"]].concat()).unwrap();
             let flag = crate::flag_update_ignores(&cli, false);
@@ -3239,6 +3403,93 @@ mod tests {
         let cli = parse(&["obdcracker", "--dry-run", "update"]).unwrap();
         assert_eq!(crate::flag_update_ignores(&cli, false), None);
         assert!(cli.dry_run);
+    }
+
+    #[test]
+    fn the_simulated_battery_takes_volts_and_a_drop_takes_requests_and_volts() {
+        assert_eq!(crate::parse_volts("11.5"), Ok(11_500));
+        assert_eq!(crate::parse_volts("11.799V"), Ok(11_799));
+        for bad in ["", "abc", "-1", "100", "11.5.1", "11,5"] {
+            assert!(crate::parse_volts(bad).is_err(), "{bad}");
+        }
+        assert_eq!(crate::parse_volt_drop("60:11.5"), Ok((60, 11_500)));
+        assert_eq!(crate::parse_volt_drop("0:0"), Ok((0, 0)));
+        for bad in [
+            "60",
+            "60:",
+            ":11.5",
+            "x:11.5",
+            "-1:11.5",
+            "60:x",
+            "60:11.5:1",
+        ] {
+            assert!(crate::parse_volt_drop(bad).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn the_simulated_battery_flags_need_sim_and_exclude_the_other_adapters() {
+        let sim = parse(&["obdcracker", "--sim", "a7", "--sim-voltage", "11.5", "vin"]).unwrap();
+        assert_eq!(sim.sim_voltage, Some(11_500));
+        let sim = parse(&[
+            "obdcracker",
+            "--sim",
+            "a7",
+            "--sim-voltage-drop",
+            "60:11.5",
+            "vin",
+        ])
+        .unwrap();
+        assert_eq!(sim.sim_voltage_drop, Some((60, 11_500)));
+        for flag in [
+            &["--sim-voltage", "11.5"][..],
+            &["--sim-voltage-drop", "60:11.5"],
+        ] {
+            for adapter in [
+                &[][..],
+                &["--tcp", "127.0.0.1:1"],
+                &["--serial", "COM3"],
+                &["--dry-run"],
+                &["--gsusb"],
+                &["--socketcan", "can0"],
+            ] {
+                let words = [&["obdcracker"][..], adapter, flag, &["vin"]].concat();
+                assert!(parse(&words).is_err(), "{words:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn only_a_sweep_of_over_256_dids_and_a_wide_discovery_are_long() {
+        let long = |words: &[&str]| crate::long_command(&parse(words).unwrap()).is_some();
+        let sweep = |range: &str| {
+            long(&[
+                "obdcracker",
+                "--sim",
+                "a7",
+                "sweep",
+                "--module",
+                "engine",
+                "--range",
+                range,
+            ])
+        };
+        assert!(!sweep("0600-0600"));
+        assert!(!sweep("0600-06FF"), "exactly 256 DIDs");
+        assert!(sweep("0600-0700"), "257 DIDs");
+        assert!(sweep("0000-FFFF"));
+        assert!(long(&["obdcracker", "scan", "--discover", "--wide"]));
+        for words in [
+            &["scan"][..],
+            &["scan", "--discover"],
+            &["scan", "--discover", "--patient-ids", "71D"],
+            &["scan", "--discover-29bit"],
+            &["vin"],
+            &["fingerprint"],
+        ] {
+            let words = [&["obdcracker"][..], words].concat();
+            assert!(!long(&words), "{words:?}");
+        }
     }
 
     #[test]

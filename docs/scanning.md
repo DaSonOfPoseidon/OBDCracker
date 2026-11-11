@@ -165,6 +165,12 @@ A module that doesn't confirm `10 01` at the end is left to return after S3.
   timeout would leave one of its two answers queued for the next read. Patience is set after every request is
   approved and ends afterwards whatever happens. Failing to set it stops the sweep before anything is sent, and
   failing to end it is a `Why::Adapter` stop.
+- With `SweepOptions::voltage_watch`, the supply voltage is read again (`Transport::supply_voltage`) before every
+  `interval`th read of the sweep (keepalives aren't counted, and a sweep of `interval` reads or fewer is never
+  checked). A reading under the watch's refusal threshold stops the sweep before that read (`Why::LowVoltage`,
+  `Stop::at` the first DID not read) and the extended session is left as usual. An unknown reading, or a failed one,
+  doesn't stop it. `discover_with` and `DiscoverOptions::voltage_watch` do the same for discovery, counting from each
+  call's first candidate and returning what answered in `Discovered`. See [safety](safety.md#supply-voltage).
 - If leaving the session fails, `Sweep::still_extended` says why the module may still be in it. When the adapter fails
   on `10 01`, `still_extended` stays `None` and `Sweep::stop` is `Why::Adapter`; the module may still be in the session.
 

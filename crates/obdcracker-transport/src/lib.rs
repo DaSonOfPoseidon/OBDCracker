@@ -183,14 +183,14 @@ pub trait Transport {
     /// command, such as the ELM327's `ATRV`, that [`Audited`] logs.
     ///
     /// The default is [`SupplyVoltage::Unknown`], for a transport that can't measure it
-    /// (`gs_usb`, SocketCAN, a dry run or a simulator that sets none). A voltage that couldn't be
-    /// read is `Unknown` too, not an error, and `Unknown` never passes a precondition. A
-    /// transport that wraps another must forward this.
+    /// (`gs_usb`, SocketCAN, a dry run). An answer that isn't one clean voltage is `Unknown`
+    /// too, not an error, and `Unknown` never passes a precondition. A transport that wraps
+    /// another must forward this.
     ///
     /// # Errors
     ///
-    /// The adapter failed. A caller that only wants to know the voltage may treat that as
-    /// `Unknown`; the adapter's next call fails too if it can no longer be trusted.
+    /// The adapter failed or didn't answer. A caller that only wants to know the voltage may
+    /// treat that as `Unknown`; the adapter's next call fails too if it can no longer be trusted.
     fn supply_voltage(&mut self) -> Result<SupplyVoltage, Error> {
         Ok(SupplyVoltage::Unknown)
     }

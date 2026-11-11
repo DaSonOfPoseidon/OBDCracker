@@ -105,6 +105,15 @@ enters the session (`10 03`), and its `keep_alive` sends TesterPresent (`3E 00`)
 doesn't drop back after S3 (5 s). If the session has lapsed anyway, the guard enters it again before the next
 request. Dropping the guard returns the module to the default session (`10 01`).
 
+## The battery
+
+`Transport::supply_voltage` returns the voltage the adapter sees on the OBD port: `Known` (an ELM327 or STN, the
+simulator) or `Unknown` (every other backend, and an ELM327 that says `?`). `safety::VoltageThresholds::DEFAULT.check`
+turns it into `Ok`, `Low`, `TooLow` or `Unknown`, and `Unknown` never satisfies a `safety::Precondition`. Pass
+`transport::voltage::VoltageWatch::default()` in `SweepOptions::voltage_watch` or `DiscoverOptions::voltage_watch` and a
+long run re-checks it every 50 requests and stops, keeping what it read, when it is too low. Nothing is checked unless
+you ask: the CLI's guard (refusing a long command at the start) is yours to write. See [safety](safety.md#supply-voltage).
+
 ## Crates
 
 See the [crate layout](development.md#crate-layout).
