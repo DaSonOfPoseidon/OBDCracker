@@ -605,6 +605,7 @@ dependencies = [
  "nix",
  "nusb",
  "obdcracker-core",
+ "obdcracker-profile",
  "obdcracker-safety",
  "proptest",
  "serde",
