@@ -1,7 +1,10 @@
 //! Parsing and validating vehicle profiles, and the built-in A7 profile.
 
 use obdcracker_core::isotp::Addressing;
-use obdcracker_profile::{Decode, DidSession, Profile, ProfileError, Protocol, standard_decode};
+use obdcracker_core::vin;
+use obdcracker_profile::{
+    Decode, DidSession, Profile, ProfileError, Protocol, builtins_matching, standard_decode,
+};
 use obdcracker_safety::{ModuleIds, Policy, Target};
 use proptest::prelude::*;
 
@@ -1155,4 +1158,282 @@ fn the_a7_profile_lists_the_gateways_tables() {
     let (module, list) = profile.gateway_list_module().unwrap();
     assert_eq!((module.vag_address, module.request_id), (Some(0x19), 0x710));
     assert_eq!((list.addresses, list.request_ids), (0x2A2A, Some(0x2A2C)));
+}
+
+// The `[vin]` table, which says what cars a profile fits.
+
+const A7_VIN: &str = "WAU2MBFC6EN093415";
+
+fn with_vin(section: &str) -> String {
+    format!(
+        "name = \"test car\"\nbitrate = 500000\n\n[vin]\n{section}\n\n\
+         [[module]]\nname = \"engine\"\nrequest_id = 0x7E0\nresponse_id = 0x7E8\nprotocol = \"uds\"\n"
+    )
+}
+
+fn vin_profile(section: &str) -> Profile {
+    Profile::from_toml(&with_vin(section)).unwrap()
+}
+
+fn matches(profile: &Profile, text: &str) -> bool {
+    profile.matches_vin(&vin::decode(text).unwrap())
+}
+
+#[test]
+fn a_profile_may_have_no_vin_table() {
+    let profile = Profile::from_toml(MINIMAL).unwrap();
+    assert_eq!(profile.vin, None);
+    // Without a rule, no VIN is claimed.
+    assert!(!matches(&profile, A7_VIN));
+}
+
+#[test]
+fn parses_the_vin_table() {
+    let profile = vin_profile("wmi = [\"WAU\", \"TRU\"]\nvds = \"2MB??\"\nyears = [2012, 2018]");
+    let rule = profile.vin.as_ref().unwrap();
+    assert_eq!(rule.wmi, ["WAU", "TRU"]);
+    assert_eq!(rule.vds.as_deref(), Some("2MB??"));
+    assert_eq!(rule.years, Some([2012, 2018]));
+    let only_wmi = vin_profile("wmi = [\"WAU\"]");
+    let rule = only_wmi.vin.as_ref().unwrap();
+    assert_eq!((rule.vds.as_deref(), rule.years), (None, None));
+}
+
+#[test]
+fn matches_on_the_manufacturer_code() {
+    let profile = vin_profile("wmi = [\"TRU\", \"WAU\"]");
+    assert!(matches(&profile, A7_VIN));
+    assert!(matches(&profile, "TRU2MBFC6EN093415"));
+    assert!(!matches(&profile, "WA12MBFC6EN093415"));
+    assert!(!matches(&profile, "1D4GP00R55B123456"));
+}
+
+#[test]
+fn matches_on_the_vehicle_descriptor_with_wildcards() {
+    let profile = vin_profile("wmi = [\"WAU\"]\nvds = \"2?BFC\"");
+    assert!(matches(&profile, A7_VIN));
+    assert!(!matches(&profile, "WAU2MAFC6EN093415"));
+    assert!(!matches(&profile, "WAU3MBFC6EN093415"));
+    assert!(!matches(&profile, "WAU2MBFD6EN093415"));
+    // A pattern of only wildcards fits every descriptor.
+    let any = vin_profile("wmi = [\"WAU\"]\nvds = \"?????\"");
+    assert!(matches(&any, A7_VIN));
+}
+
+#[test]
+fn matches_a_year_range_when_any_candidate_is_in_it() {
+    // Position 10 'E' is 1984 or 2014 outside North America.
+    let range =
+        |first: u16, last: u16| vin_profile(&format!("wmi = [\"WAU\"]\nyears = [{first}, {last}]"));
+    assert!(matches(&range(2012, 2018), A7_VIN));
+    assert!(matches(&range(2014, 2014), A7_VIN));
+    assert!(matches(&range(1984, 1984), A7_VIN));
+    assert!(matches(&range(1980, 2039), A7_VIN));
+    assert!(!matches(&range(2015, 2018), A7_VIN));
+    assert!(!matches(&range(2012, 2013), A7_VIN));
+    assert!(!matches(&range(1985, 2013), A7_VIN));
+}
+
+#[test]
+fn a_year_range_never_matches_a_code_that_is_not_a_year() {
+    let profile = vin_profile("wmi = [\"WAU\"]\nyears = [1980, 2039]");
+    for code in ["U", "Z", "0"] {
+        let text = format!("WAU2MBFC6{code}N093415");
+        assert!(!matches(&profile, &text), "{code}");
+    }
+    // No year rule, no year check.
+    let no_years = vin_profile("wmi = [\"WAU\"]");
+    assert!(matches(&no_years, "WAU2MBFC6ZN093415"));
+}
+
+#[test]
+fn a_north_american_vin_matches_only_its_one_year() {
+    // Position 7 is a digit in the first VIN (1989, not 2019) and a letter in the second.
+    let recent = vin_profile("wmi = [\"1M8\"]\nyears = [2010, 2030]");
+    assert!(!matches(&recent, "1M8GDM9AXKP042788"));
+    assert!(matches(&recent, "1M8GDMAAXKP042788"));
+    let old = vin_profile("wmi = [\"1M8\"]\nyears = [1980, 2009]");
+    assert!(matches(&old, "1M8GDM9AXKP042788"));
+    assert!(!matches(&old, "1M8GDMAAXKP042788"));
+}
+
+#[test]
+fn rejects_a_vin_table_that_cannot_match_a_vin() {
+    let wmi = |wmi: &str| {
+        (
+            format!("wmi = [\"{wmi}\"]"),
+            ProfileError::VinWmi(wmi.to_owned()),
+        )
+    };
+    let vds = |vds: &str| {
+        (
+            format!("wmi = [\"WAU\"]\nvds = \"{vds}\""),
+            ProfileError::VinVds(vds.to_owned()),
+        )
+    };
+    let years = |first: u16, last: u16| {
+        (
+            format!("wmi = [\"WAU\"]\nyears = [{first}, {last}]"),
+            ProfileError::VinYears([first, last]),
+        )
+    };
+    let mut cases = vec![
+        ("wmi = []".to_owned(), ProfileError::VinNoWmi),
+        (
+            "wmi = [\"WAU\", \"WAU\"]".to_owned(),
+            ProfileError::VinDuplicateWmi("WAU".to_owned()),
+        ),
+    ];
+    for bad in [
+        "", "WA", "WAUX", "wau", "WAI", "WAO", "WAQ", "WA?", "W A", "WA\u{e9}", "WA-",
+    ] {
+        cases.push(wmi(bad));
+    }
+    for bad in [
+        "",
+        "2MBF",
+        "2MBFCC",
+        "2mbfc",
+        "2MBFI",
+        "2MBFO",
+        "2MBFQ",
+        "2MB*C",
+        "2MB C",
+        "2MB\u{e9}C",
+    ] {
+        cases.push(vds(bad));
+    }
+    for (first, last) in [
+        (2018, 2012),
+        (1979, 2012),
+        (2012, 2040),
+        (0, 0),
+        (2040, 2040),
+        (1979, 1979),
+        (2013, 2012),
+    ] {
+        cases.push(years(first, last));
+    }
+    for (section, error) in cases {
+        assert_eq!(
+            Profile::from_toml(&with_vin(&section)),
+            Err(error),
+            "{section}"
+        );
+    }
+}
+
+#[test]
+fn accepts_the_limits_of_the_vin_table() {
+    for section in [
+        "wmi = [\"000\"]",
+        "wmi = [\"ZZZ\"]\nvds = \"?????\"\nyears = [1980, 1980]",
+        "wmi = [\"WAU\"]\nyears = [2039, 2039]",
+        "wmi = [\"WAU\"]\nyears = [1980, 2039]",
+    ] {
+        assert!(Profile::from_toml(&with_vin(section)).is_ok(), "{section}");
+    }
+}
+
+#[test]
+fn the_vin_table_refuses_missing_wrong_and_unknown_keys() {
+    for section in [
+        "vds = \"2MBFC\"",
+        "wmi = \"WAU\"",
+        "wmi = [\"WAU\"]\nyears = [2012]",
+        "wmi = [\"WAU\"]\nyears = [2012, 2014, 2018]",
+        "wmi = [\"WAU\"]\nyears = \"2012\"",
+        "wmi = [\"WAU\"]\nyear = [2012, 2018]",
+        "wmi = [\"WAU\"]\nmodel = \"A7\"",
+    ] {
+        assert!(
+            matches!(
+                Profile::from_toml(&with_vin(section)),
+                Err(ProfileError::Toml(_))
+            ),
+            "{section}"
+        );
+    }
+}
+
+#[test]
+fn a_hand_built_vin_rule_is_checked_by_validate() {
+    let mut profile = vin_profile("wmi = [\"WAU\"]");
+    profile.vin.as_mut().unwrap().wmi.clear();
+    assert_eq!(profile.validate(), Err(ProfileError::VinNoWmi));
+}
+
+#[test]
+fn a_hand_built_vds_of_the_wrong_length_never_matches() {
+    let mut profile = vin_profile("wmi = [\"WAU\"]\nvds = \"2MBFC\"");
+    assert!(matches(&profile, A7_VIN));
+    for vds in ["2MB", "2MBFCC", ""] {
+        profile.vin.as_mut().unwrap().vds = Some(vds.to_owned());
+        assert!(!matches(&profile, A7_VIN), "{vds:?}");
+    }
+}
+
+#[test]
+fn a_vin_rule_does_not_touch_the_policy() {
+    let module = "[[module]]\nname = \"engine\"\nrequest_id = 0x7E0\nresponse_id = 0x7E8\nprotocol = \"uds\"\n";
+    let with = vin_profile("wmi = [\"WAU\"]");
+    let without = Profile::from_toml(&with_module(module)).unwrap();
+    let narrowed = |profile: &Profile| profile.narrow(Policy::read_only()).unwrap();
+    let verdict = |profile: &Profile, id: u32| {
+        narrowed(profile)
+            .approve(
+                obdcracker_safety::Protocol::Uds,
+                Target::Physical(id),
+                &[0x09, 0x02],
+            )
+            .map(|approved| approved.reply_id())
+            .ok()
+    };
+    for id in [0x7E0, 0x7E8, 0x7E1, 0x711] {
+        assert_eq!(verdict(&with, id), verdict(&without, id), "{id:X}");
+    }
+    assert_eq!(verdict(&with, 0x7E0), Some(Some(0x7E8)));
+}
+
+#[test]
+fn the_a7_profile_fits_the_sim_cars_vin_and_not_others() {
+    let a7 = Profile::builtin("a7").unwrap();
+    assert!(matches(&a7, A7_VIN));
+    // A 2014 Toyota Camry, and a North American Chrysler.
+    assert!(!matches(&a7, "4T1BF1FK5EU123456"));
+    assert!(!matches(&a7, "1D4GP00R55B123456"));
+    // An Audi code with a year code from before and after the A7's years (1997 or 2027, and
+    // 2020 or 1990).
+    assert!(!matches(&a7, "WAU2MBFC6VN093415"));
+    assert!(!matches(&a7, "WAU2MBFC6LN093415"));
+}
+
+#[test]
+fn the_a7_profile_vin_rule_matches_the_sim_fixture() {
+    let fixture = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../obdcracker-sim/fixtures/a7.toml"
+    ))
+    .unwrap();
+    assert!(
+        fixture.contains(&format!("vin = \"{A7_VIN}\"")),
+        "the sim fixture's VIN moved"
+    );
+}
+
+#[test]
+fn lists_the_builtin_profiles_that_fit_a_vin() {
+    assert_eq!(builtins_matching(&vin::decode(A7_VIN).unwrap()), ["a7"]);
+    let none: [&str; 0] = [];
+    assert_eq!(
+        builtins_matching(&vin::decode("1D4GP00R55B123456").unwrap()),
+        none
+    );
+}
+
+#[test]
+fn every_builtin_profile_declares_the_vins_it_fits() {
+    for name in Profile::BUILTIN {
+        assert!(Profile::builtin(name).unwrap().vin.is_some(), "{name}");
+    }
 }
