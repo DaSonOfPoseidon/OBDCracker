@@ -551,6 +551,7 @@ dependencies = [
  "obdcracker-safety",
  "obdcracker-sim",
  "obdcracker-transport",
+ "serde",
  "serde_json",
  "socketcan",
 ]

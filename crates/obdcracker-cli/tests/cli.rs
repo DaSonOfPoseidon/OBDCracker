@@ -2391,3 +2391,459 @@ mod read_dids {
         assert!(String::from_utf8_lossy(&out.stderr).contains("--elm-segmenting"));
     }
 }
+
+// ---- --json ---------------------------------------------------------------------------------
+
+mod json {
+    use super::*;
+    use serde_json::{Value, json};
+
+    // The one document a command printed: stdout is a single line of JSON with the envelope.
+    fn document(out: &Output, command: &str) -> Value {
+        let stdout = String::from_utf8(out.stdout.clone()).unwrap();
+        assert!(stdout.ends_with('\n'), "{stdout}");
+        assert_eq!(stdout.lines().count(), 1, "{stdout}");
+        let document: Value = serde_json::from_str(&stdout).unwrap();
+        assert_eq!(document["schema"], 1, "{stdout}");
+        assert_eq!(document["command"], command, "{stdout}");
+        assert_eq!(document["obdcracker"], env!("CARGO_PKG_VERSION"));
+        assert_eq!(document.as_object().unwrap().len(), 4, "{stdout}");
+        document["result"].clone()
+    }
+
+    fn stderr(out: &Output) -> String {
+        String::from_utf8_lossy(&out.stderr).into_owned()
+    }
+
+    fn sim(name: &str, args: &[&str]) -> Output {
+        let log = temp_log(name);
+        let mut all = vec![
+            "--sim",
+            "a7",
+            "--json",
+            "--audit-log",
+            log.to_str().unwrap(),
+        ];
+        all.extend(args);
+        obdcracker(&all)
+    }
+
+    fn silent_adapter(name: &str, args: &[&str]) -> Output {
+        let addr = wifi_adapter_answering(|_, _| Vec::new()).to_string();
+        let log = temp_log(name);
+        let mut all = vec![
+            "--tcp",
+            &addr,
+            "--json",
+            "--audit-log",
+            log.to_str().unwrap(),
+        ];
+        all.extend(args);
+        obdcracker(&all)
+    }
+
+    #[test]
+    fn vin_lists_each_source_and_vin() {
+        let out = sim("json-vin", &["vin"]);
+        assert!(out.status.success(), "{}", stderr(&out));
+        assert_eq!(
+            document(&out, "vin"),
+            json!([{"source": "7E8", "vin": "WAU2MBFC6EN093415"}])
+        );
+        assert_eq!(stderr(&out), "");
+    }
+
+    #[test]
+    fn vin_keeps_a_good_vin_and_reports_a_bad_one_on_stderr() {
+        let addr = wifi_adapter_with_vins(|n| {
+            if n == 0 {
+                VIN.to_vec()
+            } else {
+                b"\x49\x02\x01WAUZZZ4G1EN00000!".to_vec()
+            }
+        })
+        .to_string();
+        let out = obdcracker(&["--tcp", &addr, "--json", "vin"]);
+        assert_eq!(out.status.code(), Some(1), "{}", stderr(&out));
+        assert_eq!(
+            document(&out, "vin"),
+            json!([{"source": "7E8", "vin": "WAUZZZ4G1EN000000"}])
+        );
+        assert!(
+            stderr(&out).contains("7E9 reply is malformed"),
+            "{}",
+            stderr(&out)
+        );
+    }
+
+    #[test]
+    fn vin_with_only_refusals_prints_an_empty_list_and_fails() {
+        let addr = wifi_adapter_with_vins(|_| vec![0x7F, 0x09, 0x31]).to_string();
+        let out = obdcracker(&["--tcp", &addr, "--json", "vin"]);
+        assert_eq!(out.status.code(), Some(1), "{}", stderr(&out));
+        assert_eq!(document(&out, "vin"), json!([]));
+        assert!(
+            stderr(&out).contains("7E8 service 0x09 refused"),
+            "{}",
+            stderr(&out)
+        );
+    }
+
+    #[test]
+    fn vin_with_no_answer_is_an_error_with_no_document() {
+        let out = silent_adapter("json-vin-silent", &["vin"]);
+        assert_eq!(out.status.code(), Some(1));
+        assert_eq!(String::from_utf8_lossy(&out.stdout), "");
+        assert!(stderr(&out).contains("no ECU answered"), "{}", stderr(&out));
+    }
+
+    #[test]
+    fn fingerprint_has_every_calid_cvn_and_did() {
+        let out = sim("json-fingerprint", &["fingerprint"]);
+        assert!(out.status.success(), "{}", stderr(&out));
+        let result = document(&out, "fingerprint");
+        let engine = &result["ecus"][0];
+        assert_eq!(engine["source"], "7E8");
+        assert_eq!(engine["calids"]["value"][0], "4G0401N 0016BVAB");
+        // The padding slot is null and keeps its place beside its CVN.
+        assert_eq!(engine["calids"]["value"][1], Value::Null);
+        assert_eq!(engine["cvns"]["value"][0], "9BF7470D");
+        assert_eq!(engine["cvns"]["value"][1], "00000000");
+        let modules = result["modules"].as_array().unwrap();
+        assert_eq!(modules[1]["name"], "transmission");
+        assert_eq!(modules[1]["response_id"], "7E9");
+        let dids = modules[1]["dids"].as_array().unwrap();
+        assert!(dids.contains(&json!({"did": "F191", "value": {"Text": "0BK927156AM"}})));
+        assert!(dids.contains(&json!(
+            {"did": "F188", "error": {"Reply": {"Negative": {"sid": "22", "nrc": "31"}}}}
+        )));
+        assert_eq!(stderr(&out), "");
+    }
+
+    #[test]
+    fn fingerprint_with_nothing_answering_prints_an_empty_document_and_fails() {
+        let out = silent_adapter("json-fingerprint-silent", &["fingerprint"]);
+        assert_eq!(out.status.code(), Some(1));
+        assert_eq!(document(&out, "fingerprint")["ecus"], json!([]));
+        assert!(
+            stderr(&out).contains("nothing answered"),
+            "{}",
+            stderr(&out)
+        );
+    }
+
+    #[test]
+    fn scan_has_what_the_text_scan_prints_and_the_notes_stay_on_stderr() {
+        let out = sim("json-scan", &["scan"]);
+        assert!(out.status.success(), "{}", stderr(&out));
+        let result = document(&out, "scan");
+        let engine = &result["ecus"][0];
+        assert_eq!(engine["source"], "7E8");
+        let pids = engine["pids"]["value"].as_array().unwrap();
+        assert!(pids.contains(&json!(
+            {"pid": "05", "value": {"Quantity": {"value": 63.0, "unit": "Celsius"}}}
+        )));
+        assert!(pids.contains(&json!({"pid": "8F", "value": {"Raw": "03 00 FF FF 00 00 00"}})));
+        assert_eq!(
+            engine["supported_info"]["value"],
+            json!(["02", "04", "06", "0A"])
+        );
+        assert_eq!(engine["ecu_name"]["value"], "ECM-EngineControl");
+        assert_eq!(engine["stored_dtcs"]["value"], json!([]));
+        let module = |name: &str| {
+            result["modules"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|m| m["name"] == name)
+                .unwrap_or_else(|| panic!("{name} missing"))
+                .clone()
+        };
+        let transmission = module("transmission");
+        assert_eq!(transmission["response_id"], "7E9");
+        assert!(transmission["dids"].as_array().unwrap().contains(&json!(
+            {"did": "F191", "value": {"Text": "0BK927156AM"}}
+        )));
+        let gateway = module("gateway");
+        let dids = gateway["dids"].as_array().unwrap();
+        assert!(dids.contains(&json!(
+            {"did": "F190", "error": {"Reply": {"Negative": {"sid": "22", "nrc": "31"}}}}
+        )));
+        assert!(dids.contains(&json!({"did": "F18B", "value": {"Bytes": "00 00 00"}})));
+        assert_eq!(gateway["dtcs"], json!({"value": []}));
+        assert_eq!(
+            module("engine")["dtc_count"]["error"],
+            json!({"Reply": {"Negative": {"sid": "19", "nrc": "12"}}})
+        );
+        // The line the text scan prints on stdout is a note here.
+        assert!(stderr(&out).contains("gateway lists "), "{}", stderr(&out));
+    }
+
+    #[test]
+    fn scan_with_discovery_and_tp20_writes_its_progress_to_stderr() {
+        let out = sim(
+            "json-scan-passes",
+            &["scan", "--discover", "--discover-29bit", "--discover-tp20"],
+        );
+        assert!(out.status.success(), "{}", stderr(&out));
+        // One line, so none of the pass lines got into stdout.
+        document(&out, "scan");
+        let err = stderr(&out);
+        for note in [
+            "discovery: ",
+            "29-bit discovery: 0 of 256 request IDs answered",
+            "TP2.0 discovery: ",
+            "gateway lists ",
+        ] {
+            assert!(err.contains(note), "{note:?} missing from:\n{err}");
+        }
+    }
+
+    #[test]
+    fn scan_with_nothing_answering_prints_an_empty_document_and_fails() {
+        let out = silent_adapter("json-scan-silent", &["scan"]);
+        assert_eq!(out.status.code(), Some(1));
+        let result = document(&out, "scan");
+        assert_eq!(result["ecus"], json!([]));
+        assert!(
+            result["modules"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|m| m["answered"] == false)
+        );
+        assert!(
+            stderr(&out).contains("nothing answered"),
+            "{}",
+            stderr(&out)
+        );
+    }
+
+    #[test]
+    fn sweep_lists_the_dids_found_with_their_bytes() {
+        let out = sim(
+            "json-sweep",
+            &[
+                "sweep",
+                "--module",
+                "head-up display",
+                "--range",
+                "F180-F18F",
+            ],
+        );
+        assert!(out.status.success(), "{}", stderr(&out));
+        let result = document(&out, "sweep");
+        assert_eq!(result["module"]["name"], "head-up display");
+        assert_eq!(result["module"]["request_id"], "71B");
+        assert_eq!(result["module"]["response_id"], "785");
+        assert_eq!(result["first"], "F180");
+        assert_eq!(result["last"], "F18F");
+        let sweep = &result["sweep"];
+        assert!(sweep["found"].as_array().unwrap().contains(&json!(
+            {"did": "F187", "value": "34 47 38 39 31 39 36 30 34 4B 20"}
+        )));
+        assert_eq!(sweep["stop"], Value::Null);
+        assert_eq!(sweep["out_of_step"], false);
+        assert!(
+            stderr(&out).contains("sweep: 16 reads of head-up display (71B)"),
+            "{}",
+            stderr(&out)
+        );
+    }
+
+    #[test]
+    fn a_sweep_stopped_by_the_voltage_guard_still_prints_what_it_found() {
+        let out = sim(
+            "json-sweep-voltage",
+            &[
+                "--sim-voltage-drop",
+                "60:11.0",
+                "sweep",
+                "--module",
+                "engine",
+                "--range",
+                "0600-0700",
+            ],
+        );
+        assert_eq!(out.status.code(), Some(1), "{}", stderr(&out));
+        let result = document(&out, "sweep");
+        assert_eq!(
+            result["sweep"]["stop"],
+            json!({"at": "0664", "why": {"LowVoltage": {"after": 100, "millivolts": 11000}}})
+        );
+        assert!(stderr(&out).contains("to go on:"), "{}", stderr(&out));
+    }
+
+    #[test]
+    fn read_dids_splits_the_reply() {
+        let out = sim(
+            "json-read-dids",
+            &[
+                "read-dids",
+                "--module",
+                "transmission",
+                "--did",
+                "F189,F191",
+            ],
+        );
+        assert!(out.status.success(), "{}", stderr(&out));
+        let result = document(&out, "read-dids");
+        assert_eq!(result["module"]["name"], "transmission");
+        assert_eq!(result["dids"], json!(["F189", "F191"]));
+        let split = result["read"]["value"]["split"].as_array().unwrap();
+        assert_eq!(split.len(), 2, "{result}");
+        assert_eq!(split[0]["did"], "F189");
+        assert_eq!(result["read"]["value"]["unsplit"], "");
+    }
+
+    #[test]
+    fn a_refused_read_is_the_document_too_and_still_fails() {
+        let out = sim(
+            "json-read-dids-refused",
+            &["read-dids", "--module", "gateway", "--did", "F190"],
+        );
+        assert_eq!(out.status.code(), Some(1), "{}", stderr(&out));
+        assert_eq!(
+            document(&out, "read-dids")["read"]["error"],
+            json!({"Reply": {"Negative": {"sid": "22", "nrc": "31"}}})
+        );
+    }
+
+    #[test]
+    fn dtc_has_both_reads() {
+        let out = sim(
+            "json-dtc",
+            &["dtc", "--module", "gateway", "--code", "0016A0"],
+        );
+        assert!(out.status.success(), "{}", stderr(&out));
+        let result = document(&out, "dtc");
+        assert_eq!(result["module"]["name"], "gateway");
+        assert_eq!(result["dtc"], "0016A0");
+        assert_eq!(result["record"], "FF");
+        let refused = json!({"error": {"Reply": {"Negative": {"sid": "19", "nrc": "12"}}}});
+        assert_eq!(result["detail"]["snapshots"], refused);
+        assert_eq!(result["detail"]["extended_data"], refused);
+        assert_eq!(result["detail"]["out_of_step"], false);
+    }
+
+    #[test]
+    fn adapter_prints_its_info_and_the_wifi_warning_stays_on_stderr() {
+        let addr = wifi_adapter().to_string();
+        let log = temp_log("json-adapter");
+        let out = obdcracker(&[
+            "--tcp",
+            &addr,
+            "--json",
+            "--audit-log",
+            log.to_str().unwrap(),
+            "adapter",
+        ]);
+        assert!(out.status.success(), "{}", stderr(&out));
+        let result = document(&out, "adapter");
+        assert_eq!(result["adapter"]["id"], fake_elm::BANNER);
+        assert_eq!(result["adapter"]["stn"], Value::Null);
+        assert_eq!(result["adapter"]["voltage"], "12.6V");
+        assert_eq!(result["link"], "tcp");
+        assert!(
+            stderr(&out).contains("warning: a Wi-Fi adapter"),
+            "{}",
+            stderr(&out)
+        );
+    }
+
+    #[test]
+    fn ports_lists_the_serial_ports() {
+        let out = obdcracker(&["--json", "ports"]);
+        assert!(out.status.success(), "{}", stderr(&out));
+        let result = document(&out, "ports");
+        assert!(
+            result["ports"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(Value::is_string)
+        );
+    }
+
+    #[test]
+    fn a_low_battery_warning_goes_to_stderr_and_the_document_is_still_alone() {
+        let out = sim("json-low-battery", &["--sim-voltage", "11.5", "vin"]);
+        assert!(out.status.success(), "{}", stderr(&out));
+        document(&out, "vin");
+        assert!(
+            stderr(&out).contains("warning: the supply voltage is"),
+            "{}",
+            stderr(&out)
+        );
+    }
+
+    #[test]
+    fn an_error_prints_text_on_stderr_and_no_document() {
+        let cases: [&[&str]; 4] = [
+            &["--json", "vin"],
+            &[
+                "--sim",
+                "a7",
+                "--json",
+                "sweep",
+                "--module",
+                "nope",
+                "--range",
+                "0600-0601",
+            ],
+            &[
+                "--sim", "a7", "--json", "dtc", "--module", "nope", "--code", "0016A0",
+            ],
+            &[
+                "--sim",
+                "a7",
+                "--json",
+                "read-dids",
+                "--module",
+                "transmission",
+                "--did",
+                "F189,F189",
+            ],
+        ];
+        for args in cases {
+            let out = obdcracker(args);
+            assert_eq!(out.status.code(), Some(2), "{args:?}");
+            assert_eq!(String::from_utf8_lossy(&out.stdout), "", "{args:?}");
+            assert!(!stderr(&out).is_empty(), "{args:?}");
+        }
+    }
+
+    #[test]
+    fn json_is_refused_with_a_dry_run_and_with_update() {
+        let log = temp_log("json-refused");
+        let cases: [&[&str]; 5] = [
+            &["--json", "--dry-run", "vin"],
+            &["--json", "--dry-run", "scan"],
+            &["--json", "--dry-run", "update"],
+            &["--json", "update"],
+            &["--json", "update", "--main"],
+        ];
+        for args in cases {
+            let mut all = vec!["--audit-log", log.to_str().unwrap()];
+            all.extend(args);
+            let out = obdcracker(&all);
+            assert_eq!(out.status.code(), Some(2), "{args:?}: {}", stderr(&out));
+            assert_eq!(String::from_utf8_lossy(&out.stdout), "", "{args:?}");
+            assert!(
+                stderr(&out).contains("--json"),
+                "{args:?}: {}",
+                stderr(&out)
+            );
+        }
+        assert!(!log.exists());
+    }
+
+    #[test]
+    fn without_the_flag_the_text_is_unchanged() {
+        let out = obdcracker(&["--sim", "a7", "vin"]);
+        assert_eq!(
+            String::from_utf8_lossy(&out.stdout),
+            "7E8 WAU2MBFC6EN093415\n"
+        );
+    }
+}

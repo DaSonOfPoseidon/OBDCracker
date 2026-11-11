@@ -83,7 +83,7 @@ fn parse_did(text: &str) -> Option<u16> {
     u16::try_from(hex_digits(text, 4)?).ok()
 }
 
-fn parse_pid(text: &str) -> Option<u8> {
+fn parse_byte(text: &str) -> Option<u8> {
     u8::try_from(hex_digits(text, 2)?).ok()
 }
 
@@ -149,20 +149,20 @@ impl<'de> Deserialize<'de> for Did {
     }
 }
 
-struct Pid(u8);
+struct Byte(u8);
 
-impl Serialize for Pid {
+impl Serialize for Byte {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         serializer.collect_str(&format_args!("{:02X}", self.0))
     }
 }
 
-impl<'de> Deserialize<'de> for Pid {
+impl<'de> Deserialize<'de> for Byte {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         read(
             deserializer,
-            "a PID as two upper-case hex digits",
-            parse_pid,
+            "a byte as two upper-case hex digits",
+            parse_byte,
         )
         .map(Self)
     }
@@ -210,7 +210,7 @@ impl Key for Did {
     const NAME: &'static str = "did";
 }
 
-impl Key for Pid {
+impl Key for Byte {
     const NAME: &'static str = "pid";
 }
 
@@ -298,7 +298,7 @@ struct DidData {
 
 #[derive(Serialize, Deserialize)]
 struct PidFailure<E> {
-    pid: Pid,
+    pid: Byte,
     error: E,
 }
 
@@ -306,7 +306,7 @@ struct PidFailure<E> {
 struct PidList<'a>(#[serde(serialize_with = "pid_list_ser")] &'a [u8]);
 
 fn pid_list_ser<S: Serializer>(pids: &[u8], serializer: S) -> Result<S::Ok, S::Error> {
-    serializer.collect_seq(pids.iter().map(|&pid| Pid(pid)))
+    serializer.collect_seq(pids.iter().map(|&pid| Byte(pid)))
 }
 
 /// A byte string as upper-case hex pairs separated by spaces, such as `"1A 2A 40"`, for
@@ -338,6 +338,22 @@ pub mod can_id {
     /// Reads a 3-digit ID of at most 0x7FF or an 8-digit one of at most 0x1FFFFFFF.
     pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<u32, D::Error> {
         CanId::deserialize(deserializer).map(|id| id.0)
+    }
+}
+
+/// A byte as two upper-case hex digits, such as `"FF"`, for
+/// `#[serde(with = "obdcracker_transport::json::byte")]` on a `u8`.
+pub mod byte {
+    use super::{Byte, Deserialize, Deserializer, Serialize, Serializer};
+
+    /// Writes `byte` as two hex digits.
+    pub fn serialize<S: Serializer>(byte: &u8, serializer: S) -> Result<S::Ok, S::Error> {
+        Byte(*byte).serialize(serializer)
+    }
+
+    /// Reads exactly two upper-case hex digits.
+    pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<u8, D::Error> {
+        Byte::deserialize(deserializer).map(|pid| pid.0)
     }
 }
 
@@ -403,18 +419,21 @@ pub(crate) mod finite {
     }
 }
 
-// `Result<T, E>` as `{"value": ...}` or `{"error": ...}`.
-pub(crate) mod outcome {
+/// A `Result<T, E>` as `{"value": ...}` or `{"error": ...}`, for
+/// `#[serde(with = "obdcracker_transport::json::outcome")]` on a field of that type.
+pub mod outcome {
     use super::{Deserialize, DeserializeOwned, Deserializer, Serialize, Serializer, Wire, wire};
 
-    pub(crate) fn serialize<T: Serialize, E: Serialize, S: Serializer>(
+    /// Writes the value or the error.
+    pub fn serialize<T: Serialize, E: Serialize, S: Serializer>(
         result: &Result<T, E>,
         serializer: S,
     ) -> Result<S::Ok, S::Error> {
         wire(result).serialize(serializer)
     }
 
-    pub(crate) fn deserialize<'de, T, E, D>(deserializer: D) -> Result<Result<T, E>, D::Error>
+    /// Reads an object with `value` or `error`; one with both, or neither, is an error.
+    pub fn deserialize<'de, T, E, D>(deserializer: D) -> Result<Result<T, E>, D::Error>
     where
         T: DeserializeOwned,
         E: DeserializeOwned,
@@ -427,7 +446,7 @@ pub(crate) mod outcome {
 // `Result<Vec<u8>, E>` of PIDs, as a list of hex pairs.
 pub(crate) mod outcome_pids {
     use super::{
-        Deserialize, DeserializeOwned, Deserializer, Pid, PidList, Serialize, Serializer, Wire,
+        Byte, Deserialize, DeserializeOwned, Deserializer, PidList, Serialize, Serializer, Wire,
     };
 
     pub(crate) fn serialize<E: Serialize, S: Serializer>(
@@ -446,7 +465,7 @@ pub(crate) mod outcome_pids {
         E: DeserializeOwned,
         D: Deserializer<'de>,
     {
-        let wire = Wire::<Vec<Pid>, E>::deserialize(deserializer)?;
+        let wire = Wire::<Vec<Byte>, E>::deserialize(deserializer)?;
         Ok(match wire {
             Wire::Value(pids) => Ok(pids.into_iter().map(|pid| pid.0).collect()),
             Wire::Error(error) => Err(error),
@@ -582,7 +601,7 @@ pub(crate) mod did_data {
 // `{"pid": ..., "error": ...}`, or the whole list's `{"error": ...}`.
 pub(crate) mod pid_readings {
     use super::{
-        Deserialize, DeserializeOwned, Deserializer, Item, Pid, Serialize, Serializer, Wire, wire,
+        Byte, Deserialize, DeserializeOwned, Deserializer, Item, Serialize, Serializer, Wire, wire,
     };
 
     type Readings<T, E> = Vec<(u8, Result<T, E>)>;
@@ -596,7 +615,7 @@ pub(crate) mod pid_readings {
                 items
                     .iter()
                     .map(|(pid, result)| Item {
-                        key: Pid(*pid),
+                        key: Byte(*pid),
                         outcome: wire(result),
                     })
                     .collect::<Vec<_>>(),
@@ -614,7 +633,7 @@ pub(crate) mod pid_readings {
         E: DeserializeOwned,
         D: Deserializer<'de>,
     {
-        let wire = Wire::<Vec<Item<Pid, T, E>>, E>::deserialize(deserializer)?;
+        let wire = Wire::<Vec<Item<Byte, T, E>>, E>::deserialize(deserializer)?;
         Ok(match wire {
             Wire::Value(items) => Ok(items
                 .into_iter()
@@ -628,7 +647,7 @@ pub(crate) mod pid_readings {
 // `Option<(u8, E)>` as `{"pid": ..., "error": ...}`.
 pub(crate) mod pid_failure {
     use super::{
-        Deserialize, DeserializeOwned, Deserializer, Pid, PidFailure, Serialize, Serializer,
+        Byte, Deserialize, DeserializeOwned, Deserializer, PidFailure, Serialize, Serializer,
     };
 
     #[expect(clippy::ref_option, reason = "serde's `with` passes a reference")]
@@ -639,7 +658,7 @@ pub(crate) mod pid_failure {
         failure
             .as_ref()
             .map(|(pid, error)| PidFailure {
-                pid: Pid(*pid),
+                pid: Byte(*pid),
                 error,
             })
             .serialize(serializer)
