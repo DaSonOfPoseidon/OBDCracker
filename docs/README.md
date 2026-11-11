@@ -3,7 +3,7 @@
 ## Using OBDCracker
 
 - [Install](install.md): one-command install on Windows, macOS and Linux
-- [Using the CLI](usage.md): `adapter`, `ports`, `vin`, `fingerprint`, `scan`, `sweep`, `dtc`, `update` and their options
+- [Using the CLI](usage.md): `adapter`, `ports`, `vin`, `fingerprint`, `scan`, `sweep`, `dtc`, `read-dids`, `diff`, `update` and their options
 - [JSON output](json.md): `--json`, the document's envelope and schema version, and each command's result
 - [Using it as a library](library.md): importing the `obdcracker` crate
 - [Safety model](safety.md): the policy, tiers, backups, dry runs and the audit log

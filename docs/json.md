@@ -1,7 +1,7 @@
 # JSON output
 
 `--json` makes `vin`, `fingerprint`, `scan`, `sweep`, `read-dids`, `dtc`, `adapter` and `ports` print one JSON document
-on stdout instead of text. The data is the library's own result types ([`obdcracker-transport`](library.md#json),
+on stdout instead of text, and `diff` print the changes it finds between two of them. The data is the library's own result types ([`obdcracker-transport`](library.md#json),
 `serde` feature), so a program importing the crates reads the same values.
 
 ```sh
@@ -31,7 +31,7 @@ obdcracker --json fingerprint > fingerprint.json
 | Field | Meaning |
 |---|---|
 | `schema` | The document format's version, a whole number from 1 |
-| `command` | The command that printed it: `vin`, `fingerprint`, `scan`, `sweep`, `read-dids`, `dtc`, `adapter` or `ports` |
+| `command` | The command that printed it: `vin`, `fingerprint`, `scan`, `sweep`, `read-dids`, `dtc`, `adapter`, `ports` or `diff` |
 | `obdcracker` | The version of the build that printed it |
 | `result` | The command's result, below |
 
@@ -217,6 +217,52 @@ still be in the extended session, and `out_of_step` is whether a late answer may
 data could be told apart, and `unsplit` is the bytes from the first DID whose length the profile doesn't give, as the
 module sent them, empty when every DID was split.
 
+### `diff`
+
+What [`obdcracker diff`](usage.md#diff) found between two documents of one command, not read back by it:
+
+```json
+{
+  "compared": "fingerprint",
+  "changes": [
+    {"change": "CalidChanged", "source": "7E8", "slot": 1, "old": "4G0907589F", "new": "4G0907589G"},
+    {"change": "DidChanged", "module": {"name": "transmission", "response_id": "7E9"}, "did": "F189",
+     "old": {"value": {"Text": "0005"}}, "new": {"value": {"Text": "0006"}}}
+  ]
+}
+```
+
+`compared` is the command both documents were of, and `changes` is in the order the text output prints them (empty when
+nothing changed). Each change is an object whose `change` is its kind, and the exit status is 0 with no changes, 1 with some
+and 2 on an error, as for the text. Slots count from 1. A DID or other value that one side doesn't have is `null`; a value
+that couldn't be read is `{"error": ...}`, as above.
+
+| `change` | Other fields |
+|---|---|
+| `EcuAdded`, `EcuRemoved` | `source` |
+| `CalidChanged` | `source`, `slot`, `old`, `new` (a calibration ID, or `null` for an empty slot) |
+| `CalidAdded`, `CalidRemoved` | `source`, `slot`, `calid` (a slot only one side has) |
+| `CvnChanged` | `source`, `slot`, `old`, `new` |
+| `CvnAdded`, `CvnRemoved` | `source`, `slot`, `cvn` |
+| `ObdPidAdded`, `ObdPidRemoved` | `source`, `pid` (a mode 01 PID the ECU supports) |
+| `ObdInfoAdded`, `ObdInfoRemoved` | `source`, `pid` (a mode 09 PID) |
+| `PidsCutShortChanged` | `source`, `old`, `new` (the bitmap PID the PID list was cut at, or `null`) |
+| `EcuNameChanged` | `source`, `old`, `new` (each `{"value": ...}` or `{"error": ...}`) |
+| `ObdDtcNew`, `ObdDtcCleared` | `source`, `dtc` |
+| `VinChanged` | `source`, `old`, `new` |
+| `ModuleAdded`, `ModuleRemoved` | `module` |
+| `AnsweredChanged` | `module`, `old`, `new` (booleans) |
+| `DidChanged` | `module`, `did`, `old`, `new` (each `null`, `{"value": ...}` or `{"error": ...}`) |
+| `UnsplitChanged` | `module`, `old`, `new` (bytes) |
+| `UdsDtcNew`, `UdsDtcCleared` | `module`, `dtc`, `status` |
+| `UdsDtcStatusChanged` | `module`, `dtc`, `old`, `new` (statuses) |
+| `Unreadable` | `scope`, `list`, `old`, `new`: a list that failed in one or both documents, with the errors differing |
+
+`module` is `{"name": ..., "response_id": ...}`. `scope` is `{"kind": "Ecu", "source": ...}` or
+`{"kind": "Module", "name": ..., "response_id": ...}`. `list` is `Calids`, `Cvns`, `ObdPids`, `ObdInfo`, `ObdDtcs`,
+`UdsDtcs` or `Dids`, and `old` and `new` are each the error that list failed with, or `null` if it was read.
+A kind added later raises the schema version, like any new variant.
+
 ### `dtc`
 
 ```json
@@ -256,5 +302,6 @@ With the `serde` feature, the result types implement `Serialize` and `Deserializ
 of `fingerprint` is a `transport::fingerprint::Fingerprint` and that of `scan` a `transport::scan::Scan`. The others
 wrap one: `sweep`'s `sweep` is a `transport::sweep::Sweep`, `read-dids`' `read` is a `Result<DidsData, ReadError>`
 (`transport::read_dids`), `dtc`'s `detail` is a `transport::dtc::DtcDetail` and `adapter`'s `adapter` a
-`transport::elm::AdapterInfo`. `transport::json` has the `with` modules for a type of your own that holds a byte
+`transport::elm::AdapterInfo`. `diff`'s `changes` are `transport::diff::Change`s, which implement `Serialize` only.
+`transport::json` has the `with` modules for a type of your own that holds a byte
 string, a CAN ID, a DID or a result. See [using it as a library](library.md#json).

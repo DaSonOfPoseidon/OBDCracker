@@ -1,8 +1,8 @@
 # Using the CLI
 
 Plug the adapter into the car and turn the ignition on. `vin`, `fingerprint`, `scan`, `sweep`, `dtc` and `read-dids` send requests only
-through the [safety policy](safety.md), and with a real adapter they append to an audit log. `ports`, `adapter` and
-`update` send nothing to the car. `ports` and `update` write no audit log; `adapter` writes one only if connecting to
+through the [safety policy](safety.md), and with a real adapter they append to an audit log. `ports`, `adapter`,
+`update` and `diff` send nothing to the car. `ports`, `update` and `diff` write no audit log; `adapter` writes one only if connecting to
 the adapter fails, recording what it sent the adapter and heard back.
 
 ## Connecting
@@ -84,9 +84,9 @@ Two options, each with its own list of commands:
 
 - `--dry-run` works with `vin`, `fingerprint`, `scan`, `sweep`, `dtc`, `read-dids` and `update`. The car commands print the frames
   they would send and open no adapter; `update` makes the same lookups and prints the command it would run, and installs
-  nothing. `adapter` refuses it, and `ports` ignores it.
+  nothing. `adapter` and `diff` refuse it, and `ports` ignores it.
 - `--sim a7` works with `vin`, `fingerprint`, `scan`, `sweep`, `dtc` and `read-dids`, and runs the command against a simulated A7.
-  `adapter` and `update` refuse it with status 2, and `ports` ignores it.
+  `adapter`, `update` and `diff` refuse it with status 2, and `ports` ignores it.
 
 ## Battery voltage
 
@@ -358,6 +358,59 @@ command would refuse is refused before that first read. If the first read gets n
 prints the frames of the whole request only, and `--elm-segmenting caf0` chooses how an STN sends it
 ([above](#sending-a-long-request-on-an-stn---elm-segmenting)).
 
+## `diff`
+
+```sh
+obdcracker --json fingerprint > before.json
+# ... have the car tuned ...
+obdcracker --json fingerprint > after.json
+obdcracker diff before.json after.json
+```
+
+Compares two [`--json`](#json-output---json) documents of the same command and prints what changed from the first to the
+second, one line per change, or `no changes`. It opens no adapter, needs no profile and writes no audit log, so every flag
+that picks an adapter, a profile or the log (and `--dry-run`) is refused with status 2. It works on `fingerprint`, `scan`,
+`sweep`, `vin` and `read-dids` documents; a document of another command (`dtc`, `adapter`, `ports`, or `diff`'s own output),
+two documents of different commands, a file that can't be read, isn't UTF-8 or JSON, is over 64 MiB, has a schema this build
+doesn't read, or a result that isn't its command's is an error that names the file (status 2, nothing on stdout).
+
+```
+7E8 CALID 1: "4G0907589F" → "4G0907589G"
+7E8 CVN 1: 9BF7470D → 38D3FF82
+transmission F189 "0005" → "0006"
+module added: 5F mmi (0x77F)
+engine DTC new: 0016A0 (confirmed)
+```
+
+A DID's, CALID's or ECU name's text is in double quotes (`\"` and `\\` for those characters), so it can't pass for bytes
+(`[01]`) or a marker (`(absent)`, `(not set)`, `(empty)`, or why a read failed, such as `(no reply)`).
+
+- **Exit status:** 0 when nothing changed, 1 when something did (as `diff(1)` does), 2 on an error.
+- **What is compared:** each emissions ECU's calibration IDs and CVNs by slot (`fingerprint`), its supported mode 01 and
+  mode 09 PIDs, name and stored DTCs (`scan`), the modules found, each module's DIDs (a DID's text, bytes, "not set", or
+  why it wasn't read, and a DID only one document has), whether it answered, and its DTCs: new, cleared, or with a
+  changed status (`scan`). Part and software numbers are DIDs, so they show here. The live values of mode 01 PIDs and a
+  DTC count aren't compared, since they change on every run.
+- **Matching:** ECUs by their reply CAN ID, and modules by name and reply CAN ID together, so a module that answers on
+  another ID is one removed and one added. An ECU or module in only one document is one line; what it holds isn't listed.
+- **A list that failed:** if a list (calibration IDs, DTCs, ...) couldn't be read in one document and was in the other, the
+  line says it can't be compared (`engine DTCs can't be compared: old read, new no reply`) instead of listing every entry
+  as new or cleared.
+- **Order:** the same whatever order the documents list things in: ECUs by CAN ID, then modules by name and CAN ID, and within
+  each by DID or DTC. A file that lists the same ECU, module, DID or DTC twice (a hand-edited one) is an error that names
+  the file and the entry (status 2): which entry is the car's can't be told, so nothing is compared.
+- **VINs:** a VIN is shown only when it changed (`vin`: `7E8 VIN <old> → <new>`; `scan`: the F190 line). An ECU that only one
+  `vin` document has is `7E8 ECU added` or `removed`, without its VIN.
+- **`sweep`:** both documents must be of the same module. A sweep that stopped early (the battery guard, a silent module)
+  didn't read what is past its stop, so only the DIDs both sweeps read in full are compared; when that is less than the
+  range either sweep asked for (two sweeps that stopped at the same DID included), a note on stderr gives it. Two sweeps
+  with no DID in common are an error.
+- **`read-dids`:** both documents must be of the same module and have asked for the same DIDs. The split DIDs' bytes are
+  compared, and the bytes the profile gave no length for (`unsplit data`).
+- **Text from the files** is shown as printable ASCII, anything else as `\u{...}`, so a document can't put an escape sequence
+  on your terminal.
+- **`--json diff`** prints the changes in the usual [envelope](json.md#diff), and the exit status above.
+
 ## JSON output (`--json`)
 
 ```sh
@@ -366,8 +419,8 @@ obdcracker --sim a7 --json vin
 ```
 
 `--json` goes before the command, like the other flags. It works with `vin`, `fingerprint`, `scan`, `sweep`,
-`read-dids`, `dtc`, `adapter` and `ports`, and is refused with `--dry-run` and `update` (status 2). stdout holds only
-the document, and the exit status is the one the text output would give. The fields and their forms are in
+`read-dids`, `dtc`, `adapter` and `ports`, and prints the changes [`diff`](#diff) finds. It is refused with `--dry-run`
+and `update` (status 2). stdout holds only the document, and the exit status is the one the text output would give. The fields and their forms are in
 [JSON output](json.md).
 
 ## `update`

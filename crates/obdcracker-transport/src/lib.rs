@@ -7,6 +7,7 @@ use std::time::{Duration, Instant, SystemTime};
 use obdcracker_safety::{Approved, ApprovedFlowControl, SupplyVoltage};
 
 mod audit;
+pub mod diff;
 pub mod discover;
 mod dry_run;
 pub mod dtc;
