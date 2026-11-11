@@ -13,7 +13,7 @@ use obdcracker_core::obd;
 use obdcracker_core::response::{self, Error as ReplyError, Nrc};
 use obdcracker_core::uds::{self, DiagnosticSession, UdsDtc};
 use obdcracker_profile::{Decode, DidSession, Profile, Protocol};
-use obdcracker_safety::{ModuleIds, Policy};
+use obdcracker_safety::{ModuleIds, Policy, SupplyVoltage};
 use obdcracker_sim::SimBus;
 use obdcracker_transport::discover;
 use obdcracker_transport::dtc::{self, RecordData};
@@ -688,6 +688,10 @@ impl Transport for Borrowed<'_> {
 
     fn broadcasts_can_overflow(&self) -> bool {
         self.0.broadcasts_can_overflow()
+    }
+
+    fn supply_voltage(&mut self) -> Result<SupplyVoltage, obdcracker_transport::Error> {
+        self.0.supply_voltage()
     }
 
     fn take_events(&mut self) -> Vec<obdcracker_transport::LinkEvent> {

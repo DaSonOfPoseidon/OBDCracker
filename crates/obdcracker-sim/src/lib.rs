@@ -30,7 +30,7 @@ use obdcracker_core::isotp::Addressing;
 use obdcracker_core::tp20::{self, Channel};
 use obdcracker_core::{obd, response, uds};
 use obdcracker_profile::{Decode, Profile, ProfileError, Protocol, STANDARD_DIDS, standard_decode};
-use obdcracker_safety::{Approved, Policy, Target, Tier};
+use obdcracker_safety::{Approved, Policy, SupplyVoltage, Target, Tier};
 use obdcracker_transport::{Error, Response, Transport};
 use tp20_module::Tp20Module;
 
@@ -100,10 +100,15 @@ impl From<ProfileError> for FixtureError {
     }
 }
 
+// A healthy battery with the engine off.
+const DEFAULT_SUPPLY: SupplyVoltage = SupplyVoltage::Known { millivolts: 12_600 };
+
 /// A simulated car: every module in a fixture, answering on the IDs its profile gives it.
 ///
 /// A broadcast OBD-II request is answered by every module with OBD-II data, in fixture order.
 /// A request to an ID no module listens on gets no reply.
+/// The battery reads 12.6 V ([`Transport::supply_voltage`]) unless [`SimBus::set_supply_voltage`]
+/// or [`SimBus::drop_supply_voltage_after`] says otherwise.
 /// A module leaves a non-default diagnostic session after S3 without a request: 5 s, as
 /// ISO 14229-2 gives it, unless [`Ecu::set_s3`] changes it.
 /// A VW TP2.0 module ([`SimBus::add_tp20`]) answers a channel setup to its address, and on the
@@ -119,6 +124,8 @@ pub struct SimBus {
     tp20: Vec<Tp20Module>,
     sent: Vec<Approved>,
     replies: VecDeque<Response>,
+    supply: SupplyVoltage,
+    supply_drop: Option<(usize, SupplyVoltage)>,
 }
 
 impl SimBus {
@@ -207,6 +214,8 @@ impl SimBus {
             tp20: Vec::new(),
             sent: Vec::new(),
             replies: VecDeque::new(),
+            supply: DEFAULT_SUPPLY,
+            supply_drop: None,
         })
     }
 
@@ -349,6 +358,20 @@ impl SimBus {
         }
     }
 
+    /// Sets the battery voltage the car reports ([`Transport::supply_voltage`]), replacing the
+    /// default and any drop set by [`SimBus::drop_supply_voltage_after`].
+    pub fn set_supply_voltage(&mut self, supply: SupplyVoltage) {
+        self.supply = supply;
+        self.supply_drop = None;
+    }
+
+    /// Makes the car report `supply` from the moment `requests` requests have been sent to it
+    /// ([`SimBus::sent`]), and until [`SimBus::set_supply_voltage`]: a battery that goes flat
+    /// during a long run.
+    pub fn drop_supply_voltage_after(&mut self, requests: usize, supply: SupplyVoltage) {
+        self.supply_drop = Some((requests, supply));
+    }
+
     /// Every request sent so far, oldest first.
     #[must_use]
     pub fn sent(&self) -> &[Approved] {
@@ -357,6 +380,13 @@ impl SimBus {
 }
 
 impl Transport for SimBus {
+    fn supply_voltage(&mut self) -> Result<SupplyVoltage, Error> {
+        Ok(match self.supply_drop {
+            Some((after, dropped)) if self.sent.len() >= after => dropped,
+            _ => self.supply,
+        })
+    }
+
     fn send(&mut self, request: &Approved) -> Result<(), Error> {
         self.sent.push(request.clone());
         match request.target() {
