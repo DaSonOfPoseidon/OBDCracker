@@ -119,7 +119,9 @@ you ask: the CLI's guard (refusing a long command at the start) is yours to writ
 With the `serde` feature, the results of `scan`, `fingerprint`, `sweep_dids`, `read_dtc_detail`, `read_dids` and
 `Elm::info` implement `Serialize` and `Deserialize` in the forms the CLI's `--json` prints ([JSON output](json.md)): byte
 strings as upper-case spaced hex, CAN IDs as 3 or 8 hex digits, DIDs and PIDs as hex, a result as `{"value": ...}` or
-`{"error": ...}`. A value reads back exactly as it was written, and text that isn't one of the forms is an error.
+`{"error": ...}`. A value reads back exactly as it was written, and text that isn't one of the forms is an error (a `DtcFormat` or
+`Nrc` holds its byte, and one built by hand as `Other` with a code that has a name reads back as the named variant,
+as `From<u8>` makes it).
 `transport::json` has the `with` modules for a type of your own that holds such a field.
 
 ```toml
