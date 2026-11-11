@@ -358,6 +358,18 @@ command would refuse is refused before that first read. If the first read gets n
 prints the frames of the whole request only, and `--elm-segmenting caf0` chooses how an STN sends it
 ([above](#sending-a-long-request-on-an-stn---elm-segmenting)).
 
+## JSON output (`--json`)
+
+```sh
+obdcracker --json scan > scan.json     # one JSON document on stdout, notes and warnings on stderr
+obdcracker --sim a7 --json vin
+```
+
+`--json` goes before the command, like the other flags. It works with `vin`, `fingerprint`, `scan`, `sweep`,
+`read-dids`, `dtc`, `adapter` and `ports`, and is refused with `--dry-run` and `update` (status 2). stdout holds only
+the document, and the exit status is the one the text output would give. The fields and their forms are in
+[JSON output](json.md).
+
 ## `update`
 
 ```sh
@@ -390,8 +402,8 @@ first install. It needs `curl` (Windows 10 and later have `curl.exe`) or, on a s
 - **`--dry-run`** goes before `update`, as for every command. It makes the same lookups and prints the command it
   would run, and downloads and installs nothing.
 - **No adapter:** `update` opens no adapter and writes no audit log. `--serial`, `--tcp`, `--gsusb`, `--socketcan`,
-  `--sim`, `--profile`, `--baud`, `--elm-segmenting`, `--listen-only`, `--bitrate` and `--audit-log` are refused with
-  status 2.
+  `--sim`, `--profile`, `--baud`, `--elm-segmenting`, `--listen-only`, `--bitrate`, `--sim-voltage`,
+  `--sim-voltage-drop`, `--force-low-voltage`, `--json` and `--audit-log` are refused with status 2.
 - **Rate limit:** GitHub's API allows 60 requests an hour per address without signing in. `update` and
   `update <VERSION>` make one request per release page, one for the target's commit and, when the installed commit is
   known and differs from the target's, one comparison. `update --main` reads no release list, so it makes the commit

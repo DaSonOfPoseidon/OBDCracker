@@ -539,6 +539,7 @@ dependencies = [
  "obdcracker-safety",
  "obdcracker-sim",
  "obdcracker-transport",
+ "serde_json",
 ]
 
 [[package]]

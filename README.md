@@ -51,7 +51,8 @@ With exactly one port that looks like a USB adapter plugged in, the port is foun
 devices can match too; see [Using the CLI](docs/usage.md)). With none or several, give `--serial <PORT>`
 (`obdcracker ports` lists them).
 
-See [Install](docs/install.md) for notes for each OS, and [Using the CLI](docs/usage.md) for every command.
+See [Install](docs/install.md) for notes for each OS, and [Using the CLI](docs/usage.md) for every command. Add
+`--json` before a command for one JSON document on stdout instead of text ([JSON output](docs/json.md)).
 
 ## Safety
 
