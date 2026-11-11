@@ -21,13 +21,16 @@ pub const IDENTIFICATION_DIDS: [u16; 5] = [
 ];
 
 /// A module to identify over UDS, by its CAN IDs.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UdsModule {
     /// What to call it in the results, such as `engine`.
     pub name: String,
     /// The CAN ID requests go to.
+    #[cfg_attr(feature = "serde", serde(with = "crate::json::can_id"))]
     pub request_id: u32,
     /// The CAN ID it answers on.
+    #[cfg_attr(feature = "serde", serde(with = "crate::json::can_id"))]
     pub response_id: u32,
 }
 
@@ -71,6 +74,7 @@ impl UdsModule {
 /// What identifies the software on a car: each emissions ECU's calibration IDs and CVNs, and
 /// each module's identification DIDs. A tune changes the CVNs, and usually the calibration IDs
 /// and software versions too, so comparing fingerprints shows what changed.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Fingerprint {
     /// Every ECU that answered OBD-II mode 09 PID 04 or 06, by reply CAN ID.
@@ -80,36 +84,44 @@ pub struct Fingerprint {
 }
 
 /// One emissions ECU's calibrations.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Calibration {
     /// The CAN ID the ECU answered on.
+    #[cfg_attr(feature = "serde", serde(with = "crate::json::can_id"))]
     pub source: u32,
     /// Its calibration IDs (mode 09 PID 04). `None` is an empty slot, sent as only 0x00 padding.
+    #[cfg_attr(feature = "serde", serde(with = "crate::json::outcome"))]
     pub calids: Result<Vec<Option<String>>, ReadError>,
     /// Its calibration verification numbers (mode 09 PID 06), one per calibration ID, in the same
     /// order. [`ReadError::CountMismatch`] if the counts differ.
+    #[cfg_attr(feature = "serde", serde(with = "crate::json::outcome"))]
     pub cvns: Result<Vec<Cvn>, ReadError>,
 }
 
 /// One module's identification DIDs.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Identification {
     /// The module's name, from [`UdsModule::name`].
     pub name: String,
     /// The CAN ID it answers on.
+    #[cfg_attr(feature = "serde", serde(with = "crate::json::can_id"))]
     pub response_id: u32,
     /// Each of [`IDENTIFICATION_DIDS`] and its value.
+    #[cfg_attr(feature = "serde", serde(with = "crate::json::did_outcomes"))]
     pub dids: Vec<(u16, Result<DidValue, ReadError>)>,
 }
 
 /// An identification DID's value. ISO 14229-1 makes these text, but some modules answer with
 /// binary data, which is kept rather than dropped.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DidValue {
     /// Printable text, without its padding.
     Text(String),
     /// Data that isn't printable text, as received. Shown as hex.
-    Bytes(Vec<u8>),
+    Bytes(#[cfg_attr(feature = "serde", serde(with = "crate::json::bytes"))] Vec<u8>),
     /// A placeholder that says the module has no value stored, such as a VIN of 17 dashes
     /// ([`obdcracker_core::obd::is_vin_placeholder`]). The bytes are in the audit log.
     NotSet,
@@ -127,6 +139,7 @@ impl fmt::Display for DidValue {
 
 /// Why one value is missing from a fingerprint. Modules often don't support every DID, so this
 /// doesn't stop the others being read.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ReadError {
     /// Nothing answered in time.
@@ -142,6 +155,7 @@ pub enum ReadError {
         error: response::Error,
         /// The reply, service ID first. For a DID read with others in one request, its own part
         /// of the reply: `62`, the DID and its data.
+        #[cfg_attr(feature = "serde", serde(with = "crate::json::bytes"))]
         reply: Vec<u8>,
     },
     /// Only the extended diagnostic session reads it, and the scan wasn't asked to enter it
@@ -154,6 +168,7 @@ pub enum ReadError {
         /// The refusal, or why the answer couldn't be decoded.
         error: response::Error,
         /// The module's answer, service ID first.
+        #[cfg_attr(feature = "serde", serde(with = "crate::json::bytes"))]
         reply: Vec<u8>,
     },
     /// The CVNs don't pair with the calibration IDs: J1979 gives one CVN per calibration ID, so

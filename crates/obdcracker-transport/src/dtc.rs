@@ -10,12 +10,14 @@ use crate::fingerprint::{FingerprintError, ReadError, UdsModule, ask};
 use crate::{Timing, Transport};
 
 /// A DTC's snapshot or extended data, as one module sent it.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RecordData {
     /// The DTC's status.
     pub status: DtcStatus,
     /// The records, each a record number and its data, as the module sent them. Their lengths
     /// depend on the module's data identifiers, so they aren't split. Empty if it stored none.
+    #[cfg_attr(feature = "serde", serde(with = "crate::json::bytes"))]
     pub records: Vec<u8>,
 }
 
@@ -40,14 +42,17 @@ impl From<uds::DtcData<'_>> for RecordData {
 }
 
 /// What [`read_dtc_detail`] found.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DtcDetail {
     /// The snapshot records asked for (`19 04 <DTC> <record>`).
+    #[cfg_attr(feature = "serde", serde(with = "crate::json::outcome"))]
     pub snapshots: Result<RecordData, ReadError>,
     /// The extended data records asked for (`19 06 <DTC> <record>`). `None` if it wasn't asked:
     /// the snapshot read went unanswered (a refusal doesn't name its DTC, so that read's late
     /// refusal could have passed for this one's answer), or the module said it was busy (NRC
     /// 0x21), so it isn't sent another request.
+    #[cfg_attr(feature = "serde", serde(with = "crate::json::option_outcome"))]
     pub extended_data: Option<Result<RecordData, ReadError>>,
     /// A read went unanswered, so its reply may still arrive as the answer to the connection's
     /// next request.

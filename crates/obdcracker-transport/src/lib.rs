@@ -14,6 +14,8 @@ pub mod elm;
 mod exchange;
 pub mod fingerprint;
 pub mod gateway;
+#[cfg(feature = "serde")]
+pub mod json;
 pub mod link;
 mod mock;
 /// The gs_usb and SocketCAN backends (M6) are its users. Crate-private, so no importer can put a
@@ -53,18 +55,22 @@ pub use session::{ExtendedSession, Left, S3, SessionError};
 /// Build one with [`Response::new`]; the struct is `#[non_exhaustive]` so it can gain fields.
 /// Two replies are equal when their `source` and `payload` are: [`Response::bus_time`] is a
 /// measurement of when the reply was heard, not part of what was said.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Debug, Clone, Eq)]
 #[non_exhaustive]
 pub struct Response {
     /// The CAN ID the reply came from.
+    #[cfg_attr(feature = "serde", serde(with = "crate::json::can_id"))]
     pub source: u32,
     /// The reassembled reply, service ID first.
+    #[cfg_attr(feature = "serde", serde(with = "crate::json::bytes"))]
     pub payload: Vec<u8>,
     /// A time no later than when the reply's last frame left the bus, if the transport can bound
     /// it, else `None`. Never later: a caller trusting a module's state from this time (such as
     /// [`ExtendedSession`] timing S3) would otherwise trust it for too long. A transport that
     /// only knows when the reply reached the host leaves it `None`. See
     /// [`docs/elm327.md#when-a-reply-left-the-bus`](https://github.com/DaSonOfPoseidon/OBDCracker/blob/main/docs/elm327.md#when-a-reply-left-the-bus).
+    #[cfg_attr(feature = "serde", serde(skip))]
     pub bus_time: Option<Instant>,
 }
 
@@ -93,6 +99,7 @@ impl PartialEq for Response {
     }
 }
 
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Debug, Clone, PartialEq, Eq)]
 /// Why a send or receive failed.
 pub enum Error {

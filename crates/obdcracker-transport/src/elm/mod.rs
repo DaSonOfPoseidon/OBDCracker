@@ -323,6 +323,7 @@ pub struct ConnectFailed {
 }
 
 /// What an adapter says about itself. Reading it puts nothing on the bus.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AdapterInfo {
     /// The banner the adapter printed when it was reset, the same as its `ATI` answer, such as

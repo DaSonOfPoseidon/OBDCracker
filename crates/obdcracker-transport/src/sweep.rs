@@ -33,12 +33,14 @@ pub struct SweepOptions {
 }
 
 /// What a sweep found, and where it stopped if it didn't finish.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Sweep {
     /// Each DID the module has, in order: its value, or why it refused it. A DID refused as out
     /// of range (NRC 0x31) isn't listed. One with no final answer is listed as
     /// [`ReadError::NoReply`] or [`ReadError::StillPending`]; if the sweep stopped before an
     /// answer came after it, [`Stop::at`] is at or before it.
+    #[cfg_attr(feature = "serde", serde(with = "crate::json::did_outcomes_bytes"))]
     pub found: Vec<(u16, Result<Vec<u8>, ReadError>)>,
     /// Where the sweep stopped early, if it did: sweep again from [`Stop::at`] to go on.
     pub stop: Option<Stop>,
@@ -66,16 +68,19 @@ impl Sweep {
 }
 
 /// Where and why a sweep stopped before the end of its range.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Stop {
     /// Where to resume: the first DID it didn't read, or the first of the unanswered DIDs just
     /// before it, or for [`Why::Unmatched`] the DID whose answer couldn't be told from a late one.
+    #[cfg_attr(feature = "serde", serde(with = "crate::json::did"))]
     pub at: u16,
     /// Why it stopped.
     pub why: Why,
 }
 
 /// Why a sweep stopped early.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Why {
     /// The module stopped answering ([`QUIET_LIMIT`] unanswered reads in a row), refused `22`

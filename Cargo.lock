@@ -605,6 +605,7 @@ dependencies = [
  "obdcracker-core",
  "obdcracker-safety",
  "proptest",
+ "serde",
  "serde_json",
  "serial2",
  "socketcan",
