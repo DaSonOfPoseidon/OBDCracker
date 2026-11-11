@@ -6,3 +6,6 @@ pub mod obd;
 pub mod response;
 pub mod tp20;
 pub mod uds;
+
+#[cfg(feature = "serde")]
+mod serde_text;
