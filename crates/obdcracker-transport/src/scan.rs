@@ -6,7 +6,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use obdcracker_core::obd::{self, Dtc, SupportedPids, Unit, Value};
 use obdcracker_core::response::{self, Error as ReplyError};
 use obdcracker_core::uds::{self, DiagnosticSession, DtcCount, DtcRecord, did};
-use obdcracker_safety::{Approved, Policy, Protocol, Target};
+use obdcracker_safety::{Approved, Policy, Protocol, SupplyVoltage, Target};
 
 use crate::fingerprint::{
     DidValue, FingerprintError, LongRead, ReadError, UdsModule, ask, broadcast, decode_did_value,
@@ -359,6 +359,9 @@ pub(crate) trait Ask {
         request: &Approved,
         decode: impl FnOnce(&[u8]) -> Result<V, ReplyError>,
     ) -> Result<(bool, Result<V, ReadError>), ScanError>;
+
+    // The supply voltage, through the transport the reads go to.
+    fn supply_voltage(&mut self) -> Result<SupplyVoltage, Error>;
 }
 
 pub(crate) struct Direct<'a, T: ?Sized> {
@@ -383,6 +386,10 @@ impl<T: Transport + ?Sized> Ask for Direct<'_, T> {
         )
         .map(|value| (true, value))
     }
+
+    fn supply_voltage(&mut self) -> Result<SupplyVoltage, Error> {
+        self.transport.supply_voltage()
+    }
 }
 
 impl<T: Transport + ?Sized> Ask for ExtendedSession<'_, T> {
@@ -398,6 +405,10 @@ impl<T: Transport + ?Sized> Ask for ExtendedSession<'_, T> {
             Ok(reply) => Ok((true, decoded(&reply.payload, decode))),
             Err(e) => session_error(e).map(|e| (true, Err(e))),
         }
+    }
+
+    fn supply_voltage(&mut self) -> Result<SupplyVoltage, Error> {
+        ExtendedSession::supply_voltage(self)
     }
 }
 

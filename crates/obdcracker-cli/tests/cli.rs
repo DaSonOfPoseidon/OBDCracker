@@ -142,9 +142,11 @@ fn sim_vin_prints_each_answer_and_audits_each_frame() {
 
     let audit = std::fs::read_to_string(&log).unwrap();
     let lines: Vec<_> = audit.lines().collect();
-    assert_eq!(lines.len(), 2, "{audit}");
-    assert!(lines[0].contains(r#""dir":"tx","id":"7DF","payload":"09 02","link":"sim""#));
-    assert!(lines[1].contains(r#""dir":"rx","id":"7E8""#));
+    assert_eq!(lines.len(), 3, "{audit}");
+    // The battery is read before the request (the voltage guard).
+    assert!(lines[0].contains(r#""dir":"voltage","millivolts":12600"#));
+    assert!(lines[1].contains(r#""dir":"tx","id":"7DF","payload":"09 02","link":"sim""#));
+    assert!(lines[2].contains(r#""dir":"rx","id":"7E8""#));
 }
 
 #[test]
@@ -519,7 +521,8 @@ fn tcp_vin_reads_through_an_elm_adapter_and_warns_about_wireless() {
     let lines: Vec<_> = audit
         .lines()
         .skip(setup)
-        .filter(|l| !l.contains(r#""dir":"cmd""#))
+        // The battery reading (`ATRV` and its result) before the first request.
+        .filter(|l| !l.contains(r#""dir":"cmd""#) && !l.contains(r#""dir":"voltage""#))
         .collect();
     // `01 00` names the ECUs, then each is asked by its own request ID (#242).
     let shape: Vec<_> = lines

@@ -3,7 +3,7 @@ use std::time::{Duration, Instant};
 
 use obdcracker_core::response;
 use obdcracker_core::uds::{self, DiagnosticSession};
-use obdcracker_safety::{Approved, Policy, Protocol, Rejection, Target};
+use obdcracker_safety::{Approved, Policy, Protocol, Rejection, SupplyVoltage, Target};
 
 use crate::{Error, Expect, Response, Timing, Transport, exchange};
 
@@ -254,6 +254,12 @@ impl<'a, T: Transport + ?Sized> ExtendedSession<'a, T> {
     pub fn exchange(&mut self, request: &Approved) -> Result<Response, SessionError> {
         self.prepare(request)?;
         self.exchange_prepared(request)
+    }
+
+    // The supply voltage, for a run that watches it between its requests. Nothing is sent to the
+    // module, so its S3 isn't restarted.
+    pub(crate) fn supply_voltage(&mut self) -> Result<SupplyVoltage, Error> {
+        self.transport.supply_voltage()
     }
 
     // `exchange`'s checks and re-entry. A failure here means `request` wasn't sent.

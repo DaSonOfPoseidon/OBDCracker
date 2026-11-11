@@ -4,7 +4,7 @@
 use std::fmt;
 use std::time::{Duration, Instant, SystemTime};
 
-use obdcracker_safety::{Approved, ApprovedFlowControl};
+use obdcracker_safety::{Approved, ApprovedFlowControl, SupplyVoltage};
 
 mod audit;
 pub mod discover;
@@ -36,6 +36,7 @@ pub mod scan;
 mod session;
 pub mod sweep;
 pub mod tp20;
+pub mod voltage;
 
 pub use audit::{Audited, log_events, log_failure};
 pub use dry_run::DryRun;
@@ -176,6 +177,22 @@ pub trait Transport {
     /// A wrapper of a `Transport` must forward it.
     fn broadcasts_can_overflow(&self) -> bool {
         false
+    }
+    /// The voltage the adapter sees on the OBD port, for [`obdcracker_safety::Precondition`]s
+    /// and the low-battery guard. Sends nothing on the bus: an adapter-local
+    /// command, such as the ELM327's `ATRV`, that [`Audited`] logs.
+    ///
+    /// The default is [`SupplyVoltage::Unknown`], for a transport that can't measure it
+    /// (`gs_usb`, SocketCAN, a dry run). An answer that isn't one clean voltage is `Unknown`
+    /// too, not an error, and `Unknown` never passes a precondition. A transport that wraps
+    /// another must forward this.
+    ///
+    /// # Errors
+    ///
+    /// The adapter failed or didn't answer. A caller that only wants to know the voltage may
+    /// treat that as `Unknown`; the adapter's next call fails too if it can no longer be trusted.
+    fn supply_voltage(&mut self) -> Result<SupplyVoltage, Error> {
+        Ok(SupplyVoltage::Unknown)
     }
     /// What the adapter did besides carrying requests and replies since this was last called,
     /// oldest first, for the audit log ([`Audited`] takes them after every call). The default

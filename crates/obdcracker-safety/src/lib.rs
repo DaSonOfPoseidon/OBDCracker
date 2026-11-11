@@ -20,8 +20,10 @@
 //! ```
 
 mod flow_control;
+mod precondition;
 
 pub use flow_control::{ApprovedFlowControl, FeedOutcome, ReplyWindow};
+pub use precondition::{Precondition, SupplyVoltage, VoltageCheck, VoltageThresholds};
 
 use obdcracker_core::tp20;
 

@@ -11,6 +11,7 @@ use obdcracker_safety::{Policy, Protocol, Target};
 
 use crate::fingerprint::{FingerprintError, ReadError, UdsModule};
 use crate::scan::{Ask, Direct, session_error};
+use crate::voltage::{LowVoltage, VoltageWatch};
 use crate::{Error, ExtendedSession, S3, SessionError, Timing, Transport};
 
 /// What [`sweep_dids`] does beyond reading in the default session.
@@ -26,6 +27,9 @@ pub struct SweepOptions {
     /// then takes longer. Patience ends afterwards whatever happens. `None`, the default, waits
     /// as usual.
     pub patient: Option<Duration>,
+    /// Re-check the supply voltage every so many reads and stop when it is too low
+    /// ([`Why::LowVoltage`]). `None`, the default, never checks.
+    pub voltage_watch: Option<VoltageWatch>,
 }
 
 /// What a sweep found, and where it stopped if it didn't finish.
@@ -84,6 +88,10 @@ pub enum Why {
     /// may be the late answer to the earlier one. Sweeping again from [`Stop::at`] on a fresh
     /// connection asks that DID first.
     Unmatched(ReadError),
+    /// The supply voltage was too low when [`SweepOptions::voltage_watch`] re-checked it. The sweep
+    /// stopped before the read at [`Stop::at`], which a sweep from there goes on with once the
+    /// battery is charged, and left the extended session.
+    LowVoltage(LowVoltage),
     /// The adapter failed, such as `BUFFER FULL`; its state may be unknown, so connect again.
     Adapter(Error),
 }
@@ -94,6 +102,7 @@ impl std::fmt::Display for Why {
             Self::Module(ReadError::NoReply) => f.write_str("the module stopped answering"),
             Self::Module(e) => e.fmt(f),
             Self::Unmatched(e) => write!(f, "a reply may have answered an earlier request ({e})"),
+            Self::LowVoltage(low) => low.fmt(f),
             Self::Adapter(e) => e.fmt(f),
         }
     }
@@ -239,7 +248,7 @@ fn sweep_approved<T: Transport + ?Sized>(
                 };
             }
         };
-        let sweep = read_each(&mut session, requests, &mut progress);
+        let sweep = read_each(&mut session, requests, options.voltage_watch, &mut progress);
         let left = session.end();
         let retried = matches!(left, Err(SessionError::Retried(_)));
         return match left.map_err(session_error) {
@@ -262,7 +271,7 @@ fn sweep_approved<T: Transport + ?Sized>(
         response_id: module.response_id,
         timing,
     };
-    read_each(&mut direct, requests, &mut progress)
+    read_each(&mut direct, requests, options.voltage_watch, &mut progress)
 }
 
 // An adapter failure after the reads leaves it in an unknown state, so it outranks why the sweep
@@ -317,6 +326,7 @@ fn halt(
 fn read_each(
     asker: &mut impl Ask,
     requests: &[(u16, obdcracker_safety::Approved)],
+    watch: Option<VoltageWatch>,
     progress: &mut impl FnMut(u16),
 ) -> Sweep {
     let mut found = Vec::new();
@@ -329,9 +339,13 @@ fn read_each(
             .map(|(did, e)| (did, Err(e)))
             .collect::<Vec<_>>()
     };
-    for (did, request) in requests {
+    for (done, (did, request)) in requests.iter().enumerate() {
         // Where to resume: the first unanswered DID.
         let resume = quiet.first().map_or(*did, |(did, _)| *did);
+        if let Some(low) = watch.and_then(|watch| watch.stop_after(done, || asker.supply_voltage()))
+        {
+            return halt(found, resume, Why::LowVoltage(low), out_of_step);
+        }
         let answer = asker.ask_sent(request, |payload| {
             Ok(uds::decode_did(payload, *did)?.to_vec())
         });

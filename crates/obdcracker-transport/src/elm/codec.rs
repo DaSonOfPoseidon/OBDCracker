@@ -293,6 +293,27 @@ fn parse_frame(line: &str) -> Option<CanFrame> {
     (len > 0).then_some(CanFrame { id, data, len })
 }
 
+/// The millivolts in an `ATRV` answer: one or two digits, up to three decimals after a point, and
+/// an optional `V` (`12.6V`, `12.63`, `9V`), with spaces or a carriage return around it. `None` for
+/// anything else, such as `?`, a sign, a hundred volts or more, or text after the `V`.
+#[must_use]
+pub fn parse_voltage(text: &str) -> Option<u32> {
+    let text = text.trim_ascii();
+    let text = text.strip_suffix('V').unwrap_or(text);
+    let (whole, fraction) = text.split_once('.').unwrap_or((text, ""));
+    let digits = |part: &str, most: usize| {
+        (part.len() <= most && part.bytes().all(|b| b.is_ascii_digit()))
+            .then(|| part.bytes().fold(0, |n, b| n * 10 + u32::from(b - b'0')))
+    };
+    if whole.is_empty() || (text.contains('.') && fraction.is_empty()) {
+        return None;
+    }
+    let whole = digits(whole, 2)?;
+    // Scaled to thousandths whatever the number of decimals.
+    let fraction = digits(fraction, 3)? * 10u32.pow(3 - u32::try_from(fraction.len()).ok()?);
+    Some(whole * 1000 + fraction)
+}
+
 // Exactly two hex digits. `from_str_radix` alone would also take "+F".
 fn hex_byte(text: &str) -> Option<u8> {
     if text.len() != 2 || !text.bytes().all(|b| b.is_ascii_hexdigit()) {

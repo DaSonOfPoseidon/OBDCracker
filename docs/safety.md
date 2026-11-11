@@ -121,6 +121,40 @@ module, saved to disk and read back from disk. Every change is reversible from t
 tested end to end against the simulator (back up → write → restore → read back equals the original) before it touches
 a car.
 
+## Supply voltage
+
+A low battery makes modules reset or refuse requests, and a long session with the engine off drains it. The adapter
+reports the voltage it sees on the OBD port (`ATRV` on an ELM327 or STN: a command to the adapter, never a frame on
+the bus), and `obdcracker-safety` gives that reading a type and a rule:
+
+- `SupplyVoltage` is `Known { millivolts }` or `Unknown`. `Transport::supply_voltage` returns it, `Unknown` by default,
+  and a transport that wraps another forwards it. An adapter that can't measure it (`gs_usb`, SocketCAN, a dry run),
+  or whose answer isn't one clean voltage (`?`, an empty or garbled line), reports `Unknown`, not an error.
+- `VoltageThresholds::DEFAULT` is 12.2 V to warn and 11.8 V to refuse, for a 12 V car with the engine off. Both
+  are provisional. A voltage **under** a threshold counts: exactly 12.2 V is `Ok`, 12.199 V is `Low`; exactly 11.8 V
+  is `Low`, 11.799 V is `TooLow`.
+- `Precondition` is what a later tier will require before it unlocks (stable power comes first for coding, and for
+  reading flash). `VoltageCheck::Ok` is the only value that satisfies it: **`Unknown` never passes**, and neither
+  does `Low` or `TooLow`. Nothing requires it yet: `Policy::approve`, the tiers and the allowlists are unchanged, and
+  T0 reads don't wait on the battery.
+
+What the tools do with it today (the CLI's rules are in [usage](usage.md#battery-voltage)):
+
+- Before any command that talks to the car, the CLI reads the voltage through the audited transport, so the reading
+  is in the audit log, and warns when it is low or can't be read.
+- Long commands (a sweep of over 256 DIDs, `scan --discover --wide`) are refused below 11.8 V unless
+  `--force-low-voltage` is given, and while they run the voltage is read again every 50 requests. A reading below
+  11.8 V stops the run with what it found; a sweep leaves its extended session as it ends any other way. These are the
+  library's `VoltageWatch` on `SweepOptions` and `DiscoverOptions`, so a program that imports the crates can use the
+  same guard. An `Unknown` reading, or one that couldn't be taken, doesn't stop a run: an adapter that can't measure
+  would otherwise never finish one.
+- The re-check never runs inside a VW TP2.0 channel or an ELM327's monitor: an AT command there would stop the
+  adapter listening and could make the module drop the channel (#227, #228). The driver reports `Unknown` there and
+  writes nothing, and TP2.0 discovery isn't watched.
+
+An adapter without voltage sensing may print a fixed `0.0V`. That is read as a voltage of 0, so a long command is
+refused with the same message; give `--force-low-voltage` if your adapter always says that.
+
 ## Seeing what will be sent
 
 - `--dry-run` prints the exact frames a command would send without opening a device. Frames that depend on the
@@ -134,8 +168,9 @@ Every frame sent or received in a real session is appended to an audit log, alon
 adapter mishearing a request it may already have sent), every command to the adapter (`"dir":"cmd"`, such as
 `AT SH 7E0`, with its answer), every status line that ended a request instead of a reply (`"dir":"status"`, such as
 `NO DATA`), every reply line the adapter printed after nothing read it any more (`"dir":"unread"`, such as a late
-reply), and every driver setting that changes how a request is sent (`"dir":"setting"`, such as
-`"name":"segment-on-stn","value":"on"`, logged before the first request). It holds only what the adapter hears through its receive filter, not the
+reply), every driver setting that changes how a request is sent (`"dir":"setting"`, such as
+`"name":"segment-on-stn","value":"on"`, logged before the first request), and every reading of the supply voltage
+(`"dir":"voltage"` with `"millivolts"`, `null` when unknown, after the `ATRV` command that took it). It holds only what the adapter hears through its receive filter, not the
 whole bus. Requests and the flow control frames a backend sends while receiving are logged before they are sent, and the log
 records which link a session used.
 

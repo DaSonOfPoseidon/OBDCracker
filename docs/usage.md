@@ -88,6 +88,40 @@ Two options, each with its own list of commands:
 - `--sim a7` works with `vin`, `fingerprint`, `scan`, `sweep`, `dtc` and `read-dids`, and runs the command against a simulated A7.
   `adapter` and `update` refuse it with status 2, and `ports` ignores it.
 
+## Battery voltage
+
+Before `vin`, `fingerprint`, `scan`, `sweep`, `dtc` and `read-dids` send anything, the CLI asks the adapter what voltage
+it sees (`ATRV`) and writes the reading to the audit log (`"dir":"voltage"`; an ELM327 or STN also logs the `ATRV`
+command and its answer). A dry run has no car and reads nothing; `adapter` just shows the voltage. With the engine
+off:
+
+| Voltage | What happens |
+|---|---|
+| 12.2 V or more | nothing is printed |
+| under 12.2 V, at least 11.8 V | a warning |
+| under 11.8 V | a long command is refused (status 1, nothing sent); a short one gets a warning |
+| not reported (`gs_usb`, SocketCAN, a clone that prints `?`) | a note that the battery isn't checked; the command goes on |
+
+A voltage equal to a threshold is on its good side: exactly 12.2 V prints nothing, and exactly 11.8 V is only a
+warning. A **long command** is a `sweep` of more than 256 DIDs (exactly 256 is short) or `scan --discover --wide`.
+
+While a long command runs, the voltage is read again every 50 requests, and a reading under 11.8 V stops it: `sweep`
+and the discovery passes print what they found and exit with status 1, `sweep` also says where to go on from (and
+leaves the extended session first, if it was in one). A reading that is unknown, or fails, doesn't stop it.
+
+`--force-low-voltage` skips both the refusal and the stop. The voltage is still read, logged and warned about.
+Some adapters without voltage sensing always print `0.0V`, which is read as a voltage of 0: use the flag with those.
+
+To try this without a car, `--sim` takes `--sim-voltage 11.5` (the simulated battery, 12.6 V by default) and
+`--sim-voltage-drop 60:11.0` (the battery drops to 11 V once 60 requests have been sent):
+
+```sh
+obdcracker --sim a7 --sim-voltage 11.5 sweep --module engine --range 0600-0700   # refused: 257 DIDs
+obdcracker --sim a7 --sim-voltage-drop 60:11.0 sweep --module engine --range 0600-0700   # stops at the check after request 100
+```
+
+The thresholds and the rules behind them are in [safety](safety.md#supply-voltage).
+
 ## `vin`
 
 ```sh
@@ -204,7 +238,8 @@ that was only slow. The wide pass waits as long, for modules such as the MMI who
 slowly. An OBDLink (STN chip) can wait that long; a plain ELM327 waits about 1 s at most, and the output says so. One
 that doesn't answer `22 F1 87` at all could still own one, so `--wide` is opt-in and may send a read on that module's
 reply ID: a frame no module receives, since modules only send on theirs. A module that speaks only KWP2000/TP2.0, as
-some older MMIs may, doesn't answer any pass.
+some older MMIs may, doesn't answer any pass. `--wide` is a long command: it is refused on a low battery and stopped
+if the battery drops ([Battery voltage](#battery-voltage)).
 
 ### `--discover-29bit`
 
@@ -260,7 +295,9 @@ what it found, if the module goes quiet (3 reads in a row with no final answer),
 not supported in active session"), says it's busy, or the adapter fails, and prints the command to go on with when
 that can help. `--extended` sweeps in the extended session, entered and left as `scan --extended` does, and warns if
 the module may not have left it. A sweep that finishes after a request went without a definite answer notes that a
-late answer may yet arrive, so connect again before reading from that module again.
+late answer may yet arrive, so connect again before reading from that module again. A sweep of more than 256 DIDs is
+a long command: it is refused on a low battery and stopped if the battery drops
+([Battery voltage](#battery-voltage)).
 
 `--patient` waits up to 5 s for each reply (about 1 s on a plain ELM327), for a module that answers slowly: the A7's
 gateway refuses `22 00BE` after more than 1.1 s, so a usual sweep takes that refusal for the next read's answer and

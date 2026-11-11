@@ -4,7 +4,7 @@ use std::io::{self, Write};
 use std::path::Path;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use obdcracker_safety::{Approved, ApprovedFlowControl};
+use obdcracker_safety::{Approved, ApprovedFlowControl, SupplyVoltage};
 
 use crate::{Error, LinkEvent, Response, Transport, hex};
 
@@ -18,7 +18,9 @@ use crate::{Error, LinkEvent, Response, Transport, hex};
 /// next request (`"dir":"unread"`), status lines that ended a request, such as `NO DATA`
 /// (`"dir":"status"`), driver settings that change how a request is sent, such as
 /// [`Elm::segment_on_stn`](crate::elm::Elm::segment_on_stn) (`"dir":"setting"`, with `"name"` and
-/// `"value"`), and how many events were lost (`"dir":"lost"`). Each line's `ts_ms` is
+/// `"value"`), how many events were lost (`"dir":"lost"`), and each reading of the supply voltage
+/// ([`Transport::supply_voltage`], `"dir":"voltage"` with `"millivolts"`, `null` when unknown).
+/// Each line's `ts_ms` is
 /// when it happened (for a reply line, when the driver read it from the link), so an event can
 /// be logged after a later request. When dropped, it has the transport read what's left of the
 /// last request ([`Transport::settle`]) and logs that too, unless it was settled since.
@@ -188,6 +190,22 @@ impl<T: Transport> Transport for Audited<T> {
 
     fn broadcasts_can_overflow(&self) -> bool {
         self.inner.broadcasts_can_overflow()
+    }
+
+    // Logged whatever the transport is, so the log says what the battery was even where no
+    // command shows it (the simulator), or that it wasn't known.
+    fn supply_voltage(&mut self) -> Result<SupplyVoltage, Error> {
+        self.settled = false;
+        let result = self.inner.supply_voltage();
+        let logged = self.record_events();
+        let supply = result.map_err(|e| self.record_error("supply_voltage", None, e))?;
+        logged?;
+        let millivolts = match supply {
+            SupplyVoltage::Known { millivolts } => millivolts.to_string(),
+            SupplyVoltage::Unknown => "null".to_owned(),
+        };
+        self.write(&format!(r#""dir":"voltage","millivolts":{millivolts}"#))?;
+        Ok(supply)
     }
 
     fn take_events(&mut self) -> Vec<LinkEvent> {

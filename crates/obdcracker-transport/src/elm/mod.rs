@@ -13,11 +13,11 @@ use obdcracker_core::isotp::{
     self, Addressing, CAN_DLC, FlowControl, FlowStatus, MAX_SHORT_PAYLOAD, Progress, Reassembler,
     Segmenter, Step,
 };
-use obdcracker_safety::{Approved, Protocol, Target};
+use obdcracker_safety::{Approved, Protocol, SupplyVoltage, Target};
 
 use crate::link::{Driver, Link, LinkKind};
 use crate::{Error, LinkEvent, Response, Timing, Transport, hex};
-use codec::{Event, Line, LineSplitter, Status, parse_line};
+use codec::{Event, Line, LineSplitter, Status, parse_line, parse_voltage};
 
 // Sent after the reset, each must answer OK (docs/elm327.md#setup). Never automatic protocol
 // search (`ATSP6`): it sends probe frames that no policy approved and no audit log records.
@@ -1490,6 +1490,23 @@ impl<L: Link> Transport for Elm<L> {
         // can't be paced, since the adapter's own flow control is the only one that reaches each
         // ECU (docs/elm327.md#flow-control-per-target).
         self.pace.is_some()
+    }
+
+    // `ATRV` is an adapter-local command, like the ones `info` sends (docs/safety.md#supply-voltage).
+    fn supply_voltage(&mut self) -> Result<SupplyVoltage, Error> {
+        // Any command stops a monitor, and the TP2.0 channel's frames go out raw: a command
+        // between them could lose the module's answer or make it drop the channel (#227, #228).
+        self.trusted()?;
+        if self.raw || self.monitoring {
+            return Ok(SupplyVoltage::Unknown);
+        }
+        let lines = self.command("ATRV")?;
+        Ok(match lines.as_slice() {
+            [line] => parse_voltage(line).map_or(SupplyVoltage::Unknown, |millivolts| {
+                SupplyVoltage::Known { millivolts }
+            }),
+            _ => SupplyVoltage::Unknown,
+        })
     }
 
     fn settle(&mut self) -> Result<(), Error> {

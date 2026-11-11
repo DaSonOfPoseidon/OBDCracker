@@ -129,6 +129,8 @@ pub struct FakeElm {
     /// With `ignores_caf0`, a clone that takes a line of 8 bytes in `AT CAF1` instead of
     /// refusing it, and sends it as the data of one frame.
     pub takes_eight_bytes_in_caf1: bool,
+    /// The lines `AT RV` prints: the voltage, `12.6V` unless a test sets another.
+    pub voltage: Vec<String>,
 }
 
 // The adapter's output buffer, in bytes (ELM327DS v2.0, p. 80).
@@ -282,6 +284,7 @@ impl FakeElm {
             module: None,
             ignores_caf0: false,
             takes_eight_bytes_in_caf1: false,
+            voltage: vec!["12.6V".to_owned()],
         }
     }
 
@@ -496,7 +499,9 @@ impl FakeElm {
                 return;
             }
             "RV" => {
-                self.print("12.6V");
+                for line in self.voltage.clone() {
+                    self.print(&line);
+                }
                 self.prompt();
                 return;
             }
