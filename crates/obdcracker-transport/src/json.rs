@@ -62,7 +62,7 @@ pub fn parse_bytes(text: &str) -> Option<Vec<u8>> {
 
 const MAX_CAN_ID: u32 = 0x1FFF_FFFF;
 
-// 3 digits for an 11-bit ID, 8 for a 29-bit one. One a 3-digit form could hold is written in it.
+// 3 digits up to 0x7FF, 8 above it up to 29 bits: each ID has one spelling.
 fn can_id_text(id: u32) -> Option<String> {
     match id {
         0..=0x7FF => Some(format!("{id:03X}")),
@@ -74,7 +74,7 @@ fn can_id_text(id: u32) -> Option<String> {
 fn parse_can_id(text: &str) -> Option<u32> {
     match text.len() {
         3 => hex_digits(text, 3).filter(|&id| id <= 0x7FF),
-        8 => hex_digits(text, 8).filter(|&id| id <= MAX_CAN_ID),
+        8 => hex_digits(text, 8).filter(|id| (0x800..=MAX_CAN_ID).contains(id)),
         _ => None,
     }
 }
@@ -371,7 +371,8 @@ pub mod can_id {
         CanId(*id).serialize(serializer)
     }
 
-    /// Reads a 3-digit ID of at most 0x7FF or an 8-digit one of at most 0x1FFFFFFF.
+    /// Reads a 3-digit ID of at most 0x7FF or an 8-digit one from 0x800 to 0x1FFFFFFF: the form
+    /// [`serialize`] writes for it, and no other.
     pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<u32, D::Error> {
         CanId::deserialize(deserializer).map(|id| id.0)
     }

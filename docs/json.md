@@ -49,7 +49,7 @@ different value.
 | What | Form | Example |
 |---|---|---|
 | Bytes | upper-case hex pairs, one space between, empty for none | `"1A 2A 40"`, `""` |
-| CAN ID | 3 upper-case hex digits (11-bit, up to 7FF), or 8 (29-bit, up to 1FFFFFFF) | `"7E8"`, `"17FE0010"` |
+| CAN ID | 3 upper-case hex digits up to 7FF, or 8 from 00000800 to 1FFFFFFF (an ID is written in the first form if it fits) | `"7E8"`, `"17FE0010"` |
 | DID | 4 upper-case hex digits | `"F187"` |
 | PID, and a bare byte such as a status or an NRC | 2 upper-case hex digits | `"0C"`, `"31"` |
 | OBD-II DTC | the J2012 text | `"P0401"` |

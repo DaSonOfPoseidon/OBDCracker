@@ -111,7 +111,11 @@ fn can_ids_outside_29_bits_are_refused_both_ways() {
     ] {
         assert!(from_text::<Id>(bad).is_err(), "{bad:?}");
     }
-    assert_eq!(from_text::<Id>("00000123").unwrap(), Id(0x123));
+    // An ID a 3-digit form holds has no other spelling.
+    for short in ["00000000", "00000123", "000007FF"] {
+        assert!(from_text::<Id>(short).is_err(), "{short}");
+    }
+    assert_eq!(from_text::<Id>("00000800").unwrap(), Id(0x800));
 }
 
 #[test]
@@ -628,8 +632,7 @@ proptest! {
             prop_assert_eq!(hex(&bytes), text.clone());
         }
         if let Ok(id) = from_text::<Id>(&text) {
-            prop_assert!(text.len() == 3 || text.len() == 8, "{}", text);
-            prop_assert!(id.0 <= 0x1FFF_FFFF);
+            prop_assert_eq!(serde_json::to_value(&id).unwrap(), json!(text.clone()));
         }
         if let Ok(Did(did)) = from_text::<Did>(&text) {
             prop_assert_eq!(format!("{did:04X}"), text);
