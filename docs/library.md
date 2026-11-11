@@ -142,6 +142,41 @@ assert_eq!(serde_json::to_string(&scan)?, r#"{"ecus":[],"modules":[]}"#);
 # fn main() {}
 ```
 
+## Comparing two reads
+
+`transport::diff` says what changed between two results you already have, such as a car's fingerprint before and after a
+tune. It sends nothing and needs no feature. `diff_fingerprint`, `diff_scan`, `diff_sweep`, `diff_dids_data` and
+`diff_vins` each return a `Vec<Change>`, which is empty when nothing changed. `Change` is `#[non_exhaustive]`, prints as
+the CLI's [`diff`](usage.md#diff) line, and with the `serde` feature serializes as the document
+[`--json diff`](json.md#diff) prints.
+
+```rust
+use obdcracker::core::obd::Cvn;
+use obdcracker::transport::diff::diff_fingerprint;
+use obdcracker::transport::fingerprint::{Calibration, Fingerprint};
+
+let engine = |calid: &str, cvn: [u8; 4]| Fingerprint {
+    ecus: vec![Calibration {
+        source: 0x7E8,
+        calids: Ok(vec![Some(calid.to_owned())]),
+        cvns: Ok(vec![Cvn(cvn)]),
+    }],
+    modules: Vec::new(),
+};
+let before = engine("4G0907589F", [0x9B, 0xF7, 0x47, 0x0D]);
+let after = engine("4G0907589G", [0x38, 0xD3, 0xFF, 0x82]);
+
+let changes = diff_fingerprint(&before, &after);
+assert_eq!(changes.len(), 2);
+assert_eq!(changes[0].to_string(), "7E8 CALID 1: 4G0907589F → 4G0907589G");
+assert_eq!(changes[1].to_string(), "7E8 CVN 1: 9BF7470D → 38D3FF82");
+assert!(diff_fingerprint(&before, &before).is_empty());
+```
+
+ECUs match by reply CAN ID and modules by name and reply CAN ID, and the changes come in a fixed order. A list that
+couldn't be read on one side (a calibration list that failed, say) is one `Change::Unreadable`, not every entry added or
+removed. Live PID values aren't compared. [`diff`](usage.md#diff) lists what is and the rest of the rules.
+
 ## Crates
 
 See the [crate layout](development.md#crate-layout).
