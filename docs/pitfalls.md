@@ -84,8 +84,9 @@ Each entry names the class, what to check, and where it bit us.
   a Windows port such as `\\.\COM10` made invalid JSON. Test by parsing the output back with a real parser (#2).
 - **A document read back must say one thing, spelled one way.** The JSON result types (`transport::json`, #100) first
   used `#[serde(flatten)]` on a `value`/`error` enum, which takes the first key and ignores the other, so an entry with
-  both read as a value. Parse such an object's keys by hand and refuse two or none, and test with a document that has
-  both. A number JSON can't hold (NaN, infinity) is written as `null`: refuse to write it. Refuse a spelling the writer
+  both read as a value, and the derived enum that replaced it refused any key a later version adds, against the format's
+  "unknown entries are ignored" rule. Parse such an object's entries by hand, ignore unknown ones, refuse two or none,
+  and test with a document that has both and one with an extra entry on every such object. A number JSON can't hold (NaN, infinity) is written as `null`: refuse to write it. Refuse a spelling the writer
   never writes (lower-case hex, a 3-digit CAN ID over 0x7FF, `P4000`), or two spellings of one value get in. A proptest
   that reads arbitrary text and checks that whatever it accepts writes back to that same text covers the last kind.
 - **Quote for a shell with an allowlist, not a denylist.** The sweep's resume command refused Windows words with

@@ -168,12 +168,63 @@ impl<'de> Deserialize<'de> for Byte {
     }
 }
 
-// A result is `{"value": ...}` or `{"error": ...}`.
-#[derive(Serialize, Deserialize)]
+// A result is an object with `value` or `error`, one of them and only one; other entries are
+// ignored, so a later version can add some.
+#[derive(Serialize)]
 #[serde(rename_all = "snake_case")]
 enum Wire<V, E> {
     Value(V),
     Error(E),
+}
+
+// Reads the entry `name` into `outcome` if it is `value` or `error`, and says whether it was.
+fn take_outcome<'de, A, V, E>(
+    map: &mut A,
+    name: &str,
+    outcome: &mut Option<Wire<V, E>>,
+) -> Result<bool, A::Error>
+where
+    A: MapAccess<'de>,
+    V: Deserialize<'de>,
+    E: Deserialize<'de>,
+{
+    let next = match name {
+        "value" => Wire::Value(map.next_value()?),
+        "error" => Wire::Error(map.next_value()?),
+        _ => return Ok(false),
+    };
+    if outcome.replace(next).is_some() {
+        return Err(de::Error::custom(
+            "more than one of \"value\" and \"error\"",
+        ));
+    }
+    Ok(true)
+}
+
+struct WireVisitor<V, E>(PhantomData<(V, E)>);
+
+impl<'de, V: Deserialize<'de>, E: Deserialize<'de>> Visitor<'de> for WireVisitor<V, E> {
+    type Value = Wire<V, E>;
+
+    fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("an object with one of \"value\" and \"error\"")
+    }
+
+    fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
+        let mut outcome = None;
+        while let Some(name) = map.next_key::<String>()? {
+            if !take_outcome(&mut map, &name, &mut outcome)? {
+                map.next_value::<de::IgnoredAny>()?;
+            }
+        }
+        outcome.ok_or_else(|| de::Error::custom("neither \"value\" nor \"error\""))
+    }
+}
+
+impl<'de, V: Deserialize<'de>, E: Deserialize<'de>> Deserialize<'de> for Wire<V, E> {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        deserializer.deserialize_map(WireVisitor(PhantomData))
+    }
 }
 
 impl<V, E> From<Wire<V, E>> for Result<V, E> {
@@ -251,27 +302,12 @@ impl<'de, K: Key + Deserialize<'de>, V: Deserialize<'de>, E: Deserialize<'de>> V
         let mut key = None;
         let mut outcome = None;
         while let Some(name) = map.next_key::<String>()? {
-            match name.as_str() {
-                name if name == K::NAME => {
-                    if key.replace(map.next_value()?).is_some() {
-                        return Err(de::Error::duplicate_field(K::NAME));
-                    }
+            if name == K::NAME {
+                if key.replace(map.next_value()?).is_some() {
+                    return Err(de::Error::duplicate_field(K::NAME));
                 }
-                "value" | "error" => {
-                    let next = if name == "value" {
-                        Wire::Value(map.next_value()?)
-                    } else {
-                        Wire::Error(map.next_value()?)
-                    };
-                    if outcome.replace(next).is_some() {
-                        return Err(de::Error::custom(
-                            "an entry has more than one of \"value\" and \"error\"",
-                        ));
-                    }
-                }
-                _ => {
-                    map.next_value::<de::IgnoredAny>()?;
-                }
+            } else if !take_outcome(&mut map, &name, &mut outcome)? {
+                map.next_value::<de::IgnoredAny>()?;
             }
         }
         Ok(Item {

@@ -519,6 +519,50 @@ fn unknown_fields_are_ignored_and_known_ones_are_required() {
 }
 
 #[test]
+fn fields_added_to_a_value_or_error_object_and_to_a_list_entry_are_ignored() {
+    let mut document = serde_json::to_value(sample_scan()).unwrap();
+    let mut fingerprint = serde_json::to_value(sample_fingerprint()).unwrap();
+    let mut detail = serde_json::to_value(DtcDetail {
+        snapshots: Ok(RecordData {
+            status: DtcStatus(0x2F),
+            records: vec![0x01],
+        }),
+        extended_data: Some(Err(refusal())),
+        out_of_step: false,
+    })
+    .unwrap();
+    // Each `value`/`error` object a result type writes, and each entry of a list of them.
+    for value in [&mut document, &mut fingerprint, &mut detail] {
+        add_a_field_everywhere(value);
+    }
+    assert_eq!(
+        serde_json::from_value::<Scan>(document).unwrap(),
+        sample_scan()
+    );
+    assert_eq!(
+        serde_json::from_value::<Fingerprint>(fingerprint).unwrap(),
+        sample_fingerprint()
+    );
+    let detail: DtcDetail = serde_json::from_value(detail).unwrap();
+    assert_eq!(detail.snapshots.unwrap().records, [0x01]);
+    assert_eq!(detail.extended_data, Some(Err(refusal())));
+}
+
+// Adds `"added later": 1` to every object that has `value` or `error`.
+fn add_a_field_everywhere(value: &mut Value) {
+    match value {
+        Value::Object(object) => {
+            if object.contains_key("value") || object.contains_key("error") {
+                object.insert("added later".to_owned(), json!(1));
+            }
+            object.values_mut().for_each(add_a_field_everywhere);
+        }
+        Value::Array(items) => items.iter_mut().for_each(add_a_field_everywhere),
+        _ => {}
+    }
+}
+
+#[test]
 fn malformed_forms_inside_a_result_are_errors() {
     let bad_id = json!({"source": "7E", "calids": {"value": []}, "cvns": {"value": []}});
     assert!(serde_json::from_value::<Calibration>(bad_id).is_err());

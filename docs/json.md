@@ -36,9 +36,10 @@ obdcracker --json fingerprint > fingerprint.json
 | `result` | The command's result, below |
 
 **The schema version** goes up on any change a reader of the version before could misread: a field removed or renamed,
-a changed meaning or text form, a variant removed. Adding a field doesn't. A reader reads every version up to the one
-it knows, refuses a higher one, and ignores fields it doesn't know. Old versions keep parsing: a change that would
-break them gets a new version, and the reader keeps the old form.
+a changed meaning or text form, a variant removed, or a variant added to an enum such as the errors (a reader of the
+version before has no value for it). Adding a field to an object doesn't. A reader reads every version up to the one
+it knows, refuses a higher one, and ignores object entries it doesn't know, a `value`/`error` object's included. Old
+versions keep parsing: a change that would break them gets a new version, and the reader keeps the old form.
 
 ## Field forms
 
