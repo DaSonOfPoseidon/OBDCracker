@@ -100,21 +100,24 @@ impl fmt::Display for Nrc {
 }
 
 /// A module's refusal of a request.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct NegativeResponse {
     /// The service ID of the refused request.
+    #[cfg_attr(feature = "serde", serde(with = "crate::serde_text::byte"))]
     pub sid: u8,
     /// Why it was refused.
     pub nrc: Nrc,
 }
 
 /// Why a reply isn't a positive answer to the request.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Error {
     /// The module refused the request.
     Negative(NegativeResponse),
     /// The reply answers another service; holds the reply's first byte.
-    WrongService(u8),
+    WrongService(#[cfg_attr(feature = "serde", serde(with = "crate::serde_text::byte"))] u8),
     /// The reply is shorter than its format needs.
     TooShort,
     /// The reply's content doesn't match its format.

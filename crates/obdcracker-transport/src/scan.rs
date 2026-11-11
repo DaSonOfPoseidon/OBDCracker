@@ -87,6 +87,7 @@ pub enum DidFormat {
 }
 
 /// Everything a scan read.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Debug, Clone, PartialEq)]
 pub struct Scan {
     /// Every ECU that answered an OBD-II request, by reply CAN ID.
@@ -108,55 +109,69 @@ impl Scan {
 pub type PidReading = (u8, Result<PidValue, ReadError>);
 
 /// One emissions ECU's OBD-II data.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Debug, Clone, PartialEq)]
 pub struct ObdEcu {
     /// The CAN ID the ECU answered on.
+    #[cfg_attr(feature = "serde", serde(with = "crate::json::can_id"))]
     pub source: u32,
     /// Each mode 01 PID the ECU says it supports, other than the bitmap PIDs (00, 20, …), and
     /// its value. An error if its first bitmap (PID 00) was missing or couldn't be decoded. A
     /// later bitmap that's missing or garbled ends its list there ([`ObdEcu::pids_cut_short`]).
+    #[cfg_attr(feature = "serde", serde(with = "crate::json::pid_readings"))]
     pub pids: Result<Vec<PidReading>, ReadError>,
     /// Where its PID list was cut short, if it was: the later bitmap PID (20, 40, …) it said it
     /// supports but that was missing or couldn't be decoded, and why. No PID from that page on
     /// was read.
+    #[cfg_attr(feature = "serde", serde(with = "crate::json::pid_failure"))]
     pub pids_cut_short: Option<(u8, ReadError)>,
     /// The mode 09 PIDs it supports (mode 09 PID 00).
+    #[cfg_attr(feature = "serde", serde(with = "crate::json::outcome_pids"))]
     pub supported_info: Result<Vec<u8>, ReadError>,
     /// Its name (mode 09 PID 0A), as `acronym-name`, such as `ECM-EngineControl`.
+    #[cfg_attr(feature = "serde", serde(with = "crate::json::outcome"))]
     pub ecu_name: Result<String, ReadError>,
     /// Its stored emissions DTCs (mode 03).
+    #[cfg_attr(feature = "serde", serde(with = "crate::json::outcome"))]
     pub stored_dtcs: Result<Vec<Dtc>, ReadError>,
 }
 
 /// A mode 01 PID's value.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Debug, Clone, PartialEq)]
 pub enum PidValue {
     /// A physical quantity.
     Quantity {
         /// The value, scaled per SAE J1979.
+        #[cfg_attr(feature = "serde", serde(with = "crate::json::finite"))]
         value: f32,
         /// Its unit.
         unit: Unit,
     },
     /// A PID that isn't decoded yet: its data bytes, as received.
-    Raw(Vec<u8>),
+    Raw(#[cfg_attr(feature = "serde", serde(with = "crate::json::bytes"))] Vec<u8>),
 }
 
 /// One module's identification and DTCs.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ModuleScan {
     /// The module's name, from [`UdsModule::name`].
     pub name: String,
     /// The CAN ID it answers on.
+    #[cfg_attr(feature = "serde", serde(with = "crate::json::can_id"))]
     pub response_id: u32,
     /// Each of [`SCAN_DIDS`], then each of [`ScanModule::extra_dids`], and its value. Batching
     /// and re-reads: [`docs/scanning.md#did-batching`](https://github.com/DaSonOfPoseidon/OBDCracker/blob/main/docs/scanning.md#did-batching).
+    #[cfg_attr(feature = "serde", serde(with = "crate::json::did_outcomes"))]
     pub dids: Vec<(u16, Result<DidValue, ReadError>)>,
     /// How it encodes DTCs, and how many have a [`FAULT_MASK`] bit set (`ReadDTCInformation`
     /// 0x01).
+    #[cfg_attr(feature = "serde", serde(with = "crate::json::outcome"))]
     pub dtc_count: Result<DtcCount, ReadError>,
     /// Its DTCs with a [`FAULT_MASK`] bit set, and their status (`ReadDTCInformation` 0x02).
     /// Only bits the module says it supports count.
+    #[cfg_attr(feature = "serde", serde(with = "crate::json::outcome"))]
     pub dtcs: Result<Vec<DtcRecord>, ReadError>,
     /// Whether the module answered anything at all, a refusal included. It can be true when
     /// every value above is [`ReadError::NoReply`] ([`docs/scanning.md#did-batching`](https://github.com/DaSonOfPoseidon/OBDCracker/blob/main/docs/scanning.md#did-batching)).

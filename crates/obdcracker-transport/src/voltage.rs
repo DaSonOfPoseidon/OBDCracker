@@ -76,6 +76,7 @@ impl Default for VoltageWatch {
 }
 
 /// Why a run stopped: the supply voltage was too low when it was re-checked.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LowVoltage {
     /// How many of the run's requests had been sent: the run stopped before the next one.

@@ -4,7 +4,7 @@
 
 | Crate | Role |
 |---|---|
-| `obdcracker` | Facade for importers: re-exports the crates below (`sim` behind a feature) |
+| `obdcracker` | Facade for importers: re-exports the crates below (`sim` behind a feature, and `serde` for the result types: [JSON output](json.md)) |
 | `obdcracker-core` | Pure `no_std` codecs: CAN, ISO-TP, VW TP2.0 ([`tp20.md`](tp20.md)), OBD-II, UDS, KWP2000 |
 | `obdcracker-safety` | Tiered policy and `Approved` |
 | `obdcracker-transport` | `Transport` trait and adapter backends; scan, sweep and multi-DID reads ([scanning](scanning.md)), VW TP2.0 channels ([tp20](tp20.md)), the raw-CAN core ([raw-can](raw-can.md)) |

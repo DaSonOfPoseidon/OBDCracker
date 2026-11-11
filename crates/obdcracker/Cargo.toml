@@ -17,6 +17,8 @@ serial = ["obdcracker-transport/serial"]
 gsusb = ["obdcracker-transport/gsusb"]
 # SocketCAN interfaces (`transport::socketcan::SocketCan`), on Linux; elsewhere the feature adds nothing
 socketcan = ["obdcracker-transport/socketcan"]
+# Serialize and Deserialize for what the transport's reads return, as JSON (`transport::json`)
+serde = ["obdcracker-transport/serde"]
 
 [dependencies]
 obdcracker-core.workspace = true
@@ -27,3 +29,6 @@ obdcracker-sim = { workspace = true, optional = true }
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+serde_json = "1.0.145"

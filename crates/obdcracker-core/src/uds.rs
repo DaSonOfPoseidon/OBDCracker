@@ -527,6 +527,7 @@ impl fmt::Display for J2012Dtc {
 }
 
 /// The reply to a DTC count request.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DtcCount {
     /// Which status bits the module supports.
@@ -562,6 +563,7 @@ pub fn decode_dtc_count(reply: &[u8]) -> Result<DtcCount, Error> {
 }
 
 /// One DTC and its status.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DtcRecord {
     /// The DTC.

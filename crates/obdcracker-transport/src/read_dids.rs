@@ -49,13 +49,16 @@ impl fmt::Display for ReadDidsError {
 impl std::error::Error for ReadDidsError {}
 
 /// What a module answered to a multi-DID read, as far as its lengths let it be split.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DidsData {
     /// The DIDs whose data could be told apart, in request order, each with its own bytes.
+    #[cfg_attr(feature = "serde", serde(with = "crate::json::did_data"))]
     pub split: Vec<(u16, Vec<u8>)>,
     /// What follows the last split DID, starting with the echo of the next DID: the bytes of
     /// every DID from the first one whose length wasn't known (unless it was the last). Empty when
     /// every DID was split.
+    #[cfg_attr(feature = "serde", serde(with = "crate::json::bytes"))]
     pub unsplit: Vec<u8>,
 }
 

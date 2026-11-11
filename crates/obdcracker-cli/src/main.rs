@@ -1,5 +1,6 @@
 //! The `obdcracker` command-line tool.
 
+mod json;
 mod update;
 
 use std::path::{Path, PathBuf};
@@ -16,7 +17,7 @@ use obdcracker_profile::{Decode, DidSession, Profile, Protocol};
 use obdcracker_safety::{ModuleIds, Policy, SupplyVoltage, VoltageCheck, VoltageThresholds};
 use obdcracker_sim::SimBus;
 use obdcracker_transport::discover::{self, DiscoverOptions};
-use obdcracker_transport::dtc::{self, RecordData};
+use obdcracker_transport::dtc::{self, DtcDetail, RecordData};
 use obdcracker_transport::elm::Elm;
 use obdcracker_transport::elm::codec::parse_voltage;
 use obdcracker_transport::fingerprint::{self, DidValue, Fingerprint, ReadError, UdsModule};
@@ -37,6 +38,19 @@ const DEFAULT_BAUD: u32 = 115_200;
 const DEFAULT_BITRATE: u32 = 500_000;
 const TCP_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 
+// A line that isn't the command's result: on stdout, or on stderr under --json so that stdout
+// holds only the document.
+macro_rules! progress {
+    ($json:expr, $($arg:tt)*) => {
+        if $json {
+            eprintln!($($arg)*)
+        } else {
+            println!($($arg)*)
+        }
+    };
+}
+
+#[allow(clippy::struct_excessive_bools)]
 #[derive(Debug, Parser)]
 #[command(
     // The binary's name, not the package's (obdcracker-cli), which `--version` would print
@@ -128,6 +142,12 @@ struct Cli {
     /// further. The voltage is still read, logged and warned about
     #[arg(long)]
     force_low_voltage: bool,
+
+    /// Print one JSON document on stdout instead of text (docs/json.md), for `vin`, `fingerprint`,
+    /// `scan`, `sweep`, `read-dids`, `dtc`, `adapter` and `ports`. Notes and warnings stay on
+    /// stderr. Not with --dry-run, which prints the frames it would send, or `update`
+    #[arg(long, conflicts_with = "dry_run")]
+    json: bool,
 
     /// Append every request and reply to this JSON Lines file
     #[arg(long, default_value = "obdcracker.audit.jsonl")]
@@ -327,6 +347,10 @@ fn update(cli: &Cli, audit_log_given: bool) -> ExitCode {
     else {
         unreachable!()
     };
+    if cli.json {
+        eprintln!("`update` prints text only, so --json doesn't apply");
+        return ExitCode::from(2);
+    }
     if let Some(flag) = flag_update_ignores(cli, audit_log_given) {
         eprintln!(
             "`update` uses no adapter or audit log, so {flag} doesn't apply (only --dry-run does)"
@@ -377,7 +401,7 @@ fn main() -> ExitCode {
     let matches = command().get_matches();
     let cli = Cli::from_arg_matches(&matches).unwrap_or_else(|e| e.exit());
     if let Command::Ports = cli.command {
-        return ports();
+        return ports(&cli);
     }
     if let Command::Update { .. } = cli.command {
         let audit_log_given = matches.value_source("audit_log") == Some(ValueSource::CommandLine);
@@ -763,8 +787,17 @@ fn find_adapter() -> Result<PathBuf, FindAdapterError> {
     }
 }
 
-fn ports() -> ExitCode {
+fn ports(cli: &Cli) -> ExitCode {
     match SerialLink::available_ports() {
+        Ok(ports) if cli.json => {
+            let ports = json::Ports {
+                ports: ports
+                    .iter()
+                    .map(|port| port.display().to_string())
+                    .collect(),
+            };
+            printed(json::print("ports", &ports))
+        }
         Ok(ports) => {
             for port in ports {
                 println!("{}", port.display());
@@ -803,6 +836,13 @@ fn adapter<L: Link>(cli: &Cli, link: L) -> ExitCode {
     };
     if let Command::Adapter = cli.command {
         return match elm.info() {
+            Ok(info) if cli.json => {
+                let report = json::AdapterReport {
+                    adapter: info,
+                    link: kind.name().to_owned(),
+                };
+                printed(json::print("adapter", &report))
+            }
             Ok(info) => {
                 println!("adapter: {}", info.id);
                 if let Some(stn) = info.stn {
@@ -980,6 +1020,15 @@ fn volts(millivolts: u32) -> SupplyVoltage {
     SupplyVoltage::Known { millivolts }
 }
 
+// The exit status for a command that has only a document to print.
+fn printed(ok: bool) -> ExitCode {
+    if ok {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::FAILURE
+    }
+}
+
 // Each ECU's reply is decoded on its own, so one bad reply doesn't hide the others. An ECU with no
 // VIN commonly refuses a request of its own where it stays silent for a broadcast, so a refusal
 // doesn't fail the command when another ECU gave a VIN.
@@ -1007,10 +1056,18 @@ fn run_vin<T: Transport>(cli: &Cli, transport: &mut T, timing: Timing) -> ExitCo
         return ExitCode::FAILURE;
     }
     let (mut found, mut failed) = (false, false);
+    let mut vins = Vec::new();
     for reply in replies {
         match obd::decode_vin(&reply.payload) {
             Ok(vin) => {
-                println!("{:03X} {vin}", reply.source);
+                if cli.json {
+                    vins.push(json::VinReading {
+                        source: reply.source,
+                        vin: vin.to_owned(),
+                    });
+                } else {
+                    println!("{:03X} {vin}", reply.source);
+                }
                 found = true;
             }
             Err(e) => {
@@ -1018,6 +1075,9 @@ fn run_vin<T: Transport>(cli: &Cli, transport: &mut T, timing: Timing) -> ExitCo
                 failed |= !matches!(e, ReplyError::Negative(_));
             }
         }
+    }
+    if cli.json && !json::print("vin", &vins) {
+        return ExitCode::FAILURE;
     }
     if found && !failed {
         ExitCode::SUCCESS
@@ -1078,7 +1138,13 @@ fn run_fingerprint<T: Transport>(cli: &Cli, transport: &mut T, timing: Timing) -
             ExitCode::SUCCESS
         }
         Ok(found) => {
-            print_fingerprint(&found);
+            if cli.json {
+                if !json::print("fingerprint", &found) {
+                    return ExitCode::FAILURE;
+                }
+            } else {
+                print_fingerprint(&found);
+            }
             if found.anything_answered() {
                 ExitCode::SUCCESS
             } else {
@@ -1269,6 +1335,35 @@ fn run_dtc<T: Transport>(
         );
         return ExitCode::SUCCESS;
     }
+    let (out_of_step, answered) = (found.out_of_step, found.answered());
+    if cli.json {
+        let report = json::DtcReport {
+            module: module.clone(),
+            dtc: code,
+            record,
+            detail: found,
+        };
+        if !json::print("dtc", &report) {
+            return ExitCode::FAILURE;
+        }
+    } else {
+        print_dtc_detail(&module, code, &found);
+    }
+    if out_of_step {
+        eprintln!("{}", dtc_out_of_step_note(&module.name));
+    }
+    if answered {
+        ExitCode::SUCCESS
+    } else {
+        eprintln!(
+            "{} answered nothing: check the ignition, the adapter's connection and the profile",
+            module.name
+        );
+        ExitCode::FAILURE
+    }
+}
+
+fn print_dtc_detail(module: &UdsModule, code: UdsDtc, found: &DtcDetail) {
     let line = |what: &str, value: &Result<RecordData, ReadError>| {
         let (id, name) = (module.response_id, &module.name);
         match value {
@@ -1298,18 +1393,6 @@ fn run_dtc<T: Transport>(
                 "found the module busy"
             }
         ),
-    }
-    if found.out_of_step {
-        eprintln!("{}", dtc_out_of_step_note(&module.name));
-    }
-    if found.answered() {
-        ExitCode::SUCCESS
-    } else {
-        eprintln!(
-            "{} answered nothing: check the ignition, the adapter's connection and the profile",
-            module.name
-        );
-        ExitCode::FAILURE
     }
 }
 
@@ -1425,13 +1508,27 @@ fn run_read_dids<T: Transport>(
         return ExitCode::SUCCESS;
     }
     let (id, module_name) = (module.response_id, &module.name);
+    if cli.json {
+        let report = json::ReadDidsReport {
+            module: module.clone(),
+            dids: dids.to_vec(),
+            read: read.clone(),
+        };
+        if !json::print("read-dids", &report) {
+            return ExitCode::FAILURE;
+        }
+    }
     match read {
         Ok(found) => {
-            print_dids_data(id, module_name, dids, &found);
+            if !cli.json {
+                print_dids_data(id, module_name, dids, &found);
+            }
             ExitCode::SUCCESS
         }
         Err(e) => {
-            println!("{id:03X} {module_name} {} ({e})", did_list(dids));
+            if !cli.json {
+                println!("{id:03X} {module_name} {} ({e})", did_list(dids));
+            }
             if e == ReadError::NoReply {
                 eprintln!("{module_name} answered nothing: check the ignition and the adapter");
             }
@@ -1516,31 +1613,29 @@ fn run_sweep<T: Transport>(
         );
         return ExitCode::SUCCESS;
     }
-    print_sweep(&module, &found, last)
+    print_sweep(cli, &module, found, (first, last))
 }
 
-fn print_sweep(module: &UdsModule, found: &sweep::Sweep, last: u16) -> ExitCode {
-    for (did, value) in &found.found {
-        match value {
-            Ok(data) => println!(
-                "{:03X} {} {did:04X} [{}]",
-                module.response_id,
-                module.name,
-                hex(data)
-            ),
-            Err(e) => println!("{:03X} {} {did:04X} ({e})", module.response_id, module.name),
+fn print_sweep(
+    cli: &Cli,
+    module: &UdsModule,
+    found: sweep::Sweep,
+    (first, last): (u16, u16),
+) -> ExitCode {
+    let report = json::SweepReport {
+        module: module.clone(),
+        first,
+        last,
+        sweep: found,
+    };
+    let found = &report.sweep;
+    if cli.json {
+        if !json::print("sweep", &report) {
+            return ExitCode::FAILURE;
         }
+    } else {
+        print_sweep_found(module, found);
     }
-    let unanswered = found.found.len() - found.answered();
-    println!(
-        "sweep: {} DIDs answered{}",
-        found.answered(),
-        if unanswered > 0 {
-            format!(", {unanswered} unanswered (worth reading again)")
-        } else {
-            String::new()
-        }
-    );
     if let Some(e) = &found.still_extended {
         eprintln!(
             "warning: {} may still be in the extended session ({e}); it returns to the default \
@@ -1591,6 +1686,30 @@ fn print_sweep(module: &UdsModule, found: &sweep::Sweep, last: u16) -> ExitCode 
             ExitCode::FAILURE
         }
     }
+}
+
+fn print_sweep_found(module: &UdsModule, found: &sweep::Sweep) {
+    for (did, value) in &found.found {
+        match value {
+            Ok(data) => println!(
+                "{:03X} {} {did:04X} [{}]",
+                module.response_id,
+                module.name,
+                hex(data)
+            ),
+            Err(e) => println!("{:03X} {} {did:04X} ({e})", module.response_id, module.name),
+        }
+    }
+    let unanswered = found.found.len() - found.answered();
+    println!(
+        "sweep: {} DIDs answered{}",
+        found.answered(),
+        if unanswered > 0 {
+            format!(", {unanswered} unanswered (worth reading again)")
+        } else {
+            String::new()
+        }
+    );
 }
 
 fn print_dids(id: u32, name: &str, dids: &[(u16, Result<DidValue, ReadError>)]) {
@@ -1719,26 +1838,13 @@ fn run_scan<T: Transport>(
     let mut scanned = None;
     let mut answered = match scan::scan_with(transport, &policy, &modules, timing, &options) {
         Ok(_) if cli.dry_run => {
-            println!("dry run: nothing was sent");
-            // Nothing answers a dry run, so the reads that depend on the answers aren't shown.
-            println!(
-                "a live scan also sends, to 7DF: 01 20, 01 40, ... up to 01 E0 while an ECU says \
-                 the next bitmap is supported, then 01 <PID> for each PID an ECU says it supports \
-                 (mode 01 reads only)"
-            );
-            print_gateway_list_preview(cli);
-            if extended {
-                // `10 03` gets no answer here, so the reads it would allow aren't shown.
-                println!(
-                    "with --extended, a live scan also reads each extended-session DID (22 <DID>) \
-                     between a module's 10 03 and 10 01, with 3E 00 before a read once 2 s have \
-                     passed since the module last accepted one"
-                );
-            }
+            print_scan_dry_run(cli, extended);
             true
         }
         Ok(found) => {
-            print_scan(&found);
+            if !cli.json {
+                print_scan(&found);
+            }
             let answered = found.anything_answered();
             scanned = Some(found);
             answered
@@ -1751,7 +1857,7 @@ fn run_scan<T: Transport>(
     // A module that's silent on ISO-TP may still answer on TP2.0.
     let mut tp20_tries = Vec::new();
     if let Some(addresses) = tp20_addresses {
-        match discover_tp20_modules(transport, &policy, &addresses, timing, cli.dry_run) {
+        match discover_tp20_modules(transport, &policy, &addresses, timing, cli) {
             Ok(found) => {
                 answered |= !found.is_empty();
                 tp20_tries = tp20_outcomes(&addresses, &found);
@@ -1763,13 +1869,40 @@ fn run_scan<T: Transport>(
         }
     }
     if let (Some(profile), Some(scanned)) = (profile_of(cli), &scanned) {
-        show_gateway_list(&profile, transport, &policy, scanned, tp20_tries, timing);
+        show_gateway_list(
+            cli, &profile, transport, &policy, scanned, tp20_tries, timing,
+        );
+    }
+    if cli.json
+        && let Some(scanned) = &scanned
+        && !json::print("scan", scanned)
+    {
+        return ExitCode::FAILURE;
     }
     if answered {
         ExitCode::SUCCESS
     } else {
         eprintln!("nothing answered: check the ignition and the adapter's connection");
         ExitCode::FAILURE
+    }
+}
+
+fn print_scan_dry_run(cli: &Cli, extended: bool) {
+    println!("dry run: nothing was sent");
+    // Nothing answers a dry run, so the reads that depend on the answers aren't shown.
+    println!(
+        "a live scan also sends, to 7DF: 01 20, 01 40, ... up to 01 E0 while an ECU says \
+         the next bitmap is supported, then 01 <PID> for each PID an ECU says it supports \
+         (mode 01 reads only)"
+    );
+    print_gateway_list_preview(cli);
+    if extended {
+        // `10 03` gets no answer here, so the reads it would allow aren't shown.
+        println!(
+            "with --extended, a live scan also reads each extended-session DID (22 <DID>) \
+             between a module's 10 03 and 10 01, with 3E 00 before a read once 2 s have \
+             passed since the module last accepted one"
+        );
     }
 }
 
@@ -1815,6 +1948,7 @@ fn profile_of(cli: &Cli) -> Option<Profile> {
 // the scan, and compares it with what answered. Any failure is a warning: the scan's result
 // stands. `tp20_tries` is what the TP2.0 pass found at each address it tried.
 fn show_gateway_list<T: Transport>(
+    cli: &Cli,
     profile: &Profile,
     transport: &mut T,
     policy: &Policy,
@@ -1871,7 +2005,7 @@ fn show_gateway_list<T: Transport>(
         .collect();
     tries.extend(tp20_tries);
     for line in gateway_list_lines(&gateway::compare(&read.installed, &tries)) {
-        println!("{line}");
+        progress!(cli.json, "{line}");
     }
 }
 
@@ -1956,8 +2090,9 @@ fn discover_tp20_modules<T: Transport>(
     policy: &Policy,
     addresses: &[u8],
     timing: Timing,
-    dry_run: bool,
+    cli: &Cli,
 ) -> Result<Vec<u8>, ExitCode> {
+    let (dry_run, json) = (cli.dry_run, cli.json);
     let found = tp20::probe(transport, policy, addresses, timing).map_err(|e| {
         eprintln!("{e}");
         ExitCode::FAILURE
@@ -1981,12 +2116,13 @@ fn discover_tp20_modules<T: Transport>(
                 format!(", A8 not sent ({rejection}); the module closes an idle channel by itself")
             }
         };
-        println!("TP2.0 {:02X} {answer}{disconnect}", module.address);
+        progress!(json, "TP2.0 {:02X} {answer}{disconnect}", module.address);
     }
     if dry_run {
         println!("TP2.0 discovery: dry run, no channel setup was sent");
     } else {
-        println!(
+        progress!(
+            json,
             "TP2.0 discovery: {} of {} addresses answered",
             found.len(),
             addresses.len()
@@ -2002,12 +2138,14 @@ fn discover_tp20_modules<T: Transport>(
                         ExitCode::FAILURE
                     },
                 )?;
-                println!(
+                progress!(
+                    json,
                     "TP2.0 {:02X} identification: {}",
-                    module.address, read.shown
+                    module.address,
+                    read.shown
                 );
                 for line in &read.common_ids {
-                    println!("TP2.0 {:02X} {line}", module.address);
+                    progress!(json, "TP2.0 {:02X} {line}", module.address);
                 }
             }
         }
@@ -2291,6 +2429,7 @@ fn discover_modules<T: Transport>(
         name,
         patient,
         watch: voltage_watch(cli),
+        json: cli.json,
     };
     let policy = profile
         .narrow_for_discovery(Policy::read_only())
@@ -2388,6 +2527,7 @@ fn discover_29_bit_modules<T: Transport>(
         name,
         patient,
         watch: voltage_watch(cli),
+        json: cli.json,
     };
     if candidates.is_empty() {
         return Err(usage(format!(
@@ -2455,6 +2595,7 @@ struct Pass<'a> {
     name: &'a str,
     patient: Option<Duration>,
     watch: Option<VoltageWatch>,
+    json: bool,
 }
 
 // One discovery pass over `candidates`, printing each module that answers, those found before a
@@ -2506,16 +2647,22 @@ fn discover_pass<T: Transport>(
             Ok(DidValue::NotSet) => "(not set)".to_owned(),
             Err(e) => format!("({e})"),
         };
-        println!(
+        progress!(
+            pass.json,
             "{:03X} found at {:03X}{known}, F187 {part}",
-            module.response_id, module.request_id
+            module.response_id,
+            module.request_id
         );
     }
     // A pass stopped for the battery asked only the first of its request IDs.
     let asked = discovered
         .low_voltage
         .map_or(candidates.len(), |low| low.after);
-    println!("{name}: {} of {asked} request IDs answered", found.len());
+    progress!(
+        pass.json,
+        "{name}: {} of {asked} request IDs answered",
+        found.len()
+    );
     if let Some(low) = discovered.low_voltage {
         eprintln!(
             "stopped: {low}, and the other {} request IDs weren't asked. Charge the battery or \

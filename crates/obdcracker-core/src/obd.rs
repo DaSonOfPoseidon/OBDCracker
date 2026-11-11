@@ -24,6 +24,7 @@ pub fn current_data(pid: u8) -> [u8; 2] {
 }
 
 /// The unit a decoded value is in.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Unit {
     /// Percent, 0 to 100.

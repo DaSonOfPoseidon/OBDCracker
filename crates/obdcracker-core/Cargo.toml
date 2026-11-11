@@ -7,8 +7,17 @@ license.workspace = true
 repository.workspace = true
 publish.workspace = true
 
+[features]
+# Serialize and Deserialize for the types a command's result holds, as the text forms the CLI prints
+# (docs/json.md)
+serde = ["dep:serde"]
+
+[dependencies]
+serde = { version = "1.0.229", default-features = false, features = ["derive"], optional = true }
+
 [lints]
 workspace = true
 
 [dev-dependencies]
 proptest = "1.11.0"
+serde_json = "1.0.145"

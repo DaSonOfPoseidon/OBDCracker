@@ -114,6 +114,34 @@ turns it into `Ok`, `Low`, `TooLow` or `Unknown`, and `Unknown` never satisfies 
 long run re-checks it every 50 requests and stops, keeping what it read, when it is too low. Nothing is checked unless
 you ask: the CLI's guard (refusing a long command at the start) is yours to write. See [safety](safety.md#supply-voltage).
 
+## JSON
+
+With the `serde` feature, the results of `scan`, `fingerprint`, `sweep_dids`, `read_dtc_detail`, `read_dids` and
+`Elm::info` implement `Serialize` and `Deserialize` in the forms the CLI's `--json` prints ([JSON output](json.md)): byte
+strings as upper-case spaced hex, CAN IDs as 3 or 8 hex digits, DIDs and PIDs as hex, a result as `{"value": ...}` or
+`{"error": ...}`. A value reads back exactly as it was written, and text that isn't one of the forms is an error (a `DtcFormat` or
+`Nrc` holds its byte, and one built by hand as `Other` with a code that has a name reads back as the named variant,
+as `From<u8>` makes it).
+`transport::json` has the `with` modules for a type of your own that holds such a field.
+
+```toml
+obdcracker = { git = "https://github.com/DaSonOfPoseidon/OBDCracker", features = ["serde"] }
+```
+
+```rust
+# #[cfg(feature = "serde")]
+# fn main() -> Result<(), Box<dyn std::error::Error>> {
+use obdcracker::transport::scan::Scan;
+
+let scan: Scan = serde_json::from_str(r#"{"ecus": [], "modules": []}"#)?;
+assert!(!scan.anything_answered());
+assert_eq!(serde_json::to_string(&scan)?, r#"{"ecus":[],"modules":[]}"#);
+# Ok(())
+# }
+# #[cfg(not(feature = "serde"))]
+# fn main() {}
+```
+
 ## Crates
 
 See the [crate layout](development.md#crate-layout).

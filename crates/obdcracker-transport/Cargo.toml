@@ -14,12 +14,16 @@ serial = ["dep:serial2"]
 gsusb = ["dep:nusb"]
 # SocketCAN interfaces (any CAN adapter with a Linux driver, and vcan). Linux only: elsewhere the feature adds nothing.
 socketcan = ["dep:socketcan", "dep:nix"]
+# Serialize and Deserialize for what scan, fingerprint, sweep and the other reads return, as JSON
+# (`json` module, docs/json.md)
+serde = ["dep:serde", "obdcracker-core/serde"]
 
 [dependencies]
 obdcracker-core.workspace = true
 obdcracker-safety.workspace = true
 serial2 = { version = "0.2.38", optional = true }
 nusb = { version = "0.2.9", optional = true }
+serde = { version = "1.0.229", features = ["derive"], optional = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 # The socket (filters, error mask) and netlink reads of the interface's mode and bitrate. Nothing here may
