@@ -97,6 +97,16 @@ Each entry names the class, what to check, and where it bit us.
   no command at all (PR #76).
 - **Don't over-restrict.** Know the protocol before rejecting something: Toyota body modules legitimately share
   CAN ID 0x750 with different extended-address bytes.
+- **A comparison must not pick between repeats.** `diff` documented "the last entry wins" for a hand-edited document
+  that lists a DID twice, so old `F189 = 0005` against new `[0006, 0005]` printed `no changes` and exited 0. A tool
+  that reads a file back and then decides something from it refuses a repeated ECU, module, DID or DTC, and a test
+  makes the repeat conflict with the other side (#100).
+- **Two different values must never print the same.** The diff text showed a DID's text bare, its bytes as `[01]` and
+  its absence as `(absent)`, so the text `[01]` or `(absent)` read as bytes or as a missing DID. Quote the one kind that
+  has no delimiter of its own (and escape the quote), and write a golden test for each pair that could collide (#100).
+- **A note about what was left out compares with what was asked for.** Two sweeps of `0600-0700` that both stopped at
+  `0664` shared the same covered range, so the "compared less than they read" note compared the result with itself and
+  stayed silent. Compare the covered range with each request, not with the other result (#100).
 
 - **State computed on read must also be stored.** The sim's `session()` reported a lapsed session as default
   without storing it, so raising S3 afterwards brought the expired session back (#68, Codex). Write the derived

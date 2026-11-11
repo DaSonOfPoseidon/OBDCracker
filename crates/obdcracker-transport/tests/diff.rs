@@ -5,10 +5,7 @@ use obdcracker_core::obd::Unit;
 use obdcracker_core::obd::{Cvn, Dtc};
 use obdcracker_core::response::Error as ReplyError;
 use obdcracker_core::uds::{DtcCount, DtcFormat, DtcRecord, DtcStatus, UdsDtc};
-use obdcracker_transport::diff::{
-    Change, List, ModuleId, Scope, diff_dids_data, diff_fingerprint, diff_scan, diff_sweep,
-    diff_vins,
-};
+use obdcracker_transport::diff::{self, Change, DuplicateError, Input, List, ModuleId, Scope};
 use obdcracker_transport::fingerprint::{
     Calibration, DidValue, Fingerprint, Identification, ReadError, UdsModule,
 };
@@ -18,6 +15,36 @@ use obdcracker_transport::sweep::Sweep;
 use proptest::prelude::*;
 
 type Did = (u16, Result<DidValue, ReadError>);
+
+// The comparisons of inputs that repeat nothing, which is what most tests are about.
+fn diff_fingerprint(old: &Fingerprint, new: &Fingerprint) -> Vec<Change> {
+    diff::diff_fingerprint(old, new).unwrap()
+}
+
+fn diff_scan(old: &Scan, new: &Scan) -> Vec<Change> {
+    diff::diff_scan(old, new).unwrap()
+}
+
+fn diff_sweep(
+    module: &UdsModule,
+    old: &Sweep,
+    new: &Sweep,
+    range: std::ops::RangeInclusive<u16>,
+) -> Vec<Change> {
+    diff::diff_sweep(module, old, new, range).unwrap()
+}
+
+fn diff_dids_data(
+    module: &UdsModule,
+    old: &Result<DidsData, ReadError>,
+    new: &Result<DidsData, ReadError>,
+) -> Vec<Change> {
+    diff::diff_dids_data(module, old, new).unwrap()
+}
+
+fn diff_vins(old: &[(u32, String)], new: &[(u32, String)]) -> Vec<Change> {
+    diff::diff_vins(old, new).unwrap()
+}
 
 fn calibration(source: u32, calids: &[Option<&str>], cvns: &[[u8; 4]]) -> Calibration {
     Calibration {
@@ -111,7 +138,7 @@ fn a_changed_calibration_id_and_cvn_are_reported_by_slot() {
     assert_eq!(
         lines(&changes),
         [
-            "7E8 CALID 1: 4G0907589F → 4G0907589G",
+            "7E8 CALID 1: \"4G0907589F\" → \"4G0907589G\"",
             "7E8 CVN 1: 9BF7470D → 38D3FF82",
         ]
     );
@@ -135,8 +162,8 @@ fn an_empty_calibration_slot_is_a_value_and_slots_past_the_end_are_added_or_remo
     assert_eq!(
         lines(&changes),
         [
-            "7E8 CALID 1: A → (empty)",
-            "7E8 CALID 3 added: C",
+            "7E8 CALID 1: \"A\" → (empty)",
+            "7E8 CALID 3 added: \"C\"",
             "7E8 CVN 3 added: 03030303",
         ]
     );
@@ -144,8 +171,8 @@ fn an_empty_calibration_slot_is_a_value_and_slots_past_the_end_are_added_or_remo
     assert_eq!(
         lines(&back),
         [
-            "7E8 CALID 1: (empty) → A",
-            "7E8 CALID 3 removed: C",
+            "7E8 CALID 1: (empty) → \"A\"",
+            "7E8 CALID 3 removed: \"C\"",
             "7E8 CVN 3 removed: 03030303",
         ]
     );
@@ -254,8 +281,8 @@ fn a_changed_did_shows_both_values_and_a_did_on_one_side_only_is_absent_on_the_o
     assert_eq!(
         lines(&changes),
         [
-            "transmission F189 0005 → 0006",
-            "transmission F18C (no reply) → serial",
+            "transmission F189 \"0005\" → \"0006\"",
+            "transmission F18C (no reply) → \"serial\"",
             "transmission F19E (absent) → (not set)",
             "transmission F1AA [1A 2A] → (absent)",
         ]
@@ -347,12 +374,12 @@ fn changes_come_in_a_fixed_order_whatever_order_the_lists_were_in() {
         vec![module("a", 0x7E8, "2"), module("b", 0x7E9, "2")],
     );
     let expected = [
-        "7E8 CALID 1: a → b",
-        "7E9 CALID 1: a → b",
-        "a F187 1 → 2",
-        "a F189 1 → 2",
-        "b F187 1 → 2",
-        "b F189 1 → 2",
+        "7E8 CALID 1: \"a\" → \"b\"",
+        "7E9 CALID 1: \"a\" → \"b\"",
+        "a F187 \"1\" → \"2\"",
+        "a F189 \"1\" → \"2\"",
+        "b F187 \"1\" → \"2\"",
+        "b F189 \"1\" → \"2\"",
     ];
     assert_eq!(lines(&diff_fingerprint(&old, &new)), expected);
     let mut flipped = new.clone();
@@ -363,27 +390,84 @@ fn changes_come_in_a_fixed_order_whatever_order_the_lists_were_in() {
 }
 
 #[test]
-fn a_hand_edited_file_with_repeats_is_compared_with_the_last_entry_winning() {
-    let old = fingerprint(
-        vec![
-            calibration(0x7E8, &[Some("first")], &[[1; 4]]),
-            calibration(0x7E8, &[Some("last")], &[[1; 4]]),
-        ],
-        vec![identification(
-            "engine",
-            0x7E8,
-            vec![text(0xF187, "first"), text(0xF187, "last")],
-        )],
+fn a_hand_edited_fingerprint_that_repeats_something_is_refused() {
+    let engine = |dids: Vec<Did>| identification("engine", 0x7E8, dids);
+    let clean = fingerprint(
+        vec![calibration(0x7E8, &[Some("a")], &[[1; 4]])],
+        vec![engine(vec![text(0xF189, "0005")])],
     );
-    let new = fingerprint(
-        vec![calibration(0x7E8, &[Some("last")], &[[1; 4]])],
+    let refused =
+        |old: &Fingerprint, new: &Fingerprint| diff::diff_fingerprint(old, new).unwrap_err();
+    // The same ECU, module or DID twice, with the same value or a conflicting one
+    let ecu_twice = fingerprint(
         vec![
-            identification("engine", 0x7E8, vec![text(0xF187, "other")]),
-            identification("engine", 0x7E8, vec![text(0xF187, "last")]),
+            calibration(0x7E8, &[Some("a")], &[[1; 4]]),
+            calibration(0x7E8, &[Some("b")], &[[1; 4]]),
+        ],
+        Vec::new(),
+    );
+    let module_twice = fingerprint(
+        Vec::new(),
+        vec![engine(vec![text(0xF189, "0006")]), engine(Vec::new())],
+    );
+    let did_twice = fingerprint(
+        Vec::new(),
+        vec![engine(vec![text(0xF189, "0006"), text(0xF189, "0005")])],
+    );
+    let did_twice_alike = fingerprint(
+        Vec::new(),
+        vec![engine(vec![text(0xF189, "0005"), text(0xF189, "0005")])],
+    );
+    for (bad, entry) in [
+        (&ecu_twice, "ECU 7E8"),
+        (&module_twice, "module engine (0x7E8)"),
+        (&did_twice, "DID F189 of engine (0x7E8)"),
+        (&did_twice_alike, "DID F189 of engine (0x7E8)"),
+    ] {
+        let expected = |input| DuplicateError {
+            input,
+            entry: entry.to_owned(),
+        };
+        assert_eq!(refused(bad, &clean), expected(Input::Old), "{entry}");
+        assert_eq!(refused(&clean, bad), expected(Input::New), "{entry}");
+        assert_eq!(refused(bad, bad), expected(Input::Old), "{entry}");
+    }
+    // The old F189 was 0005 and the new one lists 0006 and then 0005: not "no changes"
+    let error = refused(&clean, &did_twice);
+    assert_eq!(
+        error.to_string(),
+        "the new result lists DID F189 of engine (0x7E8) twice"
+    );
+    // Different modules or ECUs that merely look alike aren't repeats
+    let alike = fingerprint(
+        vec![
+            calibration(0x7E8, &[Some("a")], &[[1; 4]]),
+            calibration(0x7E9, &[Some("a")], &[[1; 4]]),
+        ],
+        vec![
+            engine(vec![text(0xF189, "1"), text(0xF18C, "1")]),
+            identification("engine", 0x7E9, vec![text(0xF189, "1")]),
+            identification("transmission", 0x7E8, vec![text(0xF189, "1")]),
         ],
     );
-    assert_eq!(diff_fingerprint(&old, &new), []);
-    assert_eq!(diff_fingerprint(&new, &old), []);
+    assert_eq!(diff_fingerprint(&alike, &alike), []);
+}
+
+#[test]
+fn a_repeated_text_in_an_error_is_made_printable() {
+    let named = |name: &str| fingerprint(Vec::new(), vec![identification(name, 0x7E8, Vec::new())]);
+    let twice = fingerprint(
+        Vec::new(),
+        vec![
+            identification("a\u{1b}[31m", 0x7E8, Vec::new()),
+            identification("a\u{1b}[31m", 0x7E8, Vec::new()),
+        ],
+    );
+    let error = diff::diff_fingerprint(&named("x"), &twice).unwrap_err();
+    assert!(
+        error.entry.chars().all(|c| (' '..='~').contains(&c)),
+        "{error}"
+    );
 }
 
 // ---- scans ----------------------------------------------------------------------------------
@@ -468,7 +552,7 @@ fn the_supported_pids_and_mode_09_pids_and_the_name_are_compared() {
             "7E8 mode 01 PID 0D added",
             "7E8 mode 09 PID 02 removed",
             "7E8 mode 09 PID 06 added",
-            "7E8 name: ECM-EngineControl → ECM-Other",
+            "7E8 name: \"ECM-EngineControl\" → \"ECM-Other\"",
         ]
     );
     let mut cut = old.clone();
@@ -485,7 +569,7 @@ fn the_supported_pids_and_mode_09_pids_and_the_name_are_compared() {
     renamed.ecus[0].ecu_name = Err(ReadError::NoReply);
     assert_eq!(
         lines(&diff_scan(&old, &renamed)),
-        ["7E8 name: ECM-EngineControl → (no reply)"]
+        ["7E8 name: \"ECM-EngineControl\" → (no reply)"]
     );
 }
 
@@ -580,7 +664,7 @@ fn a_module_that_stopped_answering_is_one_change_beside_its_failed_reads() {
         lines(&changes),
         [
             "engine answered → didn't answer",
-            "engine F187 part → (no reply)",
+            "engine F187 \"part\" → (no reply)",
             "engine DTCs can't be compared: old read, new no reply",
         ]
     );
@@ -945,7 +1029,10 @@ fn text_from_a_document_reaches_the_terminal_as_printable_ascii() {
     let old = engine_calibrations("A", [1; 4]);
     let new = engine_calibrations(evil, [1; 4]);
     let line = diff_fingerprint(&old, &new)[0].to_string();
-    assert_eq!(line, "7E8 CALID 1: A → ok\\u{1b}[31m\\u{202e}\\u{e9}\\\\");
+    assert_eq!(
+        line,
+        "7E8 CALID 1: \"A\" → \"ok\\u{1b}[31m\\u{202e}\\u{e9}\\\\\""
+    );
     assert!(line.chars().all(|c| (' '..='~').contains(&c) || c == '→'));
     let module =
         |name: &str| fingerprint(Vec::new(), vec![identification(name, 0x7E8, Vec::new())]);
@@ -1076,4 +1163,159 @@ fn every_module_change_has_a_line() {
         },
     ];
     assert!(rest.iter().all(|change| !change.to_string().is_empty()));
+}
+
+// ---- text, bytes and the markers between them ----------------------------------------------
+
+fn did_line(
+    old: Option<Result<DidValue, ReadError>>,
+    new: Option<Result<DidValue, ReadError>>,
+) -> String {
+    Change::DidChanged {
+        module: module_id("engine", 0x7E8),
+        did: 0xF187,
+        old,
+        new,
+    }
+    .to_string()
+}
+
+#[test]
+fn a_dids_text_bytes_and_markers_each_read_differently() {
+    let text = |value: &str| Some(Ok(DidValue::Text(value.to_owned())));
+    let bytes = |value: &[u8]| Some(Ok(DidValue::Bytes(value.to_vec())));
+    // Text that looks like the bytes it isn't
+    assert_eq!(
+        did_line(text("[01]"), bytes(&[1])),
+        "engine F187 \"[01]\" → [01]"
+    );
+    // Text that is a marker
+    assert_eq!(
+        did_line(text("(absent)"), None),
+        "engine F187 \"(absent)\" → (absent)"
+    );
+    assert_eq!(
+        did_line(text("(not set)"), Some(Ok(DidValue::NotSet))),
+        "engine F187 \"(not set)\" → (not set)"
+    );
+    assert_eq!(
+        did_line(text("(no reply)"), Some(Err(ReadError::NoReply))),
+        "engine F187 \"(no reply)\" → (no reply)"
+    );
+    // Quotes and backslashes in the text stay readable back
+    assert_eq!(
+        did_line(text("a\"b\\c"), text("")),
+        "engine F187 \"a\\\"b\\\\c\" → \"\""
+    );
+    assert_eq!(
+        did_line(text("0005"), text("0006")),
+        "engine F187 \"0005\" → \"0006\""
+    );
+}
+
+#[test]
+fn a_calibration_id_and_an_ecu_name_that_spell_a_marker_are_quoted() {
+    let old = engine_calibrations("4G0907589F", [1; 4]);
+    let marker = fingerprint(
+        vec![Calibration {
+            source: 0x7E8,
+            calids: Ok(vec![None]),
+            cvns: Ok(vec![Cvn([1; 4])]),
+        }],
+        Vec::new(),
+    );
+    assert_eq!(
+        lines(&diff_fingerprint(&old, &marker)),
+        ["7E8 CALID 1: \"4G0907589F\" → (empty)"]
+    );
+    let literal = engine_calibrations("(empty)", [1; 4]);
+    assert_eq!(
+        lines(&diff_fingerprint(&marker, &literal)),
+        ["7E8 CALID 1: (empty) → \"(empty)\""]
+    );
+    let name = Change::EcuNameChanged {
+        source: 0x7E8,
+        old: Err(ReadError::NoReply),
+        new: Ok("(no reply)".to_owned()),
+    };
+    assert_eq!(name.to_string(), "7E8 name: (no reply) → \"(no reply)\"");
+}
+
+// ---- repeats in the other kinds of result ---------------------------------------------------
+
+#[test]
+fn a_scan_that_repeats_an_ecu_module_did_or_dtc_is_refused() {
+    let clean = scan(vec![obd_ecu(0x7E8)], vec![module_scan("engine", 0x7E8)]);
+    let record = |dtc: u32, status: u8| DtcRecord {
+        dtc: UdsDtc::new(dtc),
+        status: DtcStatus(status),
+    };
+    let mut ecu = clean.clone();
+    ecu.ecus.push(obd_ecu(0x7E8));
+    let mut module = clean.clone();
+    module.modules.push(module_scan("engine", 0x7E8));
+    let mut did = clean.clone();
+    did.modules[0].dids.push(text(0xF187, "other"));
+    let mut dtc = clean.clone();
+    dtc.modules[0].dtcs = Ok(vec![record(0x16A0, 8), record(0x16A0, 0)]);
+    for (bad, entry) in [
+        (&ecu, "ECU 7E8"),
+        (&module, "module engine (0x7E8)"),
+        (&did, "DID F187 of engine (0x7E8)"),
+        (&dtc, "DTC 0016A0 of engine (0x7E8)"),
+    ] {
+        let expected = |input| DuplicateError {
+            input,
+            entry: entry.to_owned(),
+        };
+        assert_eq!(
+            diff::diff_scan(bad, &clean).unwrap_err(),
+            expected(Input::Old)
+        );
+        assert_eq!(
+            diff::diff_scan(&clean, bad).unwrap_err(),
+            expected(Input::New)
+        );
+    }
+    // A DTC list that failed has nothing to repeat
+    let mut failed = clean.clone();
+    failed.modules[0].dtcs = Err(ReadError::NoReply);
+    assert_eq!(diff_scan(&failed, &failed), []);
+}
+
+#[test]
+fn a_sweep_or_read_that_repeats_a_did_is_refused_but_only_inside_the_range() {
+    let module = UdsModule::obd_engine();
+    let clean = sweep(vec![(0x0600, Ok(vec![1]))]);
+    let twice = sweep(vec![(0x0600, Ok(vec![1])), (0x0600, Ok(vec![2]))]);
+    let error = diff::diff_sweep(&module, &clean, &twice, 0x0600..=0x06FF).unwrap_err();
+    assert_eq!(error.input, Input::New);
+    assert!(error.entry.starts_with("DID 0600 of "), "{error}");
+    assert!(diff::diff_sweep(&module, &twice, &clean, 0x0600..=0x06FF).is_err());
+    // Outside the range compared, a repeat says nothing
+    assert!(diff::diff_sweep(&module, &twice, &clean, 0x0700..=0x07FF).is_ok());
+
+    let read = |split: Vec<(u16, Vec<u8>)>| -> Result<DidsData, ReadError> {
+        Ok(DidsData {
+            split,
+            unsplit: Vec::new(),
+        })
+    };
+    let one = read(vec![(0xF189, vec![1])]);
+    let two = read(vec![(0xF189, vec![1]), (0xF189, vec![1])]);
+    let error = diff::diff_dids_data(&module, &two, &one).unwrap_err();
+    assert_eq!(error.input, Input::Old);
+    assert!(diff::diff_dids_data(&module, &one, &two).is_err());
+    let failed: Result<DidsData, ReadError> = Err(ReadError::NoReply);
+    assert!(diff::diff_dids_data(&module, &failed, &failed).is_ok());
+}
+
+#[test]
+fn vins_that_repeat_an_ecu_are_refused() {
+    let vin = |id: u32, vin: &str| (id, vin.to_owned());
+    let clean = [vin(0x7E8, "A")];
+    let twice = [vin(0x7E8, "B"), vin(0x7E8, "A")];
+    let error = diff::diff_vins(&clean, &twice).unwrap_err();
+    assert_eq!((error.input, error.entry.as_str()), (Input::New, "ECU 7E8"));
+    assert!(diff::diff_vins(&twice, &clean).is_err());
 }

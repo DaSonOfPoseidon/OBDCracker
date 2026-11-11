@@ -10,7 +10,8 @@
 //! - An ECU or module on one side only is a single change; what it holds isn't listed.
 //! - A list that couldn't be read on one side ([`Change::Unreadable`]) is one change: comparing it
 //!   with a list that was read would report every entry as added or removed.
-//! - A list that repeats an entry (a hand-edited document) is compared with the last one winning.
+//! - A list that repeats an ECU, module, DID or DTC (a hand-edited document) can't be compared:
+//!   which entry counts isn't known, so the `diff_*` functions return a [`DuplicateError`].
 //! - Live values (a scan's mode 01 PID readings) and the run's own state (a sweep's stop, a DTC
 //!   count) aren't compared: they differ on every run.
 
@@ -31,6 +32,42 @@ use crate::sweep::Sweep;
 
 type DidRead = Result<DidValue, ReadError>;
 type Did = (u16, DidRead);
+
+/// Which of the two results compared a [`DuplicateError`] is about.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Input {
+    /// The first result (`old`).
+    Old,
+    /// The second result (`new`).
+    New,
+}
+
+impl fmt::Display for Input {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Old => "old",
+            Self::New => "new",
+        })
+    }
+}
+
+/// A result lists the same ECU, module, DID or DTC twice, so it doesn't say which entry is the car's.
+/// Reads made by this crate never do this; a hand-edited document can.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DuplicateError {
+    /// Which result repeats it.
+    pub input: Input,
+    /// What is repeated, such as `ECU 7E8` or `DID F189 of engine (0x7E8)`.
+    pub entry: String,
+}
+
+impl fmt::Display for DuplicateError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "the {} result lists {} twice", self.input, self.entry)
+    }
+}
+
+impl std::error::Error for DuplicateError {}
 
 /// A module, as results identify it: its name and the CAN ID it answers on.
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
@@ -428,27 +465,43 @@ struct Plain<'a>(&'a str);
 
 impl fmt::Display for Plain<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.0.chars().try_for_each(|c| {
-            if c == '\\' {
-                f.write_str("\\\\")
-            } else if (' '..='~').contains(&c) {
-                fmt::Write::write_char(f, c)
-            } else {
-                write!(f, "{}", c.escape_unicode())
-            }
-        })
+        escaped(f, self.0, false)
     }
 }
 
+// `Plain` between double quotes, with the quotes in it escaped: a value that is text, which no
+// marker such as `(absent)` or `[01]` can be mistaken for.
+struct Quoted<'a>(&'a str);
+
+impl fmt::Display for Quoted<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("\"")?;
+        escaped(f, self.0, true)?;
+        f.write_str("\"")
+    }
+}
+
+fn escaped(f: &mut fmt::Formatter<'_>, text: &str, quotes: bool) -> fmt::Result {
+    text.chars().try_for_each(|c| {
+        if c == '\\' || (quotes && c == '"') {
+            write!(f, "\\{c}")
+        } else if (' '..='~').contains(&c) {
+            fmt::Write::write_char(f, c)
+        } else {
+            write!(f, "{}", c.escape_unicode())
+        }
+    })
+}
+
 // A DID's value or error as one word or group, so "no value" and "no such DID" read differently.
+// Text is quoted, bytes bracketed and the rest parenthesized: none can pass for another.
 struct Shown<'a>(&'a Option<DidRead>);
 
 impl fmt::Display for Shown<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self.0 {
             None => f.write_str("(absent)"),
-            Some(Ok(DidValue::Text(text))) => Plain(text).fmt(f),
-            // Bracketed, so binary data can't pass for text that looks like hex.
+            Some(Ok(DidValue::Text(text))) => Quoted(text).fmt(f),
             Some(Ok(bytes @ DidValue::Bytes(_))) => write!(f, "[{bytes}]"),
             Some(Ok(DidValue::NotSet)) => f.write_str("(not set)"),
             Some(Err(e)) => write!(f, "({e})"),
@@ -461,7 +514,7 @@ struct Calid<'a>(&'a Option<String>);
 impl fmt::Display for Calid<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self.0 {
-            Some(calid) => Plain(calid).fmt(f),
+            Some(calid) => Quoted(calid).fmt(f),
             None => f.write_str("(empty)"),
         }
     }
@@ -472,7 +525,7 @@ struct Name<'a>(&'a Result<String, ReadError>);
 impl fmt::Display for Name<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self.0 {
-            Ok(name) => Plain(name).fmt(f),
+            Ok(name) => Quoted(name).fmt(f),
             Err(e) => write!(f, "({e})"),
         }
     }
@@ -518,9 +571,11 @@ fn module(f: &mut fmt::Formatter<'_>, module: &ModuleId, what: fmt::Arguments<'_
     write!(f, "{} {what}", Plain(&module.name))
 }
 
-/// One line per change, such as `7E8 CALID 1: 4G0907589F → 4G0907589G` or
-/// `transmission F189 0005 → 0006`. Text that came from a document is shown as printable ASCII,
-/// with anything else as `\u{..}`.
+/// One line per change, such as `7E8 CALID 1: "4G0907589F" → "4G0907589G"` or
+/// `transmission F189 "0005" → "0006"`. A DID's, CALID's or ECU name's text is in double quotes
+/// (with `\"` and `\\` for those characters), so it can't be mistaken for bytes (`[01]`) or a
+/// marker (`(absent)`, `(not set)`, `(empty)`, or why a read failed). Text that came from a document
+/// is shown as printable ASCII, with anything else as `\u{..}`.
 impl fmt::Display for Change {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -696,7 +751,8 @@ enum Side<'a, T> {
     Both(&'a T, &'a T),
 }
 
-// The entries of both lists by `key`, in key order. An entry repeated in a list is the last one.
+// The entries of both lists by `key`, in key order. The lists have no repeated key (`unique`
+// checked): of a repeated one only the last entry would count.
 fn sides<'a, K: Ord, T>(
     old: &'a [T],
     new: &'a [T],
@@ -720,6 +776,51 @@ fn sides<'a, K: Ord, T>(
     found.extend(new.into_iter().map(|(key, new)| (key, Side::New(new))));
     found.sort_by(|a, b| a.0.cmp(&b.0));
     found
+}
+
+// Fails with a description of the first entry of `items` whose key an earlier one has.
+fn unique<K: Ord, T>(
+    items: &[T],
+    key: impl Fn(&T) -> K,
+    describe: impl Fn(&K) -> String,
+) -> Result<(), String> {
+    let mut seen = BTreeSet::new();
+    for item in items {
+        let key = key(item);
+        if seen.contains(&key) {
+            return Err(describe(&key));
+        }
+        seen.insert(key);
+    }
+    Ok(())
+}
+
+fn unique_dids(dids: &[Did], whose: &ModuleId) -> Result<(), String> {
+    unique(
+        dids,
+        |(did, _)| *did,
+        |did| format!("DID {did:04X} of {whose}"),
+    )
+}
+
+fn unique_ecus<T>(items: &[T], source: fn(&T) -> u32) -> Result<(), String> {
+    unique(items, source, |source| format!("ECU {}", CanId(*source)))
+}
+
+fn unique_modules<T>(items: &[T], id: fn(&T) -> ModuleId) -> Result<(), String> {
+    unique(items, id, |id| format!("module {id}"))
+}
+
+// `check` on the old result, then on the new one.
+fn both_unique<T: ?Sized>(
+    old: &T,
+    new: &T,
+    check: impl Fn(&T) -> Result<(), String>,
+) -> Result<(), DuplicateError> {
+    for (input, side) in [(Input::Old, old), (Input::New, new)] {
+        check(side).map_err(|entry| DuplicateError { input, entry })?;
+    }
+    Ok(())
 }
 
 // What was added (`true`) or removed (`false`) from one set to the other, in key order.
@@ -878,10 +979,34 @@ fn calibration(out: &mut Vec<Change>, source: u32, old: &Calibration, new: &Cali
     );
 }
 
+fn module_id(name: &str, response_id: u32) -> ModuleId {
+    ModuleId {
+        name: name.to_owned(),
+        response_id,
+    }
+}
+
+fn fingerprint_unique(fingerprint: &Fingerprint) -> Result<(), String> {
+    unique_ecus(&fingerprint.ecus, |ecu| ecu.source)?;
+    let id = |module: &Identification| module_id(&module.name, module.response_id);
+    unique_modules(&fingerprint.modules, id)?;
+    fingerprint
+        .modules
+        .iter()
+        .try_for_each(|module| unique_dids(&module.dids, &id(module)))
+}
+
 /// What changed between two fingerprints: each ECU's calibration IDs and CVNs (a tune changes
 /// the CVNs), and each module's identification DIDs.
-#[must_use]
-pub fn diff_fingerprint(old: &Fingerprint, new: &Fingerprint) -> Vec<Change> {
+///
+/// # Errors
+///
+/// A [`DuplicateError`] if either lists an ECU, module or DID twice.
+pub fn diff_fingerprint(
+    old: &Fingerprint,
+    new: &Fingerprint,
+) -> Result<Vec<Change>, DuplicateError> {
+    both_unique(old, new, fingerprint_unique)?;
     let mut out = Vec::new();
     ecus(
         &mut out,
@@ -894,13 +1019,10 @@ pub fn diff_fingerprint(old: &Fingerprint, new: &Fingerprint) -> Vec<Change> {
         &mut out,
         &old.modules,
         &new.modules,
-        |module| ModuleId {
-            name: module.name.clone(),
-            response_id: module.response_id,
-        },
+        |module| module_id(&module.name, module.response_id),
         identification,
     );
-    out
+    Ok(out)
 }
 
 fn pids(readings: &[PidReading]) -> BTreeSet<u8> {
@@ -1020,23 +1142,41 @@ fn module_scan(out: &mut Vec<Change>, module: &ModuleId, old: &ModuleScan, new: 
     );
 }
 
+fn scan_unique(scan: &Scan) -> Result<(), String> {
+    unique_ecus(&scan.ecus, |ecu| ecu.source)?;
+    let id = |module: &ModuleScan| module_id(&module.name, module.response_id);
+    unique_modules(&scan.modules, id)?;
+    scan.modules.iter().try_for_each(|module| {
+        unique_dids(&module.dids, &id(module))?;
+        match &module.dtcs {
+            Ok(dtcs) => unique(
+                dtcs,
+                |record| record.dtc,
+                |dtc| format!("DTC {dtc} of {}", id(module)),
+            ),
+            Err(_) => Ok(()),
+        }
+    })
+}
+
 /// What changed between two scans: each ECU's supported PIDs (not their values, which change on
 /// every run), mode 09 PIDs, name and stored DTCs, and each module's DIDs and DTCs.
-#[must_use]
-pub fn diff_scan(old: &Scan, new: &Scan) -> Vec<Change> {
+///
+/// # Errors
+///
+/// A [`DuplicateError`] if either lists an ECU, module, DID or module DTC twice.
+pub fn diff_scan(old: &Scan, new: &Scan) -> Result<Vec<Change>, DuplicateError> {
+    both_unique(old, new, scan_unique)?;
     let mut out = Vec::new();
     ecus(&mut out, &old.ecus, &new.ecus, |ecu| ecu.source, obd_ecu);
     modules(
         &mut out,
         &old.modules,
         &new.modules,
-        |module| ModuleId {
-            name: module.name.clone(),
-            response_id: module.response_id,
-        },
+        |module| module_id(&module.name, module.response_id),
         module_scan,
     );
-    out
+    Ok(out)
 }
 
 fn sweep_dids(sweep: &Sweep, range: &RangeInclusive<u16>) -> Vec<Did> {
@@ -1051,21 +1191,22 @@ fn sweep_dids(sweep: &Sweep, range: &RangeInclusive<u16>) -> Vec<Did> {
 /// What changed between two sweeps of `module`, comparing only the DIDs in `range`: the range both
 /// sweeps read all of (a sweep that stopped early didn't read what is past its stop). A DID found in
 /// only one of them is reported, so this is not for sweeps of different ranges.
-#[must_use]
+///
+/// # Errors
+///
+/// A [`DuplicateError`] if either lists a DID in `range` twice.
 pub fn diff_sweep(
     module: &UdsModule,
     old: &Sweep,
     new: &Sweep,
     range: RangeInclusive<u16>,
-) -> Vec<Change> {
+) -> Result<Vec<Change>, DuplicateError> {
+    let id = ModuleId::from(module);
+    let (old, new) = (sweep_dids(old, &range), sweep_dids(new, &range));
+    both_unique(&old, &new, |dids| unique_dids(dids, &id))?;
     let mut out = Vec::new();
-    dids(
-        &mut out,
-        &ModuleId::from(module),
-        &sweep_dids(old, &range),
-        &sweep_dids(new, &range),
-    );
-    out
+    dids(&mut out, &id, &old, &new);
+    Ok(out)
 }
 
 fn split_dids(data: &DidsData) -> Vec<Did> {
@@ -1077,14 +1218,21 @@ fn split_dids(data: &DidsData) -> Vec<Did> {
 
 /// What changed between two multi-DID reads ([`crate::read_dids::read_dids`]) of `module`: each
 /// split DID's bytes, and the bytes that couldn't be split. Both should have asked for the same DIDs.
-#[must_use]
+///
+/// # Errors
+///
+/// A [`DuplicateError`] if either lists a DID twice.
 pub fn diff_dids_data(
     module: &UdsModule,
     old: &Result<DidsData, ReadError>,
     new: &Result<DidsData, ReadError>,
-) -> Vec<Change> {
-    let mut out = Vec::new();
+) -> Result<Vec<Change>, DuplicateError> {
     let id = ModuleId::from(module);
+    both_unique(old, new, |read| match read {
+        Ok(data) => unique_dids(&split_dids(data), &id),
+        Err(_) => Ok(()),
+    })?;
+    let mut out = Vec::new();
     lists(
         &mut out,
         &Scope::Module(id.clone()),
@@ -1102,14 +1250,21 @@ pub fn diff_dids_data(
             }
         },
     );
-    out
+    Ok(out)
 }
 
 /// What changed between two lists of VINs by the CAN ID of the ECU that gave each (`vin`'s
 /// result): an ECU that appeared or disappeared, and a VIN that differs. A VIN that didn't change
 /// isn't in the result, and an ECU that appeared or disappeared doesn't show its VIN.
-#[must_use]
-pub fn diff_vins(old: &[(u32, String)], new: &[(u32, String)]) -> Vec<Change> {
+///
+/// # Errors
+///
+/// A [`DuplicateError`] if either lists an ECU twice.
+pub fn diff_vins(
+    old: &[(u32, String)],
+    new: &[(u32, String)],
+) -> Result<Vec<Change>, DuplicateError> {
+    both_unique(old, new, |vins| unique_ecus(vins, |(source, _)| *source))?;
     let mut out = Vec::new();
     for (source, side) in sides(old, new, |(source, _)| *source) {
         match side {
@@ -1123,5 +1278,5 @@ pub fn diff_vins(old: &[(u32, String)], new: &[(u32, String)]) -> Vec<Change> {
             Side::Both(..) => {}
         }
     }
-    out
+    Ok(out)
 }

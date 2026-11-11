@@ -156,9 +156,9 @@ fn a_tune_shows_as_changed_calibration_ids_cvns_and_part_numbers() {
     assert_eq!(
         lines(&out),
         [
-            "7E8 CALID 1: 4G0401N 0016BVAB → 4G0401N 0016BVAC".to_owned(),
+            "7E8 CALID 1: \"4G0401N 0016BVAB\" → \"4G0401N 0016BVAC\"".to_owned(),
             "7E8 CVN 1: 9BF7470D → 38D3FF82".to_owned(),
-            format!("transmission F189 {was} → 0006"),
+            format!("transmission F189 \"{was}\" → \"0006\""),
         ]
     );
 }
@@ -225,7 +225,7 @@ fn a_scan_reports_dtcs_and_answers_but_not_live_values_and_never_an_unchanged_vi
     let out = scratch.diff(&[], &old_path, &scratch.document("revised.json", &revised));
     let text = stdout(&out);
     assert!(
-        text.contains(&format!("engine F190 {VIN} → WAU2MBFC6EN099999")),
+        text.contains(&format!("engine F190 \"{VIN}\" → \"WAU2MBFC6EN099999\"")),
         "{text}"
     );
 
@@ -322,6 +322,36 @@ fn sweeps_are_compared_over_the_range_both_read_all_of() {
 }
 
 #[test]
+fn two_sweeps_that_stopped_at_the_same_did_still_say_what_was_left_out() {
+    let scratch = Scratch::new("sweep-same-stop");
+    let stopped = || {
+        sim(&[
+            "--sim-voltage-drop",
+            "60:11.0",
+            "sweep",
+            "--module",
+            "engine",
+            "--range",
+            "0600-0700",
+        ])
+    };
+    let (old, new) = (stopped(), stopped());
+    assert_eq!(old["result"]["sweep"]["stop"]["at"], "0664");
+    let out = scratch.diff(
+        &[],
+        &scratch.document("old.json", &old),
+        &scratch.document("new.json", &new),
+    );
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    assert_eq!(stdout(&out), "no changes\n");
+    assert!(
+        stderr(&out).contains("note: compared the DIDs 0600-0663"),
+        "{}",
+        stderr(&out)
+    );
+}
+
+#[test]
 fn sweeps_that_cant_be_compared_are_an_error() {
     let scratch = Scratch::new("sweep-error");
     let first = sim(&[
@@ -381,6 +411,66 @@ fn a_multi_did_read_compares_its_split_dids() {
         let out = scratch.diff(&[], &old_path, &scratch.document(name, other));
         assert_eq!(out.status.code(), Some(2), "{name}");
         assert!(stderr(&out).contains(message), "{name}: {}", stderr(&out));
+    }
+}
+
+#[test]
+fn a_document_that_lists_something_twice_is_refused_naming_the_file_and_the_entry() {
+    let scratch = Scratch::new("repeats");
+    // Each kind of document, with the list that gets an entry repeated in the new one
+    let range = ["--module", "head-up display", "--range", "F180-F18F"];
+    let sweep = sim(&[&["sweep"], &range[..]].concat());
+    let reads = sim(&[
+        "read-dids",
+        "--module",
+        "transmission",
+        "--did",
+        "F189,F191",
+    ]);
+    let cases: [(&str, Value, &[&str], &str); 5] = [
+        (
+            "fingerprint",
+            sim(&["fingerprint"]),
+            &["result", "ecus"],
+            "ECU 7E8",
+        ),
+        ("scan", sim(&["scan"]), &["result", "modules"], "module "),
+        ("vin", sim(&["vin"]), &["result"], "ECU 7E8"),
+        (
+            "sweep",
+            sweep,
+            &["result", "sweep", "found"],
+            "DID F187 of head-up display",
+        ),
+        (
+            "read-dids",
+            reads,
+            &["result", "read", "value", "split"],
+            "DID F189 of transmission",
+        ),
+    ];
+    for (name, old, path, entry) in cases {
+        let mut new = old.clone();
+        let list = path
+            .iter()
+            .fold(&mut new, |value, key| &mut value[*key])
+            .as_array_mut()
+            .unwrap();
+        let first = list[0].clone();
+        list.push(first);
+        let old_path = scratch.document(&format!("{name}-old.json"), &old);
+        let new_path = scratch.document(&format!("{name}-new.json"), &new);
+        let out = scratch.diff(&[], &old_path, &new_path);
+        assert_eq!(out.status.code(), Some(2), "{name}: {}", stderr(&out));
+        assert_eq!(stdout(&out), "", "{name}");
+        let text = stderr(&out);
+        assert!(text.contains(&format!("{name}-new.json")), "{name}: {text}");
+        assert!(text.contains(&format!("lists {entry}")), "{name}: {text}");
+        assert!(text.contains("twice"), "{name}: {text}");
+        // Either side repeating is refused, naming that side's file
+        let out = scratch.diff(&[], &new_path, &old_path);
+        assert_eq!(out.status.code(), Some(2), "{name}");
+        assert!(stderr(&out).contains(&format!("{name}-new.json")), "{name}");
     }
 }
 

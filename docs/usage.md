@@ -375,12 +375,15 @@ two documents of different commands, a file that can't be read, isn't UTF-8 or J
 doesn't read, or a result that isn't its command's is an error that names the file (status 2, nothing on stdout).
 
 ```
-7E8 CALID 1: 4G0907589F → 4G0907589G
+7E8 CALID 1: "4G0907589F" → "4G0907589G"
 7E8 CVN 1: 9BF7470D → 38D3FF82
-transmission F189 0005 → 0006
+transmission F189 "0005" → "0006"
 module added: 5F mmi (0x77F)
 engine DTC new: 0016A0 (confirmed)
 ```
+
+A DID's, CALID's or ECU name's text is in double quotes (`\"` and `\\` for those characters), so it can't pass for bytes
+(`[01]`) or a marker (`(absent)`, `(not set)`, `(empty)`, or why a read failed, such as `(no reply)`).
 
 - **Exit status:** 0 when nothing changed, 1 when something did (as `diff(1)` does), 2 on an error.
 - **What is compared:** each emissions ECU's calibration IDs and CVNs by slot (`fingerprint`), its supported mode 01 and
@@ -394,12 +397,14 @@ engine DTC new: 0016A0 (confirmed)
   line says it can't be compared (`engine DTCs can't be compared: old read, new no reply`) instead of listing every entry
   as new or cleared.
 - **Order:** the same whatever order the documents list things in: ECUs by CAN ID, then modules by name and CAN ID, and within
-  each by DID or DTC. If a hand-edited file repeats an ECU, module, DID or DTC, the last entry counts.
+  each by DID or DTC. A file that lists the same ECU, module, DID or DTC twice (a hand-edited one) is an error that names
+  the file and the entry (status 2): which entry is the car's can't be told, so nothing is compared.
 - **VINs:** a VIN is shown only when it changed (`vin`: `7E8 VIN <old> → <new>`; `scan`: the F190 line). An ECU that only one
   `vin` document has is `7E8 ECU added` or `removed`, without its VIN.
 - **`sweep`:** both documents must be of the same module. A sweep that stopped early (the battery guard, a silent module)
-  didn't read what is past its stop, so only the DIDs both sweeps read in full are compared; when that is less than either
-  range, a note on stderr gives it. Two sweeps with no DID in common are an error.
+  didn't read what is past its stop, so only the DIDs both sweeps read in full are compared; when that is less than the
+  range either sweep asked for (two sweeps that stopped at the same DID included), a note on stderr gives it. Two sweeps
+  with no DID in common are an error.
 - **`read-dids`:** both documents must be of the same module and have asked for the same DIDs. The split DIDs' bytes are
   compared, and the bytes the profile gave no length for (`unsplit data`).
 - **Text from the files** is shown as printable ASCII, anything else as `\u{...}`, so a document can't put an escape sequence

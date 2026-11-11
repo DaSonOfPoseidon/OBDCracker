@@ -10,7 +10,7 @@ use std::ops::RangeInclusive;
 use std::path::Path;
 use std::process::ExitCode;
 
-use obdcracker_transport::diff::{self, Change, ModuleId};
+use obdcracker_transport::diff::{self, Change, DuplicateError, Input, ModuleId};
 use obdcracker_transport::fingerprint::Fingerprint;
 use obdcracker_transport::scan::Scan;
 use serde::de::{DeserializeOwned, IgnoredAny};
@@ -137,6 +137,19 @@ impl Document<'_> {
     }
 }
 
+// The error for a document that lists something twice, naming the file that does.
+fn duplicate(paths: [&Path; 2], error: &DuplicateError) -> String {
+    let path = match error.input {
+        Input::Old => paths[0],
+        Input::New => paths[1],
+    };
+    format!(
+        "{}: lists {} twice, so which entry counts isn't known",
+        path.display(),
+        printable(&error.entry)
+    )
+}
+
 fn compare(old: &Path, new: &Path) -> Result<Comparison, String> {
     compare_limited(old, new, MAX_DOCUMENT)
 }
@@ -150,6 +163,7 @@ fn compare_limited(old: &Path, new: &Path, limit: u64) -> Result<Comparison, Str
         path: new,
         text: read_text(new, limit)?,
     };
+    let paths = [old.path, new.path];
     let (old_command, new_command) = (old.command()?, new.command()?);
     for (document, command) in [(&old, &old_command), (&new, &new_command)] {
         if !matches!(
@@ -170,27 +184,26 @@ fn compare_limited(old: &Path, new: &Path, limit: u64) -> Result<Comparison, Str
         ));
     }
     match old_command.as_str() {
-        "fingerprint" => Ok(Comparison::new(
-            "fingerprint",
-            diff::diff_fingerprint(&old.result::<Fingerprint>()?, &new.result::<Fingerprint>()?),
-        )),
-        "scan" => Ok(Comparison::new(
-            "scan",
-            diff::diff_scan(&old.result::<Scan>()?, &new.result::<Scan>()?),
-        )),
+        "fingerprint" => {
+            diff::diff_fingerprint(&old.result::<Fingerprint>()?, &new.result::<Fingerprint>()?)
+                .map(|changes| Comparison::new("fingerprint", changes))
+                .map_err(|e| duplicate(paths, &e))
+        }
+        "scan" => diff::diff_scan(&old.result::<Scan>()?, &new.result::<Scan>()?)
+            .map(|changes| Comparison::new("scan", changes))
+            .map_err(|e| duplicate(paths, &e)),
         "vin" => {
             let vins = |document: &Document<'_>| -> Result<Vec<(u32, String)>, String> {
                 let readings = document.result::<Vec<VinReading>>()?;
                 Ok(readings.into_iter().map(|r| (r.source, r.vin)).collect())
             };
-            Ok(Comparison::new(
-                "vin",
-                diff::diff_vins(&vins(&old)?, &vins(&new)?),
-            ))
+            diff::diff_vins(&vins(&old)?, &vins(&new)?)
+                .map(|changes| Comparison::new("vin", changes))
+                .map_err(|e| duplicate(paths, &e))
         }
-        "sweep" => compare_sweeps(&old.result()?, &new.result()?),
+        "sweep" => compare_sweeps(paths, &old.result()?, &new.result()?),
         // `compare_limited` refused every other command above.
-        _ => compare_reads(&old.result()?, &new.result()?),
+        _ => compare_reads(paths, &old.result()?, &new.result()?),
     }
 }
 
@@ -208,7 +221,11 @@ fn dids(range: &RangeInclusive<u16>) -> String {
     format!("{:04X}-{:04X}", range.start(), range.end())
 }
 
-fn compare_sweeps(old: &SweepReport, new: &SweepReport) -> Result<Comparison, String> {
+fn compare_sweeps(
+    paths: [&Path; 2],
+    old: &SweepReport,
+    new: &SweepReport,
+) -> Result<Comparison, String> {
     if old.module != new.module {
         return Err(format!(
             "the sweeps are of different modules: {} and {}",
@@ -229,20 +246,29 @@ fn compare_sweeps(old: &SweepReport, new: &SweepReport) -> Result<Comparison, St
             dids(&new_read)
         ));
     }
-    let changes = diff::diff_sweep(&old.module, &old.sweep, &new.sweep, range.clone());
+    let changes = diff::diff_sweep(&old.module, &old.sweep, &new.sweep, range.clone())
+        .map_err(|e| duplicate(paths, &e))?;
     let mut found = Comparison::new("sweep", changes);
-    if range != old_read || range != new_read {
+    let (old_asked, new_asked) = (old.first..=old.last, new.first..=new.last);
+    if range != old_asked || range != new_asked {
         found.notes.push(format!(
-            "compared the DIDs {}, the range both sweeps read (the old one read {}, the new one {})",
+            "compared the DIDs {}, the range both sweeps read (the old one asked for {} and read {}, \
+             the new one asked for {} and read {})",
             dids(&range),
+            dids(&old_asked),
             dids(&old_read),
+            dids(&new_asked),
             dids(&new_read)
         ));
     }
     Ok(found)
 }
 
-fn compare_reads(old: &ReadDidsReport, new: &ReadDidsReport) -> Result<Comparison, String> {
+fn compare_reads(
+    paths: [&Path; 2],
+    old: &ReadDidsReport,
+    new: &ReadDidsReport,
+) -> Result<Comparison, String> {
     if old.module != new.module {
         return Err(format!(
             "the reads are of different modules: {} and {}",
@@ -263,10 +289,9 @@ fn compare_reads(old: &ReadDidsReport, new: &ReadDidsReport) -> Result<Compariso
             list(&new.dids)
         ));
     }
-    Ok(Comparison::new(
-        "read-dids",
-        diff::diff_dids_data(&old.module, &old.read, &new.read),
-    ))
+    diff::diff_dids_data(&old.module, &old.read, &new.read)
+        .map(|changes| Comparison::new("read-dids", changes))
+        .map_err(|e| duplicate(paths, &e))
 }
 
 #[cfg(test)]
@@ -325,7 +350,8 @@ mod tests {
     #[test]
     fn sweeps_are_compared_where_their_ranges_overlap() {
         let found = |old: &SweepReport, new: &SweepReport| {
-            compare_sweeps(old, new).map(|found| (found.changes, found.notes))
+            compare_sweeps([Path::new("old"), Path::new("new")], old, new)
+                .map(|found| (found.changes, found.notes))
         };
         let (changes, notes) =
             found(&report(0x600, 0x6FF, None), &report(0x600, 0x6FF, None)).unwrap();
@@ -334,9 +360,28 @@ mod tests {
         assert_eq!(
             notes,
             [
-                "compared the DIDs 0680-06FF, the range both sweeps read (the old one read 0600-06FF, the new one 0680-07FF)"
+                "compared the DIDs 0680-06FF, the range both sweeps read (the old one asked for 0600-06FF and read 0600-06FF, the new one asked for 0680-07FF and read 0680-07FF)"
             ]
         );
+        // Both stopped at the same DID: what they have in common is still less than they asked for
+        let (_, notes) = found(
+            &report(0x600, 0x700, Some(0x664)),
+            &report(0x600, 0x700, Some(0x664)),
+        )
+        .unwrap();
+        assert_eq!(
+            notes,
+            [
+                "compared the DIDs 0600-0663, the range both sweeps read (the old one asked for 0600-0700 and read 0600-0663, the new one asked for 0600-0700 and read 0600-0663)"
+            ]
+        );
+        // Stopped past the range, or at its last DID's successor: nothing left out
+        let (_, notes) = found(
+            &report(0x600, 0x700, Some(0x900)),
+            &report(0x600, 0x700, None),
+        )
+        .unwrap();
+        assert!(notes.is_empty(), "{notes:?}");
         // Sharing exactly one DID is enough, and none is an error
         assert!(found(&report(0x600, 0x6FF, None), &report(0x6FF, 0x7FF, None)).is_ok());
         let error = found(&report(0x600, 0x6FF, None), &report(0x700, 0x7FF, None)).unwrap_err();
