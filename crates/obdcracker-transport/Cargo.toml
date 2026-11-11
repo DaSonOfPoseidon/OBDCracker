@@ -20,6 +20,7 @@ serde = ["dep:serde", "obdcracker-core/serde"]
 
 [dependencies]
 obdcracker-core.workspace = true
+obdcracker-profile.workspace = true
 obdcracker-safety.workspace = true
 serial2 = { version = "0.2.38", optional = true }
 nusb = { version = "0.2.9", optional = true }

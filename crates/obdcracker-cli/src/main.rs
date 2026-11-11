@@ -3,6 +3,7 @@
 mod diff;
 mod json;
 mod update;
+mod vin_cmd;
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -121,7 +122,9 @@ struct Cli {
     sim: Option<String>,
 
     /// The vehicle profile that gives module addresses [default: the --sim profile, else the
-    /// OBD-II engine and transmission IDs]
+    /// OBD-II engine and transmission IDs]. Before `fingerprint`, `scan`, `sweep`, `read-dids`
+    /// and `dtc`, the car's VIN is read and checked against the profile (see
+    /// --ignore-vin-mismatch)
     #[arg(long, value_name = "PROFILE",
           value_parser = PossibleValuesParser::new(Profile::BUILTIN))]
     profile: Option<String>,
@@ -143,6 +146,13 @@ struct Cli {
     /// further. The voltage is still read, logged and warned about
     #[arg(long)]
     force_low_voltage: bool,
+
+    /// Go on although the car's VIN isn't the one --profile fits, or couldn't be read. Before
+    /// `fingerprint`, `scan`, `sweep`, `read-dids` and `dtc`, a given --profile makes the tool
+    /// read the VIN (mode 09 PID 02) and stop when it doesn't match, when no ECU gives one, or
+    /// when ECUs give different ones. The mismatch is still printed, as a warning
+    #[arg(long, requires = "profile")]
+    ignore_vin_mismatch: bool,
 
     /// Print one JSON document on stdout instead of text (docs/json.md), for `vin`, `fingerprint`,
     /// `scan`, `sweep`, `read-dids`, `dtc`, `adapter` and `ports`, and for the changes `diff`
@@ -170,7 +180,8 @@ enum ElmSegmenting {
 
 #[derive(Debug, Subcommand)]
 enum Command {
-    /// Read the VIN from every emissions ECU (OBD-II mode 09 PID 02)
+    /// Read the VIN from every emissions ECU (OBD-II mode 09 PID 02) and decode it: manufacturer
+    /// code, model year, plant, check digit, and the builtin profile that fits
     Vin,
     /// Identify the engine and transmission software: calibration IDs and CVNs (mode 09 PIDs 04
     /// and 06), then part numbers and versions (UDS 0x22 F187, F188, F189, F191, F19E)
@@ -346,6 +357,7 @@ fn flag_adapter_free_ignores(cli: &Cli, audit_log_given: bool) -> Option<&'stati
         (cli.sim_voltage.is_some(), "--sim-voltage"),
         (cli.sim_voltage_drop.is_some(), "--sim-voltage-drop"),
         (cli.force_low_voltage, "--force-low-voltage"),
+        (cli.ignore_vin_mismatch, "--ignore-vin-mismatch"),
         (audit_log_given, "--audit-log"),
     ]
     .into_iter()
@@ -1074,18 +1086,27 @@ fn run_vin<T: Transport>(cli: &Cli, transport: &mut T, timing: Timing) -> ExitCo
         eprintln!("no ECU answered");
         return ExitCode::FAILURE;
     }
+    let profile = cli
+        .profile
+        .as_deref()
+        .and_then(|name| Profile::builtin(name).ok().map(|profile| (name, profile)));
     let (mut found, mut failed) = (false, false);
     let mut vins = Vec::new();
     for reply in replies {
         match obd::decode_vin(&reply.payload) {
             Ok(vin) => {
+                let decoded = obdcracker_core::vin::decode(vin).map(|parsed| {
+                    vin_cmd::Decoded::new(parsed, profile.as_ref().map(|(n, p)| (*n, p)))
+                });
                 if cli.json {
-                    vins.push(json::VinReading {
-                        source: reply.source,
-                        vin: vin.to_owned(),
-                    });
+                    if let Ok(decoded) = &decoded {
+                        vins.push(decoded.entry(reply.source));
+                    }
                 } else {
                     println!("{:03X} {vin}", reply.source);
+                    if let Ok(decoded) = &decoded {
+                        decoded.lines().iter().for_each(|line| println!("{line}"));
+                    }
                 }
                 found = true;
             }
@@ -1151,6 +1172,9 @@ fn run_fingerprint<T: Transport>(cli: &Cli, transport: &mut T, timing: Timing) -
             return ExitCode::from(2);
         }
     };
+    if let Err(code) = vin_cmd::check_profile(cli, transport, timing) {
+        return code;
+    }
     match fingerprint::fingerprint(transport, &policy, &modules, timing) {
         Ok(_) if cli.dry_run => {
             println!("dry run: nothing was sent");
@@ -1337,6 +1361,9 @@ fn run_dtc<T: Transport>(
             return ExitCode::from(2);
         }
     };
+    if let Err(code) = vin_cmd::check_profile(cli, transport, timing) {
+        return code;
+    }
     let found = match dtc::read_dtc_detail(transport, &policy, &module, code, record, timing) {
         Ok(found) => found,
         Err(e) => {
@@ -1468,6 +1495,9 @@ fn run_read_dids<T: Transport>(
         eprintln!("{e}");
         return ExitCode::from(2);
     }
+    if let Err(code) = vin_cmd::check_profile(cli, transport, timing) {
+        return code;
+    }
     let lengths = module_did_lengths(cli, name);
     let length_of = |did: u16| {
         lengths
@@ -1592,6 +1622,9 @@ fn run_sweep<T: Transport>(
             return ExitCode::from(2);
         }
     };
+    if let Err(code) = vin_cmd::check_profile(cli, transport, timing) {
+        return code;
+    }
     let count = u32::from(last) - u32::from(first) + 1;
     let (most, each) = match options.patient {
         Some(wait) => ("up to", u32::try_from(wait.as_millis()).unwrap_or(u32::MAX)),
@@ -1826,8 +1859,16 @@ fn run_scan<T: Transport>(
     } else {
         None
     };
-    if passes.discover {
-        match discover_modules(cli, transport, timing, passes.wide, patient_ids) {
+    // Every argument is checked before the VIN check sends the first request.
+    let (discovery, discovery_29) = match discovery_setups(cli, passes, patient_ids) {
+        Ok(setups) => setups,
+        Err(code) => return code,
+    };
+    if let Err(code) = vin_cmd::check_profile(cli, transport, timing) {
+        return code;
+    }
+    if let Some(setup) = discovery {
+        match discover_modules(cli, transport, timing, passes.wide, setup) {
             Ok((found, discovery_policy)) => {
                 modules.extend(found);
                 policy = discovery_policy;
@@ -1835,8 +1876,8 @@ fn run_scan<T: Transport>(
             Err(code) => return code,
         }
     }
-    if passes.discover_29bit {
-        match discover_29_bit_modules(cli, transport, timing, &modules) {
+    if let Some(setup) = discovery_29 {
+        match discover_29_bit_modules(cli, transport, timing, &modules, setup) {
             Ok((found, discovery_policy)) => {
                 modules.extend(found);
                 policy = discovery_policy;
@@ -1904,6 +1945,24 @@ fn run_scan<T: Transport>(
         eprintln!("nothing answered: check the ignition and the adapter's connection");
         ExitCode::FAILURE
     }
+}
+
+// The set-up of each discovery pass asked for, which refuses what can't work before anything is
+// sent.
+fn discovery_setups(
+    cli: &Cli,
+    passes: Discovery,
+    patient_ids: &[u32],
+) -> Result<(Option<DiscoverySetup>, Option<Discovery29Setup>), ExitCode> {
+    let discovery = passes
+        .discover
+        .then(|| discovery_setup(cli, passes.wide, patient_ids))
+        .transpose()?;
+    let discovery_29 = passes
+        .discover_29bit
+        .then(|| discovery_29_bit_setup(cli))
+        .transpose()?;
+    Ok((discovery, discovery_29))
 }
 
 fn print_scan_dry_run(cli: &Cli, extended: bool) {
@@ -2415,13 +2474,17 @@ fn shell_word(word: &str, windows: bool) -> Option<String> {
 // that didn't answer, and with `wide` in its wide range too, and prints each that answers.
 // Returns those the profile doesn't list, to scan with the rest, and the policy narrowed to the
 // profile's modules and the ones found.
-fn discover_modules<T: Transport>(
-    cli: &Cli,
-    transport: &mut T,
-    timing: Timing,
-    wide: bool,
-    patient_ids: &[u32],
-) -> Result<(Vec<ScanModule>, Policy), ExitCode> {
+// What `--discover` needs, checked before anything is sent: a profile with a discovery range, the
+// wide range if asked for, and the patient IDs.
+struct DiscoverySetup {
+    name: String,
+    profile: Profile,
+    candidates: Vec<ModuleIds>,
+    patient: Vec<ModuleIds>,
+    policy: Policy,
+}
+
+fn discovery_setup(cli: &Cli, wide: bool, patient_ids: &[u32]) -> Result<DiscoverySetup, ExitCode> {
     let usage = |e: String| {
         eprintln!("{e}");
         ExitCode::from(2)
@@ -2443,16 +2506,40 @@ fn discover_modules<T: Transport>(
             "--wide needs a profile with a wide discovery range, and {name} has none"
         )));
     }
-    let mut patient = patient_candidates(name, &candidates, patient_ids).map_err(usage)?;
+    let patient = patient_candidates(name, &candidates, patient_ids).map_err(usage)?;
+    let policy = profile
+        .narrow_for_discovery(Policy::read_only())
+        .map_err(|e| usage(format!("profile {name}: {e}")))?;
+    Ok(DiscoverySetup {
+        name: name.clone(),
+        profile,
+        candidates,
+        patient,
+        policy,
+    })
+}
+
+fn discover_modules<T: Transport>(
+    cli: &Cli,
+    transport: &mut T,
+    timing: Timing,
+    wide: bool,
+    setup: DiscoverySetup,
+) -> Result<(Vec<ScanModule>, Policy), ExitCode> {
+    let DiscoverySetup {
+        name,
+        profile,
+        candidates,
+        mut patient,
+        policy,
+    } = setup;
+    let name = &name;
     let pass = |name, patient| Pass {
         name,
         patient,
         watch: voltage_watch(cli),
         json: cli.json,
     };
-    let policy = profile
-        .narrow_for_discovery(Policy::read_only())
-        .map_err(|e| usage(format!("profile {name}: {e}")))?;
     let mut found = discover_pass(
         transport,
         &policy,
@@ -2524,12 +2611,14 @@ fn discover_modules<T: Transport>(
     Ok((unlisted(&profile, &found), narrow(&known)?))
 }
 
-fn discover_29_bit_modules<T: Transport>(
-    cli: &Cli,
-    transport: &mut T,
-    timing: Timing,
-    known: &[ScanModule],
-) -> Result<(Vec<ScanModule>, Policy), ExitCode> {
+// What `--discover-29bit` needs, checked before anything is sent: a profile with a 29-bit range.
+struct Discovery29Setup {
+    name: String,
+    profile: Profile,
+    candidates: Vec<ModuleIds>,
+}
+
+fn discovery_29_bit_setup(cli: &Cli) -> Result<Discovery29Setup, ExitCode> {
     let usage = |e: String| {
         eprintln!("{e}");
         ExitCode::from(2)
@@ -2542,17 +2631,37 @@ fn discover_29_bit_modules<T: Transport>(
     };
     let profile = Profile::builtin(name).map_err(|e| usage(format!("profile {name}: {e}")))?;
     let candidates = profile.candidates_29bit();
+    if candidates.is_empty() {
+        return Err(usage(format!(
+            "--discover-29bit needs a profile with a 29-bit discovery range, and {name} has none"
+        )));
+    }
+    Ok(Discovery29Setup {
+        name: name.clone(),
+        profile,
+        candidates,
+    })
+}
+
+fn discover_29_bit_modules<T: Transport>(
+    cli: &Cli,
+    transport: &mut T,
+    timing: Timing,
+    known: &[ScanModule],
+    setup: Discovery29Setup,
+) -> Result<(Vec<ScanModule>, Policy), ExitCode> {
+    let Discovery29Setup {
+        name,
+        profile,
+        candidates,
+    } = setup;
+    let name = &name;
     let pass = |name, patient| Pass {
         name,
         patient,
         watch: voltage_watch(cli),
         json: cli.json,
     };
-    if candidates.is_empty() {
-        return Err(usage(format!(
-            "--discover-29bit needs a profile with a 29-bit discovery range, and {name} has none"
-        )));
-    }
     let narrow = |extra: &[ModuleIds]| {
         profile
             .narrow_with(Policy::read_only(), extra)

@@ -2,7 +2,7 @@
 //! errors and never panic.
 
 use obdcracker_core::obd::{self, Dtc, SupportedPids};
-use obdcracker_core::{response, uds};
+use obdcracker_core::{response, uds, vin};
 use proptest::prelude::*;
 
 // Arbitrary replies, half of them starting with a plausible service ID so decoding gets past
@@ -19,6 +19,22 @@ fn any_reply() -> impl Strategy<Value = Vec<u8>> {
 }
 
 proptest! {
+    // Text near a VIN's shape, with the characters a VIN excludes and some it never holds, so the
+    // decoder both accepts and refuses.
+    #[test]
+    fn vin_decoder_never_panics_and_accepts_only_vins(text in "[0-9A-Za-z -]{12,22}") {
+        if let Ok(vin) = vin::decode(&text) {
+            prop_assert_eq!(vin.as_str(), text.as_str());
+            prop_assert_eq!(vin.as_str().len(), 17);
+            prop_assert!(vin
+                .as_str()
+                .bytes()
+                .all(|b| (b.is_ascii_digit() || b.is_ascii_uppercase()) && !b"IOQ".contains(&b)));
+            prop_assert!(vin.model_years().as_slice().len() <= 2);
+            let _ = vin.check_digit().status();
+        }
+    }
+
     #[test]
     fn answers_never_panics(request in any_reply(), reply in any_reply()) {
         let _ = obdcracker_core::response::answers(&request, &reply);

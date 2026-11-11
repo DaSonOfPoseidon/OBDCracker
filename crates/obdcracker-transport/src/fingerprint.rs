@@ -6,6 +6,8 @@ use std::fmt;
 use obdcracker_core::obd::{self, Cvn};
 use obdcracker_core::response;
 use obdcracker_core::uds::{self, did};
+use obdcracker_core::vin;
+use obdcracker_profile::Profile;
 use obdcracker_safety::{Approved, Policy, Protocol, Rejection, Target};
 
 use crate::{Error, Expect, Response, SessionError, Timing, Transport, exchange, hex};
@@ -374,6 +376,88 @@ pub fn read_vin<T: Transport + ?Sized>(
     let ecu_list_request = approve_ecu_list(policy)?;
     let asked = ecus_to_ask(transport, &ecu_list_request, timing)?;
     vin_request.read(transport, &asked, timing)
+}
+
+/// What [`check_vin`] found when it compared the car's VIN with a profile.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum VinCheck {
+    /// The car's VIN is one the profile's `[vin]` table fits.
+    Match {
+        /// The VIN.
+        vin: String,
+    },
+    /// The car's VIN is not one the profile fits.
+    Mismatch {
+        /// The VIN.
+        vin: String,
+    },
+    /// No ECU gave a VIN: none answered, or each refused or sent something that isn't a VIN.
+    NoVin,
+    /// ECUs gave different VINs, so the car can't be said to be any one of them.
+    Conflicting {
+        /// The distinct VINs, in the order they arrived.
+        vins: Vec<String>,
+    },
+    /// The profile has no `[vin]` table, so there is nothing to compare with. Nothing was sent.
+    ProfileHasNoVin,
+}
+
+impl VinCheck {
+    /// Whether a session may go on: the VIN matched, or the profile says nothing about VINs. An
+    /// unknown VIN ([`VinCheck::NoVin`], [`VinCheck::Conflicting`]) doesn't pass, as a mismatch
+    /// doesn't.
+    #[must_use]
+    pub fn passes(&self) -> bool {
+        matches!(self, Self::Match { .. } | Self::ProfileHasNoVin)
+    }
+}
+
+/// Reads the car's VIN ([`read_vin`]) and checks it against `profile`'s `[vin]` table
+/// ([`Profile::matches_vin`]), so a session can stop before it reads a car the profile isn't for.
+///
+/// Each reply is decoded on its own ([`obd::decode_vin`]) and an ECU whose reply isn't a VIN
+/// (a refusal, as an ECU with no VIN often sends, or a malformed reply) is left out, so one
+/// doesn't hide another's VIN. The distinct VINs left decide: none is [`VinCheck::NoVin`], two or
+/// more [`VinCheck::Conflicting`], one is compared with the profile. A profile with no `[vin]`
+/// table gives [`VinCheck::ProfileHasNoVin`] and sends nothing. Every request is approved by
+/// `policy` first, and `09 02` is a read.
+///
+/// # Errors
+///
+/// As [`read_vin`].
+pub fn check_vin<T: Transport + ?Sized>(
+    transport: &mut T,
+    policy: &Policy,
+    timing: Timing,
+    profile: &Profile,
+) -> Result<VinCheck, FingerprintError> {
+    if profile.vin.is_none() {
+        return Ok(VinCheck::ProfileHasNoVin);
+    }
+    let replies = read_vin(transport, policy, timing)?;
+    let mut vins: Vec<&str> = Vec::new();
+    for reply in &replies {
+        if let Ok(vin) = obd::decode_vin(&reply.payload)
+            && !vins.contains(&vin)
+        {
+            vins.push(vin);
+        }
+    }
+    Ok(match vins.as_slice() {
+        [] => VinCheck::NoVin,
+        [text] => match vin::decode(text) {
+            Ok(parsed) if profile.matches_vin(&parsed) => VinCheck::Match {
+                vin: (*text).to_owned(),
+            },
+            Ok(_) => VinCheck::Mismatch {
+                vin: (*text).to_owned(),
+            },
+            Err(_) => VinCheck::NoVin,
+        },
+        _ => VinCheck::Conflicting {
+            vins: vins.into_iter().map(str::to_owned).collect(),
+        },
+    })
 }
 
 fn approve_ecu_list(policy: &Policy) -> Result<Approved, FingerprintError> {

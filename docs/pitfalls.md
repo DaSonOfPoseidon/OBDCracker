@@ -35,6 +35,9 @@ Each entry names the class, what to check, and where it bit us.
   every raw value in a range, then filter.
 - **Validate against the real decoder.** Data the tool will decode must pass the decoder that reads it: VIN characters,
   mode 01 PID widths, text DIDs. Round-trip through `obdcracker-core` rather than re-implementing the rule.
+- **A fixed-size array field takes extra elements.** serde reads `[2012, 2014, 2018]` into a `[u16; 2]` without
+  complaint, so a profile's `years = [first, last]` accepted a third number. Read it as a `Vec` and convert
+  (`VinRule::years`), and test a list one element too long and one too short (#102).
 - **Respect the wire format's limits.** A count stored in a `u8` (mode 03, mode 09) or a `u16` (UDS DTC count) caps
   the list. Reject the input; don't saturate with `unwrap_or(MAX)`, which makes two replies contradict each other.
 - **A page limit fails only when a page past it has entries.** A list that fills its last allowed page may end exactly
@@ -107,6 +110,11 @@ Each entry names the class, what to check, and where it bit us.
 - **A note about what was left out compares with what was asked for.** Two sweeps of `0600-0700` that both stopped at
   `0664` shared the same covered range, so the "compared less than they read" note compared the result with itself and
   stayed silent. Compare the covered range with each request, not with the other result (#100).
+
+- **A standard's rule for one class of vehicle isn't a rule for the region.** The VIN decoder narrowed a North
+  American VIN's year by position 7, but 49 CFR 565.15 limits that to passenger cars and light trucks, and a VIN
+  doesn't say which class it is, so a motorcycle's year was named with false certainty. When a rule applies only
+  to a class the input can't identify, return every candidate and let the caller match on any (#102, Codex).
 
 - **State computed on read must also be stored.** The sim's `session()` reported a lapsed session as default
   without storing it, so raising S3 afterwards brought the expired session back (#68, Codex). Write the derived

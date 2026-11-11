@@ -21,7 +21,9 @@ use std::collections::{HashMap, HashSet};
 use std::fmt;
 
 use obdcracker_core::isotp::Addressing;
+use obdcracker_core::obd::check_vin;
 use obdcracker_core::uds;
+use obdcracker_core::vin::Vin;
 use obdcracker_safety::{ModuleIds, NarrowingError, Policy};
 use serde::Deserialize;
 
@@ -43,8 +45,91 @@ pub struct Profile {
     /// The VAG addresses to try VW TP2.0 channel setups to, if any. Without it, the profile
     /// allows no channel setup.
     pub discovery_tp20: Option<DiscoveryTp20>,
+    /// The VINs this profile fits, if it says ([`Profile::matches_vin`]). Without it, a session
+    /// can't check the car's VIN against the profile.
+    pub vin: Option<VinRule>,
     /// The tables of the VAG gateway's installed-module list, if the car has them.
     pub gateway_list: Option<GatewayList>,
+}
+
+/// The VINs a profile fits: all of the checks it gives must pass ([`Profile::matches_vin`]).
+///
+/// See [`docs/profiles.md#vin`](https://github.com/DaSonOfPoseidon/OBDCracker/blob/main/docs/profiles.md#vin).
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct VinRule {
+    /// The manufacturer codes (VIN positions 1 to 3) the car may have, at least one, each 3 VIN
+    /// characters, none twice.
+    pub wmi: Vec<String>,
+    /// A pattern for the descriptor section (positions 4 to 8): 5 characters, each a VIN
+    /// character or `?` for any.
+    pub vds: Option<String>,
+    /// The first and last model year, inclusive, within 1980 to 2039. A VIN fits if any year its
+    /// position 10 can mean is in the range ([`obdcracker_core::vin::Vin::model_years`]).
+    #[serde(default, deserialize_with = "year_range")]
+    pub years: Option<[u16; 2]>,
+}
+
+// serde reads `[2012, 2014, 2018]` into `[u16; 2]` without complaint, so check the length here.
+fn year_range<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<[u16; 2]>, D::Error> {
+    let Some(years) = Option::<Vec<u16>>::deserialize(deserializer)? else {
+        return Ok(None);
+    };
+    <[u16; 2]>::try_from(years)
+        .map(Some)
+        .map_err(|years| serde::de::Error::invalid_length(years.len(), &"a first and a last year"))
+}
+
+impl VinRule {
+    /// The model years a VIN can fall in: its code repeats every 30 years.
+    pub const YEARS: std::ops::RangeInclusive<u16> = 1980..=2039;
+
+    /// Whether `vin` passes every check this rule gives. A descriptor pattern that isn't 5
+    /// characters matches nothing.
+    #[must_use]
+    pub fn matches(&self, vin: &Vin<'_>) -> bool {
+        self.wmi.iter().any(|wmi| wmi == vin.wmi())
+            && self.vds.as_ref().is_none_or(|pattern| {
+                pattern.len() == vin.vds().len()
+                    && pattern
+                        .bytes()
+                        .zip(vin.vds().bytes())
+                        .all(|(want, got)| want == b'?' || want == got)
+            })
+            && self
+                .years
+                .is_none_or(|[first, last]| vin.model_years().any_in(first, last))
+    }
+
+    fn validate(&self) -> Result<(), ProfileError> {
+        if self.wmi.is_empty() {
+            return Err(ProfileError::VinNoWmi);
+        }
+        let mut seen = HashSet::new();
+        for wmi in &self.wmi {
+            // Padding it to a VIN makes the VIN character rule, and the length, the decoder's.
+            if check_vin(format!("{wmi}00000000000000").as_bytes()).is_err() {
+                return Err(ProfileError::VinWmi(wmi.clone()));
+            }
+            if !seen.insert(wmi.as_str()) {
+                return Err(ProfileError::VinDuplicateWmi(wmi.clone()));
+            }
+        }
+        if let Some(vds) = &self.vds {
+            let filled = vds.replace('?', "0");
+            if check_vin(format!("AAA{filled}000000000").as_bytes()).is_err() {
+                return Err(ProfileError::VinVds(vds.clone()));
+            }
+        }
+        if let Some([first, last]) = self.years
+            && (first > last || !Self::YEARS.contains(&first) || !Self::YEARS.contains(&last))
+        {
+            return Err(ProfileError::VinYears([first, last]));
+        }
+        Ok(())
+    }
 }
 
 /// The DIDs of a VAG gateway's installed-module list: parallel tables with one slot per module
@@ -284,6 +369,17 @@ pub enum ProfileError {
         /// The DID.
         did: u16,
     },
+    /// The `[vin]` table lists no manufacturer code.
+    VinNoWmi,
+    /// A manufacturer code in `[vin]` isn't 3 VIN characters (digits and upper case letters other
+    /// than I, O and Q).
+    VinWmi(String),
+    /// `[vin]` lists a manufacturer code twice.
+    VinDuplicateWmi(String),
+    /// The descriptor pattern in `[vin]` isn't 5 characters that are VIN characters or `?`.
+    VinVds(String),
+    /// The model years in `[vin]` are reversed or outside 1980 to 2039.
+    VinYears([u16; 2]),
 }
 
 impl fmt::Display for ProfileError {
@@ -339,11 +435,35 @@ impl fmt::Display for ProfileError {
                 f,
                 "gateway list: DID {did:04X} is used twice or is one of {module}'s own"
             ),
+            Self::VinNoWmi => write!(f, "[vin]: wmi lists no manufacturer code"),
+            Self::VinWmi(wmi) => write!(
+                f,
+                "[vin]: wmi {wmi:?} isn't 3 VIN characters (digits and capitals but I, O, Q)"
+            ),
+            Self::VinDuplicateWmi(wmi) => write!(f, "[vin]: wmi {wmi:?} is listed twice"),
+            Self::VinVds(vds) => write!(
+                f,
+                "[vin]: vds {vds:?} isn't 5 characters that are VIN characters or ?"
+            ),
+            Self::VinYears([first, last]) => write!(
+                f,
+                "[vin]: years {first} to {last} aren't a range within 1980 to 2039"
+            ),
         }
     }
 }
 
 impl std::error::Error for ProfileError {}
+
+/// The names of the built-in profiles whose `[vin]` table fits `vin`, in [`Profile::BUILTIN`]'s
+/// order.
+#[must_use]
+pub fn builtins_matching(vin: &Vin<'_>) -> Vec<&'static str> {
+    Profile::BUILTIN
+        .into_iter()
+        .filter(|name| Profile::builtin(name).is_ok_and(|profile| profile.matches_vin(vin)))
+        .collect()
+}
 
 /// The ISO 14229-1 identification DIDs, which every module may have without a profile entry.
 pub const STANDARD_DIDS: std::ops::RangeInclusive<u16> = 0xF180..=0xF19F;
@@ -377,6 +497,13 @@ impl Profile {
             "a7" => Self::from_toml(include_str!("../profiles/audi-a7-c7.toml")),
             _ => Err(ProfileError::UnknownBuiltin(name.to_owned())),
         }
+    }
+
+    /// Whether the car with this VIN is one the profile's `[vin]` table fits. A profile without
+    /// the table fits no VIN: check [`Profile::vin`] first to tell "no rule" from "not this car".
+    #[must_use]
+    pub fn matches_vin(&self, vin: &Vin<'_>) -> bool {
+        self.vin.as_ref().is_some_and(|rule| rule.matches(vin))
     }
 
     /// The module with this name.
@@ -630,6 +757,9 @@ impl Profile {
         }
         if let Some(list) = &self.gateway_list {
             self.validate_gateway_list(list)?;
+        }
+        if let Some(rule) = &self.vin {
+            rule.validate()?;
         }
         Ok(())
     }

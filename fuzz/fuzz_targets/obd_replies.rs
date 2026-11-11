@@ -4,7 +4,7 @@
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
-use obdcracker_core::{obd, response};
+use obdcracker_core::{obd, response, vin};
 
 fuzz_target!(|data: &[u8]| {
     // The first byte splits the input into a request and a reply, for reply matching.
@@ -21,6 +21,11 @@ fuzz_target!(|data: &[u8]| {
     }
     let _ = obd::decode_supported_info(data);
     let _ = obd::decode_vin(data);
+    if let Ok(text) = core::str::from_utf8(data)
+        && let Ok(vin) = vin::decode(text)
+    {
+        let _ = (vin.model_years(), vin.check_digit().status());
+    }
     if let Ok(calids) = obd::decode_calids(data) {
         calids.for_each(drop);
     }

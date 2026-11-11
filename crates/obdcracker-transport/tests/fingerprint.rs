@@ -5,10 +5,11 @@ use std::time::Duration;
 
 use obdcracker_core::obd::Cvn;
 use obdcracker_core::response::{Error as ReplyError, NegativeResponse, Nrc};
+use obdcracker_profile::Profile;
 use obdcracker_safety::{Approved, Policy, Rejection};
 use obdcracker_transport::fingerprint::{
-    Calibration, DidValue, FingerprintError, IDENTIFICATION_DIDS, ReadError, UdsModule,
-    fingerprint, read_vin,
+    Calibration, DidValue, FingerprintError, IDENTIFICATION_DIDS, ReadError, UdsModule, VinCheck,
+    check_vin, fingerprint, read_vin,
 };
 use obdcracker_transport::{Error, Response, Timing, Transport, hex};
 
@@ -402,6 +403,152 @@ fn a_vin_read_reports_an_adapter_failure() {
     car.fail_after = Some(0);
     assert_eq!(
         read_vin(&mut car, &Policy::read_only(), TIMING),
+        Err(FingerprintError::Transport(Error::Adapter(
+            "unplugged".to_owned()
+        )))
+    );
+}
+
+// The check of the car's VIN against a profile's `[vin]` table.
+
+const A7_VIN: &[u8] = b"WAU2MBFC6EN093415";
+const OTHER_VIN: &[u8] = b"WAU2MBFC6EN093416";
+
+fn vin_reply(source: u32, vin: &[u8]) -> Response {
+    let mut payload = vec![0x49, 0x02, 0x01];
+    payload.extend_from_slice(vin);
+    reply(source, &payload)
+}
+
+fn a7_profile() -> Profile {
+    Profile::builtin("a7").unwrap()
+}
+
+// A car whose ECUs answer the one broadcast `09 02` with these replies.
+fn car_answering(replies: Vec<Response>) -> Car {
+    Car::new(move |id, request| match (id, request) {
+        (0x7DF, [0x09, 0x02]) => replies.clone(),
+        _ => Vec::new(),
+    })
+}
+
+fn check(car: &mut Car, profile: &Profile) -> VinCheck {
+    check_vin(car, &Policy::read_only(), TIMING, profile).unwrap()
+}
+
+#[test]
+fn a_vin_the_profile_fits_is_a_match() {
+    let mut car = car_answering(vec![vin_reply(0x7E8, A7_VIN)]);
+    let got = check(&mut car, &a7_profile());
+    assert_eq!(
+        got,
+        VinCheck::Match {
+            vin: "WAU2MBFC6EN093415".to_owned()
+        }
+    );
+    assert!(got.passes());
+    assert_eq!(car.sent, ["7DF 09 02"]);
+}
+
+#[test]
+fn a_vin_the_profile_does_not_fit_is_a_mismatch() {
+    let mut car = car_answering(vec![vin_reply(0x7E8, b"4T1BF1FK5EU123456")]);
+    let got = check(&mut car, &a7_profile());
+    assert_eq!(
+        got,
+        VinCheck::Mismatch {
+            vin: "4T1BF1FK5EU123456".to_owned()
+        }
+    );
+    assert!(!got.passes());
+}
+
+#[test]
+fn a_profile_without_a_vin_table_passes_without_asking() {
+    let mut profile = a7_profile();
+    profile.vin = None;
+    let mut car = car_answering(vec![vin_reply(0x7E8, b"4T1BF1FK5EU123456")]);
+    let got = check(&mut car, &profile);
+    assert_eq!(got, VinCheck::ProfileHasNoVin);
+    assert!(got.passes());
+    // Nothing to compare with, so nothing is sent.
+    assert_eq!(car.sent.len(), 0);
+}
+
+#[test]
+fn no_answer_is_no_vin_and_does_not_pass() {
+    let mut car = car_answering(Vec::new());
+    let got = check(&mut car, &a7_profile());
+    assert_eq!(got, VinCheck::NoVin);
+    assert!(!got.passes());
+}
+
+#[test]
+fn a_refusal_or_a_malformed_reply_is_no_vin() {
+    for payload in [
+        &[0x7F, 0x09, 0x12][..],
+        &[0x49, 0x02, 0x01],
+        b"\x49\x02\x01WAU2MBFC6EN09341",
+        b"\x49\x02\x01wau2mbfc6en093415",
+        b"\x49\x02\x01-----------------",
+        b"\x49\x02\x02WAU2MBFC6EN093415",
+        b"\x49\x04\x01WAU2MBFC6EN093415",
+        &[0x41, 0x00, 0xBE, 0x1F, 0xA8, 0x13],
+    ] {
+        let mut car = car_answering(vec![reply(0x7E8, payload)]);
+        let got = check(&mut car, &a7_profile());
+        assert_eq!(got, VinCheck::NoVin, "{}", hex(payload));
+        assert!(!got.passes());
+    }
+}
+
+#[test]
+fn a_refusing_ecu_does_not_hide_the_ecu_that_has_the_vin() {
+    let mut car = car_answering(vec![
+        reply(0x7E9, &[0x7F, 0x09, 0x31]),
+        vin_reply(0x7E8, A7_VIN),
+    ]);
+    assert!(matches!(
+        check(&mut car, &a7_profile()),
+        VinCheck::Match { .. }
+    ));
+}
+
+#[test]
+fn two_ecus_with_the_same_vin_are_one_vin() {
+    let mut car = car_answering(vec![vin_reply(0x7E8, A7_VIN), vin_reply(0x7E9, A7_VIN)]);
+    assert!(matches!(
+        check(&mut car, &a7_profile()),
+        VinCheck::Match { .. }
+    ));
+}
+
+#[test]
+fn two_ecus_with_different_vins_conflict_even_when_both_fit() {
+    let mut car = car_answering(vec![
+        vin_reply(0x7E8, A7_VIN),
+        vin_reply(0x7E9, OTHER_VIN),
+        vin_reply(0x7EA, A7_VIN),
+    ]);
+    let got = check(&mut car, &a7_profile());
+    assert_eq!(
+        got,
+        VinCheck::Conflicting {
+            vins: vec![
+                "WAU2MBFC6EN093415".to_owned(),
+                "WAU2MBFC6EN093416".to_owned()
+            ]
+        }
+    );
+    assert!(!got.passes());
+}
+
+#[test]
+fn a_vin_check_reports_an_adapter_failure() {
+    let mut car = car_answering(Vec::new());
+    car.fail_after = Some(0);
+    assert_eq!(
+        check_vin(&mut car, &Policy::read_only(), TIMING, &a7_profile()),
         Err(FingerprintError::Transport(Error::Adapter(
             "unplugged".to_owned()
         )))

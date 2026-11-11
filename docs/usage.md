@@ -128,13 +128,67 @@ The thresholds and the rules behind them are in [safety](safety.md#supply-voltag
 obdcracker vin
 ```
 
-Prints each ECU's VIN (OBD-II mode 09 PID 02), one `<reply ID> <VIN>` line per ECU. It is one broadcast, except on an
+Prints each ECU's VIN (OBD-II mode 09 PID 02) as a `<reply ID> <VIN>` line, with the VIN's fields indented under it:
+
+```
+7E8 WAU2MBFC6EN093415
+    manufacturer code: WAU
+    descriptor section: 2MBFC
+    check digit: 6 (correct; not required outside North America)
+    model year: E = 1984 or 2014
+    plant code: N
+    serial: 093415
+    matches profile: a7
+```
+
+The fields are ISO 3779's: positions 1 to 3, 4 to 8, 9, 10, 11 and 12 to 17. The descriptor section and the plant code
+are shown as written, because what they mean is the manufacturer's.
+
+- **Model year.** Position 10's code repeats every 30 years, so two years are shown. Position 7 narrows them only for
+  some North American vehicles (passenger cars and light trucks, 49 CFR 565.15), and a VIN doesn't say which class it
+  is, so none is narrowed to one. A profile's `years` range fits if either is in it. `U`, `Z` and `0` aren't year codes.
+- **Check digit.** The digit the other 16 characters make (weights and letter values from 49 CFR 565.15, 10 written as
+  `X`) is shown beside the one written. North America requires it, so a wrong one there is called wrong; elsewhere a
+  mismatch is only noted, since those VINs needn't have a correct one.
+- **Profile.** `matches profile` lists the builtin profiles whose `[vin]` table ([profiles](profiles.md#vin)) fits the VIN,
+  or says none does. With `--profile` that doesn't fit, a `does not fit --profile a7` line follows, and the command still
+  exits 0: reading the VIN is its job.
+
+It is one broadcast, except on an
 adapter whose driver paces its replies (every plain ELM327, and an STN below 115200 baud): there it broadcasts mode 01
 PID 00 to find the ECUs, then asks each in turn by its own request ID, so that several ECUs' long replies don't
 overflow the adapter ([details](scanning.md#module-discovery)). `--dry-run` shows the one broadcast. With `--profile`,
 the requests to each ECU go only to request IDs the profile lists; if it leaves one out, the VINs are read by a
 `09 02` broadcast after the `01 00`. An ECU that has no VIN may refuse a request of its own: that is
 printed to stderr but isn't a failure if another ECU gave a VIN. A malformed VIN, or no VIN at all, exits 1.
+
+### Checking the car against `--profile`
+
+With `--profile`, `fingerprint`, `scan`, `sweep`, `read-dids` and `dtc` first read the car's VIN (the same `09 02`
+request as `vin`, after the battery check and after the command's own arguments have been checked) and compare it with
+the profile's `[vin]` table. Only an explicit `--profile` is checked: `--sim` already is the car its profile describes,
+and without a profile there is nothing to compare with. `vin` itself is not checked.
+
+| What the car says | What happens |
+|---|---|
+| a VIN the profile fits, or ECUs that all give the same one | the command goes on |
+| a VIN the profile doesn't fit | refused: the message names the VIN and the profile, nothing else is sent, exit 1 |
+| no VIN: no ECU answered, or each refused or sent something that isn't a VIN | refused, the same |
+| ECUs that give different VINs | refused, the same: it can't be told which car this is, even if each fits |
+| a profile with no `[vin]` table | a note that the VIN isn't checked; the command goes on |
+
+An unknown VIN stops the command just as a mismatch does. An ECU that refuses `09 02` or sends a malformed reply is left
+out when another gives a VIN. `--ignore-vin-mismatch` (it needs `--profile`) turns each refusal into a warning and goes
+on. A failure of the adapter or the policy while reading the VIN stops the command whatever the flag says.
+
+`--dry-run` shows the planned request and says the comparison was skipped; it never stops a dry run:
+
+```
+$ obdcracker --dry-run --profile a7 fingerprint
+7DF 02 09 02
+dry run: the car's VIN wasn't compared with the a7 profile
+...
+```
 
 ## `fingerprint`
 
@@ -456,7 +510,8 @@ first install. It needs `curl` (Windows 10 and later have `curl.exe`) or, on a s
   would run, and downloads and installs nothing.
 - **No adapter:** `update` opens no adapter and writes no audit log. `--serial`, `--tcp`, `--gsusb`, `--socketcan`,
   `--sim`, `--profile`, `--baud`, `--elm-segmenting`, `--listen-only`, `--bitrate`, `--sim-voltage`,
-  `--sim-voltage-drop`, `--force-low-voltage`, `--json` and `--audit-log` are refused with status 2.
+  `--sim-voltage-drop`, `--force-low-voltage`, `--ignore-vin-mismatch`, `--json` and `--audit-log` are refused with
+  status 2.
 - **Rate limit:** GitHub's API allows 60 requests an hour per address without signing in. `update` and
   `update <VERSION>` make one request per release page, one for the target's commit and, when the installed commit is
   known and differs from the target's, one comparison. `update --main` reads no release list, so it makes the commit

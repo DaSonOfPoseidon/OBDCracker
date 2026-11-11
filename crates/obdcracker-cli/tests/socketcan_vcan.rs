@@ -246,7 +246,13 @@ fn vin_over_vcan_is_answered_by_the_sim_with_flow_control_on_the_wire() {
     ]);
     let heard = car.stop();
     assert!(out.status.success(), "{}", lossy(&out.stderr));
-    assert_eq!(lossy(&out.stdout), "7E8 WAU2MBFC6EN093415\n");
+    // The VIN, then its decoded fields and the profile that fits it.
+    let stdout = lossy(&out.stdout);
+    assert!(
+        stdout.starts_with("7E8 WAU2MBFC6EN093415\n    "),
+        "{stdout}"
+    );
+    assert!(stdout.contains("    matches profile: a7\n"), "{stdout}");
     // vcan has no bitrate to report, so the profile's can't be confirmed, and the user is told.
     assert!(
         lossy(&out.stderr).contains("reports no bitrate"),

@@ -22,6 +22,7 @@ A profile is TOML. Unknown fields are errors. `Profile::from_toml` and `Profile:
 | `name` | What car it is, such as `2014 Audi A7 3.0 TDI (C7)`. |
 | `bitrate` | The diagnostic CAN bus's bitrate in bit/s, 250000 or 500000. It is fixed per car, since a wrong bitrate can flood the bus with error frames. |
 | `[[module]]` | The modules on the bus. |
+| `[vin]` | The VINs the car may have, which a command checks the car against ([below](#vin)) (optional). |
 | `[discovery]` | Where to look on 11-bit IDs for modules the profile doesn't list (optional). |
 | `[discovery_29bit]` | Where to look on 29-bit IDs (optional). |
 | `[discovery_tp20]` | The VAG addresses to try VW TP2.0 channel setups to (optional). Without it the narrowed policy allows no channel setup. |
@@ -29,6 +30,25 @@ A profile is TOML. Unknown fields are errors. `Profile::from_toml` and `Profile:
 
 Names (the profile's, modules' and DIDs') can't be empty or blank, and can't start or end with spaces, so a lookup by
 the visible text finds them. Module names are unique ignoring case.
+
+### `[vin]`
+
+Says which cars the profile is for. `fingerprint`, `scan`, `sweep`, `read-dids` and `dtc` read the car's VIN when `--profile`
+is given and stop if the profile doesn't fit it ([usage](usage.md#checking-the-car-against---profile)); `vin` lists the
+builtin profiles that fit. A profile with no `[vin]` table fits no VIN, and the check says so and goes on.
+
+| Field | Meaning |
+|---|---|
+| `wmi` | The manufacturer codes (VIN positions 1 to 3) the car may have: at least one, each 3 VIN characters (digits and upper case letters except I, O and Q), none twice. Required. |
+| `vds` | A pattern for the descriptor section (positions 4 to 8): 5 characters, each a VIN character or `?` for any one. Optional. |
+| `years` | `[first, last]`: the model years, inclusive, `first` at most `last`, both within 1980 to 2039. A VIN fits if any year its position 10 can mean is in the range, so a VIN fits if either of its two candidate years is. A year code that isn't one (`U`, `Z`, `0`) fits no range. Optional. |
+
+All the fields given must fit. Validation uses the same VIN character rule as the decoder (`obd::check_vin`), and
+`years` takes exactly two numbers. The table only says which car the profile is for, so like the rest of the profile it
+can't widen the safety policy.
+
+The A7's table is `wmi = ["WAU"]` and `years = [2012, 2018]`. It has no `vds`: only the owner's one car's VIN was at hand, and
+what the descriptor positions mean is Audi's, so a pattern would be a guess.
 
 ### `[[module]]`
 
