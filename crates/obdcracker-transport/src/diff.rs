@@ -19,7 +19,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::ops::RangeInclusive;
 
-use obdcracker_core::obd::{Cvn, Dtc};
+use obdcracker_core::obd::{Cvn, Dtc, MonitorKind, MonitorStatus};
 use obdcracker_core::uds::{DtcStatus, UdsDtc};
 
 use crate::fingerprint::{
@@ -134,6 +134,12 @@ pub enum List {
     ObdInfo,
     /// An ECU's stored emissions DTCs (mode 03).
     ObdDtcs,
+    /// An ECU's pending emissions DTCs (mode 07).
+    ObdPendingDtcs,
+    /// An ECU's permanent emissions DTCs (mode 0A).
+    ObdPermanentDtcs,
+    /// An ECU's MIL and readiness monitors (mode 01 PID 01).
+    MonitorStatus,
     /// A module's DTCs (UDS `19 02`).
     UdsDtcs,
     /// The DIDs of a multi-DID read.
@@ -148,6 +154,9 @@ impl fmt::Display for List {
             Self::ObdPids => "mode 01 PIDs",
             Self::ObdInfo => "mode 09 PIDs",
             Self::ObdDtcs | Self::UdsDtcs => "DTCs",
+            Self::ObdPendingDtcs => "pending DTCs",
+            Self::ObdPermanentDtcs => "permanent DTCs",
+            Self::MonitorStatus => "readiness",
             Self::Dids => "DIDs",
         })
     }
@@ -322,6 +331,62 @@ pub enum Change {
         /// The DTC.
         dtc: Dtc,
     },
+    /// A pending emissions DTC (mode 07) is there that wasn't.
+    ObdPendingDtcNew {
+        /// The ECU's CAN ID.
+        #[cfg_attr(feature = "serde", serde(with = "crate::json::can_id"))]
+        source: u32,
+        /// The DTC.
+        dtc: Dtc,
+    },
+    /// A pending emissions DTC that was there no longer is.
+    ObdPendingDtcCleared {
+        /// The ECU's CAN ID.
+        #[cfg_attr(feature = "serde", serde(with = "crate::json::can_id"))]
+        source: u32,
+        /// The DTC.
+        dtc: Dtc,
+    },
+    /// A permanent emissions DTC (mode 0A) is there that wasn't.
+    ObdPermanentDtcNew {
+        /// The ECU's CAN ID.
+        #[cfg_attr(feature = "serde", serde(with = "crate::json::can_id"))]
+        source: u32,
+        /// The DTC.
+        dtc: Dtc,
+    },
+    /// A permanent emissions DTC that was there no longer is.
+    ObdPermanentDtcCleared {
+        /// The ECU's CAN ID.
+        #[cfg_attr(feature = "serde", serde(with = "crate::json::can_id"))]
+        source: u32,
+        /// The DTC.
+        dtc: Dtc,
+    },
+    /// The malfunction indicator lamp is on where it was off, or off where it was on.
+    MilChanged {
+        /// The ECU's CAN ID.
+        #[cfg_attr(feature = "serde", serde(with = "crate::json::can_id"))]
+        source: u32,
+        /// Whether it was on in the first read.
+        old: bool,
+        /// Whether it was on in the second.
+        new: bool,
+    },
+    /// A readiness monitor that both reads say the ECU supports went from incomplete to complete,
+    /// or back.
+    MonitorChanged {
+        /// The ECU's CAN ID.
+        #[cfg_attr(feature = "serde", serde(with = "crate::json::can_id"))]
+        source: u32,
+        /// The monitor, as [`MonitorKind::name`] writes it.
+        #[cfg_attr(feature = "serde", serde(serialize_with = "wire::monitor"))]
+        monitor: MonitorKind,
+        /// Whether it was complete in the first read.
+        old: bool,
+        /// Whether it was complete in the second.
+        new: bool,
+    },
     /// A module was read only the second time.
     ModuleAdded {
         /// The module.
@@ -428,7 +493,15 @@ pub enum Change {
 
 #[cfg(feature = "serde")]
 mod wire {
+    use obdcracker_core::obd::MonitorKind;
     use serde::Serializer;
+
+    pub(super) fn monitor<S: Serializer>(
+        kind: &MonitorKind,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(kind.name())
+    }
 
     #[expect(
         clippy::ref_option,
@@ -595,6 +668,12 @@ impl fmt::Display for Change {
             | Self::EcuNameChanged { .. }
             | Self::ObdDtcNew { .. }
             | Self::ObdDtcCleared { .. }
+            | Self::ObdPendingDtcNew { .. }
+            | Self::ObdPendingDtcCleared { .. }
+            | Self::ObdPermanentDtcNew { .. }
+            | Self::ObdPermanentDtcCleared { .. }
+            | Self::MilChanged { .. }
+            | Self::MonitorChanged { .. }
             | Self::VinChanged { .. } => fmt_ecu_change(self, f),
             Self::ModuleAdded { .. }
             | Self::ModuleRemoved { .. }
@@ -676,6 +755,40 @@ fn fmt_ecu_change(change: &Change, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         Change::ObdDtcNew { source, dtc } => ecu(f, *source, format_args!("DTC new: {dtc}")),
         Change::ObdDtcCleared { source, dtc } => {
             ecu(f, *source, format_args!("DTC cleared: {dtc}"))
+        }
+        Change::ObdPendingDtcNew { source, dtc } => {
+            ecu(f, *source, format_args!("pending DTC new: {dtc}"))
+        }
+        Change::ObdPendingDtcCleared { source, dtc } => {
+            ecu(f, *source, format_args!("pending DTC cleared: {dtc}"))
+        }
+        Change::ObdPermanentDtcNew { source, dtc } => {
+            ecu(f, *source, format_args!("permanent DTC new: {dtc}"))
+        }
+        Change::ObdPermanentDtcCleared { source, dtc } => {
+            ecu(f, *source, format_args!("permanent DTC cleared: {dtc}"))
+        }
+        Change::MilChanged { source, old, new } => {
+            let on = |on: &bool| if *on { "on" } else { "off" };
+            ecu(f, *source, format_args!("MIL: {} → {}", on(old), on(new)))
+        }
+        Change::MonitorChanged {
+            source,
+            monitor,
+            old,
+            new,
+        } => {
+            let state = |complete: &bool| if *complete { "complete" } else { "incomplete" };
+            ecu(
+                f,
+                *source,
+                format_args!(
+                    "monitor {}: {} → {}",
+                    monitor.name(),
+                    state(old),
+                    state(new)
+                ),
+            )
         }
         Change::VinChanged { source, old, new } => {
             let (old, new) = (Plain(old), Plain(new));
@@ -1096,6 +1209,89 @@ fn obd_ecu(out: &mut Vec<Change>, source: u32, old: &ObdEcu, new: &ObdEcu) {
             }
         },
     );
+    dtc_lists(
+        out,
+        &scope,
+        List::ObdPendingDtcs,
+        (&old.pending_dtcs, &new.pending_dtcs),
+        |dtc, added| {
+            if added {
+                Change::ObdPendingDtcNew { source, dtc }
+            } else {
+                Change::ObdPendingDtcCleared { source, dtc }
+            }
+        },
+    );
+    dtc_lists(
+        out,
+        &scope,
+        List::ObdPermanentDtcs,
+        (&old.permanent_dtcs, &new.permanent_dtcs),
+        |dtc, added| {
+            if added {
+                Change::ObdPermanentDtcNew { source, dtc }
+            } else {
+                Change::ObdPermanentDtcCleared { source, dtc }
+            }
+        },
+    );
+    // A read one side never made (a document from before it) has nothing to compare.
+    if let (Some(old), Some(new)) = (&old.monitor_status, &new.monitor_status) {
+        lists(
+            out,
+            &scope,
+            List::MonitorStatus,
+            old,
+            new,
+            |out, old, new| monitor_status(out, source, old, new),
+        );
+    }
+}
+
+type DtcRead = Option<Result<Vec<Dtc>, ReadError>>;
+
+// Pending or permanent DTCs, new or cleared. `change` builds each from the DTC and whether it was
+// added. A list one side never read (a document from before it) isn't compared.
+fn dtc_lists(
+    out: &mut Vec<Change>,
+    scope: &Scope,
+    list: List,
+    (old, new): (&DtcRead, &DtcRead),
+    change: impl Fn(Dtc, bool) -> Change,
+) {
+    let (Some(old), Some(new)) = (old, new) else {
+        return;
+    };
+    lists(out, scope, list, old, new, |out, old, new| {
+        let set = |dtcs: &[Dtc]| dtcs.iter().copied().collect::<BTreeSet<_>>();
+        for (dtc, added) in membership(&set(old), &set(new)) {
+            out.push(change(dtc, added));
+        }
+    });
+}
+
+// The MIL, then each monitor both statuses have and support, in the order `monitors()` gives.
+fn monitor_status(out: &mut Vec<Change>, source: u32, old: &MonitorStatus, new: &MonitorStatus) {
+    if old.mil_on != new.mil_on {
+        out.push(Change::MilChanged {
+            source,
+            old: old.mil_on,
+            new: new.mil_on,
+        });
+    }
+    for (monitor, old) in old.monitors() {
+        let Some(new) = new.monitor(monitor) else {
+            continue;
+        };
+        if old.supported && new.supported && old.complete != new.complete {
+            out.push(Change::MonitorChanged {
+                source,
+                monitor,
+                old: old.complete,
+                new: new.complete,
+            });
+        }
+    }
 }
 
 fn module_scan(out: &mut Vec<Change>, module: &ModuleId, old: &ModuleScan, new: &ModuleScan) {
@@ -1160,7 +1356,10 @@ fn scan_unique(scan: &Scan) -> Result<(), String> {
 }
 
 /// What changed between two scans: each ECU's supported PIDs (not their values, which change on
-/// every run), mode 09 PIDs, name and stored DTCs, and each module's DIDs and DTCs.
+/// every run), mode 09 PIDs, name, stored, pending and permanent DTCs, MIL and readiness monitors,
+/// and each module's DIDs and DTCs. A read that one scan never made (a document from before the
+/// read existed) isn't compared. The freeze frame and the mode 06 monitor IDs aren't compared
+/// either: they change between runs.
 ///
 /// # Errors
 ///
