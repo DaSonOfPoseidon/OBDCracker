@@ -56,8 +56,15 @@ pub struct FakeElm {
     /// With `listen_raw`, the timeout runs out just as the host writes: the prompt comes
     /// first, and the byte is the first of the next line.
     pub listen_ends_on_write: bool,
-    // Listening after a raw bus request (`listen_raw`).
+    // Listening after a raw bus request (`listen_raw`), or after a reply (`listen_after_reply`).
     listening: bool,
+    /// After a request that got a reply, keep listening for more until this long has passed, as
+    /// a real adapter does for its whole `AT ST` time (`AT ST FF` is about 1 s), and only then
+    /// print its prompt. A byte from the host ends the listen early, with `STOPPED` and the
+    /// prompt. Off, the default, the prompt follows the reply at once.
+    pub listen_after_reply: Option<Duration>,
+    // When the listen after a reply runs out (`listen_after_reply`).
+    listen_until: Option<Instant>,
     /// With `listen_raw`, as an STN that ends a raw listen after one frame: it prints the first
     /// frame the receive filter shows and then its prompt, and any frame after that is lost until
     /// the host starts listening again. With none shown it listens until the host writes.
@@ -287,6 +294,8 @@ impl FakeElm {
             listen_raw: false,
             listen_ends_on_write: false,
             listening: false,
+            listen_after_reply: None,
+            listen_until: None,
             listen_one_frame: false,
             delayed: None,
             delay_from_monitor: false,
@@ -348,6 +357,7 @@ impl FakeElm {
             }
             if self.listening {
                 self.listening = false;
+                self.listen_until = None;
                 if self.listen_ends_on_write {
                     self.prompt();
                     self.printing = false;
@@ -902,7 +912,19 @@ impl FakeElm {
         } else if !logical && self.listen_raw && !self.settings.caf {
             self.listening = true;
         } else if !self.hang_after_request {
-            self.end_listen(Instant::now());
+            self.listen_or_prompt(printed > 0);
+        }
+    }
+
+    // The adapter has printed what the modules answered: it prints its prompt, or with
+    // `listen_after_reply`, after a reply, listens on first.
+    fn listen_or_prompt(&mut self, replied: bool) {
+        match self.listen_after_reply {
+            Some(wait) if replied && !self.batch_pending => {
+                self.listening = true;
+                self.listen_until = Some(Instant::now() + wait);
+            }
+            _ => self.end_listen(Instant::now()),
         }
     }
 
@@ -995,6 +1017,25 @@ impl FakeElm {
         self.bus.iter().map(|(at, ..)| *at).min()
     }
 
+    /// When something next happens by itself: a frame reaches the adapter, or a listen after a
+    /// reply runs out.
+    pub fn next_event_at(&self) -> Option<Instant> {
+        self.next_frame_at()
+            .into_iter()
+            .chain(self.listen_until)
+            .min()
+    }
+
+    // The listen after a reply ends with the adapter's prompt once `at` is past its timeout. It
+    // prints no `NO DATA`: a reply came.
+    fn expire_listen(&mut self, at: Instant) {
+        if self.listening && self.listen_until.is_some_and(|until| at >= until) {
+            self.listening = false;
+            self.listen_until = None;
+            self.prompt();
+        }
+    }
+
     /// Lets the frames that have reached the adapter by now in: printed if it's listening or
     /// monitoring and the receive filter shows them, else lost.
     pub fn poll(&mut self) {
@@ -1008,6 +1049,7 @@ impl FakeElm {
         self.bus.retain(|(at, ..)| *at > now);
         due.sort_by_key(|(at, ..)| *at);
         for (at, id, data) in due {
+            self.expire_listen(at);
             let monitoring = self.monitoring && at >= self.monitor_from;
             let monitored = monitoring && self.monitor_all;
             if !monitored && !self.settings.shows(id) {
@@ -1036,6 +1078,7 @@ impl FakeElm {
                 self.lost_frames.push((id, data));
             }
         }
+        self.expire_listen(now);
     }
 }
 
@@ -1524,9 +1567,10 @@ impl Link for FakeLink {
         }
         self.elm.poll();
         if !self.elm.has_output()
-            && let Some(at) = self.elm.next_frame_at()
+            && let Some(at) = self.elm.next_event_at()
         {
-            // A module's frame is still on its way: wait for it, up to the read's timeout.
+            // A module's frame is still on its way, or the adapter's listen runs out: wait for
+            // it, up to the read's timeout.
             std::thread::sleep(
                 at.saturating_duration_since(std::time::Instant::now())
                     .min(timeout),

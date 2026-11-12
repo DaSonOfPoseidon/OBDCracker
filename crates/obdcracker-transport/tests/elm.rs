@@ -4586,6 +4586,129 @@ mod response_pending {
     }
 }
 
+// A real adapter listens for more replies after each one until its timeout runs out
+// (`FakeElm::listen_after_reply`), so a request sent next has to end that listen or wait it out.
+mod listening_after_a_reply {
+    use super::*;
+
+    const ANSWER: &[u8] = b"\x62\xF1\x87\x34\x47\x30\x39";
+
+    // The engine ECU, answering `22 F1 87` at once.
+    fn engine() -> FakeElm {
+        let mut car = FakeElm::new(Box::new(|header, request| match (header, request) {
+            (0x7E0, [0x22, 0xF1, 0x87]) => vec![(0x7E8, ANSWER.to_vec())],
+            _ => Vec::new(),
+        }));
+        car.listen_after_reply = Some(ADAPTER_TIMEOUT);
+        car
+    }
+
+    // The way `scan` reads: one request, its answer, nothing after it.
+    fn read_f187(elm: &mut Elm<FakeLink>, target: Target, source: u32) -> Response {
+        let read = approve(target, &[0x22, 0xF1, 0x87]);
+        let mut got = exchange(
+            elm,
+            &read,
+            Expect::Module(source),
+            Elm::<FakeLink>::timing(),
+        )
+        .unwrap();
+        got.remove(0)
+    }
+
+    #[test]
+    fn the_fake_prints_its_prompt_only_when_the_listen_runs_out_or_a_byte_stops_it() {
+        let mut elm = connect(engine());
+        read_f187(&mut elm, Target::Physical(0x7E0), 0x7E8);
+        let fake = &mut elm.link_mut().elm;
+        fake.poll();
+        assert!(!fake.has_output(), "a prompt right after the reply");
+        std::thread::sleep(ADAPTER_TIMEOUT + Duration::from_millis(50));
+        fake.poll();
+        assert_eq!(fake.read(64), b"\r>");
+
+        let mut elm = connect(engine());
+        read_f187(&mut elm, Target::Physical(0x7E0), 0x7E8);
+        let fake = &mut elm.link_mut().elm;
+        fake.write(b"X");
+        assert_eq!(fake.read(64), b"STOPPED\r\r>");
+        assert_eq!(fake.interrupted, 1);
+    }
+
+    #[test]
+    fn a_broadcast_still_hears_a_second_ecu_300_ms_after_the_first() {
+        // 7E8 answers at once and 7E9 300 ms later, both inside the adapter's listen.
+        let mut car = FakeElm::new(Box::new(|header, request| match (header, request) {
+            (0x7DF, [0x01, 0x00]) => vec![(0x7E8, vec![0x41, 0x00, 0xBE, 0x3E, 0xB8, 0x13])],
+            _ => Vec::new(),
+        }));
+        car.delayed = Some(Box::new(|header, request| match (header, request) {
+            (0x7DF, [0x01, 0x00]) => vec![(
+                Duration::from_millis(300),
+                0x7E9,
+                vec![0x06, 0x41, 0x00, 0x98, 0x3B, 0x80, 0x01],
+            )],
+            _ => Vec::new(),
+        }));
+        car.listen_after_reply = Some(ADAPTER_TIMEOUT);
+        let mut elm = connect(car);
+        elm.send(&approve(Target::ObdFunctional, &[0x01, 0x00]))
+            .unwrap();
+        let first = elm.recv(Duration::from_secs(1)).unwrap();
+        let second = elm.recv(Duration::from_secs(1)).unwrap();
+        assert_eq!((first.source, second.source), (0x7E8, 0x7E9));
+        assert_eq!(second.payload, [0x41, 0x00, 0x98, 0x3B, 0x80, 0x01]);
+        // More ECUs may still answer a broadcast, so the next request waits for the prompt.
+        elm.send(&approve(Target::Physical(0x7E0), &[0x22, 0xF1, 0x87]))
+            .unwrap();
+        assert_eq!(elm.link().elm.interrupted, 0);
+    }
+
+    #[test]
+    fn an_answer_after_response_pending_is_still_heard() {
+        // The module is busy, says so, and answers 1.5 s later, while the adapter keeps listening
+        // as an STN does for P2*.
+        let mut car = FakeElm::new(Box::new(|header, request| match (header, request) {
+            (0x7E0, [0x22, 0xF1, 0x87]) => vec![(0x7E8, vec![0x7F, 0x22, 0x78])],
+            _ => Vec::new(),
+        }));
+        car.delayed = Some(Box::new(|header, request| match (header, request) {
+            (0x7E0, [0x22, 0xF1, 0x87]) => vec![(
+                Duration::from_millis(1500),
+                0x7E8,
+                vec![0x07, 0x62, 0xF1, 0x87, 0x34, 0x47, 0x30, 0x39],
+            )],
+            _ => Vec::new(),
+        }));
+        car.listen_after_reply = Some(Duration::from_millis(2500));
+        let mut elm = connect(car);
+        let got = read_f187(&mut elm, Target::Physical(0x7E0), 0x7E8);
+        assert_eq!(got.payload, ANSWER);
+        assert_eq!(elm.link().elm.interrupted, 0);
+    }
+
+    #[test]
+    fn a_module_with_no_known_reply_id_is_waited_for_to_the_prompt() {
+        // Without a reply ID the receive filter is wide, so another module may still answer.
+        let mut car = FakeElm::new(Box::new(|header, request| match (header, request) {
+            (0x710, [0x22, 0xF1, 0x87]) => vec![(0x77A, ANSWER.to_vec())],
+            _ => Vec::new(),
+        }));
+        car.listen_after_reply = Some(Duration::from_millis(300));
+        let mut elm = connect(car);
+        let read = approve(Target::Physical(0x710), &[0x22, 0xF1, 0x87]);
+        assert_eq!(read.reply_id(), None);
+        assert_eq!(
+            read_f187(&mut elm, Target::Physical(0x710), 0x77A).payload,
+            ANSWER
+        );
+        let started = Instant::now();
+        elm.send(&read).unwrap();
+        assert!(started.elapsed() >= Duration::from_millis(200));
+        assert_eq!(elm.link().elm.interrupted, 0);
+    }
+}
+
 mod misbehaving {
     use super::*;
 
