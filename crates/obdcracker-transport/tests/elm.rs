@@ -4671,6 +4671,46 @@ mod listening_after_a_reply {
     }
 
     #[test]
+    fn the_fake_restarts_its_timeout_after_each_frame_it_prints() {
+        // Late frames 300 ms apart, each inside the 400 ms timeout but the second beyond it from
+        // the reply: a real adapter counts its timeout from the last frame.
+        let mut car = FakeElm::new(Box::new(|header, request| match (header, request) {
+            (0x7E0, [0x22, 0xF1, 0x87]) => vec![(0x7E8, vec![0x7F, 0x22, 0x78])],
+            _ => Vec::new(),
+        }));
+        car.delayed = Some(Box::new(|_, _| {
+            vec![
+                (
+                    Duration::from_millis(300),
+                    0x7E8,
+                    vec![0x03, 0x7F, 0x22, 0x78],
+                ),
+                (
+                    Duration::from_millis(600),
+                    0x7E8,
+                    vec![0x03, 0x7F, 0x22, 0x79],
+                ),
+            ]
+        }));
+        car.listen_after_reply = Some(Duration::from_millis(400));
+        let mut elm = connect(car);
+        elm.send(&approve(Target::Physical(0x7E0), &[0x22, 0xF1, 0x87]))
+            .unwrap();
+        elm.recv(Duration::from_secs(1)).unwrap();
+        let fake = &mut elm.link_mut().elm;
+        std::thread::sleep(Duration::from_millis(700));
+        fake.poll();
+        let heard = String::from_utf8(fake.read(256)).unwrap();
+        assert!(heard.contains("03 7F 22 78"), "{heard:?}");
+        assert!(heard.contains("03 7F 22 79"), "{heard:?}");
+        assert!(!heard.contains('>'), "{heard:?}");
+        // 400 ms after the last frame, the listen runs out.
+        std::thread::sleep(Duration::from_millis(500));
+        fake.poll();
+        assert_eq!(fake.read(64), b"\r>");
+    }
+
+    #[test]
     fn a_physical_reply_does_not_wait_out_the_adapter_timeout() {
         let mut elm = connect(engine());
         let target = Target::Physical(0x7E0);

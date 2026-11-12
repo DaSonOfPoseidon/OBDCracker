@@ -1070,6 +1070,13 @@ impl FakeElm {
                         self.print(&line);
                     }
                 }
+                // The adapter's timeout counts from the last frame it heard.
+                if self.listening
+                    && let Some(wait) = self.listen_after_reply
+                    && self.listen_until.is_some()
+                {
+                    self.listen_until = Some(at + wait);
+                }
                 if self.listening && self.listen_one_frame {
                     self.listening = false;
                     self.end_listen(at);
