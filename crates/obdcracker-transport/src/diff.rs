@@ -1355,8 +1355,27 @@ fn module_scan(out: &mut Vec<Change>, module: &ModuleId, old: &ModuleScan, new: 
     );
 }
 
+// An ECU's pending and permanent DTCs, whether or not the other document has the read.
+fn obd_ecu_unique(ecu: &ObdEcu) -> Result<(), String> {
+    let lists = [
+        ("pending", ecu.pending_dtcs.as_ref()),
+        ("permanent", ecu.permanent_dtcs.as_ref()),
+    ];
+    for (kind, read) in lists {
+        if let Some(Ok(dtcs)) = read {
+            unique(
+                dtcs,
+                |dtc| *dtc,
+                |dtc| format!("{kind} DTC {dtc} of ECU {}", CanId(ecu.source)),
+            )?;
+        }
+    }
+    Ok(())
+}
+
 fn scan_unique(scan: &Scan) -> Result<(), String> {
     unique_ecus(&scan.ecus, |ecu| ecu.source)?;
+    scan.ecus.iter().try_for_each(obd_ecu_unique)?;
     let id = |module: &ModuleScan| module_id(&module.name, module.response_id);
     unique_modules(&scan.modules, id)?;
     scan.modules.iter().try_for_each(|module| {
@@ -1380,7 +1399,8 @@ fn scan_unique(scan: &Scan) -> Result<(), String> {
 ///
 /// # Errors
 ///
-/// A [`DuplicateError`] if either lists an ECU, module, DID or module DTC twice.
+/// A [`DuplicateError`] if either lists an ECU, module, DID or module DTC twice, or an ECU's pending or
+/// permanent DTC.
 pub fn diff_scan(old: &Scan, new: &Scan) -> Result<Vec<Change>, DuplicateError> {
     both_unique(old, new, scan_unique)?;
     let mut out = Vec::new();

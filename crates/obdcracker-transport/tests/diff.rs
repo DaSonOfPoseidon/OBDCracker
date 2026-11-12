@@ -593,7 +593,7 @@ fn pending_and_permanent_dtcs_are_new_or_cleared_like_stored_ones() {
     old.ecus[0].pending_dtcs = Some(Ok(vec![Dtc::new(0x0401)]));
     old.ecus[0].permanent_dtcs = Some(Ok(vec![Dtc::new(0x0420)]));
     let mut new = old.clone();
-    new.ecus[0].pending_dtcs = Some(Ok(vec![Dtc::new(0x0171), Dtc::new(0x0171)]));
+    new.ecus[0].pending_dtcs = Some(Ok(vec![Dtc::new(0x0171)]));
     new.ecus[0].permanent_dtcs = Some(Ok(vec![Dtc::new(0x0420), Dtc::new(0x0300)]));
     let changes = diff_scan(&old, &new);
     assert_eq!(
@@ -1563,11 +1563,18 @@ fn a_scan_that_repeats_an_ecu_module_did_or_dtc_is_refused() {
     did.modules[0].dids.push(text(0xF187, "other"));
     let mut dtc = clean.clone();
     dtc.modules[0].dtcs = Ok(vec![record(0x16A0, 8), record(0x16A0, 0)]);
+    let dtc_twice = || Ok(vec![Dtc::new(0x0171), Dtc::new(0x0171)]);
+    let mut pending = clean.clone();
+    pending.ecus[0].pending_dtcs = Some(dtc_twice());
+    let mut permanent = clean.clone();
+    permanent.ecus[0].permanent_dtcs = Some(dtc_twice());
     for (bad, entry) in [
         (&ecu, "ECU 7E8"),
         (&module, "module engine (0x7E8)"),
         (&did, "DID F187 of engine (0x7E8)"),
         (&dtc, "DTC 0016A0 of engine (0x7E8)"),
+        (&pending, "pending DTC P0171 of ECU 7E8"),
+        (&permanent, "permanent DTC P0171 of ECU 7E8"),
     ] {
         let expected = |input| DuplicateError {
             input,
@@ -1585,7 +1592,14 @@ fn a_scan_that_repeats_an_ecu_module_did_or_dtc_is_refused() {
     // A DTC list that failed has nothing to repeat
     let mut failed = clean.clone();
     failed.modules[0].dtcs = Err(ReadError::NoReply);
+    failed.ecus[0].pending_dtcs = Some(Err(ReadError::NoReply));
     assert_eq!(diff_scan(&failed, &failed), []);
+    // A repeat is refused even when the other document never made the read
+    let mut unread = clean.clone();
+    unread.ecus[0].pending_dtcs = None;
+    unread.ecus[0].permanent_dtcs = None;
+    assert!(diff::diff_scan(&pending, &unread).is_err());
+    assert!(diff::diff_scan(&unread, &permanent).is_err());
 }
 
 #[test]
