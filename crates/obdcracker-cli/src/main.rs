@@ -2,6 +2,7 @@
 
 mod diff;
 mod json;
+mod obd_modes;
 mod update;
 mod vin_cmd;
 
@@ -1981,6 +1982,12 @@ fn print_scan_dry_run(cli: &Cli, extended: bool) {
          the next bitmap is supported, then 01 <PID> for each PID an ECU says it supports \
          (mode 01 reads only)"
     );
+    println!(
+        "and, once an ECU has answered: 02 02 00, then for each ECU whose freeze frame says a DTC \
+         stored it, 02 00 00, 02 20 00, ... while the bitmap says the next is supported, and 02 \
+         <PID> 00 for each PID it lists; and 06 00, 06 20, ... while an ECU says the next bitmap \
+         is supported (mode 06 bitmaps only, no test results)"
+    );
     print_gateway_list_preview(cli);
     if extended {
         // `10 03` gets no answer here, so the reads it would allow aren't shown.
@@ -2832,7 +2839,7 @@ fn unlisted(profile: &Profile, found: &[discover::Found]) -> Vec<ScanModule> {
 
 fn print_scan(found: &Scan) {
     if found.ecus.is_empty() {
-        println!("no ECU answered OBD-II modes 01, 03 and 09");
+        println!("no ECU answered OBD-II modes 01, 03, 07, 09 or 0A");
     }
     for ecu in &found.ecus {
         let id = ecu.source;
@@ -2877,6 +2884,9 @@ fn print_scan(found: &Scan) {
                 println!("{id:03X} stored DTCs {}", dtcs.join(", "));
             }
             Err(e) => println!("{id:03X} stored DTCs ({e})"),
+        }
+        for line in obd_modes::lines(ecu) {
+            println!("{line}");
         }
     }
     for module in &found.modules {

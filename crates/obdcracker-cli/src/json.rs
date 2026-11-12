@@ -12,9 +12,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::BUILD;
 
-// Raised on any change that breaks a reader of the version before it. A reader refuses a version
+// Raised on any change a reader of the version before could misread. A reader refuses a version
 // above the one it knows.
-pub(crate) const SCHEMA: u32 = 1;
+pub(crate) const SCHEMA: u32 = 2;
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(try_from = "RawEnvelope<T>")]
@@ -149,10 +149,13 @@ mod tests {
     }
 
     #[test]
-    fn the_known_schema_reads() {
-        let read = read(&envelope(1)).unwrap();
-        assert_eq!((read.schema, read.command.as_str()), (1, "ports"));
-        assert_eq!(read.result.ports, ["/dev/ttyUSB0"]);
+    fn every_schema_up_to_the_known_one_reads() {
+        for schema in 1..=SCHEMA {
+            let read = read(&envelope(schema)).unwrap();
+            assert_eq!((read.schema, read.command.as_str()), (schema, "ports"));
+            assert_eq!(read.result.ports, ["/dev/ttyUSB0"]);
+        }
+        assert_eq!(SCHEMA, 2);
     }
 
     #[test]

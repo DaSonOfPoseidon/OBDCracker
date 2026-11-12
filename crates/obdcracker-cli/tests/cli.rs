@@ -886,6 +886,18 @@ fn sim_scan_reads_obd_data_and_every_profile_module() {
         "7E8 mode 09 PIDs 02, 04, 06, 0A",
         "7E8 ECU name ECM-EngineControl",
         "7E8 stored DTCs (none)",
+        // Session 11's `41 01` replies. The A7 fixture has no replies to modes 02, 06, 07 and 0A
+        // (the car's are unknown), and a module stays silent on a broadcast it doesn't support.
+        "7E8 MIL off, 0 DTCs, compression ignition",
+        "7E8 monitor misfire complete (continuous)",
+        "7E8 monitor fuel system incomplete (continuous)",
+        "7E8 monitor exhaust gas sensor incomplete",
+        "7E8 pending DTCs (no reply)",
+        "7E8 permanent DTCs (no reply)",
+        "7E8 freeze frame (no reply)",
+        "7E8 mode 06 monitor IDs (no reply)",
+        "7E9 MIL off, 0 DTCs, spark ignition",
+        "7E9 monitor components complete (continuous)",
         "7E9 PID 42 11.961 V",
         "7E9 ECU name TCM-TransmisCtrl",
         "7E9 stored DTCs (none)",
@@ -915,8 +927,12 @@ fn sim_scan_reads_obd_data_and_every_profile_module() {
         assert!(
             [
                 r#""payload":"01 "#,
+                r#""payload":"02 "#,
                 r#""payload":"03""#,
+                r#""payload":"06 "#,
+                r#""payload":"07""#,
                 r#""payload":"09 "#,
+                r#""payload":"0A""#,
                 r#""payload":"22 "#,
                 r#""payload":"19 "#
             ]
@@ -949,6 +965,12 @@ fn dry_run_scan_sends_nothing() {
         stdout.contains("a live scan also sends") && stdout.contains("01 <PID>"),
         "{stdout}"
     );
+    for request in ["02 02 00", "02 <PID> 00", "06 00", "06 20"] {
+        assert!(
+            stdout.contains(request),
+            "{request} missing from:\n{stdout}"
+        );
+    }
 }
 
 #[test]
@@ -2524,7 +2546,7 @@ mod json {
         assert!(stdout.ends_with('\n'), "{stdout}");
         assert_eq!(stdout.lines().count(), 1, "{stdout}");
         let document: Value = serde_json::from_str(&stdout).unwrap();
-        assert_eq!(document["schema"], 1, "{stdout}");
+        assert_eq!(document["schema"], 2, "{stdout}");
         assert_eq!(document["command"], command, "{stdout}");
         assert_eq!(document["obdcracker"], env!("CARGO_PKG_VERSION"));
         assert_eq!(document.as_object().unwrap().len(), 4, "{stdout}");
