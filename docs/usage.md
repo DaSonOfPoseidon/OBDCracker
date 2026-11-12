@@ -242,6 +242,10 @@ twice. The statuses:
 - `not in profile`: no profile module has that VAG address. That includes a module the profile lists without a
   `vag_address`.
 
+A `found` module is only as certain as its profile address. On the A7, seven addresses (airbag 15, climate 08, parking
+brake 53, headlight range 55, tire pressure 65, camera 6C, rear lid 6D) are each the module's own claim, not confirmed by
+the gateway's list ([profiles](profiles.md#gateway-list)).
+
 If the list can't be read, scan prints a `warning:` and its result and exit status are unchanged. `--dry-run` says
 which two reads a live scan adds.
 

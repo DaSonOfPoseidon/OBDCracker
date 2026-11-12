@@ -3,14 +3,17 @@
 # The first four modules come from public VAG UDS references, and the second read-only session
 # (#49) confirmed them. The rest are what `scan --discover` found in the third (#54, engine idling).
 # Every module answered on its request and reply IDs: a VAG reply ID is the request ID + 0x6A,
-# except for the OBD-II pairs. A module's VAG address is given only where a source confirms it, except the
-# seven unconfirmed ones named below: the head-up display's 0x82 is from an Audi bulletin (J898, "diag. addr. 0082"). Brakes 03, acc 13,
-# acc 2 8B, sensor cluster 3B, steering 44 and image processing 8E are from the gateway's installed-
-# module list in car session 6 (#124): its 2A2A table gives each address and its 2A2C table the same
-# slot's request ID (0x713, 0x757, 0x756, 0x721, 0x712, 0x758). Airbag 15, climate 08, parking brake 53,
-# headlight range 55, tire pressure 65, camera 6C and rear lid 6D are also in its 2A2A table, but its 2A2C
-# table has no request ID for their slots, so their match to these modules is unconfirmed on the car (#231).
-# The other modules have none yet.
+# except for the OBD-II pairs. A module's VAG address is given where a source names it for the
+# module, or for seven of them where its own claim does. The head-up display's 0x82 is from an
+# Audi bulletin (J898, "diag. addr. 0082").
+# Brakes 03, acc 13, acc 2 8B, sensor cluster 3B, steering 44 and image processing 8E are from the
+# gateway's installed-module list in car session 6 (#124): its 2A2A table gives each address and its
+# 2A2C table the same slot's request ID (0x713, 0x757, 0x756, 0x721, 0x712, 0x758).
+# Airbag 15, climate 08, parking brake 53, headlight range 55, tire pressure 65, camera 6C and rear
+# lid 6D are each the module's own claim, not confirmed by the gateway: they are in its 2A2A table,
+# but its 2A2C table has no request ID for their slots. Each was matched to its module by the name
+# the module gave at that CAN ID in session 10 (#304). Car session 12 (#334) checks each against the
+# module's F197 and F19E (#231). The other modules have none yet.
 # Standard identification DIDs (0xF180..=0xF19F) need no entry; they're listed here to give their
 # length, which lets a scan read several in one request. Each length is the data (not the whole
 # reply) this car's module sent in #49 or #54, so it holds for these ECU variants (part numbers),
