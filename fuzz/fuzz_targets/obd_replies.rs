@@ -25,6 +25,9 @@ fuzz_target!(|data: &[u8]| {
             dtcs.for_each(|dtc| drop(dtc.to_string()));
         }
     }
+    if let Ok(status) = obd::decode_monitor_status(data) {
+        status.monitors().for_each(drop);
+    }
     let _ = obd::decode_supported_info(data);
     let _ = obd::decode_vin(data);
     if let Ok(text) = core::str::from_utf8(data)

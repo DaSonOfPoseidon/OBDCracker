@@ -221,6 +221,186 @@ impl<'a> Iterator for Readings<'a> {
     }
 }
 
+const MONITOR_STATUS_PID: u8 = 0x01;
+
+/// Whether the engine is spark or compression ignition, which decides what the last two bytes of
+/// the monitor status mean.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IgnitionType {
+    /// Petrol and other spark-ignition engines.
+    Spark,
+    /// Diesel and other compression-ignition engines.
+    Compression,
+}
+
+/// An on-board diagnostic monitor of the emissions system.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MonitorKind {
+    /// Misfire (both engine types).
+    Misfire,
+    /// Fuel system (both engine types).
+    FuelSystem,
+    /// Comprehensive components (both engine types).
+    Components,
+    /// Catalyst (spark).
+    Catalyst,
+    /// Heated catalyst (spark).
+    HeatedCatalyst,
+    /// Evaporative system (spark).
+    EvaporativeSystem,
+    /// Secondary air system (spark).
+    SecondaryAir,
+    /// A/C refrigerant (spark; reserved in newer editions of J1979).
+    AcRefrigerant,
+    /// Oxygen sensor (spark).
+    OxygenSensor,
+    /// Oxygen sensor heater (spark).
+    OxygenSensorHeater,
+    /// EGR and/or VVT system (both engine types).
+    EgrVvt,
+    /// Non-methane hydrocarbon catalyst (compression).
+    NmhcCatalyst,
+    /// `NOx` and/or SCR aftertreatment (compression).
+    NoxScr,
+    /// Boost pressure (compression).
+    BoostPressure,
+    /// Exhaust gas sensor (compression).
+    ExhaustGasSensor,
+    /// Particulate matter filter (compression).
+    ParticulateFilter,
+}
+
+// The engine-specific monitors, by bit of bytes C and D. A bit with no entry is reserved.
+const SPARK_MONITORS: [(u8, MonitorKind); 8] = [
+    (0, MonitorKind::Catalyst),
+    (1, MonitorKind::HeatedCatalyst),
+    (2, MonitorKind::EvaporativeSystem),
+    (3, MonitorKind::SecondaryAir),
+    (4, MonitorKind::AcRefrigerant),
+    (5, MonitorKind::OxygenSensor),
+    (6, MonitorKind::OxygenSensorHeater),
+    (7, MonitorKind::EgrVvt),
+];
+const COMPRESSION_MONITORS: [(u8, MonitorKind); 6] = [
+    (0, MonitorKind::NmhcCatalyst),
+    (1, MonitorKind::NoxScr),
+    (3, MonitorKind::BoostPressure),
+    (5, MonitorKind::ExhaustGasSensor),
+    (6, MonitorKind::ParticulateFilter),
+    (7, MonitorKind::EgrVvt),
+];
+
+/// One monitor's state. `complete` means something only when `supported` is set: a module may
+/// send either value for a monitor it doesn't have.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Monitor {
+    /// Whether the car has this monitor.
+    pub supported: bool,
+    /// Whether it has finished since the codes were last cleared.
+    pub complete: bool,
+}
+
+/// The MIL and readiness monitors from mode 01 PID 01.
+///
+/// See [`docs/protocols.md#monitor-status-mode-01-pid-01`](https://github.com/DaSonOfPoseidon/OBDCracker/blob/main/docs/protocols.md#monitor-status-mode-01-pid-01).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MonitorStatus {
+    /// Whether the malfunction indicator lamp is on.
+    pub mil_on: bool,
+    /// How many emissions DTCs are confirmed, 0 to 127.
+    pub dtc_count: u8,
+    /// Whether the engine is spark or compression ignition.
+    pub ignition: IgnitionType,
+    /// The misfire monitor.
+    pub misfire: Monitor,
+    /// The fuel system monitor.
+    pub fuel_system: Monitor,
+    /// The comprehensive component monitor.
+    pub components: Monitor,
+    engine_supported: u8,
+    engine_incomplete: u8,
+}
+
+impl MonitorStatus {
+    fn engine_monitor(&self, bit: u8) -> Monitor {
+        Monitor {
+            supported: self.engine_supported & (1 << bit) != 0,
+            complete: self.engine_incomplete & (1 << bit) == 0,
+        }
+    }
+
+    fn engine_table(&self) -> &'static [(u8, MonitorKind)] {
+        match self.ignition {
+            IgnitionType::Spark => &SPARK_MONITORS,
+            IgnitionType::Compression => &COMPRESSION_MONITORS,
+        }
+    }
+
+    /// The state of `kind`, or `None` if this engine type has no such monitor.
+    #[must_use]
+    pub fn monitor(&self, kind: MonitorKind) -> Option<Monitor> {
+        match kind {
+            MonitorKind::Misfire => Some(self.misfire),
+            MonitorKind::FuelSystem => Some(self.fuel_system),
+            MonitorKind::Components => Some(self.components),
+            _ => self
+                .engine_table()
+                .iter()
+                .find(|(_, k)| *k == kind)
+                .map(|&(bit, _)| self.engine_monitor(bit)),
+        }
+    }
+
+    /// Every monitor this engine type has, supported or not: the three common ones, then the
+    /// engine-specific ones in bit order.
+    pub fn monitors(&self) -> impl Iterator<Item = (MonitorKind, Monitor)> + '_ {
+        [
+            (MonitorKind::Misfire, self.misfire),
+            (MonitorKind::FuelSystem, self.fuel_system),
+            (MonitorKind::Components, self.components),
+        ]
+        .into_iter()
+        .chain(
+            self.engine_table()
+                .iter()
+                .map(|&(bit, kind)| (kind, self.engine_monitor(bit))),
+        )
+    }
+}
+
+/// Decodes a mode 01 reply for PID 01 alone (`41 01 A B C D`). The reply must be exactly that:
+/// other PIDs, or more bytes, are malformed. [`decode_current_data`] leaves PID 01 as
+/// [`Value::Raw`].
+pub fn decode_monitor_status(reply: &[u8]) -> Result<MonitorStatus, Error> {
+    let [pid, data @ ..] = positive(CURRENT_DATA, reply)? else {
+        return Err(Error::TooShort);
+    };
+    let &[a, b, c, d] = data else {
+        return Err(Error::Malformed);
+    };
+    if *pid != MONITOR_STATUS_PID {
+        return Err(Error::Malformed);
+    }
+    let common = |supported_bit: u8| Monitor {
+        supported: b & (1 << supported_bit) != 0,
+        complete: b & (1 << (supported_bit + 4)) == 0,
+    };
+    Ok(MonitorStatus {
+        mil_on: a & 0x80 != 0,
+        dtc_count: a & 0x7F,
+        ignition: if b & 0x08 == 0 {
+            IgnitionType::Spark
+        } else {
+            IgnitionType::Compression
+        },
+        misfire: common(0),
+        fuel_system: common(1),
+        components: common(2),
+        engine_supported: c,
+        engine_incomplete: d,
+    })
+}
+
 /// A mode 03 request for every stored emissions DTC.
 #[must_use]
 pub fn stored_dtcs() -> [u8; 1] {

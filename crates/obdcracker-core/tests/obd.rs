@@ -344,6 +344,203 @@ mod pending_and_permanent_dtcs {
     }
 }
 
+mod monitor_status {
+    use obdcracker_core::obd::{
+        IgnitionType, Monitor, MonitorKind, MonitorStatus, decode_monitor_status,
+    };
+    use obdcracker_core::response::Error;
+
+    const DONE: Monitor = Monitor {
+        supported: true,
+        complete: true,
+    };
+    const NOT_DONE: Monitor = Monitor {
+        supported: true,
+        complete: false,
+    };
+
+    fn status(a: u8, b: u8, c: u8, d: u8) -> MonitorStatus {
+        decode_monitor_status(&[0x41, 0x01, a, b, c, d]).unwrap()
+    }
+
+    fn supported(status: &MonitorStatus) -> Vec<MonitorKind> {
+        status
+            .monitors()
+            .filter(|(_, monitor)| monitor.supported)
+            .map(|(kind, _)| kind)
+            .collect()
+    }
+
+    #[test]
+    fn decodes_the_a7_engines_reply() {
+        // The sim's engine answer to 01 01; the A7 is a diesel.
+        let status = status(0x00, 0x2F, 0x28, 0x20);
+        assert!(!status.mil_on);
+        assert_eq!(status.dtc_count, 0);
+        assert_eq!(status.ignition, IgnitionType::Compression);
+        assert_eq!(status.misfire, DONE);
+        assert_eq!(status.fuel_system, NOT_DONE);
+        assert_eq!(status.components, DONE);
+        assert_eq!(
+            supported(&status),
+            [
+                MonitorKind::Misfire,
+                MonitorKind::FuelSystem,
+                MonitorKind::Components,
+                MonitorKind::BoostPressure,
+                MonitorKind::ExhaustGasSensor,
+            ]
+        );
+        assert_eq!(status.monitor(MonitorKind::BoostPressure), Some(DONE));
+        assert_eq!(
+            status.monitor(MonitorKind::ExhaustGasSensor),
+            Some(NOT_DONE)
+        );
+        assert_eq!(
+            status
+                .monitor(MonitorKind::ParticulateFilter)
+                .map(|m| m.supported),
+            Some(false)
+        );
+    }
+
+    #[test]
+    fn mil_and_the_count_share_the_first_byte() {
+        let on = status(0xFF, 0, 0, 0);
+        assert!(on.mil_on);
+        assert_eq!(on.dtc_count, 127);
+        let off = status(0x7F, 0, 0, 0);
+        assert!(!off.mil_on);
+        assert_eq!(off.dtc_count, 127);
+        let one = status(0x81, 0, 0, 0);
+        assert!(one.mil_on);
+        assert_eq!(one.dtc_count, 1);
+        let none = status(0x00, 0, 0, 0);
+        assert!(!none.mil_on);
+        assert_eq!(none.dtc_count, 0);
+    }
+
+    #[test]
+    fn spark_ignition_names_the_engine_monitors_differently() {
+        // Misfire, fuel system and components supported, all complete; every spark monitor supported.
+        let status = status(0x00, 0x07, 0xFF, 0x00);
+        assert_eq!(status.ignition, IgnitionType::Spark);
+        assert_eq!(
+            supported(&status),
+            [
+                MonitorKind::Misfire,
+                MonitorKind::FuelSystem,
+                MonitorKind::Components,
+                MonitorKind::Catalyst,
+                MonitorKind::HeatedCatalyst,
+                MonitorKind::EvaporativeSystem,
+                MonitorKind::SecondaryAir,
+                MonitorKind::AcRefrigerant,
+                MonitorKind::OxygenSensor,
+                MonitorKind::OxygenSensorHeater,
+                MonitorKind::EgrVvt,
+            ]
+        );
+        assert_eq!(status.monitor(MonitorKind::Catalyst), Some(DONE));
+        assert_eq!(status.monitor(MonitorKind::BoostPressure), None);
+        assert_eq!(status.monitor(MonitorKind::ParticulateFilter), None);
+    }
+
+    #[test]
+    fn compression_ignition_names_every_engine_monitor() {
+        let status = status(0x00, 0x08, 0xEB, 0x81);
+        assert_eq!(status.ignition, IgnitionType::Compression);
+        assert_eq!(
+            supported(&status),
+            [
+                MonitorKind::NmhcCatalyst,
+                MonitorKind::NoxScr,
+                MonitorKind::BoostPressure,
+                MonitorKind::ExhaustGasSensor,
+                MonitorKind::ParticulateFilter,
+                MonitorKind::EgrVvt,
+            ]
+        );
+        assert_eq!(status.monitor(MonitorKind::NmhcCatalyst), Some(NOT_DONE));
+        assert_eq!(status.monitor(MonitorKind::EgrVvt), Some(NOT_DONE));
+        assert_eq!(status.monitor(MonitorKind::NoxScr), Some(DONE));
+        assert_eq!(status.monitor(MonitorKind::Catalyst), None);
+        assert_eq!(status.monitor(MonitorKind::AcRefrigerant), None);
+    }
+
+    #[test]
+    fn the_common_monitors_read_their_own_bits() {
+        // Misfire not supported but incomplete, fuel system supported and incomplete, components
+        // supported and complete.
+        let status = status(0x00, 0b0011_0110, 0, 0);
+        assert_eq!(
+            status.misfire,
+            Monitor {
+                supported: false,
+                complete: false
+            }
+        );
+        assert_eq!(status.fuel_system, NOT_DONE);
+        assert_eq!(status.components, DONE);
+    }
+
+    #[test]
+    fn nothing_supported_reports_no_supported_monitors() {
+        for ignition_bit in [0x00, 0x08] {
+            let status = status(0x00, ignition_bit, 0, 0);
+            assert_eq!(supported(&status), Vec::<MonitorKind>::new());
+        }
+    }
+
+    #[test]
+    fn a_complete_bit_on_an_unsupported_monitor_is_reported_not_refused() {
+        let status = status(0x00, 0b0111_0000, 0x00, 0xFF);
+        assert_eq!(
+            status.misfire,
+            Monitor {
+                supported: false,
+                complete: false
+            }
+        );
+        assert_eq!(
+            status.monitor(MonitorKind::Catalyst),
+            Some(Monitor {
+                supported: false,
+                complete: false
+            })
+        );
+    }
+
+    #[test]
+    fn reserved_bits_are_not_monitors() {
+        // Compression ignition bits C2 and C4, and B7, are reserved.
+        let status = status(0x00, 0x88, 0x14, 0x14);
+        assert_eq!(supported(&status), Vec::<MonitorKind>::new());
+    }
+
+    #[test]
+    fn the_reply_is_exactly_pid_01_and_four_bytes() {
+        assert_eq!(
+            decode_monitor_status(&[0x41, 0x01, 0, 0, 0]).err(),
+            Some(Error::Malformed)
+        );
+        assert_eq!(
+            decode_monitor_status(&[0x41, 0x01, 0, 0, 0, 0, 0]).err(),
+            Some(Error::Malformed)
+        );
+        assert_eq!(
+            decode_monitor_status(&[0x41, 0x02, 0, 0, 0, 0]).err(),
+            Some(Error::Malformed)
+        );
+        assert_eq!(decode_monitor_status(&[0x41]).err(), Some(Error::TooShort));
+        assert_eq!(decode_monitor_status(&[]).err(), Some(Error::TooShort));
+        assert_eq!(
+            decode_monitor_status(&[0x43, 0x01, 0, 0, 0, 0]).err(),
+            Some(Error::WrongService(0x43))
+        );
+    }
+}
+
 mod vehicle_info {
     use obdcracker_core::obd::{
         EcuName, check_vin, decode_calids, decode_cvns, decode_ecu_name, decode_supported_info,

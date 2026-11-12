@@ -65,6 +65,10 @@ proptest! {
                 }
             }
         }
+        if let Ok(status) = obd::decode_monitor_status(&reply) {
+            prop_assert!(status.dtc_count <= 127);
+            status.monitors().for_each(drop);
+        }
         let _ = obd::decode_supported_info(&reply);
         let _ = obd::decode_vin(&reply);
         if let Ok(calids) = obd::decode_calids(&reply) {
