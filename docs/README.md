@@ -24,6 +24,7 @@
 ## Design notes
 
 - [ELM327 requests over 7 bytes with `AT CAF0`](design/elm-caf0-segmenting.md): approved and built (#214); forcing it on an STN is #308
+- [Hearing a TP2.0 answer after the ACK on an STN](design/tp20-stn-listen.md): batched `<frame>|STM` on an STN, built (#333) and to be run on the car (#334)
 
 ## Contributing
 
