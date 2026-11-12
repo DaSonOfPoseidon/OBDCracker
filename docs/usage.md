@@ -393,16 +393,23 @@ adapter sends a request over 7 bytes in segments only once an earlier request ha
 If the module doesn't answer that read, the long request isn't sent. Every other backend (`--gsusb`, `--socketcan`,
 `--sim`) sends the one request. `--dry-run` has no backend, so it says both.
 
+A module leaves out of its reply the DIDs it doesn't support (ISO 14229-1; it refuses with `7F 22 31` only when it has
+none of them), so the reply may hold fewer DIDs than were asked for, still in the order asked. Each DID it left out is
+printed as `<ID> <module> <DID> (not in the reply)`, and the read still succeeds.
+
 The reply doesn't say where one DID's data ends, so it is split only as far as the profile gives lengths. Each DID
-whose length the profile gives is printed as `<ID> <module> <DID> [bytes]`. From the first DID with no length that isn't
-the last, the rest is printed whole, as `<ID> <module> <DIDs> not split, as the profile gives no length for the first
-[bytes]`, from that DID's echo on (a DID with no length that is last takes the rest of the reply). The reply is checked
-exactly: each DID's echo in the order asked, each known length, nothing left over once every DID is split, and room for
-the DIDs still to come. A reply that fails any of that (a DID the module left out, bytes after the last one) is
-printed as `(reply is malformed: <bytes>)` and shows no values; a refusal is printed by name, as `scan` does. The
-command exits 0 only when the module gave a good reply, 1 when it didn't, refused or said nothing, and 2 for a bad
-command line (a DID that isn't four hex digits, a repeat, none or more than 21, a module the profile doesn't have, no
-profile).
+whose length the profile gives is printed as `<ID> <module> <DID> [bytes]`. From the first DID in the reply with no
+length that isn't the last one asked for, the rest is printed whole, as `<ID> <module> <DIDs> not split, as the profile
+gives no length for the first [bytes]`, from that DID's echo on (a DID with no length that is the last one asked for
+takes the rest of the reply). The reply is checked exactly as far as it is split: each echo is one of the DIDs asked for
+and comes in the order asked, with none repeated; each known length is held to; and nothing is left over once the last
+DID is split. The length of a DID the reply leaves out doesn't matter. The bytes after the first DID with no length
+aren't checked beyond that DID's echo and one data byte, so the DIDs after it aren't reported as left out: they are in the
+`not split` line. A reply that fails any check (a DID out of order, a DID not asked for, bytes after the last one, or a
+reply that leaves out every DID) is printed as `(reply is malformed: <bytes>)` and shows no values; a refusal is
+printed by name, as `scan` does. The command exits 0 when the module gave a good reply, left-out DIDs included, 1 when
+it didn't, refused or said nothing, and 2 for a bad command line (a DID that isn't four hex digits, a repeat, none or
+more than 21, a module the profile doesn't have, no profile).
 
 An ELM327 sends a request over 7 bytes in segments only on an adapter that has shown it echoes each character as it
 reads it, and its first request shows that, so with 4 or more DIDs the command first reads the first DID alone (a single
@@ -460,7 +467,8 @@ A DID's, CALID's or ECU name's text is in double quotes (`\"` and `\\` for those
   range either sweep asked for (two sweeps that stopped at the same DID included), a note on stderr gives it. Two sweeps
   with no DID in common are an error.
 - **`read-dids`:** both documents must be of the same module and have asked for the same DIDs. The split DIDs' bytes are
-  compared, and the bytes the profile gave no length for (`unsplit data`).
+  compared (a DID split in one and left out of the other is `(absent)` on the left-out side), and the bytes the profile
+  gave no length for (`unsplit data`).
 - **Text from the files** is shown as printable ASCII, anything else as `\u{...}`, so a document can't put an escape sequence
   on your terminal.
 - **`--json diff`** prints the changes in the usual [envelope](json.md#diff), and the exit status above.
