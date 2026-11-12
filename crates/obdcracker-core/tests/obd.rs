@@ -213,6 +213,27 @@ mod stored_dtcs {
     }
 
     #[test]
+    fn p0000_is_padding_not_a_code() {
+        assert_eq!(codes(&[0x43, 0x01, 0x00, 0x00]), Vec::<String>::new());
+        assert_eq!(
+            codes(&[0x43, 0x03, 0x00, 0x00, 0x04, 0x01, 0x00, 0x00]),
+            ["P0401"]
+        );
+    }
+
+    #[test]
+    fn padding_still_counts_toward_the_count() {
+        assert_eq!(
+            decode_stored_dtcs(&[0x43, 0x02, 0x00, 0x00]).err(),
+            Some(Error::Malformed)
+        );
+        assert_eq!(
+            decode_stored_dtcs(&[0x43, 0x01, 0x00, 0x00, 0x00]).err(),
+            Some(Error::Malformed)
+        );
+    }
+
+    #[test]
     fn top_bits_pick_the_system_and_the_first_digit() {
         assert_eq!(Dtc::new(0x1234).to_string(), "P1234");
         assert_eq!(Dtc::new(0x4567).to_string(), "C0567");

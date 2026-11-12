@@ -248,9 +248,14 @@ impl fmt::Display for Dtc {
 }
 
 /// Decodes a mode 03 reply in the CAN format (ISO 15765-4): a count byte, then that many
-/// two-byte codes. Pre-CAN layouts aren't decoded; see [`docs/protocols.md#obd-ii-decoding`](https://github.com/DaSonOfPoseidon/OBDCracker/blob/main/docs/protocols.md#obd-ii-decoding).
+/// two-byte codes. The count must match the bytes, and the codes skip P0000, the padding a module
+/// fills unused slots with. Pre-CAN layouts aren't decoded; see [`docs/protocols.md#obd-ii-decoding`](https://github.com/DaSonOfPoseidon/OBDCracker/blob/main/docs/protocols.md#obd-ii-decoding).
 pub fn decode_stored_dtcs(reply: &[u8]) -> Result<Dtcs<'_>, Error> {
-    let (&count, codes) = positive(STORED_DTCS, reply)?
+    decode_dtc_list(STORED_DTCS, reply)
+}
+
+fn decode_dtc_list(request_sid: u8, reply: &[u8]) -> Result<Dtcs<'_>, Error> {
+    let (&count, codes) = positive(request_sid, reply)?
         .split_first()
         .ok_or(Error::TooShort)?;
     if codes.len() != usize::from(count) * 2 {
@@ -259,7 +264,7 @@ pub fn decode_stored_dtcs(reply: &[u8]) -> Result<Dtcs<'_>, Error> {
     Ok(Dtcs(codes.as_chunks::<2>().0.iter()))
 }
 
-/// The codes in a mode 03 reply.
+/// The codes in a mode 03, 07 or 0A reply, without P0000 padding.
 #[derive(Debug, Clone)]
 pub struct Dtcs<'a>(slice::Iter<'a, [u8; 2]>);
 
@@ -267,7 +272,11 @@ impl Iterator for Dtcs<'_> {
     type Item = Dtc;
 
     fn next(&mut self) -> Option<Dtc> {
-        self.0.next().map(|&pair| Dtc(u16::from_be_bytes(pair)))
+        self.0
+            .by_ref()
+            .map(|&pair| u16::from_be_bytes(pair))
+            .find(|&code| code != 0)
+            .map(Dtc)
     }
 }
 

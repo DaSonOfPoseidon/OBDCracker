@@ -82,7 +82,8 @@ check what it reads.
 ## OBD-II decoding
 
 - Mode 03 is decoded in the CAN format (ISO 15765-4): a count byte, then that many two-byte codes, such as
-  `43 02 04 01 01 13` for P0401 and P0113. Pre-CAN protocols (J1850, ISO 9141-2, ISO 14230-4) have no count byte and use
+  `43 02 04 01 01 13` for P0401 and P0113. The count must equal the codes in the reply, but P0000 isn't yielded: a
+  module fills unused slots with it (SAE J1979), so `43 01 00 00` is a reply with no codes. Pre-CAN protocols (J1850, ISO 9141-2, ISO 14230-4) have no count byte and use
   zero-padded groups of three, so their replies aren't decoded.
 - Mode 01 leaves out unsupported PIDs. A PID the decoder doesn't know ends the readings, as its length is unknown.
 - Mode 09 text fields (VIN, CALID, ECU name) are printable ASCII after trimming 0x00 padding, and a field of nothing

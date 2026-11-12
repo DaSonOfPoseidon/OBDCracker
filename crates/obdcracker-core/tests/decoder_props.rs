@@ -54,7 +54,10 @@ proptest! {
             readings.for_each(drop);
         }
         if let Ok(dtcs) = obd::decode_stored_dtcs(&reply) {
-            dtcs.for_each(|dtc| drop(dtc.to_string()));
+            for dtc in dtcs {
+                prop_assert_ne!(dtc.code(), 0);
+                drop(dtc.to_string());
+            }
         }
         let _ = obd::decode_supported_info(&reply);
         let _ = obd::decode_vin(&reply);
