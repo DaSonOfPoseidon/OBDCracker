@@ -252,8 +252,9 @@ STBC1                             <OK        batching on (FRPM 8.15); only an ex
   damaged digits would run as an element of their own (section 4).
 - **After the carriage return** the driver is monitoring and logs the `STM` as a command, as for a monitor it starts
   itself. The adapter prints the frame's own replies, then, with the pipe in front, the monitor's frames, and no prompt
-  until the driver stops it. The pipe is accepted once, as a prefix of the first line after the frame's, or alone on a
-  line, only while a batched line is in progress; a `|` anywhere else is unexpected output. The manual's examples put it
+  until the driver stops it. The pipe is accepted once, as a prefix of the first line after the frame's reply, or alone on a
+  line, only while a batched line is in progress; after a second line without it, or anywhere else, a `|` is
+  unexpected output (a monitor that printed no pipe doesn't leave one to be taken later). The manual's examples put it
   before each later element's first output line (8.15), which is the one place taken.
 - **A prompt before the pipe is seen** means the batch ended without its monitor (an error before `STM`, or it was
   dropped): the driver starts `STM` itself, as it does for an adapter without batching, and the frame that lost nothing

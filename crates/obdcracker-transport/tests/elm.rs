@@ -1806,6 +1806,18 @@ mod requests {
     }
 
     #[test]
+    fn a_pipe_in_the_monitor_after_the_batch_printed_none_is_unexpected_output() {
+        // The STN printed the frame's reply and then monitor lines with no pipe at all: the
+        // batch's pipe isn't still to come, so a `|` that starts a later line is not taken for it.
+        let mut elm = with_echo_shown(batching_stn(Duration::from_secs(60)));
+        request_sent(&mut elm);
+        elm.link_mut().inject = b"300 20 00 0E 5A 9B 41 42 43\r|300 01 44 45 46 47 48 49 4A\r".to_vec();
+        assert_eq!(elm.recv(Duration::from_secs(1)).unwrap().payload[0], 0x20);
+        let err = elm.recv(Duration::from_secs(1)).unwrap_err();
+        assert!(err.to_string().contains("unexpected output"), "{err}");
+    }
+
+    #[test]
     fn a_batched_stm_and_the_probe_are_logged_when_their_writes_fail() {
         // The audit log is written before the adapter acts, and however the write ends: a line
         // that failed part-way may still have run.

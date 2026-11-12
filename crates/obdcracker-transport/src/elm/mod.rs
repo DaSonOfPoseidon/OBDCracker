@@ -253,8 +253,13 @@ pub struct Elm<L> {
     // for the frame's replies and then monitors without the host's help, so `monitoring` is set
     // from the carriage return. A prompt then means the monitor never started.
     batched: bool,
-    // The `|` that precedes the second element's output is still to come, and allowed once.
+    // The `|` that precedes the second element's output is still to come, and allowed once. It
+    // is only allowed until the line after the frame's own reply: a monitor that printed no pipe
+    // doesn't leave one to be taken from its later output.
     batch_pipe: bool,
+    // The batch's frame has had its reply line printed, so the next line not starting with the
+    // pipe is the monitor's first.
+    batch_replied: bool,
     // The request line the adapter hasn't echoed yet.
     echo: Option<String>,
     // Whether the adapter echoes a request's characters before its carriage return, once the
@@ -413,6 +418,7 @@ impl<L: Link> Elm<L> {
             stbc: Stbc::Untried,
             batched: false,
             batch_pipe: false,
+            batch_replied: false,
             echo: None,
             early_echo: None,
             quiet: Duration::ZERO,
@@ -1096,6 +1102,7 @@ impl<L: Link> Elm<L> {
         self.listen = false;
         self.busy = false;
         self.batched = false;
+        self.batch_pipe = false;
         self.drop_senders();
         self.take_overflow()
     }
@@ -1215,6 +1222,14 @@ impl<L: Link> Elm<L> {
                     Event::Prompt => {
                         self.batch_pipe = false;
                         return Ok(Some(Event::Prompt));
+                    }
+                    // The request's echo is not a reply. The first line after it is the frame's
+                    // own reply, and the second one is the monitor's, with no pipe in front.
+                    Event::Line(text) if self.batch_pipe && self.echo.is_none() => {
+                        if std::mem::replace(&mut self.batch_replied, true) {
+                            self.batch_pipe = false;
+                        }
+                        return Ok(Some(Event::Line(text)));
                     }
                     event => return Ok(Some(event)),
                 }
@@ -1582,6 +1597,7 @@ impl<L: Link> Transport for Elm<L> {
             self.monitoring = true;
             self.batched = true;
             self.batch_pipe = true;
+            self.batch_replied = false;
         }
         self.sent = Some((sent_at, self.printed));
         self.drained = sent_at;
