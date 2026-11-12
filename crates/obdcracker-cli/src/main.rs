@@ -6,6 +6,7 @@ mod obd_modes;
 mod update;
 mod vin_cmd;
 
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::Duration;
@@ -230,6 +231,11 @@ enum Command {
         /// --gsusb and --socketcan send the frames themselves
         #[arg(long)]
         discover_tp20: bool,
+        /// Also read the detail of each DTC a module lists: its snapshot records and extended
+        /// data records (UDS 0x19 04 and 06, record FF), printed under the DTC. A module that
+        /// says it is busy or leaves a read unanswered gets no more of them
+        #[arg(long)]
+        dtc_detail: bool,
     },
     /// Look for the DIDs a module has: read each DID in a range (UDS 0x22), one request each, and
     /// list those it answers. Reads only. Needs a profile (--profile or --sim) that lists the
@@ -921,6 +927,7 @@ fn run<T: Transport>(cli: &Cli, transport: T, link: &str, timing: Timing, elm: b
         extended,
         discover_29bit,
         discover_tp20,
+        dtc_detail,
     } = cli.command
     {
         let passes = Discovery {
@@ -929,7 +936,17 @@ fn run<T: Transport>(cli: &Cli, transport: T, link: &str, timing: Timing, elm: b
             discover_29bit,
             discover_tp20,
         };
-        return run_scan(cli, &mut transport, timing, passes, patient_ids, extended);
+        return run_scan(
+            cli,
+            &mut transport,
+            timing,
+            passes,
+            patient_ids,
+            ScanReads {
+                extended,
+                dtc_detail,
+            },
+        );
     }
     if let Command::Sweep {
         module,
@@ -1394,7 +1411,15 @@ fn run_dtc<T: Transport>(
             return ExitCode::FAILURE;
         }
     } else {
-        print_dtc_detail(&module, code, &found);
+        let profile = profile_of(cli);
+        let text = profile
+            .as_ref()
+            .and_then(|profile| profile.module(name))
+            .and_then(|listed| listed.dtc_text(code));
+        let label = dtc_label(&code.to_string(), text);
+        for line in dtc_detail_lines(module.response_id, &module.name, &label, &found) {
+            println!("{line}");
+        }
     }
     if out_of_step {
         eprintln!("{}", dtc_out_of_step_note(&module.name));
@@ -1410,37 +1435,34 @@ fn run_dtc<T: Transport>(
     }
 }
 
-fn print_dtc_detail(module: &UdsModule, code: UdsDtc, found: &DtcDetail) {
-    let line = |what: &str, value: &Result<RecordData, ReadError>| {
-        let (id, name) = (module.response_id, &module.name);
-        match value {
-            Ok(data) if data.records.is_empty() => println!(
-                "{id:03X} {name} DTC {code} {what}: none (status {:02X}, {})",
-                data.status.0, data.status
-            ),
-            Ok(data) => println!(
-                "{id:03X} {name} DTC {code} {what}: [{}] (status {:02X}, {})",
-                hex(&data.records),
-                data.status.0,
-                data.status
-            ),
-            Err(e) => println!("{id:03X} {name} DTC {code} {what} ({e})"),
-        }
+// What was read for one DTC: its snapshots, then its extended data. `label` is the DTC as
+// `dtc_label` prints it.
+fn dtc_detail_lines(id: u32, name: &str, label: &str, found: &DtcDetail) -> Vec<String> {
+    let line = |what: &str, value: &Result<RecordData, ReadError>| match value {
+        Ok(data) if data.records.is_empty() => format!(
+            "{id:03X} {name} DTC {label} {what}: none (status {:02X}, {})",
+            data.status.0, data.status
+        ),
+        Ok(data) => format!(
+            "{id:03X} {name} DTC {label} {what}: [{}] (status {:02X}, {})",
+            hex(&data.records),
+            data.status.0,
+            data.status
+        ),
+        Err(e) => format!("{id:03X} {name} DTC {label} {what} ({e})"),
     };
-    line("snapshots", &found.snapshots);
-    match &found.extended_data {
+    let extended = match &found.extended_data {
         Some(value) => line("extended data", value),
-        None => println!(
-            "{:03X} {} DTC {code} extended data not read: the snapshot read {}",
-            module.response_id,
-            module.name,
+        None => format!(
+            "{id:03X} {name} DTC {label} extended data not read: the snapshot read {}",
             if found.out_of_step {
                 "went unanswered"
             } else {
                 "found the module busy"
             }
         ),
-    }
+    };
+    vec![line("snapshots", &found.snapshots), extended]
 }
 
 // The most DIDs a `22` read can name and still fit one CAN frame: 1 + 2 * 3 = 7 bytes.
@@ -1842,13 +1864,20 @@ struct Discovery {
     discover_tp20: bool,
 }
 
+// The reads `scan` was asked to add.
+#[derive(Debug, Clone, Copy, Default)]
+struct ScanReads {
+    extended: bool,
+    dtc_detail: bool,
+}
+
 fn run_scan<T: Transport>(
     cli: &Cli,
     transport: &mut T,
     timing: Timing,
     passes: Discovery,
     patient_ids: &[u32],
-    extended: bool,
+    reads: ScanReads,
 ) -> ExitCode {
     let (mut modules, mut policy) = match scan_modules(cli).and_then(|m| Ok((m, policy(cli)?))) {
         Ok(found) => found,
@@ -1894,26 +1923,20 @@ fn run_scan<T: Transport>(
             Err(code) => return code,
         }
     }
-    let mut options = ScanOptions::default();
-    if extended {
-        eprintln!(
-            "note: --extended switches each module with extended-session DIDs to the extended \
-             diagnostic session (10 03) and back (10 01); it only reads"
-        );
-        options.extended = Some(S3::default());
-    }
+    let options = scan_options(reads);
     // A TP2.0 pass goes after the scan, whose ISO-TP requests show whether the adapter echoes
     // each character as it reads it, which the ELM driver's raw mode needs.
     let mut scanned = None;
     let mut answered = match scan::scan_with(transport, &policy, &modules, timing, &options) {
         Ok(_) if cli.dry_run => {
-            print_scan_dry_run(cli, extended);
+            print_scan_dry_run(cli, reads);
             true
         }
         Ok(found) => {
             if !cli.json {
-                print_scan(&found);
+                print_scan(&found, profile_of(cli).as_ref());
             }
+            note_out_of_step_detail(&found);
             let answered = found.anything_answered();
             scanned = Some(found);
             answered
@@ -1956,6 +1979,32 @@ fn run_scan<T: Transport>(
     }
 }
 
+fn scan_options(reads: ScanReads) -> ScanOptions {
+    let mut options = ScanOptions::default();
+    options.dtc_detail = reads.dtc_detail;
+    if reads.extended {
+        eprintln!(
+            "note: --extended switches each module with extended-session DIDs to the extended \
+             diagnostic session (10 03) and back (10 01); it only reads"
+        );
+        options.extended = Some(S3::default());
+    }
+    options
+}
+
+// A module whose DTC detail read went unanswered: its late reply may still arrive.
+fn note_out_of_step_detail(found: &Scan) {
+    for module in &found.modules {
+        let details = module.dtc_details.iter().flatten();
+        if details
+            .into_iter()
+            .any(|reading| reading.detail.out_of_step)
+        {
+            eprintln!("{}", dtc_out_of_step_note(&module.name));
+        }
+    }
+}
+
 // The set-up of each discovery pass asked for, which refuses what can't work before anything is
 // sent.
 fn discovery_setups(
@@ -1974,7 +2023,7 @@ fn discovery_setups(
     Ok((discovery, discovery_29))
 }
 
-fn print_scan_dry_run(cli: &Cli, extended: bool) {
+fn print_scan_dry_run(cli: &Cli, reads: ScanReads) {
     println!("dry run: nothing was sent");
     // Nothing answers a dry run, so the reads that depend on the answers aren't shown.
     println!(
@@ -1988,8 +2037,19 @@ fn print_scan_dry_run(cli: &Cli, extended: bool) {
          <PID> 00 for each PID it lists; and 06 00, 06 20, ... while an ECU says the next bitmap \
          is supported (mode 06 bitmaps only, no test results)"
     );
+    println!(
+        "and, to each module: 22 reads of its DIDs (up to three to a request), then 19 01 AF and \
+         19 02 AF (its DTCs with a fault bit set)"
+    );
+    if reads.dtc_detail {
+        // The DTCs come from the module's answer, which a dry run doesn't get.
+        println!(
+            "with --dtc-detail, a live scan then sends 19 04 <DTC> FF and 19 06 <DTC> FF for each \
+             DTC a module lists (snapshot and extended data records)"
+        );
+    }
     print_gateway_list_preview(cli);
-    if extended {
+    if reads.extended {
         // `10 03` gets no answer here, so the reads it would allow aren't shown.
         println!(
             "with --extended, a live scan also reads each extended-session DID (22 <DID>) \
@@ -2837,7 +2897,7 @@ fn unlisted(profile: &Profile, found: &[discover::Found]) -> Vec<ScanModule> {
         .collect()
 }
 
-fn print_scan(found: &Scan) {
+fn print_scan(found: &Scan, profile: Option<&Profile>) {
     if found.ecus.is_empty() {
         println!("no ECU answered OBD-II modes 01, 03, 07, 09 or 0A");
     }
@@ -2908,23 +2968,75 @@ fn print_scan(found: &Scan) {
                 None
             }
         };
-        match &module.dtcs {
-            Ok(dtcs) if dtcs.is_empty() => println!("{id:03X} {name} DTCs (no faults)"),
-            Ok(dtcs) => {
-                for record in dtcs {
-                    // The J2012 form only when the module said its DTCs are in that format.
-                    let code = format
-                        .and_then(|format| record.dtc.j2012(format))
-                        .map_or_else(|| record.dtc.to_string(), |dtc| dtc.to_string());
-                    println!(
-                        "{id:03X} {name} DTC {code} {} (status {:02X})",
-                        record.status, record.status.0
-                    );
-                }
-            }
-            Err(e) => println!("{id:03X} {name} DTCs ({e})"),
+        // The profile's names only for the module it lists: a discovered module's name could be
+        // anything.
+        let named = profile
+            .and_then(|profile| profile.module(name))
+            .filter(|listed| listed.response_id == id);
+        for line in dtc_lines(module, format, named) {
+            println!("{line}");
         }
     }
+}
+
+// A DTC as printed: its code, then the profile's name for it in quotes if it has one.
+fn dtc_label(code: &str, name: Option<&str>) -> String {
+    name.map_or_else(|| code.to_owned(), |name| format!("{code} {name:?}"))
+}
+
+// A module's DTC lines: each DTC with its status, and under it, with `--dtc-detail`, what was read
+// for it. `format` is how the module says it encodes DTCs.
+fn dtc_lines(
+    module: &scan::ModuleScan,
+    format: Option<uds::DtcFormat>,
+    names: Option<&obdcracker_profile::Module>,
+) -> Vec<String> {
+    let (id, name) = (module.response_id, &module.name);
+    let dtcs = match &module.dtcs {
+        Ok(dtcs) if dtcs.is_empty() => return vec![format!("{id:03X} {name} DTCs (no faults)")],
+        Ok(dtcs) => dtcs,
+        Err(e) => return vec![format!("{id:03X} {name} DTCs ({e})")],
+    };
+    let mut lines = Vec::new();
+    let mut shown = BTreeSet::new();
+    for record in dtcs {
+        // The J2012 form only when the module said its DTCs are in that format.
+        let code = format
+            .and_then(|format| record.dtc.j2012(format))
+            .map_or_else(|| record.dtc.to_string(), |dtc| dtc.to_string());
+        let text = names.and_then(|listed| listed.dtc_text(record.dtc));
+        lines.push(format!(
+            "{id:03X} {name} DTC {} {} (status {:02X})",
+            dtc_label(&code, text),
+            record.status,
+            record.status.0
+        ));
+        // A DTC the module lists twice was read once.
+        let reading = module
+            .dtc_details
+            .iter()
+            .flatten()
+            .find(|reading| reading.dtc == record.dtc);
+        if let Some(reading) = reading.filter(|_| shown.insert(record.dtc)) {
+            let label = dtc_label(&record.dtc.to_string(), text);
+            lines.extend(dtc_detail_lines(id, name, &label, &reading.detail));
+        }
+    }
+    if let Some(details) = &module.dtc_details {
+        let listed: BTreeSet<_> = dtcs.iter().map(|record| record.dtc).collect();
+        let unread = listed.len().saturating_sub(details.len());
+        if unread > 0 {
+            let why = match details.last().map(|reading| &reading.detail) {
+                Some(last) if last.busy() => "the module said it was busy",
+                Some(last) if last.out_of_step => "a read went unanswered",
+                _ => "the reads stopped",
+            };
+            lines.push(format!(
+                "{id:03X} {name} DTC detail not read for {unread} more: {why}"
+            ));
+        }
+    }
+    lines
 }
 
 fn dtc_out_of_step_note(module: &str) -> String {
@@ -2950,10 +3062,16 @@ mod tests {
 
     use crate::{BUILD, Build, command};
     use clap::Parser;
+    use obdcracker_core::response::{Error as ReplyError, NegativeResponse, Nrc};
     use obdcracker_core::tp20::Channel;
+    use obdcracker_core::uds::{DtcRecord, DtcStatus, UdsDtc};
+    use obdcracker_profile::Profile;
     use obdcracker_safety::{Approved, Target};
     use obdcracker_sim::SimBus;
+    use obdcracker_transport::dtc::{DtcDetail, DtcReading, RecordData};
+    use obdcracker_transport::fingerprint::ReadError;
     use obdcracker_transport::gateway::{Compared, Installed, ListedAs};
+    use obdcracker_transport::scan::ModuleScan;
     use obdcracker_transport::{Error, Response, Timing, Transport};
 
     use obdcracker_transport::gsusb::BitrateSource;
@@ -2961,10 +3079,147 @@ mod tests {
     #[cfg(target_os = "linux")]
     use super::socketcan_unconfirmed_warning;
     use super::{
-        Cli, Discovery, configured_bitrate, dtc_out_of_step_note, gateway_list_lines,
-        gsusb_bitrate, resume_command, run_scan, show_common_id, sweep_out_of_step_note,
-        tp20_identification,
+        Cli, Discovery, ScanReads, configured_bitrate, dtc_lines, dtc_out_of_step_note,
+        gateway_list_lines, gsusb_bitrate, resume_command, run_scan, show_common_id,
+        sweep_out_of_step_note, tp20_identification,
     };
+
+    // A module with two DTCs: 0016A0, whose snapshot read the A7's gateway refused with 7F 19 13
+    // while its extended data answered with no records (#124), and 029900.
+    fn listing(details: Option<Vec<DtcReading>>) -> ModuleScan {
+        let record = |code, status| DtcRecord {
+            dtc: UdsDtc::new(code),
+            status: DtcStatus(status),
+        };
+        ModuleScan {
+            name: "gateway".to_owned(),
+            response_id: 0x77A,
+            dids: vec![],
+            dtc_count: Err(ReadError::NoReply),
+            dtcs: Ok(vec![record(0x00_16A0, 0x01), record(0x02_9900, 0x08)]),
+            dtc_details: details,
+            answered: true,
+        }
+    }
+
+    fn reading(code: u32, snapshots: Result<RecordData, ReadError>) -> DtcReading {
+        DtcReading {
+            dtc: UdsDtc::new(code),
+            detail: DtcDetail {
+                snapshots,
+                extended_data: Some(Ok(RecordData {
+                    status: DtcStatus(0x01),
+                    records: vec![],
+                })),
+                out_of_step: false,
+            },
+        }
+    }
+
+    fn refused() -> ReadError {
+        ReadError::Reply(ReplyError::Negative(NegativeResponse {
+            sid: 0x19,
+            nrc: Nrc::IncorrectMessageLength,
+        }))
+    }
+
+    // A profile whose gateway names one of the two DTCs.
+    fn named_profile() -> Profile {
+        let toml = "name = \"test car\"\nbitrate = 500000\n\
+                    [[module]]\nname = \"gateway\"\nrequest_id = 0x710\nresponse_id = 0x77A\n\
+                    protocol = \"uds\"\n\
+                    [[module.dtc]]\ncode = \"0016A0\"\ntext = \"Test \\\"fault\\\"\"\n";
+        Profile::from_toml(toml).unwrap()
+    }
+
+    #[test]
+    fn a_dtc_the_profile_names_prints_its_name_in_quotes() {
+        let profile = named_profile();
+        let names = profile.module("gateway");
+        let lines = dtc_lines(&listing(None), None, names);
+        assert_eq!(
+            lines,
+            [
+                r#"77A gateway DTC 0016A0 "Test \"fault\"" failed (status 01)"#,
+                "77A gateway DTC 029900 confirmed (status 08)",
+            ]
+        );
+        // Without a profile the lines are as they were.
+        assert_eq!(
+            dtc_lines(&listing(None), None, None),
+            [
+                "77A gateway DTC 0016A0 failed (status 01)",
+                "77A gateway DTC 029900 confirmed (status 08)",
+            ]
+        );
+    }
+
+    #[test]
+    fn dtc_detail_goes_under_its_dtc_with_the_name_and_the_code_dtc_takes() {
+        let profile = named_profile();
+        let details = vec![
+            reading(0x00_16A0, Err(refused())),
+            reading(
+                0x02_9900,
+                Ok(RecordData {
+                    status: DtcStatus(0x08),
+                    records: vec![0x01, 0x01, 0x12],
+                }),
+            ),
+        ];
+        // As `7F 19 13`, then `59 06 00 16 A0 01`, came back in #124.
+        let lines = dtc_lines(
+            &listing(Some(details)),
+            Some(obdcracker_core::uds::DtcFormat::SaeJ2012Da00),
+            profile.module("gateway"),
+        );
+        assert_eq!(
+            lines,
+            [
+                r#"77A gateway DTC P0016-A0 "Test \"fault\"" failed (status 01)"#,
+                r#"77A gateway DTC 0016A0 "Test \"fault\"" snapshots (service 0x19 refused: incorrect message length or invalid format (0x13))"#,
+                r#"77A gateway DTC 0016A0 "Test \"fault\"" extended data: none (status 01, failed)"#,
+                "77A gateway DTC P0299-00 confirmed (status 08)",
+                "77A gateway DTC 029900 snapshots: [01 01 12] (status 08, confirmed)",
+                "77A gateway DTC 029900 extended data: none (status 01, failed)",
+            ]
+        );
+    }
+
+    #[test]
+    fn a_stopped_detail_says_how_many_dtcs_were_not_read_and_why() {
+        let mut stopped = reading(0x00_16A0, Err(ReadError::NoReply));
+        stopped.detail.extended_data = None;
+        stopped.detail.out_of_step = true;
+        let lines = dtc_lines(&listing(Some(vec![stopped])), None, None);
+        assert_eq!(
+            lines,
+            [
+                "77A gateway DTC 0016A0 failed (status 01)",
+                "77A gateway DTC 0016A0 snapshots (no reply)",
+                "77A gateway DTC 0016A0 extended data not read: the snapshot read went unanswered",
+                "77A gateway DTC 029900 confirmed (status 08)",
+                "77A gateway DTC detail not read for 1 more: a read went unanswered",
+            ]
+        );
+        let busy = reading(
+            0x00_16A0,
+            Err(ReadError::Reply(ReplyError::Negative(NegativeResponse {
+                sid: 0x19,
+                nrc: Nrc::BusyRepeatRequest,
+            }))),
+        );
+        let mut busy = busy;
+        busy.detail.extended_data = None;
+        let lines = dtc_lines(&listing(Some(vec![busy])), None, None);
+        assert_eq!(
+            lines.last().unwrap(),
+            "77A gateway DTC detail not read for 1 more: the module said it was busy"
+        );
+        assert!(lines.iter().any(|l| {
+            l.ends_with("extended data not read: the snapshot read found the module busy")
+        }));
+    }
 
     fn compared(address: u8, request_id: Option<u16>, status: ListedAs) -> Compared {
         Compared {
@@ -3068,7 +3323,14 @@ mod tests {
             discover_29bit: false,
             discover_tp20: true,
         };
-        run_scan(&cli, bus, Timing::default(), passes, &[], false)
+        run_scan(
+            &cli,
+            bus,
+            Timing::default(),
+            passes,
+            &[],
+            ScanReads::default(),
+        )
     }
 
     // On the module's channel: how many frames had this payload.
