@@ -1,6 +1,6 @@
 //! One simulated module: answers requests the way a UDS ECU with optional OBD-II support does.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::time::{Duration, Instant};
 
 use obdcracker_core::response::Nrc;
@@ -34,6 +34,19 @@ pub(crate) struct Obd {
     // Item count and data bytes.
     pub(crate) info: BTreeMap<u8, (u8, Vec<u8>)>,
     pub(crate) dtcs: Vec<u16>,
+    // The modes below answer only where the fixture lists them: `None` is "not supported", and an
+    // empty list is a reply with nothing in it.
+    pub(crate) pending_dtcs: Option<Vec<u16>>,
+    pub(crate) permanent_dtcs: Option<Vec<u16>>,
+    pub(crate) freeze_frame: Option<FreezeFrame>,
+    pub(crate) monitor_ids: Option<BTreeSet<u8>>,
+}
+
+// Freeze frame 0. The cause is PID 02; `None` says P0000, no frame.
+#[derive(Debug, Default)]
+pub(crate) struct FreezeFrame {
+    pub(crate) cause: Option<u16>,
+    pub(crate) pids: BTreeMap<u8, Vec<u8>>,
 }
 
 #[derive(Debug)]
@@ -158,11 +171,11 @@ impl Ecu {
             return replies;
         }
         match sid {
-            0x01 | 0x03 | 0x09 => match &self.obd {
-                Some(obd) => obd.answer(sid, data).into_iter().collect(),
+            0x01 | 0x02 | 0x03 | 0x06 | 0x07 | 0x09 | 0x0A => match &self.obd {
+                Some(obd) if obd.supports(sid) => obd.answer(sid, data).into_iter().collect(),
                 // A module without OBD-II stays out of broadcast requests.
                 None if functional => Vec::new(),
-                None => one(negative(sid, Nrc::ServiceNotSupported)),
+                _ => one(negative(sid, Nrc::ServiceNotSupported)),
             },
             0x10 => self.session_control(data),
             0x19 => self.read_dtc_information(data),
@@ -308,6 +321,16 @@ fn tester_present(data: &[u8]) -> Vec<Vec<u8>> {
 }
 
 impl Obd {
+    fn supports(&self, sid: u8) -> bool {
+        match sid {
+            0x02 => self.freeze_frame.is_some(),
+            0x06 => self.monitor_ids.is_some(),
+            0x07 => self.pending_dtcs.is_some(),
+            0x0A => self.permanent_dtcs.is_some(),
+            _ => true,
+        }
+    }
+
     // OBD-II modules don't answer what they don't support, so this is None then.
     fn answer(&self, sid: u8, data: &[u8]) -> Option<Vec<u8>> {
         let mut reply = vec![sid + POSITIVE_OFFSET];
@@ -323,12 +346,24 @@ impl Obd {
                     }
                 }
             }
-            (0x03, []) => {
-                // The fixture refuses more than 255 codes, so this never saturates.
-                reply.push(u8::try_from(self.dtcs.len()).unwrap_or(u8::MAX));
-                for dtc in &self.dtcs {
-                    reply.extend(dtc.to_be_bytes());
+            (0x03, []) => dtc_list(&mut reply, &self.dtcs),
+            (0x07, []) => dtc_list(&mut reply, self.pending_dtcs.as_ref()?),
+            (0x0A, []) => dtc_list(&mut reply, self.permanent_dtcs.as_ref()?),
+            (0x02, &[pid, FRAME]) => {
+                let frame = self.freeze_frame.as_ref()?;
+                reply.extend([pid, FRAME]);
+                if pid == CAUSE_PID {
+                    reply.extend(frame.cause.unwrap_or(0).to_be_bytes());
+                } else if let Some(bits) = frame.pid_bitmap(pid) {
+                    reply.extend(bits);
+                } else {
+                    reply.extend(frame.pids.get(&pid)?);
                 }
+            }
+            (0x06, &[mid]) => {
+                let bits = bitmap_page(self.monitor_ids.as_ref()?.iter().copied(), mid)?;
+                reply.push(mid);
+                reply.extend(bits);
             }
             (0x09, [0x00]) => {
                 let bits = bitmap(0x00, self.info.keys().copied(), false);
@@ -351,16 +386,42 @@ impl Obd {
     // The 4 data bytes of a mode 01 bitmap PID (0x00, 0x20, …), if the module supports it:
     // 0x00 whenever it has any PID, a later one when it has a PID above it.
     fn pid_bitmap(&self, pid: u8) -> Option<[u8; 4]> {
-        if !pid.is_multiple_of(0x20) || !self.pids.keys().any(|&p| pid == 0 || p > pid) {
+        // A module with no PIDs doesn't answer mode 01 at all.
+        if self.pids.is_empty() {
             return None;
         }
-        let more = self
-            .pids
-            .keys()
-            .any(|&p| u16::from(p) > u16::from(pid) + 0x20);
-        Some(bitmap(pid, self.pids.keys().copied(), more).to_be_bytes())
+        bitmap_page(self.pids.keys().copied(), pid)
     }
 }
+
+impl FreezeFrame {
+    // The cause (PID 02) is always in the frame.
+    fn pid_bitmap(&self, pid: u8) -> Option<[u8; 4]> {
+        bitmap_page(self.pids.keys().copied().chain([CAUSE_PID]), pid)
+    }
+}
+
+// The mode 03, 07 or 0A reply after its service ID: the count, then each code.
+fn dtc_list(reply: &mut Vec<u8>, dtcs: &[u16]) {
+    // The fixture refuses more than 255 codes, so this never saturates.
+    reply.push(u8::try_from(dtcs.len()).unwrap_or(u8::MAX));
+    for dtc in dtcs {
+        reply.extend(dtc.to_be_bytes());
+    }
+}
+
+// The 4 data bytes of a bitmap at `base` (0x00, 0x20, …) over `ids`, if there is one: 0x00 always,
+// a later one when there is an ID above it.
+fn bitmap_page(ids: impl Iterator<Item = u8> + Clone, base: u8) -> Option<[u8; 4]> {
+    if !base.is_multiple_of(0x20) || !(base == 0 || ids.clone().any(|id| id > base)) {
+        return None;
+    }
+    let more = ids.clone().any(|id| u16::from(id) > u16::from(base) + 0x20);
+    Some(bitmap(base, ids, more).to_be_bytes())
+}
+
+const FRAME: u8 = 0;
+const CAUSE_PID: u8 = 0x02;
 
 // Bit 31 is PID base+1 and bit 0 is base+0x20 (set by `next`), as SAE J1979 gives it.
 fn bitmap(base: u8, pids: impl Iterator<Item = u8>, next: bool) -> u32 {

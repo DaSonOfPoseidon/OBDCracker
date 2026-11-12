@@ -1,13 +1,13 @@
 //! The fixture file format: what each simulated module answers. Addresses come from the profile.
 //! See [`docs/fixtures.md`](https://github.com/DaSonOfPoseidon/OBDCracker/blob/main/docs/fixtures.md).
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 
 use obdcracker_core::obd;
 use serde::Deserialize;
 
 use crate::FixtureError;
-use crate::ecu::{Did, Obd, RawReply};
+use crate::ecu::{Did, FreezeFrame, Obd, RawReply};
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -76,6 +76,18 @@ struct ObdFixture {
     ecu_name: Option<EcuNameFixture>,
     #[serde(default)]
     dtcs: Vec<String>,
+    #[serde(default)]
+    pids: BTreeMap<String, String>,
+    pending_dtcs: Option<Vec<String>>,
+    permanent_dtcs: Option<Vec<String>>,
+    freeze_frame: Option<FreezeFrameFixture>,
+    monitor_ids: Option<Vec<String>>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FreezeFrameFixture {
+    cause: Option<String>,
     #[serde(default)]
     pids: BTreeMap<String, String>,
 }
@@ -194,25 +206,101 @@ fn dtc_code(text: &str) -> Result<u16, FixtureError> {
     Ok(code)
 }
 
+// A table of PIDs to data, for mode 01 or a freeze frame (`mode` names it). The cause PID (02) of
+// a freeze frame is its own field, so `except` refuses it.
+fn pid_table(
+    table: &BTreeMap<String, String>,
+    mode: &str,
+    except: Option<u8>,
+) -> Result<BTreeMap<u8, Vec<u8>>, FixtureError> {
+    let mut pids = BTreeMap::new();
+    for (pid, data) in table {
+        let id = u8::from_str_radix(pid, 16)
+            .ok()
+            .filter(|id| {
+                pid.len() == 2 && is_hex(pid) && !id.is_multiple_of(0x20) && Some(*id) != except
+            })
+            .ok_or_else(|| {
+                value_error(&format!("bad {mode} PID (bitmap PIDs are computed)"), pid)
+            })?;
+        let data = hex_bytes(data)?;
+        if !decodes_exactly(id, &data) {
+            return Err(value_error(
+                "wrong data length for this PID (SAE J1979)",
+                pid,
+            ));
+        }
+        if pids.insert(id, data).is_some() {
+            return Err(value_error(&format!("{mode} PID listed twice"), pid));
+        }
+    }
+    Ok(pids)
+}
+
+// A list of OBD DTCs of one mode: up to 255 (the count is a byte), none P0000, none twice.
+fn dtc_list(codes: &[String], mode: &str) -> Result<Vec<u16>, FixtureError> {
+    if codes.len() > usize::from(u8::MAX) {
+        return Err(FixtureError::Value(format!("too many {mode} DTCs")));
+    }
+    let mut list = Vec::new();
+    for dtc in codes {
+        let code = dtc_code(dtc)?;
+        if list.contains(&code) {
+            return Err(value_error(&format!("{mode} DTC listed twice"), dtc));
+        }
+        list.push(code);
+    }
+    Ok(list)
+}
+
+// Monitor IDs (mode 06), 2 hex digits each. The bitmap IDs (0x00, 0x20, …) are computed.
+fn monitor_ids(ids: &[String]) -> Result<BTreeSet<u8>, FixtureError> {
+    let mut set = BTreeSet::new();
+    for id in ids {
+        let mid = u8::from_str_radix(id, 16)
+            .ok()
+            .filter(|mid| id.len() == 2 && is_hex(id) && !mid.is_multiple_of(0x20))
+            .ok_or_else(|| value_error("bad monitor ID (bitmap IDs are computed)", id))?;
+        if !set.insert(mid) {
+            return Err(value_error("monitor ID listed twice", id));
+        }
+    }
+    Ok(set)
+}
+
+impl FreezeFrameFixture {
+    fn build(&self) -> Result<FreezeFrame, FixtureError> {
+        let cause = self.cause.as_deref().map(dtc_code).transpose()?;
+        let pids = pid_table(&self.pids, "freeze frame", Some(0x02))?;
+        if cause.is_none() && !pids.is_empty() {
+            return Err(FixtureError::Value(
+                "a freeze frame with PIDs needs a cause (without one it is empty: P0000)".into(),
+            ));
+        }
+        Ok(FreezeFrame { cause, pids })
+    }
+}
+
 impl ObdFixture {
     fn build(&self) -> Result<Obd, FixtureError> {
         let mut obd = Obd::default();
-        for (pid, data) in &self.pids {
-            let id = u8::from_str_radix(pid, 16)
-                .ok()
-                .filter(|id| pid.len() == 2 && is_hex(pid) && !id.is_multiple_of(0x20))
-                .ok_or_else(|| value_error("bad mode 01 PID (bitmap PIDs are computed)", pid))?;
-            let data = hex_bytes(data)?;
-            if !decodes_exactly(id, &data) {
-                return Err(value_error(
-                    "wrong data length for this PID (SAE J1979)",
-                    pid,
-                ));
-            }
-            if obd.pids.insert(id, data).is_some() {
-                return Err(value_error("mode 01 PID listed twice", pid));
-            }
-        }
+        obd.pids = pid_table(&self.pids, "mode 01", None)?;
+        obd.pending_dtcs = self
+            .pending_dtcs
+            .as_deref()
+            .map(|codes| dtc_list(codes, "pending"))
+            .transpose()?;
+        obd.permanent_dtcs = self
+            .permanent_dtcs
+            .as_deref()
+            .map(|codes| dtc_list(codes, "permanent"))
+            .transpose()?;
+        obd.freeze_frame = self
+            .freeze_frame
+            .as_ref()
+            .map(FreezeFrameFixture::build)
+            .transpose()?;
+        obd.monitor_ids = self.monitor_ids.as_deref().map(monitor_ids).transpose()?;
         if let Some(vin) = &self.vin {
             if obd::check_vin(vin.as_bytes()).is_err() {
                 return Err(value_error(
@@ -257,16 +345,7 @@ impl ObdFixture {
             bytes.extend(padded(&name.name, ECU_NAME_LEN, "bad ECU name")?);
             obd.info.insert(0x0A, (1, bytes));
         }
-        if self.dtcs.len() > usize::from(u8::MAX) {
-            return Err(FixtureError::Value("too many OBD DTCs".into()));
-        }
-        for dtc in &self.dtcs {
-            let code = dtc_code(dtc)?;
-            if obd.dtcs.contains(&code) {
-                return Err(value_error("OBD DTC listed twice", dtc));
-            }
-            obd.dtcs.push(code);
-        }
+        obd.dtcs = dtc_list(&self.dtcs, "stored")?;
         Ok(obd)
     }
 }

@@ -1,0 +1,32 @@
+# Synthetic OBD-II data, not from any car: what modes 02, 06, 07 and 0A answer, for modules at the
+# OBD-II IDs 0x7E0 and 0x7E1. Every value is worked out by hand in `tests/obd_modes.rs`.
+#
+# The engine has pending DTCs (P0299, and U3FFF at the top of the range), a permanent DTC list with
+# no codes (a reply with a count of 0), a freeze frame of three PIDs (0x04, 0x05 and 0x0C) stored by
+# P0299, and the mode 06 monitor IDs 0x01, 0x02, 0x21 and 0xFF (the highest, so every bitmap range
+# says a next one follows until 0xE0).
+# The transmission has no permanent DTC list (it refuses mode 0A as not supported), an empty pending
+# list, and a freeze frame with no DTC stored, which answers cause P0000 (SAE J1979).
+
+[[ecu]]
+module = "engine"
+
+[ecu.obd]
+pending_dtcs = ["P0299", "U3FFF"]
+permanent_dtcs = []
+monitor_ids = ["01", "02", "21", "FF"]
+
+[ecu.obd.freeze_frame]
+cause = "P0299"
+
+[ecu.obd.freeze_frame.pids]
+"04" = "80"
+"05" = "82"
+"0C" = "0C 80"
+
+[[ecu]]
+module = "transmission"
+
+[ecu.obd]
+pending_dtcs = []
+freeze_frame = {}
