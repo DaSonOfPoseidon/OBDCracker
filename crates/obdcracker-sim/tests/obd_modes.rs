@@ -198,7 +198,7 @@ fn the_new_modes_are_refused_from_a_module_without_an_obd_table() {
             ask(&mut bus, ENGINE, &payload),
             Some(vec![0x7F, payload[0], 0x11])
         );
-        assert!(ask_all(&mut bus, Target::ObdFunctional, &payload).is_empty());
+        assert_eq!(ask_all(&mut bus, Target::ObdFunctional, &payload).len(), 0);
     }
 }
 

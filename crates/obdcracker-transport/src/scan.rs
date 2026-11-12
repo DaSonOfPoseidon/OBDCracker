@@ -273,119 +273,12 @@ pub fn scan_with<T: Transport + ?Sized>(
     timing: Timing,
     options: &ScanOptions,
 ) -> Result<Scan, ScanError> {
-    let approve = |target, payload: &[u8]| {
-        policy
-            .approve(Protocol::Uds, target, payload)
-            .map_err(FingerprintError::Rejected)
-    };
-    // Which PIDs are asked for depends on the bitmaps, so all are approved up front.
-    let pid_requests = (0..=u8::MAX)
-        .map(|pid| approve(Target::ObdFunctional, &obd::current_data(pid)))
-        .collect::<Result<Vec<_>, _>>()?;
-    let info_request = approve(Target::ObdFunctional, &obd::vehicle_info(0x00))?;
-    let name_request = LongRead::approve(policy, &obd::vehicle_info(0x0A))?;
-    let dtc_request = LongRead::approve(policy, &obd::stored_dtcs())?;
-    let pending_request = LongRead::approve(policy, &obd::pending_dtcs())?;
-    let permanent_request = LongRead::approve(policy, &obd::permanent_dtcs())?;
-    // Mode 02's PIDs depend on the frame's bitmaps too.
-    let frame_requests = (0..=u8::MAX)
-        .map(|pid| approve(Target::ObdFunctional, &obd::freeze_frame(pid, FRAME)))
-        .collect::<Result<Vec<_>, _>>()?;
-    let monitor_id_requests = (0..=u8::MAX)
-        .step_by(0x20)
-        .map(|mid| approve(Target::ObdFunctional, &obd::monitor_results(mid)))
-        .collect::<Result<Vec<_>, _>>()?;
+    let obd_requests = ObdRequests::approve(policy)?;
     let module_requests = modules
         .iter()
         .map(|scanned| module_requests(policy, scanned, options))
         .collect::<Result<Vec<ModuleRequests>, ScanError>>()?;
-
-    let supported = supported_pids(
-        transport,
-        |pid| &pid_requests[usize::from(pid)],
-        None,
-        decode_bitmap,
-        timing,
-    )?;
-    let mut statuses = BTreeMap::new();
-    let mut values = pid_values(
-        transport,
-        &pid_requests,
-        &supported,
-        timing,
-        decode_pid_value,
-        |pid, source, replies| {
-            if pid == MONITOR_STATUS_PID {
-                statuses.insert(source, from(replies, source, obd::decode_monitor_status));
-            }
-        },
-    )?;
-
-    let info = broadcast(transport, &info_request, timing)?;
-    // Where each ECU is asked in turn (`LongRead`), these are the ones that answered so far.
-    let known: Vec<u32> = supported
-        .keys()
-        .copied()
-        .chain(info.iter().map(|r| r.source))
-        .collect();
-    let names = name_request.read(transport, &known, timing)?;
-    let dtcs = dtc_request.read(transport, &known, timing)?;
-    let known: Vec<u32> = known
-        .into_iter()
-        .chain(names.iter().chain(&dtcs).map(|r| r.source))
-        .collect();
-    let pending = pending_request.read(transport, &known, timing)?;
-    let permanent = permanent_request.read(transport, &known, timing)?;
-    let sources: BTreeSet<u32> = known
-        .into_iter()
-        .chain(pending.iter().chain(&permanent).map(|r| r.source))
-        .collect();
-    let mut frames = freeze_frames(transport, &frame_requests, &sources, timing)?;
-    let monitor_ids = supported_pids(
-        transport,
-        |mid| &monitor_id_requests[usize::from(mid / 0x20)],
-        Some(&sources),
-        obd::decode_supported_monitor_ids,
-        timing,
-    )?;
-    let ecus = sources
-        .into_iter()
-        .map(|source| {
-            let (pids, pids_cut_short) = supported
-                .get(&source)
-                .cloned()
-                .unwrap_or((Err(ReadError::NoReply), None));
-            let (monitor_ids, monitor_ids_cut_short) = monitor_ids
-                .get(&source)
-                .cloned()
-                .unwrap_or((Err(ReadError::NoReply), None));
-            ObdEcu {
-                source,
-                pids: pids.map(|_| values.remove(&source).unwrap_or_default()),
-                pids_cut_short,
-                monitor_status: statuses.remove(&source),
-                pending_dtcs: Some(from(&pending, source, |payload| {
-                    Ok(obd::decode_pending_dtcs(payload)?.collect())
-                })),
-                permanent_dtcs: Some(from(&permanent, source, |payload| {
-                    Ok(obd::decode_permanent_dtcs(payload)?.collect())
-                })),
-                freeze_frame: Some(frames.remove(&source).unwrap_or(Err(ReadError::NoReply))),
-                monitor_ids: Some(monitor_ids),
-                monitor_ids_cut_short,
-                supported_info: from(&info, source, |payload| {
-                    Ok(obd::decode_supported_info(payload)?.iter().collect())
-                }),
-                ecu_name: from(&names, source, |payload| {
-                    let name = obd::decode_ecu_name(payload)?;
-                    Ok(format!("{}-{}", name.acronym, name.name))
-                }),
-                stored_dtcs: from(&dtcs, source, |payload| {
-                    Ok(obd::decode_stored_dtcs(payload)?.collect())
-                }),
-            }
-        })
-        .collect();
+    let ecus = obd_requests.scan(transport, timing)?;
 
     let mut scanned = Vec::with_capacity(modules.len());
     for (scanned_module, requests) in modules.iter().zip(module_requests) {
@@ -402,6 +295,143 @@ pub fn scan_with<T: Transport + ?Sized>(
         ecus,
         modules: scanned,
     })
+}
+
+// Everything the OBD-II part of a scan could send, approved before the first request is.
+struct ObdRequests {
+    // Which PIDs are asked for depends on the bitmaps, so all are approved up front; so are mode
+    // 02's, whose PIDs depend on the frame's bitmaps too.
+    pids: Vec<Approved>,
+    info: Approved,
+    names: LongRead,
+    dtcs: LongRead,
+    pending: LongRead,
+    permanent: LongRead,
+    frame: Vec<Approved>,
+    monitor_ids: Vec<Approved>,
+}
+
+impl ObdRequests {
+    fn approve(policy: &Policy) -> Result<Self, ScanError> {
+        let approve = |payload: &[u8]| {
+            policy
+                .approve(Protocol::Uds, Target::ObdFunctional, payload)
+                .map_err(FingerprintError::Rejected)
+        };
+        Ok(Self {
+            pids: (0..=u8::MAX)
+                .map(|pid| approve(&obd::current_data(pid)))
+                .collect::<Result<_, _>>()?,
+            info: approve(&obd::vehicle_info(0x00))?,
+            names: LongRead::approve(policy, &obd::vehicle_info(0x0A))?,
+            dtcs: LongRead::approve(policy, &obd::stored_dtcs())?,
+            pending: LongRead::approve(policy, &obd::pending_dtcs())?,
+            permanent: LongRead::approve(policy, &obd::permanent_dtcs())?,
+            frame: (0..=u8::MAX)
+                .map(|pid| approve(&obd::freeze_frame(pid, FRAME)))
+                .collect::<Result<_, _>>()?,
+            monitor_ids: (0..=u8::MAX)
+                .step_by(0x20)
+                .map(|mid| approve(&obd::monitor_results(mid)))
+                .collect::<Result<_, _>>()?,
+        })
+    }
+
+    // Each ECU that answered anything, in the order docs/scanning.md gives: the mode 01 bitmaps and
+    // PIDs, mode 09, then modes 03, 07 and 0A, the freeze frame and the mode 06 bitmaps. A read
+    // that fails loses only its own value.
+    fn scan<T: Transport + ?Sized>(
+        &self,
+        transport: &mut T,
+        timing: Timing,
+    ) -> Result<Vec<ObdEcu>, ScanError> {
+        let supported = supported_pids(
+            transport,
+            |pid| &self.pids[usize::from(pid)],
+            None,
+            decode_bitmap,
+            timing,
+        )?;
+        let mut statuses = BTreeMap::new();
+        let mut values = pid_values(
+            transport,
+            &self.pids,
+            &supported,
+            timing,
+            decode_pid_value,
+            |pid, source, replies| {
+                if pid == MONITOR_STATUS_PID {
+                    statuses.insert(source, from(replies, source, obd::decode_monitor_status));
+                }
+            },
+        )?;
+
+        let info = broadcast(transport, &self.info, timing)?;
+        // Where each ECU is asked in turn (`LongRead`), these are the ones that answered so far.
+        let known: Vec<u32> = supported
+            .keys()
+            .copied()
+            .chain(info.iter().map(|r| r.source))
+            .collect();
+        let names = self.names.read(transport, &known, timing)?;
+        let dtcs = self.dtcs.read(transport, &known, timing)?;
+        let known: Vec<u32> = known
+            .into_iter()
+            .chain(names.iter().chain(&dtcs).map(|r| r.source))
+            .collect();
+        let pending = self.pending.read(transport, &known, timing)?;
+        let permanent = self.permanent.read(transport, &known, timing)?;
+        let sources: BTreeSet<u32> = known
+            .into_iter()
+            .chain(pending.iter().chain(&permanent).map(|r| r.source))
+            .collect();
+        let mut frames = freeze_frames(transport, &self.frame, &sources, timing)?;
+        let monitor_ids = supported_pids(
+            transport,
+            |mid| &self.monitor_ids[usize::from(mid / 0x20)],
+            Some(&sources),
+            obd::decode_supported_monitor_ids,
+            timing,
+        )?;
+        Ok(sources
+            .into_iter()
+            .map(|source| {
+                let (pids, pids_cut_short) = supported
+                    .get(&source)
+                    .cloned()
+                    .unwrap_or((Err(ReadError::NoReply), None));
+                let (monitor_ids, monitor_ids_cut_short) = monitor_ids
+                    .get(&source)
+                    .cloned()
+                    .unwrap_or((Err(ReadError::NoReply), None));
+                ObdEcu {
+                    source,
+                    pids: pids.map(|_| values.remove(&source).unwrap_or_default()),
+                    pids_cut_short,
+                    supported_info: from(&info, source, |payload| {
+                        Ok(obd::decode_supported_info(payload)?.iter().collect())
+                    }),
+                    ecu_name: from(&names, source, |payload| {
+                        let name = obd::decode_ecu_name(payload)?;
+                        Ok(format!("{}-{}", name.acronym, name.name))
+                    }),
+                    stored_dtcs: from(&dtcs, source, |payload| {
+                        Ok(obd::decode_stored_dtcs(payload)?.collect())
+                    }),
+                    monitor_status: statuses.remove(&source),
+                    pending_dtcs: Some(from(&pending, source, |payload| {
+                        Ok(obd::decode_pending_dtcs(payload)?.collect())
+                    })),
+                    permanent_dtcs: Some(from(&permanent, source, |payload| {
+                        Ok(obd::decode_permanent_dtcs(payload)?.collect())
+                    })),
+                    freeze_frame: Some(frames.remove(&source).unwrap_or(Err(ReadError::NoReply))),
+                    monitor_ids: Some(monitor_ids),
+                    monitor_ids_cut_short,
+                }
+            })
+            .collect())
+    }
 }
 
 fn module_requests(

@@ -708,8 +708,8 @@ fn a_monitor_going_complete_or_incomplete_is_a_change_in_bit_order() {
     assert_eq!(
         lines(&changes),
         [
-            "7E8 monitor boost_pressure: complete → incomplete",
-            "7E8 monitor exhaust_gas_sensor: incomplete → complete",
+            "7E8 monitor boost pressure: complete → incomplete",
+            "7E8 monitor exhaust gas sensor: incomplete → complete",
         ]
     );
     assert_eq!(

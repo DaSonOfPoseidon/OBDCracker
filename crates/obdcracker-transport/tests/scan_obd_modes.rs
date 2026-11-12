@@ -11,8 +11,10 @@ use obdcracker_transport::fingerprint::{FingerprintError, ReadError};
 use obdcracker_transport::scan::{FreezeFrame, ObdEcu, PidValue, Scan, scan};
 use obdcracker_transport::{Error, Response, Timing, Transport, hex};
 
+type Answer = Box<dyn FnMut(u32, &[u8]) -> Vec<Response>>;
+
 struct Car {
-    answer: Box<dyn FnMut(u32, &[u8]) -> Vec<Response>>,
+    answer: Answer,
     replies: VecDeque<Response>,
     sent: Vec<String>,
     fail_after: Option<usize>,
@@ -145,7 +147,7 @@ fn an_ecu_that_doesnt_support_pid_01_has_no_status() {
     });
     let got = obd_only(&mut car);
     assert_eq!(ecu(&got, 0x7E8).monitor_status, None);
-    assert!(sent_with(&car, "7DF 01 01").is_empty());
+    assert_eq!(sent_with(&car, "7DF 01 01").len(), 0);
 }
 
 fn dtc_car(id: u32, request: &[u8]) -> Vec<Response> {
@@ -492,7 +494,7 @@ fn a_refused_mode_06_is_that_ecus_error() {
 fn nothing_answering_sends_no_mode_02_or_06_request() {
     let mut car = Car::new(|_, _| Vec::new());
     let got = obd_only(&mut car);
-    assert!(got.ecus.is_empty());
+    assert_eq!(got.ecus.len(), 0);
     assert!(sent_with(&car, "7DF 02").is_empty() && sent_with(&car, "7DF 06").is_empty());
 }
 

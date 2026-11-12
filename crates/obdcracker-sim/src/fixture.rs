@@ -283,24 +283,24 @@ impl FreezeFrameFixture {
 
 impl ObdFixture {
     fn build(&self) -> Result<Obd, FixtureError> {
-        let mut obd = Obd::default();
-        obd.pids = pid_table(&self.pids, "mode 01", None)?;
-        obd.pending_dtcs = self
-            .pending_dtcs
-            .as_deref()
-            .map(|codes| dtc_list(codes, "pending"))
-            .transpose()?;
-        obd.permanent_dtcs = self
-            .permanent_dtcs
-            .as_deref()
-            .map(|codes| dtc_list(codes, "permanent"))
-            .transpose()?;
-        obd.freeze_frame = self
-            .freeze_frame
-            .as_ref()
-            .map(FreezeFrameFixture::build)
-            .transpose()?;
-        obd.monitor_ids = self.monitor_ids.as_deref().map(monitor_ids).transpose()?;
+        let list = |codes: &Option<Vec<String>>, mode| {
+            codes
+                .as_deref()
+                .map(|codes| dtc_list(codes, mode))
+                .transpose()
+        };
+        let mut obd = Obd {
+            pids: pid_table(&self.pids, "mode 01", None)?,
+            pending_dtcs: list(&self.pending_dtcs, "pending")?,
+            permanent_dtcs: list(&self.permanent_dtcs, "permanent")?,
+            freeze_frame: self
+                .freeze_frame
+                .as_ref()
+                .map(FreezeFrameFixture::build)
+                .transpose()?,
+            monitor_ids: self.monitor_ids.as_deref().map(monitor_ids).transpose()?,
+            ..Obd::default()
+        };
         if let Some(vin) = &self.vin {
             if obd::check_vin(vin.as_bytes()).is_err() {
                 return Err(value_error(

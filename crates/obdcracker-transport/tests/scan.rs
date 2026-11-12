@@ -794,12 +794,20 @@ fn a_silent_car_loses_only_its_values() {
     );
     assert_eq!(module.dtc_count, Err(ReadError::NoReply));
     assert_eq!(module.dtcs, Err(ReadError::NoReply));
-    // No bitmap answered, so no PIDs and no later bitmaps are asked for.
+    // No bitmap answered, so no PIDs, no later bitmaps and, with no ECU known, no mode 02 or 06
+    // reads are asked for.
     assert_eq!(
-        car.sent[..4],
-        ["7DF 01 00", "7DF 09 00", "7DF 09 0A", "7DF 03"]
+        car.sent[..6],
+        [
+            "7DF 01 00",
+            "7DF 09 00",
+            "7DF 09 0A",
+            "7DF 03",
+            "7DF 07",
+            "7DF 0A"
+        ]
     );
-    assert_eq!(car.sent.len(), 4 + SCAN_DIDS.len() + 2);
+    assert_eq!(car.sent.len(), 6 + SCAN_DIDS.len() + 2);
 }
 
 #[test]

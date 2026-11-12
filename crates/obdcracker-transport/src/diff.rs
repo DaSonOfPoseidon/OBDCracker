@@ -496,6 +496,10 @@ mod wire {
     use obdcracker_core::obd::MonitorKind;
     use serde::Serializer;
 
+    #[expect(
+        clippy::trivially_copy_pass_by_ref,
+        reason = "serde's `serialize_with` passes a reference"
+    )]
     pub(super) fn monitor<S: Serializer>(
         kind: &MonitorKind,
         serializer: S,
@@ -668,13 +672,13 @@ impl fmt::Display for Change {
             | Self::EcuNameChanged { .. }
             | Self::ObdDtcNew { .. }
             | Self::ObdDtcCleared { .. }
-            | Self::ObdPendingDtcNew { .. }
+            | Self::VinChanged { .. } => fmt_ecu_change(self, f),
+            Self::ObdPendingDtcNew { .. }
             | Self::ObdPendingDtcCleared { .. }
             | Self::ObdPermanentDtcNew { .. }
             | Self::ObdPermanentDtcCleared { .. }
             | Self::MilChanged { .. }
-            | Self::MonitorChanged { .. }
-            | Self::VinChanged { .. } => fmt_ecu_change(self, f),
+            | Self::MonitorChanged { .. } => fmt_readiness_change(self, f),
             Self::ModuleAdded { .. }
             | Self::ModuleRemoved { .. }
             | Self::AnsweredChanged { .. }
@@ -756,6 +760,17 @@ fn fmt_ecu_change(change: &Change, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         Change::ObdDtcCleared { source, dtc } => {
             ecu(f, *source, format_args!("DTC cleared: {dtc}"))
         }
+        Change::VinChanged { source, old, new } => {
+            let (old, new) = (Plain(old), Plain(new));
+            ecu(f, *source, format_args!("VIN {old} → {new}"))
+        }
+        other => unreachable!("{other:?} isn't about an ECU: `fmt` sends it to the module lines"),
+    }
+}
+
+// The pending and permanent DTC changes, the MIL and the readiness monitors, which `fmt` sends here.
+fn fmt_readiness_change(change: &Change, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    match change {
         Change::ObdPendingDtcNew { source, dtc } => {
             ecu(f, *source, format_args!("pending DTC new: {dtc}"))
         }
@@ -784,17 +799,13 @@ fn fmt_ecu_change(change: &Change, f: &mut fmt::Formatter<'_>) -> fmt::Result {
                 *source,
                 format_args!(
                     "monitor {}: {} → {}",
-                    monitor.name(),
+                    monitor.name().replace('_', " "),
                     state(old),
                     state(new)
                 ),
             )
         }
-        Change::VinChanged { source, old, new } => {
-            let (old, new) = (Plain(old), Plain(new));
-            ecu(f, *source, format_args!("VIN {old} → {new}"))
-        }
-        other => unreachable!("{other:?} isn't about an ECU: `fmt` sends it to the module lines"),
+        other => unreachable!("{other:?} isn't a readiness change: `fmt` sends it elsewhere"),
     }
 }
 
@@ -1209,6 +1220,12 @@ fn obd_ecu(out: &mut Vec<Change>, source: u32, old: &ObdEcu, new: &ObdEcu) {
             }
         },
     );
+    readiness(out, source, old, new);
+}
+
+// What changed in an ECU's pending and permanent DTCs, MIL and readiness monitors.
+fn readiness(out: &mut Vec<Change>, source: u32, old: &ObdEcu, new: &ObdEcu) {
+    let scope = Scope::Ecu { source };
     dtc_lists(
         out,
         &scope,
