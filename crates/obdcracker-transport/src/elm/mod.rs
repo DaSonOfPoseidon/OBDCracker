@@ -251,7 +251,9 @@ pub struct Elm<L> {
     stbc: Stbc,
     // The request in progress was written with `STM` after it, as one batch: the adapter listens
     // for the frame's replies and then monitors without the host's help, so `monitoring` is set
-    // from the carriage return. A prompt then means the monitor never started.
+    // from the carriage return. A prompt then means the monitor never started, until the
+    // monitor's first line is read (with the pipe in front or without): after that it means the
+    // monitor stopped.
     batched: bool,
     // The `|` that precedes the second element's output is still to come, and allowed once. It
     // is only allowed until the line after the frame's own reply: a monitor that printed no pipe
@@ -1235,10 +1237,12 @@ impl<L: Link> Elm<L> {
                         return Ok(Some(Event::Prompt));
                     }
                     // The request's echo is not a reply. The first line after it is the frame's
-                    // own reply, and the second one is the monitor's, with no pipe in front.
+                    // own reply, and the second one is the monitor's, with no pipe in front:
+                    // the monitor is running all the same, so a later prompt is it stopping.
                     Event::Line(text) if self.batch_pipe && self.echo.is_none() => {
                         if std::mem::replace(&mut self.batch_replied, true) {
                             self.batch_pipe = false;
+                            self.batched = false;
                         }
                         return Ok(Some(Event::Line(text)));
                     }

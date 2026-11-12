@@ -1788,6 +1788,37 @@ mod requests {
     }
 
     #[test]
+    fn a_prompt_after_a_monitor_line_with_no_pipe_is_still_a_failure() {
+        // The STN printed the frame's reply and then a monitor line with no pipe: the monitor
+        // has started whether or not the pipe was shown, so a later prompt is the adapter
+        // stopping on its own, not a batch whose `STM` never started.
+        let mut elm = with_echo_shown(batching_stn(Duration::from_secs(60)));
+        request_sent(&mut elm);
+        elm.link_mut().inject = b"300 20 00 0E 5A 9B 41 42 43\r>".to_vec();
+        assert_eq!(elm.recv(Duration::from_secs(1)).unwrap().payload[0], 0x20);
+        let err = elm.recv(Duration::from_secs(1)).unwrap_err();
+        assert!(err.to_string().contains("stopped monitoring"), "{err}");
+    }
+
+    #[test]
+    fn a_prompt_met_while_stopping_a_monitor_with_no_pipe_is_still_a_failure() {
+        // The same through `interrupt`: the next channel frame has to stop the monitor, and the
+        // prompt it meets first is not a batch that never started its monitor.
+        let mut elm = with_echo_shown(batching_stn(Duration::from_secs(60)));
+        let channel = request_sent(&mut elm);
+        elm.link_mut().inject = b"300 20 00 0E 5A 9B 41 42 43\r>".to_vec();
+        assert_eq!(elm.recv(Duration::from_secs(1)).unwrap().payload[0], 0x20);
+        let err = elm
+            .send(
+                &Policy::read_only()
+                    .approve_tp20_keep_alive(&channel)
+                    .unwrap(),
+            )
+            .unwrap_err();
+        assert!(err.to_string().contains("stopped monitoring"), "{err}");
+    }
+
+    #[test]
     fn a_second_pipe_in_a_batch_and_a_pipe_outside_one_are_unexpected_output() {
         let mut elm = with_echo_shown(batching_stn(Duration::from_secs(60)));
         request_sent(&mut elm);

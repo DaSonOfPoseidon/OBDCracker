@@ -561,7 +561,10 @@ Each entry names the class, what to check, and where it bit us.
   printed no pipe had a later line's `|` taken for the batch's own (#338). The batched `STM` was logged before the
   head's digits were written, so a wrong head echo left an entry for a command never sent (#340). Clear such a flag
   at the end of the place it applies, not only on the event it waits for, and log an element of a multi-write line
-  just before its own bytes go out, once the earlier ones are written and checked.
+  just before its own bytes go out, once the earlier ones are written and checked. A state flag has the same rule:
+  `batched` ("a prompt means `STM` never started") was cleared only when the pipe was seen, so a monitor that printed
+  no pipe left it set and a later prompt, from `prompt_after_request` or `interrupt`, passed as a batch that never
+  started (#342). Clear a flag on every path that ends the state it stands for, and grep every reader of it.
 - **A separator in a line makes its first part a command of its own.** An STN runs `<hex>|STM` as two elements, left to
   right, so a misheard digit that the driver ended with `XX` would have left the damaged digits as a complete hex element
   to send, `XX` ending only the last one. Check the part that can become a request before the separator is written

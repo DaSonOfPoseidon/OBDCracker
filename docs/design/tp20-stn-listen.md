@@ -259,7 +259,9 @@ STBC1                             <OK        batching on (FRPM 8.15); only an ex
   before each later element's first output line (8.15), which is the one place taken.
 - **A prompt before the pipe is seen** means the batch ended without its monitor (an error before `STM`, or it was
   dropped): the driver starts `STM` itself, as it does for an adapter without batching, and the frame that lost nothing
-  more than the re-arm would. A prompt after the pipe is the monitor stopping on its own, a failure, as for any monitor.
+  more than the re-arm would. A prompt after the monitor's first line is the monitor stopping on its own, a failure, as
+  for any monitor, whether that line had the pipe in front or not (the line after the frame's own reply is the
+  monitor's first); `interrupt` reads a prompt the same way.
 - **An `X` while the frame's listen is still running** (the module's ACK is slow, and the next frame goes out) has no
   documented effect on a batch. The manual says an interrupted monitor may abort "the remainder of the batch" (16.1).
   The driver assumes the worst, that `X` ends the whole batch with no `STM`, and reads `STOPPED` and the prompt as
