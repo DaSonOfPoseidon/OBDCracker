@@ -64,7 +64,7 @@ module.
 
 | Tier | Allows | Status |
 |---|---|---|
-| T0 Read | OBD-II modes 01/03/09, UDS 0x22, 0x19, 0x3E, 0x10 (default/extended session) | allowed |
+| T0 Read | OBD-II modes 01/02/03/06/07/09/0A, UDS 0x22, 0x19, 0x3E, 0x10 (default/extended session) | allowed |
 | T1 Clear DTCs | UDS 0x14, OBD-II mode 04 | planned |
 | T2 Coding | UDS 0x2E, 0x27 | planned |
 | T3 Flash | programming session, 0x31, 0x34/0x36/0x37, 0x11 | **hard-banned** |

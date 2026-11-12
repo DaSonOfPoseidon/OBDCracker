@@ -35,10 +35,14 @@ Each tier above read-only needs a cargo feature, an explicit runtime unlock, and
 
 | Tier | UDS and OBD-II | KWP2000 | Status |
 |---|---|---|---|
-| T0 Read | OBD-II modes 01/03/09, UDS 0x22, 0x19, 0x3E, 0x10 (default/extended session) | 0x1A, 0x21, 0x22 (exactly one 2-byte common ID), 0x17, 0x18, 0x3E; on a TP2.0 channel only, 0x10 89 (VAG session) | allowed |
+| T0 Read | OBD-II modes 01/02/03/06/07/09/0A, UDS 0x22, 0x19, 0x3E, 0x10 (default/extended session) | 0x1A, 0x21, 0x22 (exactly one 2-byte common ID), 0x17, 0x18, 0x3E; on a TP2.0 channel only, 0x10 89 (VAG session) | allowed |
 | T1 Clear DTCs | UDS 0x14, OBD-II mode 04 | 0x14 | planned |
 | T2 Coding | UDS 0x2E, 0x27 | 0x2E, 0x3B, 0x27, 0x10 87 (adjustment session) | planned; needs a backup of the current value |
 | T3 Flash | programming session, 0x31, 0x34/0x36/0x37, 0x11 | 0x10 85/86 (programming, development), 0x11, 0x31-0x3A, 0x3D | **hard-banned** until a separate design doc exists; will need a full backup of the current image |
+
+The OBD-II reads are approved by shape: mode 01 takes one to six PIDs, 02 exactly one PID and one frame number, 06 one
+monitor ID, 09 one PID, and 03, 07 and 0A no data. Mode 04 is T1, and mode 08 (control an on-board component) is
+rejected. Modes 02, 06, 07 and 0A are UDS/OBD-II only: KWP2000 has no such services, so `approve` rejects them there.
 
 Anything else is rejected, including KWP2000's IO control (0x30), memory reads (0x23) and every session other than the
 banned and locked ones: ISO 14230-3 leaves what each value means to the manufacturer. The one exception is VAG's
