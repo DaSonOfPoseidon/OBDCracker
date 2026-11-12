@@ -1241,6 +1241,155 @@ mod requests {
         );
     }
 
+    use obdcracker_transport::Timing;
+    use obdcracker_transport::tp20::{ChannelError, ChannelSession};
+
+    // How long after the tester's data frame the module ACKs it, how long it then takes to
+    // start a single-frame answer, and how long the STN takes to start monitoring after `STM` is
+    // written. Car session 11 (#333): 35 to 52 ms, 160 ms, and about 15 ms for the echo round
+    // trip plus the start. The times are wider apart than the car's so that a loaded test thread
+    // can't move a frame to the other side of the monitor's start.
+    const ACK_AFTER: Duration = Duration::from_millis(60);
+    const ANSWER_AFTER_ACK: Duration = Duration::from_millis(150);
+    const MONITOR_STARTUP: Duration = Duration::from_millis(45);
+
+    // An STN that ends a raw listen with its prompt after the first frame and takes
+    // `MONITOR_STARTUP` to monitor, in front of the TP2.0 module at `address` that listens on
+    // `tester_id` and sends on 0x300, as in A7 session 11 (#333). The module ACKs each data frame
+    // `ACK_AFTER` after it, and every frame it sends goes on the bus at a time counted from that
+    // ACK (`ANSWER_AFTER_ACK` for its single-frame answers, `answer` for its answer to
+    // `22 F1 87`), whatever the adapter is doing: a frame that arrives before the monitor is up
+    // is lost. `start_answer` is its answer to `10 89`.
+    fn stn_losing_frames_after_the_ack(
+        address: u8,
+        tester_id: u32,
+        start_answer: &[u8],
+        answer: Vec<(Duration, Vec<u8>)>,
+    ) -> FakeElm {
+        let [low, high, ..] = tester_id.to_le_bytes();
+        let setup_reply = vec![0x00, 0xD0, 0x00, 0x03, low, high, 0x01];
+        let setup_source = 0x200 + u32::from(address);
+        let mut car = FakeElm::new(Box::new(move |header, request| match (header, request) {
+            (0x200, [first, 0xC0, ..]) if *first == address => {
+                vec![(setup_source, setup_reply.clone())]
+            }
+            (id, [0xA0, ..]) if id == tester_id => {
+                vec![(0x300, vec![0xA1, 0x0F, 0x8A, 0xFF, 0x4A, 0xFF])]
+            }
+            (id, [0xA8]) if id == tester_id => vec![(0x300, vec![0xA8])],
+            (0x7E0, [0x09, 0x02]) => vec![(0x7E8, VIN.to_vec())],
+            _ => Vec::new(),
+        }));
+        car.sti = Some("STN2232 v5.12.4".into());
+        car.listen_raw = true;
+        car.listen_one_frame = true;
+        car.monitor_startup = MONITOR_STARTUP;
+        let start_answer = start_answer.to_vec();
+        car.delayed = Some(Box::new(move |header, request| {
+            if header != tester_id {
+                return Vec::new();
+            }
+            let ack = |next: u8| (ACK_AFTER, 0x300, vec![0xB0 | next]);
+            let later = |frame: &[u8]| (ACK_AFTER + ANSWER_AFTER_ACK, 0x300, frame.to_vec());
+            match request {
+                [0x10, 0x00, 0x02, 0x10, 0x89] => vec![ack(1), later(&start_answer)],
+                [0x11, 0x00, 0x02, 0x1A, 0x9B] => {
+                    vec![ack(2), later(&[0x11, 0x00, 0x03, 0x7F, 0x1A, 0x11])]
+                }
+                [0x12, 0x00, 0x03, 0x22, 0xF1, 0x87] => {
+                    let mut frames = vec![ack(3)];
+                    frames.extend(
+                        answer
+                            .iter()
+                            .map(|(after, frame)| (ACK_AFTER + *after, 0x300, frame.clone())),
+                    );
+                    frames
+                }
+                _ => Vec::new(),
+            }
+        }));
+        car
+    }
+
+    // What the last read gave, and the frames the adapter lost.
+    type ReadAndLost = (Result<Vec<u8>, ChannelError>, Vec<(u32, Vec<u8>)>);
+
+    // Opens the channel to `address` on `car` and reads, as the A7's passes did: `10 89`, `1A 9B`
+    // (which both modules refused) and then the one that matters, `22 F1 87`.
+    fn read_f187_after_two_requests(car: FakeElm, address: u8) -> ReadAndLost {
+        let mut elm = with_echo_shown(car);
+        let policy = Policy::read_only();
+        let timing = Timing {
+            p2: Duration::from_secs(1),
+            ..Timing::default()
+        };
+        let mut session = ChannelSession::open(&mut elm, &policy, address, timing).unwrap();
+        session.request(&[0x10, 0x89]).unwrap();
+        session.request(&[0x1A, 0x9B]).unwrap();
+        let read = session.request(&[0x22, 0xF1, 0x87]);
+        drop(session);
+        (read, elm.link().elm.lost_frames.clone())
+    }
+
+    #[test]
+    #[ignore = "fails until #333"]
+    fn a_tp20_answer_that_starts_while_the_stn_re_arms_after_the_ack_is_heard_whole_module_52() {
+        // Session 11, module 52 (4DB to 300): its answer to `22 F1 87` is ACKed (`B3`), then
+        // `22 ..` and `23 ..` come about 10 and 20 ms later, while the STN, which printed its
+        // prompt after the ACK, is writing and starting `STM`. Only `14 47 20` was heard, with
+        // sequence 4 where 2 was due, and the session closed the channel. The part number's
+        // first 9 bytes are invented; its last two are the car's.
+        let answer = vec![
+            (
+                Duration::from_millis(10),
+                vec![0x22, 0x00, 0x0E, 0x62, 0xF1, 0x87, 0x34, 0x47],
+            ),
+            (
+                Duration::from_millis(20),
+                vec![0x23, 0x38, 0x35, 0x39, 0x37, 0x39, 0x33, 0x30],
+            ),
+            (Duration::from_millis(100), vec![0x14, 0x47, 0x20]),
+        ];
+        let car =
+            stn_losing_frames_after_the_ack(0x52, 0x4DB, &[0x10, 0x00, 0x02, 0x50, 0x89], answer);
+        let (read, lost) = read_f187_after_two_requests(car, 0x52);
+        assert_eq!(
+            read,
+            Ok(b"\x62\xF1\x87\x34\x47\x38\x35\x39\x37\x39\x33\x30\x47\x20".to_vec())
+        );
+        assert_eq!(lost, []);
+    }
+
+    #[test]
+    #[ignore = "fails until #333"]
+    fn a_tp20_answer_that_starts_while_the_stn_re_arms_after_the_ack_is_heard_whole_module_20() {
+        // Session 11, module 20 (518 to 300): `22 ..` is lost, and the heard `23 30 39 30 37 30
+        // 36 33` has sequence 3 where 2 was due, with `14 43 47` right behind it, unread.
+        let answer = vec![
+            (
+                Duration::from_millis(10),
+                vec![0x22, 0x00, 0x0E, 0x62, 0xF1, 0x87, 0x34, 0x47],
+            ),
+            (
+                Duration::from_millis(100),
+                vec![0x23, 0x30, 0x39, 0x30, 0x37, 0x30, 0x36, 0x33],
+            ),
+            (Duration::from_millis(101), vec![0x14, 0x43, 0x47]),
+        ];
+        let car = stn_losing_frames_after_the_ack(
+            0x20,
+            0x518,
+            &[0x10, 0x00, 0x03, 0x7F, 0x10, 0x22],
+            answer,
+        );
+        let (read, lost) = read_f187_after_two_requests(car, 0x20);
+        assert_eq!(
+            read,
+            Ok(b"\x62\xF1\x87\x34\x47\x30\x39\x30\x37\x30\x36\x33\x43\x47".to_vec())
+        );
+        assert_eq!(lost, []);
+    }
+
     fn count(elm: &Elm<FakeLink>, command: &str) -> usize {
         commands(elm).iter().filter(|c| *c == command).count()
     }

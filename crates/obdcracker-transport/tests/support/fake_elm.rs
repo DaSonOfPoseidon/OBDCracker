@@ -69,6 +69,12 @@ pub struct FakeElm {
     /// listening, whatever the test thread does before it. A request sent first drops frames
     /// still held, and with no monitor the frames never arrive.
     pub delay_from_monitor: bool,
+    /// How long after its command line `STM` or `ATMA` takes to start printing. Frames that
+    /// reach the adapter in between are lost, as on the real one, where the echo round trip alone
+    /// is about 15 ms (session 11, #333). Nothing, the default, starts it at once.
+    pub monitor_startup: Duration,
+    // When the monitor started by the last `STM` or `ATMA` prints from.
+    monitor_from: Instant,
     // Frames waiting for the adapter to start monitoring (`delay_from_monitor`).
     held: Vec<(Duration, u32, Vec<u8>)>,
     // Frames on the bus that haven't reached the adapter yet.
@@ -262,6 +268,8 @@ impl FakeElm {
             listen_one_frame: false,
             delayed: None,
             delay_from_monitor: false,
+            monitor_startup: Duration::ZERO,
+            monitor_from: Instant::now(),
             held: Vec::new(),
             bus: Vec::new(),
             lost_frames: Vec::new(),
@@ -866,7 +874,8 @@ impl FakeElm {
     // Starts monitoring, which puts the frames held for it on the bus.
     fn start_monitoring(&mut self) {
         self.monitoring = true;
-        let now = Instant::now();
+        let now = Instant::now() + self.monitor_startup;
+        self.monitor_from = now;
         let held = std::mem::take(&mut self.held);
         self.bus.extend(
             held.into_iter()
@@ -902,12 +911,13 @@ impl FakeElm {
             .collect();
         self.bus.retain(|(at, ..)| *at > now);
         due.sort_by_key(|(at, ..)| *at);
-        for (_, id, data) in due {
-            let monitored = self.monitoring && self.monitor_all;
+        for (at, id, data) in due {
+            let monitoring = self.monitoring && at >= self.monitor_from;
+            let monitored = monitoring && self.monitor_all;
             if !monitored && !self.settings.shows(id) {
                 continue;
             }
-            if self.listening || self.monitoring {
+            if self.listening || monitoring {
                 let line = self.frame_line(id, &data);
                 let acked = self.listening
                     || (self.settings.monitor_ack && !self.monitor_ignores_ack)
