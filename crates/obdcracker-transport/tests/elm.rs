@@ -1745,6 +1745,34 @@ mod requests {
     }
 
     #[test]
+    fn a_batched_stm_and_the_probe_are_logged_when_their_writes_fail() {
+        // The audit log is written before the adapter acts, and however the write ends: a line
+        // that failed part-way may still have run.
+        let mut elm = with_echo_shown(batching_stn(Duration::from_secs(60)));
+        let channel = open_channel(&mut elm, 0x5F);
+        elm.take_events();
+        let frame = Policy::read_only()
+            .approve_tp20_request(&channel, 0, &[0x1A, 0x9B])
+            .unwrap();
+        // The digits go out, and then the link is gone.
+        elm.link_mut().kill_after_writes = Some(1);
+        assert!(elm.send(&frame).is_err());
+        let logged = logged_commands(&mut elm);
+        assert_eq!(logged, [("STM".to_owned(), Vec::new())]);
+        // The probe: echoed, and never answered.
+        let mut car = batching_stn(Duration::from_secs(60));
+        car.mute = vec!["STBC1".to_owned()];
+        let mut elm = with_echo_shown(car);
+        elm.take_events();
+        assert!(
+            elm.send(&Policy::read_only().approve_tp20_setup(0x5F).unwrap())
+                .is_err()
+        );
+        let logged = logged_commands(&mut elm);
+        assert!(logged.iter().any(|(c, _)| c == "STBC1"), "{logged:?}");
+    }
+
+    #[test]
     fn a_batched_frame_the_module_never_answers_gets_one_timeout_and_nothing_sent() {
         let mut elm = with_echo_shown(batching_stn(Duration::from_secs(60)));
         let channel = request_sent(&mut elm);

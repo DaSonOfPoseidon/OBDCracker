@@ -1569,13 +1569,16 @@ impl<L: Link> Transport for Elm<L> {
         };
         // Noted however it ends, as `start_monitor` does: a misheard `STM` may still have run.
         let at = SystemTime::now();
-        let sent_at = self.write_line(&line, if batched { head_len } else { line.len() })?;
+        let written = self.write_line(&line, if batched { head_len } else { line.len() });
         if batched {
             self.note(LinkEvent::Command {
                 at,
                 command: MONITOR_STN.to_owned(),
                 answer: Vec::new(),
             });
+        }
+        let sent_at = written?;
+        if batched {
             self.monitoring = true;
             self.batched = true;
             self.batch_pipe = true;
