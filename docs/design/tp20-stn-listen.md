@@ -249,7 +249,11 @@ STBC1                             <OK        batching on (FRPM 8.15); only an ex
 - **The line.** The approved payload's digits, then the constant `|STM`. The digits are the ones sent today, so the
   frame on the bus doesn't change. They are echoed and checked *before* `|STM` is written, then `|STM` is, then the
   carriage return: with the pipe in the line, `XX` after a misheard digit would end only the last element, and the
-  damaged digits would run as an element of their own (section 4).
+  damaged digits would run as an element of their own (section 4). Once the digits are echoed right they are an
+  element the adapter may run at any carriage return, so a failure after that point (the write or echo of `|STM`, the
+  carriage return's write) is reported as "the request may have been sent". A failure in the digits themselves still
+  says "the request wasn't sent". The driver is broken either way, and `ChannelSession` returns the error without
+  resending the approved frame.
 - **After the carriage return** the driver is monitoring and has logged the `STM` as a command, as for a monitor it
   starts itself: once the digits were written and echoed right, before `|STM` was written (a head that failed leaves no
   `STM` entry). The adapter prints the frame's own replies, then, with the pipe in front, the monitor's frames, and no prompt

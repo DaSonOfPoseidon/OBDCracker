@@ -565,6 +565,11 @@ Each entry names the class, what to check, and where it bit us.
   `batched` ("a prompt means `STM` never started") was cleared only when the pipe was seen, so a monitor that printed
   no pipe left it set and a later prompt, from `prompt_after_request` or `interrupt`, passed as a batch that never
   started (#342). Clear a flag on every path that ends the state it stands for, and grep every reader of it.
+- **An error that says "not sent" must be true for every byte already written.** A batched line is written in two
+  parts, and the head's echo is checked before the tail goes out. Once the head was heard right it is a complete
+  element a carriage return (a corrupted `M`, say) makes the adapter run, yet a tail failure still ended "the
+  request wasn't sent" (#343). After the first part passed, any later failure of the same line says the request
+  *may have been sent*, and the caller must not resend it; test a flip in each part of the line.
 - **A separator in a line makes its first part a command of its own.** An STN runs `<hex>|STM` as two elements, left to
   right, so a misheard digit that the driver ended with `XX` would have left the damaged digits as a complete hex element
   to send, `XX` ending only the last one. Check the part that can become a request before the separator is written
