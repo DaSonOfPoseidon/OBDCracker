@@ -457,20 +457,29 @@ fn a_dtc_detail_is_written_as_documented() {
 fn split_and_unsplit_dids_are_written_as_documented() {
     let data = DidsData {
         split: vec![(0xF187, vec![0x30, 0x42]), (0xF188, vec![])],
+        left_out: vec![0xF18A],
         unsplit: vec![0xF1, 0x89, 0x00],
     };
     round_trip(
         &data,
         Some(json!({
             "split": [{"did": "F187", "data": "30 42"}, {"did": "F188", "data": ""}],
+            "left_out": ["F18A"],
             "unsplit": "F1 89 00",
         })),
     );
     let all_split = DidsData {
         split: vec![],
+        left_out: vec![],
         unsplit: vec![],
     };
-    round_trip(&all_split, Some(json!({"split": [], "unsplit": ""})));
+    round_trip(
+        &all_split,
+        Some(json!({"split": [], "left_out": [], "unsplit": ""})),
+    );
+    // A document from before `left_out` existed still loads.
+    let older: DidsData = serde_json::from_value(json!({"split": [], "unsplit": ""})).unwrap();
+    assert_eq!(older, all_split);
 }
 
 #[test]

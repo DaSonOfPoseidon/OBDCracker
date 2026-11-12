@@ -49,15 +49,24 @@ impl fmt::Display for ReadDidsError {
 impl std::error::Error for ReadDidsError {}
 
 /// What a module answered to a multi-DID read, as far as its lengths let it be split.
+///
+/// Every DID asked for is in `split`, in `left_out`, or among the DIDs of `unsplit` (the ones from
+/// the first DID that is in neither), and `split` and `left_out` together are the DIDs asked for
+/// up to that one, in request order.
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DidsData {
     /// The DIDs whose data could be told apart, in request order, each with its own bytes.
     #[cfg_attr(feature = "serde", serde(with = "crate::json::did_data"))]
     pub split: Vec<(u16, Vec<u8>)>,
-    /// What follows the last split DID, starting with the echo of the next DID: the bytes of
-    /// every DID from the first one whose length wasn't known (unless it was the last). Empty when
-    /// every DID was split.
+    /// The DIDs asked for that the reply left out, which is how a module says it doesn't support
+    /// them (ISO 14229-1), in request order. Only those before the first DID of `unsplit`: after
+    /// that point nothing says which DIDs the bytes hold.
+    #[cfg_attr(feature = "serde", serde(default, with = "crate::json::did_list"))]
+    pub left_out: Vec<u16>,
+    /// What follows the last split DID, starting with the echo of the next DID that wasn't left
+    /// out: the bytes of every DID from the first one whose length wasn't known (unless it was the
+    /// last). Empty when every DID was split or left out.
     #[cfg_attr(feature = "serde", serde(with = "crate::json::bytes"))]
     pub unsplit: Vec<u8>,
 }
@@ -86,12 +95,21 @@ pub fn check_dids(dids: &[u16]) -> Result<(), ReadDidsError> {
 /// Reads `dids` from `module` with one request, `22` and each DID in order.
 ///
 /// A reply doesn't say where one DID's data ends, so `length_of` gives each DID's length where it
-/// is known (from the vehicle profile; `None`, or 0, where it isn't). The reply is checked
-/// exactly: each DID's echo in request order, each known length, and nothing left over once
-/// every DID is split. A DID of unknown length can be split off only if it is the last, and takes
-/// the rest of the reply. From the first unknown one before the last, the rest is
-/// [`DidsData::unsplit`], checked only for room for every DID's echo and at least one data byte. A
-/// reply that fails any check is [`ReadError::Undecodable`], carrying the reply.
+/// is known (from the vehicle profile; `None`, or 0, where it isn't). A module leaves out of its
+/// reply the DIDs it doesn't support, so the reply is checked as follows:
+///
+/// - Each echo is one of the DIDs not yet matched, so the DIDs stay in request order and none
+///   repeats. The DIDs skipped to reach it are [`DidsData::left_out`], and so are those after the
+///   last echo.
+/// - A DID of known length takes exactly that many bytes. The length of a DID the reply leaves out
+///   doesn't matter.
+/// - A DID of unknown length that is the last one asked for takes the rest of the reply, and needs
+///   at least one byte. One before the last can't be split off: from its echo, the rest is
+///   [`DidsData::unsplit`], and is checked only for the echo and one data byte.
+/// - Nothing is left over once the last DID is split, and a reply that leaves out every DID
+///   isn't one (a module with none of them answers `7F 22 31`).
+///
+/// A reply that fails any check is [`ReadError::Undecodable`], carrying the reply.
 ///
 /// The request is approved by `policy` first. Returns the module's answer, or why it gave none.
 ///
@@ -135,42 +153,50 @@ fn split(
     length_of: &impl Fn(u16) -> Option<usize>,
 ) -> Result<DidsData, ReplyError> {
     let mut rest = response::positive(READ_DATA_BY_IDENTIFIER, reply)?;
+    if rest.is_empty() {
+        return Err(ReplyError::TooShort);
+    }
     let mut split = Vec::with_capacity(dids.len());
-    for (index, &did) in dids.iter().enumerate() {
-        let (echo, after) = rest.split_at_checked(2).ok_or(ReplyError::TooShort)?;
-        if echo != did.to_be_bytes() {
+    let mut left_out = Vec::new();
+    // The first DID the reply hasn't matched yet.
+    let mut next = 0;
+    while !rest.is_empty() {
+        if next == dids.len() {
             return Err(ReplyError::Malformed);
         }
+        let (echo, after) = rest.split_at_checked(2).ok_or(ReplyError::TooShort)?;
+        let offset = dids[next..]
+            .iter()
+            .position(|did| did.to_be_bytes() == echo)
+            .ok_or(ReplyError::Malformed)?;
+        left_out.extend_from_slice(&dids[next..next + offset]);
+        let did = dids[next + offset];
+        next += offset + 1;
         match length_of(did).filter(|&length| length > 0) {
             Some(length) => {
-                let (data, next) = after.split_at_checked(length).ok_or(ReplyError::TooShort)?;
+                let (data, after_data) =
+                    after.split_at_checked(length).ok_or(ReplyError::TooShort)?;
                 split.push((did, data.to_vec()));
-                rest = next;
+                rest = after_data;
             }
-            None if index + 1 == dids.len() => {
-                if after.is_empty() {
-                    return Err(ReplyError::TooShort);
-                }
+            None if after.is_empty() => return Err(ReplyError::TooShort),
+            None if next == dids.len() => {
                 split.push((did, after.to_vec()));
                 rest = &[];
             }
             None => {
-                // Each DID still to come needs its echo and a data byte.
-                if rest.len() < 3 * (dids.len() - index) {
-                    return Err(ReplyError::TooShort);
-                }
                 return Ok(DidsData {
                     split,
+                    left_out,
                     unsplit: rest.to_vec(),
                 });
             }
         }
     }
-    if !rest.is_empty() {
-        return Err(ReplyError::Malformed);
-    }
+    left_out.extend_from_slice(&dids[next..]);
     Ok(DidsData {
         split,
+        left_out,
         unsplit: Vec::new(),
     })
 }

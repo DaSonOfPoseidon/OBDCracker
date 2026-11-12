@@ -753,7 +753,13 @@ fn a_sweep_compares_the_dids_found_inside_the_range_given() {
 #[test]
 fn a_multi_did_read_compares_each_split_did_and_the_unsplit_bytes() {
     let module = UdsModule::obd_transmission();
-    let read = |split: Vec<(u16, Vec<u8>)>, unsplit: Vec<u8>| Ok(DidsData { split, unsplit });
+    let read = |split: Vec<(u16, Vec<u8>)>, unsplit: Vec<u8>| {
+        Ok(DidsData {
+            split,
+            left_out: vec![],
+            unsplit,
+        })
+    };
     let old = read(
         vec![(0xF189, vec![1]), (0xF191, vec![2])],
         vec![0xF1, 0x90, 7],
@@ -781,6 +787,29 @@ fn a_multi_did_read_compares_each_split_did_and_the_unsplit_bytes() {
         }]
     );
     assert_eq!(diff_dids_data(&module, &failed, &failed.clone()), []);
+}
+
+#[test]
+fn a_did_split_in_one_multi_did_read_and_left_out_of_the_other_is_a_change() {
+    let module = UdsModule::obd_transmission();
+    let read = |split: Vec<(u16, Vec<u8>)>, left_out: Vec<u16>| {
+        Ok(DidsData {
+            split,
+            left_out,
+            unsplit: vec![],
+        })
+    };
+    let both = read(vec![(0xF188, vec![1]), (0xF189, vec![2])], vec![]);
+    let left_out = read(vec![(0xF189, vec![2])], vec![0xF188]);
+    assert_eq!(
+        lines(&diff_dids_data(&module, &both, &left_out)),
+        ["transmission F188 [01] → (absent)"]
+    );
+    assert_eq!(
+        lines(&diff_dids_data(&module, &left_out, &both)),
+        ["transmission F188 (absent) → [01]"]
+    );
+    assert_eq!(diff_dids_data(&module, &left_out, &left_out.clone()), []);
 }
 
 #[test]
@@ -1298,6 +1327,7 @@ fn a_sweep_or_read_that_repeats_a_did_is_refused_but_only_inside_the_range() {
     let read = |split: Vec<(u16, Vec<u8>)>| -> Result<DidsData, ReadError> {
         Ok(DidsData {
             split,
+            left_out: Vec::new(),
             unsplit: Vec::new(),
         })
     };
