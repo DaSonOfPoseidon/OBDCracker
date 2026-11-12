@@ -1,6 +1,7 @@
 //! Parsing and validating vehicle profiles, and the built-in A7 profile.
 
 use obdcracker_core::isotp::Addressing;
+use obdcracker_core::uds::UdsDtc;
 use obdcracker_core::vin;
 use obdcracker_profile::{
     Decode, DidSession, Profile, ProfileError, Protocol, builtins_matching, standard_decode,
@@ -166,6 +167,115 @@ fn rejects_duplicate_dids_in_a_module() {
             did: 0xF190
         }
     );
+}
+
+const TEST_DTC: &str = "\n[[module.dtc]]\ncode = \"0016A0\"\ntext = \"Test fault\"\n";
+
+#[test]
+fn a_module_names_its_dtcs() {
+    let toml = format!(
+        "{MINIMAL}{TEST_DTC}\n[[module.dtc]]\ncode = \"00FFFF\"\ntext = \"Another test fault\"\n"
+    );
+    let profile = Profile::from_toml(&toml).unwrap();
+    let engine = &profile.modules[0];
+    assert_eq!(engine.dtcs.len(), 2);
+    assert_eq!(engine.dtcs[0].code, UdsDtc::new(0x0000_16A0));
+    assert_eq!(engine.dtcs[0].text, "Test fault");
+    assert_eq!(
+        engine.dtc_text(UdsDtc::new(0x0000_FFFF)),
+        Some("Another test fault")
+    );
+    assert_eq!(engine.dtc_text(UdsDtc::new(0x0000_16A1)), None);
+    // A module that lists none has none.
+    assert_eq!(
+        Profile::from_toml(MINIMAL).unwrap().modules[0].dtcs.len(),
+        0
+    );
+}
+
+#[test]
+fn rejects_a_repeated_dtc_in_a_module() {
+    let toml = format!("{MINIMAL}{TEST_DTC}{TEST_DTC}");
+    assert_eq!(
+        Profile::from_toml(&toml).unwrap_err(),
+        ProfileError::DuplicateDtc {
+            module: "engine".into(),
+            dtc: UdsDtc::new(0x0000_16A0)
+        }
+    );
+    // The same code in another module is that module's own fault.
+    let two_modules = format!(
+        "{MINIMAL}{TEST_DTC}\n[[module]]\nname = \"tcu\"\nrequest_id = 0x7E1\nresponse_id = 0x7E9\n\
+         protocol = \"uds\"\n{TEST_DTC}"
+    );
+    assert!(Profile::from_toml(&two_modules).is_ok());
+}
+
+#[test]
+fn rejects_a_blank_padded_or_unprintable_dtc_text() {
+    for text in [
+        "",
+        "   ",
+        " padded",
+        "padded ",
+        "two\\nlines",
+        "esc\\u001b[2J",
+    ] {
+        let toml = format!("{MINIMAL}\n[[module.dtc]]\ncode = \"0016A0\"\ntext = \"{text}\"\n");
+        assert_eq!(
+            Profile::from_toml(&toml).unwrap_err(),
+            ProfileError::DtcText {
+                module: "engine".into(),
+                dtc: UdsDtc::new(0x0000_16A0)
+            },
+            "{text:?}"
+        );
+    }
+}
+
+#[test]
+fn rejects_a_dtc_code_that_isnt_six_upper_case_hex_digits() {
+    for code in [
+        "16A0", "0016a0", "+016A0", "0x16A0", "10016A0", "1000000", "", "  16A0",
+    ] {
+        let toml = format!("{MINIMAL}\n[[module.dtc]]\ncode = \"{code}\"\ntext = \"Test fault\"\n");
+        assert!(
+            matches!(Profile::from_toml(&toml), Err(ProfileError::Toml(_))),
+            "{code:?}"
+        );
+    }
+    // A TOML integer isn't a code: 0x16A0 would be read as a number, not as digits.
+    let toml = format!("{MINIMAL}\n[[module.dtc]]\ncode = 0x16A0\ntext = \"Test fault\"\n");
+    assert!(matches!(
+        Profile::from_toml(&toml),
+        Err(ProfileError::Toml(_))
+    ));
+}
+
+#[test]
+fn rejects_the_dtc_codes_that_are_no_fault() {
+    // 0x000000 is padding and 0xFFFFFF means "every group" (ISO 14229-1).
+    for code in [0x00_0000, 0xFF_FFFF] {
+        let toml =
+            format!("{MINIMAL}\n[[module.dtc]]\ncode = \"{code:06X}\"\ntext = \"Test fault\"\n");
+        assert_eq!(
+            Profile::from_toml(&toml).unwrap_err(),
+            ProfileError::DtcCode {
+                module: "engine".into(),
+                dtc: UdsDtc::new(code)
+            }
+        );
+    }
+}
+
+#[test]
+fn a_dtc_entry_takes_no_other_key() {
+    // It names a fault and nothing else: no service, no request.
+    let toml = format!("{MINIMAL}{TEST_DTC}service = 0x14\n");
+    assert!(matches!(
+        Profile::from_toml(&toml),
+        Err(ProfileError::Toml(_))
+    ));
 }
 
 #[test]

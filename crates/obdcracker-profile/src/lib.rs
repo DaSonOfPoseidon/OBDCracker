@@ -217,9 +217,34 @@ pub struct Module {
     /// The data identifiers this module can read beyond the standard ones.
     #[serde(rename = "did", default)]
     pub dids: Vec<DidDef>,
+    /// The manufacturer's name for some of this module's DTCs, which scan and `dtc` print next to
+    /// the code. Display only: it adds no request.
+    #[serde(rename = "dtc", default)]
+    pub dtcs: Vec<DtcDef>,
+}
+
+/// A manufacturer's name for one of a module's UDS DTCs.
+///
+/// See [`docs/profiles.md#dtc-names`](https://github.com/DaSonOfPoseidon/OBDCracker/blob/main/docs/profiles.md#dtc-names).
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DtcDef {
+    /// The DTC's three bytes, written as six upper-case hex digits.
+    pub code: uds::UdsDtc,
+    /// What it means, in one line of printable text with no space at either end.
+    pub text: String,
 }
 
 impl Module {
+    /// The profile's name for `dtc`, if this module has one.
+    #[must_use]
+    pub fn dtc_text(&self, dtc: uds::UdsDtc) -> Option<&str> {
+        self.dtcs
+            .iter()
+            .find(|def| def.code == dtc)
+            .map(|def| def.text.as_str())
+    }
+
     /// Each DID with its length, in the order given, to decode a multi-DID read
     /// (`obdcracker_core::uds::decode_dids`). `None` if the profile doesn't give every one's
     /// length.
@@ -231,6 +256,38 @@ impl Module {
                 Some((id, usize::from(length)))
             })
             .collect()
+    }
+
+    fn validate_dtcs(&self) -> Result<(), ProfileError> {
+        let module = &self.name;
+        let mut seen = HashSet::new();
+        for &DtcDef {
+            code: dtc,
+            ref text,
+        } in &self.dtcs
+        {
+            // Padding and "every group" aren't a fault's code.
+            if matches!(dtc.code(), 0x00_0000 | 0xFF_FFFF) {
+                return Err(ProfileError::DtcCode {
+                    module: module.clone(),
+                    dtc,
+                });
+            }
+            // The text reaches a terminal: one line, nothing that moves the cursor.
+            if text.trim().is_empty() || text.trim() != text || text.chars().any(char::is_control) {
+                return Err(ProfileError::DtcText {
+                    module: module.clone(),
+                    dtc,
+                });
+            }
+            if !seen.insert(dtc) {
+                return Err(ProfileError::DuplicateDtc {
+                    module: module.clone(),
+                    dtc,
+                });
+            }
+        }
+        Ok(())
     }
 
     /// How the module is addressed inside CAN frames.
@@ -323,6 +380,27 @@ pub enum ProfileError {
         /// The DID.
         did: u16,
     },
+    /// A module lists the same DTC twice.
+    DuplicateDtc {
+        /// The module.
+        module: String,
+        /// The DTC.
+        dtc: uds::UdsDtc,
+    },
+    /// A DTC's text is blank, has a space at either end, or has a control character.
+    DtcText {
+        /// The module.
+        module: String,
+        /// The DTC.
+        dtc: uds::UdsDtc,
+    },
+    /// A DTC's code is 0x000000 (padding) or 0xFFFFFF (every group): neither names a fault.
+    DtcCode {
+        /// The module.
+        module: String,
+        /// The DTC.
+        dtc: uds::UdsDtc,
+    },
     /// A DID's length is 0: every DID value has at least one byte.
     DidLength {
         /// The module.
@@ -401,6 +479,17 @@ impl fmt::Display for ProfileError {
             Self::DuplicateDid { module, did } => {
                 write!(f, "module {module}: DID 0x{did:04X} is listed twice")
             }
+            Self::DuplicateDtc { module, dtc } => {
+                write!(f, "module {module}: DTC {dtc} is listed twice")
+            }
+            Self::DtcText { module, dtc } => write!(
+                f,
+                "module {module}: DTC {dtc}'s text is blank, padded with spaces or has a control character"
+            ),
+            Self::DtcCode { module, dtc } => write!(
+                f,
+                "module {module}: DTC {dtc} isn't a fault code (000000 is padding, FFFFFF means every group)"
+            ),
             Self::DidLength { module, did } => {
                 write!(f, "module {module}: DID 0x{did:04X}'s length can't be 0")
             }
@@ -734,6 +823,7 @@ impl Profile {
                     });
                 }
             }
+            module.validate_dtcs()?;
         }
         if let Some(discovery) = self.discovery {
             self.validate_discovery(discovery)?;
