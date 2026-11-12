@@ -807,6 +807,7 @@ mod requests {
                 "ATV1",
                 "ATCAF0",
                 "STCMM1",
+                "STBC1",
                 "ATAT0",
                 "ATSH200",
                 "ATCRA25F",
@@ -818,7 +819,8 @@ mod requests {
         assert_eq!(
             commands(&elm)[before..],
             [
-                "ATCAF1", "ATV0", "ATCFC1", "STCMM0", "ATAT1", "ATSH7E0", "ATCRA7E8", "0902"
+                "ATCAF1", "ATV0", "ATCFC1", "STCMM0", "STBC0", "ATAT1", "ATSH7E0", "ATCRA7E8",
+                "0902"
             ]
         );
         // And off again for the next channel.
@@ -1131,6 +1133,8 @@ mod requests {
         car.sti = Some("STN2232 v5.12.4".into());
         car.listen_raw = true;
         car.listen_one_frame = true;
+        // Firmware without batched commands: the frames are listened to by re-arming `STM`.
+        car.stbc_unsupported = true;
         car.delayed = Some(Box::new(move |header, request| match (header, request) {
             (0x740, [0x10, 0x00, 0x02, 0x1A, 0x9B]) => vec![
                 (
@@ -1239,6 +1243,675 @@ mod requests {
                 (0x740, vec![0xB2])
             ]
         );
+    }
+
+    use obdcracker_transport::Timing;
+    use obdcracker_transport::tp20::{ChannelError, ChannelSession, Disconnect};
+
+    // How long after the tester's data frame the module ACKs it, how long it then takes to
+    // start a single-frame answer, and how long the STN takes to start monitoring after `STM` is
+    // written. Car session 11 (#333): 35 to 52 ms, 160 ms, and about 15 ms for the echo round
+    // trip plus the start. The times are wider apart than the car's so that a loaded test thread
+    // can't move a frame to the other side of the monitor's start.
+    const ACK_AFTER: Duration = Duration::from_millis(60);
+    const ANSWER_AFTER_ACK: Duration = Duration::from_millis(150);
+    const MONITOR_STARTUP: Duration = Duration::from_millis(45);
+
+    // An STN that ends a raw listen with its prompt after the first frame and takes
+    // `MONITOR_STARTUP` to monitor, in front of the TP2.0 module at `address` that listens on
+    // `tester_id` and sends on 0x300, as in A7 session 11 (#333). The module ACKs each data frame
+    // `ACK_AFTER` after it, and every frame it sends goes on the bus at a time counted from that
+    // ACK (`ANSWER_AFTER_ACK` for its single-frame answers, `answer` for its answer to
+    // `22 F1 87`), whatever the adapter is doing: a frame that arrives before the monitor is up
+    // is lost. `start_answer` is its answer to `10 89`.
+    fn stn_losing_frames_after_the_ack(
+        address: u8,
+        tester_id: u32,
+        start_answer: &[u8],
+        answer: Vec<(Duration, Vec<u8>)>,
+    ) -> FakeElm {
+        let [low, high, ..] = tester_id.to_le_bytes();
+        let setup_reply = vec![0x00, 0xD0, 0x00, 0x03, low, high, 0x01];
+        let setup_source = 0x200 + u32::from(address);
+        let mut car = FakeElm::new(Box::new(move |header, request| match (header, request) {
+            (0x200, [first, 0xC0, ..]) if *first == address => {
+                vec![(setup_source, setup_reply.clone())]
+            }
+            (id, [0xA0, ..]) if id == tester_id => {
+                vec![(0x300, vec![0xA1, 0x0F, 0x8A, 0xFF, 0x4A, 0xFF])]
+            }
+            (id, [0xA8]) if id == tester_id => vec![(0x300, vec![0xA8])],
+            (0x7E0, [0x09, 0x02]) => vec![(0x7E8, VIN.to_vec())],
+            _ => Vec::new(),
+        }));
+        car.sti = Some("STN2232 v5.12.4".into());
+        car.listen_raw = true;
+        car.listen_one_frame = true;
+        car.monitor_startup = MONITOR_STARTUP;
+        let start_answer = start_answer.to_vec();
+        car.delayed = Some(Box::new(move |header, request| {
+            if header != tester_id {
+                return Vec::new();
+            }
+            let ack = |next: u8| (ACK_AFTER, 0x300, vec![0xB0 | next]);
+            let later = |frame: &[u8]| (ACK_AFTER + ANSWER_AFTER_ACK, 0x300, frame.to_vec());
+            match request {
+                [0x10, 0x00, 0x02, 0x10, 0x89] => vec![ack(1), later(&start_answer)],
+                [0x11, 0x00, 0x02, 0x1A, 0x9B] => {
+                    vec![ack(2), later(&[0x11, 0x00, 0x03, 0x7F, 0x1A, 0x11])]
+                }
+                [0x12, 0x00, 0x03, 0x22, 0xF1, 0x87] => {
+                    let mut frames = vec![ack(3)];
+                    frames.extend(
+                        answer
+                            .iter()
+                            .map(|(after, frame)| (ACK_AFTER + *after, 0x300, frame.clone())),
+                    );
+                    frames
+                }
+                _ => Vec::new(),
+            }
+        }));
+        car
+    }
+
+    // What the last read gave, and the frames the adapter lost.
+    type ReadAndLost = (Result<Vec<u8>, ChannelError>, Vec<(u32, Vec<u8>)>);
+
+    // Opens the channel to `address` on `car` and reads, as the A7's passes did: `10 89`, `1A 9B`
+    // (which both modules refused) and then the one that matters, `22 F1 87`.
+    fn read_f187_after_two_requests(car: FakeElm, address: u8) -> ReadAndLost {
+        let mut elm = with_echo_shown(car);
+        let policy = Policy::read_only();
+        let timing = Timing {
+            p2: Duration::from_secs(1),
+            ..Timing::default()
+        };
+        let mut session = ChannelSession::open(&mut elm, &policy, address, timing).unwrap();
+        session.request(&[0x10, 0x89]).unwrap();
+        session.request(&[0x1A, 0x9B]).unwrap();
+        let read = session.request(&[0x22, 0xF1, 0x87]);
+        drop(session);
+        (read, elm.link().elm.lost_frames.clone())
+    }
+
+    #[test]
+    fn a_tp20_answer_that_starts_while_the_stn_re_arms_after_the_ack_is_heard_whole_module_52() {
+        // Session 11, module 52 (4DB to 300): its answer to `22 F1 87` is ACKed (`B3`), then
+        // `22 ..` and `23 ..` come about 10 and 20 ms later, while the STN, which printed its
+        // prompt after the ACK, is writing and starting `STM`. Only `14 47 20` was heard, with
+        // sequence 4 where 2 was due, and the session closed the channel. The part number's
+        // first 9 bytes are invented; its last two are the car's.
+        let answer = vec![
+            (
+                Duration::from_millis(10),
+                vec![0x22, 0x00, 0x0E, 0x62, 0xF1, 0x87, 0x34, 0x47],
+            ),
+            (
+                Duration::from_millis(20),
+                vec![0x23, 0x38, 0x35, 0x39, 0x37, 0x39, 0x33, 0x30],
+            ),
+            (Duration::from_millis(100), vec![0x14, 0x47, 0x20]),
+        ];
+        let car =
+            stn_losing_frames_after_the_ack(0x52, 0x4DB, &[0x10, 0x00, 0x02, 0x50, 0x89], answer);
+        let (read, lost) = read_f187_after_two_requests(car, 0x52);
+        assert_eq!(
+            read,
+            Ok(b"\x62\xF1\x87\x34\x47\x38\x35\x39\x37\x39\x33\x30\x47\x20".to_vec())
+        );
+        assert_eq!(lost, []);
+    }
+
+    #[test]
+    fn a_tp20_answer_that_starts_while_the_stn_re_arms_after_the_ack_is_heard_whole_module_20() {
+        // Session 11, module 20 (518 to 300): `22 ..` is lost, and the heard `23 30 39 30 37 30
+        // 36 33` has sequence 3 where 2 was due, with `14 43 47` right behind it, unread.
+        let answer = vec![
+            (
+                Duration::from_millis(10),
+                vec![0x22, 0x00, 0x0E, 0x62, 0xF1, 0x87, 0x34, 0x47],
+            ),
+            (
+                Duration::from_millis(100),
+                vec![0x23, 0x30, 0x39, 0x30, 0x37, 0x30, 0x36, 0x33],
+            ),
+            (Duration::from_millis(101), vec![0x14, 0x43, 0x47]),
+        ];
+        let car = stn_losing_frames_after_the_ack(
+            0x20,
+            0x518,
+            &[0x10, 0x00, 0x03, 0x7F, 0x10, 0x22],
+            answer,
+        );
+        let (read, lost) = read_f187_after_two_requests(car, 0x20);
+        assert_eq!(
+            read,
+            Ok(b"\x62\xF1\x87\x34\x47\x30\x39\x30\x37\x30\x36\x33\x43\x47".to_vec())
+        );
+        assert_eq!(lost, []);
+    }
+
+    #[test]
+    fn with_batching_refused_the_old_gap_remains() {
+        // The same replay on firmware without batched commands (`STBC` answers `?`): the driver
+        // does what it did before and loses the same frames, which is why the design keeps this
+        // case on record (docs/design/tp20-stn-listen.md).
+        let answer = vec![
+            (
+                Duration::from_millis(10),
+                vec![0x22, 0x00, 0x0E, 0x62, 0xF1, 0x87, 0x34, 0x47],
+            ),
+            (
+                Duration::from_millis(20),
+                vec![0x23, 0x38, 0x35, 0x39, 0x37, 0x39, 0x33, 0x30],
+            ),
+            (Duration::from_millis(100), vec![0x14, 0x47, 0x20]),
+        ];
+        let mut car =
+            stn_losing_frames_after_the_ack(0x52, 0x4DB, &[0x10, 0x00, 0x02, 0x50, 0x89], answer);
+        car.stbc_unsupported = true;
+        let (read, lost) = read_f187_after_two_requests(car, 0x52);
+        // The car's framing error; a test thread so slow that even the last frame is lost reads
+        // a timeout instead, which is the same gap.
+        assert!(
+            matches!(read, Err(ChannelError::Framing(_) | ChannelError::Timeout)),
+            "{read:?}"
+        );
+        assert_ne!(lost.len(), 0);
+    }
+
+    // `one_frame_stn` on firmware with batched commands.
+    fn batching_stn(delay: Duration) -> FakeElm {
+        let mut car = one_frame_stn(delay);
+        car.stbc_unsupported = false;
+        car
+    }
+
+    // Opens the channel to the module at `address` on `elm`: the setup and the parameters, both
+    // answered.
+    fn open_channel(elm: &mut Elm<FakeLink>, address: u8) -> obdcracker_safety::OpenTp20Channel {
+        let policy = Policy::read_only();
+        let setup = policy.approve_tp20_setup(address).unwrap();
+        elm.send(&setup).unwrap();
+        let reply = elm.recv(Duration::from_secs(1)).unwrap();
+        let channel = policy
+            .tp20_channel(&setup, reply.source, &reply.payload)
+            .unwrap();
+        while elm.recv(Duration::from_secs(1)).is_ok() {}
+        elm.send(&policy.approve_tp20_parameters(&channel).unwrap())
+            .unwrap();
+        assert_eq!(elm.recv(Duration::from_secs(1)).unwrap().payload[0], 0xA1);
+        channel
+    }
+
+    // The channel frames, batching switches and monitors the driver wrote, in order.
+    fn batching_commands(elm: &Elm<FakeLink>) -> Vec<String> {
+        commands(elm)
+            .iter()
+            .filter(|c| {
+                c.starts_with("STBC")
+                    || c.contains('|')
+                    || *c == "STM"
+                    || c.starts_with("A0")
+                    || *c == "A3"
+                    || *c == "A8"
+            })
+            .cloned()
+            .collect()
+    }
+
+    fn logged_commands(elm: &mut Elm<FakeLink>) -> Vec<(String, Vec<String>)> {
+        use obdcracker_transport::LinkEvent;
+        elm.take_events()
+            .into_iter()
+            .filter_map(|e| match e {
+                LinkEvent::Command {
+                    command, answer, ..
+                } => Some((command, answer)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_batched_session_writes_a_frame_and_stm_as_one_line_and_never_re_arms() {
+        use obdcracker_transport::tp20::{ChannelSession, Disconnect};
+        let mut elm = with_echo_shown(batching_stn(Duration::from_millis(5)));
+        elm.take_events();
+        let policy = Policy::read_only();
+        let timing = Timing {
+            p2: Duration::from_millis(100),
+            ..Timing::default()
+        };
+        let mut session = ChannelSession::open(&mut elm, &policy, 0x5F, timing).unwrap();
+        assert_eq!(
+            session.request(&[0x1A, 0x9B]).unwrap(),
+            b"\x5A\x9BABCDEFGHIJKL"
+        );
+        assert_eq!(session.close(), Ok(Disconnect::Closed));
+        assert_eq!(elm.link().elm.lost_frames, []);
+        // The data frame and the two ACKs it needed went as batches; the parameters and the
+        // disconnect, answered by one frame each, did not. No standalone `STM`.
+        assert_eq!(
+            batching_commands(&elm),
+            [
+                "STBC1",
+                "A00F8AFF32FF",
+                "1000021A9B|STM",
+                "B2|STM",
+                "B4|STM",
+                "A8"
+            ]
+        );
+        // Leaving raw mode puts batching back, once.
+        read_vin(&mut elm);
+        assert_eq!(count(&elm, "STBC0"), 1);
+        // The probe and each batched `STM` are in the log as commands, before anything else the
+        // frame did.
+        let logged = logged_commands(&mut elm);
+        let stm = logged.iter().filter(|(c, _)| c == "STM").count();
+        assert_eq!(stm, 3, "{logged:?}");
+        assert!(logged.contains(&("STBC1".to_owned(), vec!["OK".to_owned()])));
+        assert!(logged.contains(&("STBC0".to_owned(), vec!["OK".to_owned()])));
+    }
+
+    #[test]
+    fn a_probe_that_isnt_ok_leaves_the_old_path_and_isnt_asked_again() {
+        use obdcracker_transport::tp20::{ChannelSession, Disconnect};
+        for says in [None, Some("WHAT")] {
+            let mut car = if says.is_some() {
+                batching_stn(Duration::from_millis(5))
+            } else {
+                one_frame_stn(Duration::from_millis(5))
+            };
+            car.delay_from_monitor = true;
+            car.stbc_says = says.map(str::to_owned);
+            let mut elm = with_echo_shown(car);
+            let policy = Policy::read_only();
+            let timing = Timing {
+                p2: Duration::from_millis(100),
+                ..Timing::default()
+            };
+            let mut session = ChannelSession::open(&mut elm, &policy, 0x5F, timing).unwrap();
+            assert_eq!(
+                session.request(&[0x1A, 0x9B]).unwrap(),
+                b"\x5A\x9BABCDEFGHIJKL"
+            );
+            assert_eq!(session.close(), Ok(Disconnect::Closed));
+            // Asked once, answered something other than `OK`, and so never batched: re-armed as
+            // before, and nothing with a pipe was written.
+            assert_eq!(count(&elm, "STBC1"), 1, "{says:?}");
+            assert!(!elm.link().written.contains(&b'|'), "{says:?}");
+            assert_eq!(count(&elm, "STM"), 2, "{says:?}");
+            assert_eq!(count(&elm, "STBC0"), 0, "{says:?}");
+            // The next channel doesn't ask again, and nothing is put back.
+            read_vin(&mut elm);
+            open_tp20(&mut elm);
+            read_vin(&mut elm);
+            assert_eq!(count(&elm, "STBC1"), 1, "{says:?}");
+            assert_eq!(count(&elm, "STBC0"), 0, "{says:?}");
+        }
+    }
+
+    #[test]
+    fn only_an_stn_is_asked_to_batch() {
+        // A plain ELM327 is never sent `STBC`; its whole byte stream is fixed, above.
+        let mut plain = batching_stn(Duration::from_secs(60));
+        plain.sti = None;
+        let mut elm = with_echo_shown(plain);
+        open_tp20(&mut elm);
+        read_vin(&mut elm);
+        assert_eq!(count(&elm, "STBC1") + count(&elm, "STBC0"), 0);
+    }
+
+    #[test]
+    fn only_a_frame_the_module_answers_after_its_ack_is_batched() {
+        let mut elm = with_echo_shown(batching_stn(Duration::from_secs(60)));
+        let channel = open_channel(&mut elm, 0x5F);
+        let policy = Policy::read_only();
+        elm.send(&policy.approve_tp20_keep_alive(&channel).unwrap())
+            .unwrap();
+        elm.send(
+            &policy
+                .approve_tp20_request(&channel, 0, &[0x1A, 0x9B])
+                .unwrap(),
+        )
+        .unwrap();
+        elm.send(&policy.approve_tp20_ack(&channel, 2).unwrap())
+            .unwrap();
+        elm.send(&policy.approve_tp20_disconnect(&channel).unwrap())
+            .unwrap();
+        assert_eq!(
+            batching_commands(&elm),
+            [
+                "STBC1",
+                "A00F8AFF32FF",
+                "A3",
+                "1000021A9B|STM",
+                "B2|STM",
+                "A8"
+            ]
+        );
+    }
+
+    #[test]
+    fn no_single_bit_error_in_a_batched_line_puts_another_frame_on_the_bus() {
+        // The digits are echoed and checked before `|STM` is written, so a flip in them is ended
+        // with `XX` into a line that isn't hex and nothing is sent. A flip in `|STM`, or in a
+        // character that becomes a carriage return (an `M`), can leave the digits as a complete
+        // first element, which the adapter sends as it was checked: the approved frame, once,
+        // never another. A flip of a letter's case is the same line.
+        let line = b"1000021A9B|STM";
+        let digits = 10;
+        let approved = (0x740, vec![0x10, 0x00, 0x02, 0x1A, 0x9B]);
+        let mut same = 0;
+        let mut once = 0;
+        for index in 0..line.len() {
+            for bit in 0..8 {
+                let mut elm = with_echo_shown(batching_stn(Duration::from_secs(60)));
+                let channel = open_channel(&mut elm, 0x5F);
+                let sent = elm.link().elm.sent.len();
+                let frame = Policy::read_only()
+                    .approve_tp20_request(&channel, 0, &[0x1A, 0x9B])
+                    .unwrap();
+                // The flipped character is in the write that holds it.
+                elm.link_mut().corrupt_write_of = if index < digits {
+                    Some((line[..digits].to_vec(), index, 1 << bit))
+                } else {
+                    Some((line[digits..].to_vec(), index - digits, 1 << bit))
+                };
+                let result = elm.send(&frame);
+                assert!(elm.link().corrupt_write_of.is_none(), "{index} {bit}");
+                let on_bus = &elm.link().elm.sent[sent..];
+                if bit == 5 && line[index].is_ascii_alphabetic() {
+                    same += 1;
+                    result.unwrap();
+                    assert_eq!(on_bus, std::slice::from_ref(&approved), "{index} {bit}");
+                    continue;
+                }
+                assert!(result.is_err(), "{index} {bit}");
+                if on_bus.is_empty() {
+                    assert!(
+                        commands(&elm).last().unwrap().ends_with("XX"),
+                        "{index} {bit}"
+                    );
+                } else {
+                    once += 1;
+                    assert!(index >= digits, "{index} {bit}");
+                    assert_eq!(on_bus, std::slice::from_ref(&approved), "{index} {bit}");
+                }
+                let written = elm.link().written.len();
+                assert!(elm.send(&frame).is_err());
+                assert_eq!(elm.link().written.len(), written);
+            }
+        }
+        // `A`, `B`, `S`, `T` and `M`: the check isn't passing vacuously.
+        assert_eq!(same, 5);
+        assert!(once > 0);
+    }
+
+    #[test]
+    fn a_flipped_carriage_return_leaves_a_batched_frame_off_the_bus() {
+        // The adapter holds the unfinished line and never runs it (the driver's next write is the
+        // class `docs/pitfalls.md` describes for every line, not a batch's alone).
+        for bit in 0..8 {
+            let mut elm = with_echo_shown(batching_stn(Duration::from_secs(60)));
+            let channel = open_channel(&mut elm, 0x5F);
+            let sent = elm.link().elm.sent.len();
+            let frame = Policy::read_only()
+                .approve_tp20_request(&channel, 0, &[0x1A, 0x9B])
+                .unwrap();
+            elm.link_mut().corrupt_write_of = Some((b"\r".to_vec(), 0, 1 << bit));
+            let _ = elm.send(&frame);
+            assert!(elm.link().corrupt_write_of.is_none(), "{bit}");
+            assert_eq!(elm.link().elm.sent.len(), sent, "{bit}");
+        }
+    }
+
+    #[test]
+    fn an_interrupt_before_the_batch_reaches_its_monitor_leaves_the_adapter_idle() {
+        // The module's ACK is 60 ms away, so the frame's listen is still running when the next
+        // frame goes out and writes `X`. The worst case the manual allows: the batch ends with the
+        // listen, and `STM` never starts. `STOPPED` and the prompt follow, the next frame is
+        // written as it would be, and the adapter is in a known state.
+        let answer = vec![(Duration::from_millis(100), vec![0x14, 0x47, 0x20])];
+        let mut elm = with_echo_shown(stn_losing_frames_after_the_ack(
+            0x52,
+            0x4DB,
+            &[0x10, 0x00, 0x02, 0x50, 0x89],
+            answer,
+        ));
+        let channel = open_channel(&mut elm, 0x52);
+        let policy = Policy::read_only();
+        let sent = elm.link().elm.sent.len();
+        elm.send(
+            &policy
+                .approve_tp20_request(&channel, 0, &[0x10, 0x89])
+                .unwrap(),
+        )
+        .unwrap();
+        elm.send(&policy.approve_tp20_keep_alive(&channel).unwrap())
+            .unwrap();
+        assert_eq!(elm.link().elm.interrupted, 1);
+        assert_eq!(
+            elm.link().elm.sent[sent..],
+            [
+                (0x4DB, vec![0x10, 0x00, 0x02, 0x10, 0x89]),
+                (0x4DB, vec![0xA3])
+            ]
+        );
+        // And nothing is left running: the next frame stops the A3's listen as usual.
+        elm.send(&policy.approve_tp20_disconnect(&channel).unwrap())
+            .unwrap();
+        assert_eq!(elm.link().elm.interrupted, 2);
+        assert_eq!(count(&elm, "XX"), 0);
+    }
+
+    #[test]
+    fn a_batch_that_ends_in_a_prompt_is_re_armed_with_a_plain_stm() {
+        // The STN lost the batch's `STM` (an error before it, or it was dropped): the prompt
+        // comes after the frame's listen, and the driver monitors as it did before batching.
+        let mut car = batching_stn(Duration::from_millis(5));
+        car.batch_drops_monitor = true;
+        car.delay_from_monitor = true;
+        let mut elm = with_echo_shown(car);
+        request_sent(&mut elm);
+        let data = elm.recv(Duration::from_secs(1)).unwrap();
+        assert_eq!(data.payload[0], 0x20);
+        assert_eq!(elm.link().elm.lost_frames, []);
+        let written = batching_commands(&elm);
+        assert_eq!(written[written.len() - 2..], ["1000021A9B|STM", "STM"]);
+    }
+
+    #[test]
+    fn a_batched_monitor_starts_at_the_acks_time_however_late_the_host_reads() {
+        // The module's ACK reaches the adapter over the bus, and its answer follows 1 ms later.
+        // The STN switches to monitoring at the ACK, so a host that reads only when both are
+        // long due (a descheduled test thread) still hears the answer.
+        let mut car = FakeElm::new(Box::new(|header, request| match (header, request) {
+            (0x200, [0x5F, 0xC0, ..]) => {
+                vec![(0x25F, vec![0x00, 0xD0, 0x00, 0x03, 0x40, 0x07, 0x01])]
+            }
+            (0x740, [0xA0, ..]) => vec![(0x300, vec![0xA1, 0x0F, 0x8A, 0xFF, 0x32, 0xFF])],
+            _ => Vec::new(),
+        }));
+        car.sti = Some("STN2232 v5.12.4".into());
+        car.listen_raw = true;
+        car.listen_one_frame = true;
+        car.stbc_unsupported = false;
+        car.delayed = Some(Box::new(|header, request| match (header, request) {
+            (0x740, [0x10, 0x00, 0x02, 0x1A, 0x9B]) => vec![
+                (Duration::from_millis(2), 0x300, vec![0xB1]),
+                (
+                    Duration::from_millis(3),
+                    0x300,
+                    vec![0x20, 0x00, 0x0E, 0x5A, 0x9B, 0x41, 0x42, 0x43],
+                ),
+            ],
+            _ => Vec::new(),
+        }));
+        let mut elm = with_echo_shown(car);
+        let policy = Policy::read_only();
+        let setup = policy.approve_tp20_setup(0x5F).unwrap();
+        elm.send(&setup).unwrap();
+        let reply = elm.recv(Duration::from_secs(1)).unwrap();
+        let channel = policy
+            .tp20_channel(&setup, reply.source, &reply.payload)
+            .unwrap();
+        while elm.recv(Duration::from_secs(1)).is_ok() {}
+        elm.send(&policy.approve_tp20_parameters(&channel).unwrap())
+            .unwrap();
+        assert_eq!(elm.recv(Duration::from_secs(1)).unwrap().payload[0], 0xA1);
+        elm.send(
+            &policy
+                .approve_tp20_request(&channel, 0, &[0x1A, 0x9B])
+                .unwrap(),
+        )
+        .unwrap();
+        std::thread::sleep(Duration::from_millis(100));
+        assert_eq!(elm.recv(Duration::from_secs(1)).unwrap().payload, [0xB1]);
+        assert_eq!(elm.recv(Duration::from_secs(1)).unwrap().payload[0], 0x20);
+        assert_eq!(elm.link().elm.lost_frames, []);
+    }
+
+    #[test]
+    fn a_prompt_after_the_batch_started_its_monitor_is_still_a_failure() {
+        // Once the monitor's first line has come (its output follows the pipe), a prompt is the
+        // adapter stopping on its own, as for a monitor started by `STM`.
+        let mut elm = with_echo_shown(batching_stn(Duration::from_secs(60)));
+        request_sent(&mut elm);
+        elm.link_mut().inject = b"|300 20 00 0E 5A 9B 41 42 43\r>".to_vec();
+        assert_eq!(elm.recv(Duration::from_secs(1)).unwrap().payload[0], 0x20);
+        let err = elm.recv(Duration::from_secs(1)).unwrap_err();
+        assert!(err.to_string().contains("stopped monitoring"), "{err}");
+    }
+
+    #[test]
+    fn a_second_pipe_in_a_batch_and_a_pipe_outside_one_are_unexpected_output() {
+        let mut elm = with_echo_shown(batching_stn(Duration::from_secs(60)));
+        request_sent(&mut elm);
+        elm.link_mut().inject =
+            b"|300 20 00 0E 5A 9B 41 42 43\r|300 01 44 45 46 47 48 49 4A\r".to_vec();
+        assert_eq!(elm.recv(Duration::from_secs(1)).unwrap().payload[0], 0x20);
+        let err = elm.recv(Duration::from_secs(1)).unwrap_err();
+        assert!(err.to_string().contains("unexpected output"), "{err}");
+        // Outside a batch: an ISO-TP request's reply.
+        let mut elm = with_echo_shown(batching_stn(Duration::from_secs(60)));
+        elm.link_mut().elm.after_echo = b"|7E8 10 13 49 02 01 57 41 55\r".to_vec();
+        elm.send(&approve(Target::Physical(0x7E0), &[0x09, 0x02]))
+            .unwrap();
+        let err = elm.recv(Duration::from_secs(1)).unwrap_err();
+        assert!(err.to_string().contains("unexpected output"), "{err}");
+    }
+
+    #[test]
+    fn a_pipe_in_the_monitor_after_the_batch_printed_none_is_unexpected_output() {
+        // The STN printed the frame's reply and then monitor lines with no pipe at all: the
+        // batch's pipe isn't still to come, so a `|` that starts a later line is not taken for it.
+        let mut elm = with_echo_shown(batching_stn(Duration::from_secs(60)));
+        request_sent(&mut elm);
+        elm.link_mut().inject =
+            b"300 20 00 0E 5A 9B 41 42 43\r|300 01 44 45 46 47 48 49 4A\r".to_vec();
+        assert_eq!(elm.recv(Duration::from_secs(1)).unwrap().payload[0], 0x20);
+        let err = elm.recv(Duration::from_secs(1)).unwrap_err();
+        assert!(err.to_string().contains("unexpected output"), "{err}");
+    }
+
+    #[test]
+    fn a_batched_stm_is_not_logged_when_the_digits_before_it_were_misheard() {
+        // The `STM` is logged once the digits are written and echoed right, before its own bytes
+        // go out: a wrong echo ends the line with the kill and `|STM` is never written.
+        let mut elm = with_echo_shown(batching_stn(Duration::from_secs(60)));
+        let channel = open_channel(&mut elm, 0x5F);
+        elm.take_events();
+        let frame = Policy::read_only()
+            .approve_tp20_request(&channel, 0, &[0x1A, 0x9B])
+            .unwrap();
+        elm.link_mut().corrupt_write_of = Some((b"1000021A9B".to_vec(), 3, 0x01));
+        let err = elm.send(&frame).unwrap_err();
+        assert!(err.to_string().contains("echoed"), "{err}");
+        assert_eq!(logged_commands(&mut elm), []);
+        assert!(!commands(&elm).iter().any(|c| c.contains("STM")));
+    }
+
+    #[test]
+    fn a_batched_stm_and_the_probe_are_logged_when_their_writes_fail() {
+        // The audit log is written before the adapter acts, and however the write ends: a line
+        // that failed part-way may still have run.
+        let mut elm = with_echo_shown(batching_stn(Duration::from_secs(60)));
+        let channel = open_channel(&mut elm, 0x5F);
+        elm.take_events();
+        let frame = Policy::read_only()
+            .approve_tp20_request(&channel, 0, &[0x1A, 0x9B])
+            .unwrap();
+        // The digits go out, and then the link is gone.
+        elm.link_mut().kill_after_writes = Some(1);
+        assert!(elm.send(&frame).is_err());
+        let logged = logged_commands(&mut elm);
+        assert_eq!(logged, [("STM".to_owned(), Vec::new())]);
+        // The probe: echoed, and never answered.
+        let mut car = batching_stn(Duration::from_secs(60));
+        car.mute = vec!["STBC1".to_owned()];
+        let mut elm = with_echo_shown(car);
+        elm.take_events();
+        assert!(
+            elm.send(&Policy::read_only().approve_tp20_setup(0x5F).unwrap())
+                .is_err()
+        );
+        let logged = logged_commands(&mut elm);
+        assert!(logged.iter().any(|(c, _)| c == "STBC1"), "{logged:?}");
+    }
+
+    #[test]
+    fn a_batched_frame_the_module_never_answers_gets_one_timeout_and_nothing_sent() {
+        let mut elm = with_echo_shown(batching_stn(Duration::from_secs(60)));
+        let channel = request_sent(&mut elm);
+        let sent = elm.link().elm.sent.len();
+        let started = Instant::now();
+        assert!(matches!(
+            elm.recv(Duration::from_millis(300)),
+            Err(Error::Timeout)
+        ));
+        assert!(started.elapsed() >= Duration::from_millis(300));
+        assert!(matches!(
+            elm.recv(Duration::from_millis(100)),
+            Err(Error::Timeout)
+        ));
+        assert_eq!(elm.link().elm.sent.len(), sent, "nothing was sent");
+        assert_eq!(count(&elm, "STM"), 0);
+        // The next frame stops the monitor first.
+        let policy = Policy::read_only();
+        elm.send(&policy.approve_tp20_disconnect(&channel).unwrap())
+            .unwrap();
+        assert_eq!(elm.recv(Duration::from_secs(1)).unwrap().payload, [0xA8]);
+        assert_eq!(elm.link().elm.interrupted, 1);
+    }
+
+    #[test]
+    fn a_plain_elm327_gets_exactly_the_same_bytes_in_a_channel_session() {
+        // It has no batched commands, so the byte stream of a whole session (everything the
+        // driver writes, from the first request that shows its echo to the disconnect) is fixed.
+        let mut elm = with_echo_shown(tp20_reading_car());
+        let policy = Policy::read_only();
+        let timing = Timing {
+            p2: Duration::from_millis(100),
+            ..Timing::default()
+        };
+        let start = elm.link().written.len();
+        let mut session = ChannelSession::open(&mut elm, &policy, 0x5F, timing).unwrap();
+        assert_eq!(
+            session.request(&[0x1A, 0x9B]).unwrap(),
+            b"\x5A\x9BABCDEFGHIJKL"
+        );
+        assert_eq!(session.close(), Ok(Disconnect::Closed));
+        let written = String::from_utf8(elm.link().written[start..].to_vec()).unwrap();
+        assert_eq!(
+            written.replace('\r', "\\r"),
+            "ATCFC0\\rATV1\\rATCAF0\\rATCSM0\\rATSH200\\rATCRA25F\\r5FC00010000301\\rXATSH740\\rATCRA300\\r\
+             A00F8AFF32FF\\rX1000021A9B\\rXB2\\rXB3\\rXA8\\r"
+        );
+        assert!(!written.contains("STBC") && !written.contains('|'));
     }
 
     fn count(elm: &Elm<FakeLink>, command: &str) -> usize {

@@ -49,6 +49,12 @@ const RAW_OFF: [&str; 3] = ["ATCAF1", "ATV0", "ATCFC1"];
 // `CAN ERROR` (docs/elm327.md#vw-tp20-channel-frames). Each has two or more non-hex letters.
 const MONITOR_ACK_ELM: [&str; 2] = ["ATCSM0", "ATCSM1"];
 const MONITOR_ACK_STN: [&str; 2] = ["STCMM1", "STCMM0"];
+// Batched commands on an STN (OBDLink FRPM, sections 8.15 and 16.0), on while raw mode is: `STBC 1`
+// lets a frame and `STM` go as one line (docs/design/tp20-stn-listen.md). `S` and `T` are non-hex,
+// so no single flipped bit makes a bus request.
+const BATCHING: [&str; 2] = ["STBC1", "STBC0"];
+// The pipe that joins the elements of a batch.
+const BATCH_PIPE: char = '|';
 
 // `AT CRA` patterns (docs/elm327.md#receive-filter): every diagnostic reply ID, and every
 // OBD-II emissions ECU's; for 29-bit IDs, every ISO 15765-4 reply to the tester and every VAG one.
@@ -240,6 +246,20 @@ pub struct Elm<L> {
     monitoring: bool,
     // A monitor printed `BUFFER FULL` while the driver was stopping it: frames were lost.
     monitor_overflow: bool,
+    // Whether the STN batches commands: `STBC 1` is tried when raw mode starts, and its answer
+    // kept, so a refusal isn't asked again (docs/design/tp20-stn-listen.md).
+    stbc: Stbc,
+    // The request in progress was written with `STM` after it, as one batch: the adapter listens
+    // for the frame's replies and then monitors without the host's help, so `monitoring` is set
+    // from the carriage return. A prompt then means the monitor never started.
+    batched: bool,
+    // The `|` that precedes the second element's output is still to come, and allowed once. It
+    // is only allowed until the line after the frame's own reply: a monitor that printed no pipe
+    // doesn't leave one to be taken from its later output.
+    batch_pipe: bool,
+    // The batch's frame has had its reply line printed, so the next line not starting with the
+    // pipe is the monitor's first.
+    batch_replied: bool,
     // The request line the adapter hasn't echoed yet.
     echo: Option<String>,
     // Whether the adapter echoes a request's characters before its carriage return, once the
@@ -313,6 +333,19 @@ enum Flow {
     To(u32, u8),
 }
 
+// What is known of an STN's batched commands (`STBC`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Stbc {
+    // Not tried yet.
+    Untried,
+    // The adapter answered anything but `OK` to `STBC 1`: it isn't asked again.
+    Refused,
+    // It took `STBC 1`, and `STBC 0` put it back.
+    Off,
+    // It took `STBC 1`, and it is on.
+    On,
+}
+
 /// Why [`Elm::connect_reporting`] failed, and what the adapter was sent and answered first.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConnectFailed {
@@ -382,6 +415,10 @@ impl<L: Link> Elm<L> {
             listen: false,
             monitoring: false,
             monitor_overflow: false,
+            stbc: Stbc::Untried,
+            batched: false,
+            batch_pipe: false,
+            batch_replied: false,
             echo: None,
             early_echo: None,
             quiet: Duration::ZERO,
@@ -670,6 +707,16 @@ impl<L: Link> Elm<L> {
     // a flipped bit is caught before the carriage return. Needs an adapter that has shown it
     // echoes characters as it reads them.
     fn guarded_command(&mut self, command: &str) -> Result<(), Error> {
+        let lines = self.guarded_answer(command)?;
+        if lines.iter().map(String::as_str).eq(["OK"]) {
+            Ok(())
+        } else {
+            Err(self.break_down(self.refusal(command, &lines)))
+        }
+    }
+
+    // `guarded_command` up to its answer, for a caller that takes more than `OK` for an answer.
+    fn guarded_answer(&mut self, command: &str) -> Result<Vec<String>, Error> {
         if self.early_echo != Some(true) {
             return Err(Error::Adapter(format!(
                 "{command} needs an adapter that echoes each character as it reads it (such as \
@@ -692,11 +739,66 @@ impl<L: Link> Elm<L> {
             answer: lines.clone(),
         });
         answered?;
-        if lines.iter().map(String::as_str).eq(["OK"]) {
-            Ok(())
-        } else {
-            Err(self.break_down(self.refusal(command, &lines)))
+        Ok(lines)
+    }
+
+    // Raw mode has started on an STN: asks it to batch commands. Only an exact `OK` counts; any
+    // other answer, `?` included, leaves things as they were and isn't tried again this session.
+    fn start_batching(&mut self) -> Result<(), Error> {
+        if self.stn.is_none() || self.stbc == Stbc::Refused {
+            return Ok(());
         }
+        let lines = self.guarded_answer(BATCHING[0])?;
+        self.stbc = if lines.iter().map(String::as_str).eq(["OK"]) {
+            Stbc::On
+        } else {
+            Stbc::Refused
+        };
+        Ok(())
+    }
+
+    // Raw mode is ending: batching goes off again if it was turned on.
+    fn stop_batching(&mut self) -> Result<(), Error> {
+        if self.stbc == Stbc::On {
+            self.guarded_command(BATCHING[1])?;
+            self.stbc = Stbc::Off;
+        }
+        Ok(())
+    }
+
+    // Writes a request's line and its carriage return, and returns when the carriage return was
+    // written. An adapter that echoes each character has the line's first `head_len` bytes echoed
+    // and checked before the rest is written, and the rest before the carriage return: a
+    // misheard digit is then ended with `XX` into a line that isn't hex, and a batch's pipe
+    // never gets the chance to make the damaged digits an element of their own, which the
+    // adapter would send. `before_tail` runs just before the line's rest is written (or, for an
+    // adapter that doesn't echo early, the whole line), and only if there is a rest: the audit
+    // log's entry for a command the head's failure kept from being written.
+    fn write_line(
+        &mut self,
+        line: &str,
+        head_len: usize,
+        before_tail: impl FnOnce(&mut Self),
+    ) -> Result<Instant, Error> {
+        if self.early_echo == Some(false) {
+            if head_len < line.len() {
+                before_tail(self);
+            }
+            let sent_at = Instant::now();
+            self.write(format!("{line}\r").as_bytes())?;
+            return Ok(sent_at);
+        }
+        let (head, tail) = line.split_at(head_len);
+        self.write(head.as_bytes())?;
+        self.check_early_echo(head)?;
+        if !tail.is_empty() {
+            before_tail(self);
+            self.write(tail.as_bytes())?;
+            self.check_early_echo(tail)?;
+        }
+        let sent_at = Instant::now();
+        self.write(b"\r")?;
+        Ok(sent_at)
     }
 
     // Reads the answer to `command`, already written, into `lines`.
@@ -949,6 +1051,14 @@ impl<L: Link> Elm<L> {
                     self.events.push_front((self.event_at, Event::Prompt));
                     return Ok(());
                 }
+                // A batch's listen ended in a prompt: its `STM` never started, and the request
+                // finishes as usual.
+                Event::Prompt if self.batched => {
+                    self.monitoring = false;
+                    self.batched = false;
+                    self.events.push_front((self.event_at, Event::Prompt));
+                    return Ok(());
+                }
                 // Nothing was written to stop it.
                 Event::Prompt => {
                     return Err(self.break_down("the adapter stopped monitoring on its own".into()));
@@ -1002,6 +1112,8 @@ impl<L: Link> Elm<L> {
         }
         self.listen = false;
         self.busy = false;
+        self.batched = false;
+        self.batch_pipe = false;
         self.drop_senders();
         self.take_overflow()
     }
@@ -1105,7 +1217,33 @@ impl<L: Link> Elm<L> {
         loop {
             if let Some((at, event)) = self.events.pop_front() {
                 self.event_at = at;
-                return Ok(Some(event));
+                match event {
+                    // The pipe between a batch's elements, once, in front of the next one's
+                    // output (OBDLink FRPM, sections 8.15 and 16.2.2). Anywhere else a `|` is
+                    // unexpected output.
+                    Event::Line(text) if self.batch_pipe && text.starts_with(BATCH_PIPE) => {
+                        // The monitor's output has begun, so it is running.
+                        self.batch_pipe = false;
+                        self.batched = false;
+                        match text[BATCH_PIPE.len_utf8()..].trim_start() {
+                            "" => continue,
+                            rest => return Ok(Some(Event::Line(rest.to_owned()))),
+                        }
+                    }
+                    Event::Prompt => {
+                        self.batch_pipe = false;
+                        return Ok(Some(Event::Prompt));
+                    }
+                    // The request's echo is not a reply. The first line after it is the frame's
+                    // own reply, and the second one is the monitor's, with no pipe in front.
+                    Event::Line(text) if self.batch_pipe && self.echo.is_none() => {
+                        if std::mem::replace(&mut self.batch_replied, true) {
+                            self.batch_pipe = false;
+                        }
+                        return Ok(Some(Event::Line(text)));
+                    }
+                    event => return Ok(Some(event)),
+                }
             }
             let Some(left) = deadline
                 .checked_duration_since(Instant::now())
@@ -1352,6 +1490,18 @@ fn hex_byte(text: &str) -> Option<u8> {
     }
 }
 
+// Whether `request` is a frame on an open TP2.0 channel that the module answers with more frames
+// after its ACK: a data frame (opcodes 0x0 to 0x3), or an ACK (0xB), which asks the module for the
+// next block of an answer that goes on. A channel test (`A3`), the parameters (`A0`) and the
+// disconnect (`A8`) are answered by one frame, which the frame's own listen prints.
+fn answered_after_ack(request: &Approved) -> bool {
+    matches!(request.target(), Target::Tp20Channel(_))
+        && request
+            .payload()
+            .first()
+            .is_some_and(|first| matches!(first >> 4, 0..=3 | 0xB))
+}
+
 impl<L: Link> Transport for Elm<L> {
     fn send(&mut self, request: &Approved) -> Result<(), Error> {
         let payload = request.payload();
@@ -1414,6 +1564,11 @@ impl<L: Link> Transport for Elm<L> {
                 self.guarded_command(command)?;
             }
             self.guarded_command(self.monitor_ack_command(raw))?;
+            if raw {
+                self.start_batching()?;
+            } else {
+                self.stop_batching()?;
+            }
             self.raw = raw;
             self.sync_adaptive()?;
         }
@@ -1429,20 +1584,31 @@ impl<L: Link> Transport for Elm<L> {
             return self.send_in_segments(request, segments);
         }
         let digits = hex(payload).replace(' ', "");
+        let batched = self.stbc == Stbc::On && answered_after_ack(request);
+        let head_len = digits.len();
         let line = if stpx {
             format!("STPX d:{digits}")
+        } else if batched {
+            format!("{digits}{BATCH_PIPE}{MONITOR_STN}")
         } else {
             digits
         };
-        let sent_at;
-        if self.early_echo == Some(false) {
-            sent_at = Instant::now();
-            self.write(format!("{line}\r").as_bytes())?;
-        } else {
-            self.write(line.as_bytes())?;
-            self.check_early_echo(&line)?;
-            sent_at = Instant::now();
-            self.write(b"\r")?;
+        // The `STM` is noted before its bytes are written, as `start_monitor` does, and however
+        // that write ends: a misheard `STM` may still have run. A head that failed first means
+        // it was never written, so it isn't noted.
+        let sent_at =
+            self.write_line(&line, if batched { head_len } else { line.len() }, |elm| {
+                elm.note(LinkEvent::Command {
+                    at: SystemTime::now(),
+                    command: MONITOR_STN.to_owned(),
+                    answer: Vec::new(),
+                });
+            })?;
+        if batched {
+            self.monitoring = true;
+            self.batched = true;
+            self.batch_pipe = true;
+            self.batch_replied = false;
         }
         self.sent = Some((sent_at, self.printed));
         self.drained = sent_at;
@@ -1543,10 +1709,12 @@ impl<L: Link> Transport for Elm<L> {
                     self.prompt_after_request()?;
                     self.drop_senders();
                     // The adapter stopped listening before the caller's wait ran out. Whatever
-                    // the module sends from now on is lost unless the adapter listens again, and
-                    // sending anything to make it would be a frame on the channel (an `A3` the
-                    // module may answer by dropping it, #227): monitor instead, which sends no
-                    // frame, only the CAN ACK bits `monitor_ack_command` turns on (#301).
+                    // the module sends until the monitor is up is lost, which a batched frame
+                    // (`start_batching`) avoids where the STN takes it, so this is the path for
+                    // an adapter without batching. Sending anything to make it listen would be
+                    // a frame on the channel (an `A3` the module may answer by dropping it,
+                    // #227): monitor instead, which sends no frame, only the CAN ACK bits
+                    // `monitor_ack_command` turns on (#301).
                     if listen && Instant::now() < deadline {
                         self.start_monitor()?;
                         continue;
@@ -2283,7 +2451,12 @@ impl<L: Link> Elm<L> {
         // A monitor prints no prompt until the driver stops it (`interrupt` reads that one
         // itself), so this one means the adapter's state isn't what the driver cached.
         if self.monitoring {
-            return Err(self.break_down("the adapter stopped monitoring on its own".into()));
+            // A batch's listen ended in this prompt, so its `STM` never started.
+            if !self.batched {
+                return Err(self.break_down("the adapter stopped monitoring on its own".into()));
+            }
+            self.monitoring = false;
+            self.batched = false;
         }
         self.listen = false;
         match self.echo.take() {
