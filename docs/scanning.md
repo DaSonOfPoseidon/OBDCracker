@@ -7,11 +7,12 @@ uses; a library caller must wrap the transport itself) records each one before i
 ## Module discovery
 
 OBD-II emissions ECUs are found by broadcast: the mode 01 bitmap chain (PID 00, 20, ...), each mode 01 value PID
-a bitmap advertises, mode 09 PIDs 00 and 0A and mode 03 go to the functional address, and every CAN ID that answers
-is an ECU. The policy approves every mode 01 PID up front, but one no bitmap lists is never sent. Other modules are
+a bitmap advertises, mode 09 PIDs 00 and 0A and modes 03, 07 and 0A go to the functional address, and every CAN ID that
+answers is an ECU. The freeze frame (mode 02, frame 0) and the mode 06 monitor-ID bitmaps are then broadcast too, and their
+replies kept only for the ECUs found so far (none known, none sent). The policy approves every mode 01 PID up front, but one no bitmap lists is never sent. Other modules are
 not discovered by `scan`; the caller gives it the modules to read (from a vehicle profile).
 
-Mode 09 PIDs 0A (04 and 06 in `fingerprint`, 02 in `read_vin`) and mode 03 can have long, multi-frame replies. Where the transport
+Mode 09 PIDs 0A (04 and 06 in `fingerprint`, 02 in `read_vin`) and modes 03, 07 and 0A can have long, multi-frame replies. Where the transport
 says broadcasts can overflow (`Transport::broadcasts_can_overflow`: the ELM driver on every plain ELM327, and on an STN
 below 115200 baud; [details](elm327.md#timing)), `scan_with`, `fingerprint` and `read_vin` ask each ECU already known for them by
 its own request ID (0x7E0..=0x7E7), in ascending reply ID order, instead of broadcasting. `scan_with` knows the ECUs
@@ -31,6 +32,16 @@ that ECU says it supports, and ends at a bitmap that is missing or garbled even 
 requests going. A bad first bitmap makes the ECU's whole PID list an error; a bad later one cuts the list short
 (`ObdEcu::pids_cut_short`) and no PID from that page on is read. Which PIDs get asked depends on the bitmaps, so all
 256 mode 01 requests are approved up front.
+
+The order is fixed: the mode 01 bitmaps and PIDs, mode 09, mode 03, mode 07, mode 0A, then mode 02 and mode 06. A failed
+read loses only its own value (`ObdEcu::monitor_status` is decoded from the mode 01 PID 01 reply already read, with no
+request of its own). A refusal of mode 07 or 0A as not supported (NRC 0x11) is an error that
+`ReadError::is_not_supported` tells from the others. The freeze frame reads the cause (`02 02 00`) first and stops there
+for an ECU that says P0000 or refuses the mode; for one with a frame it follows that frame's bitmaps (`02 00 00`,
+`02 20 00`, ...) and reads each PID in them the way mode 01's are read (a bad PID is that PID's error, a bad later bitmap
+cuts the list short, `FreezeFrame::pids_cut_short`). The mode 06 bitmaps (`06 00`, `06 20`, ...) are followed the same way
+(`ObdEcu::monitor_ids_cut_short`); the test results behind the monitor IDs aren't read (#345). All 256 requests of
+each of modes 01 and 02 are approved up front.
 
 ## DID batching
 

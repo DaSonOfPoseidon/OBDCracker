@@ -134,4 +134,5 @@ the frame: two bytes, where P0000 means none.
 bytes, laid out like the mode 01 PID bitmaps. The test records for any other monitor ID aren't decoded yet: the layout
 of a record (monitor ID, test ID, unit and scaling ID, test value, minimum and maximum, and whether the monitor ID
 repeats in each record) couldn't be checked against the standard or a permissively licensed implementation, and
-the one public implementation found (python-OBD, GPL) is reference only. The records follow with the scan wiring.
+the one public implementation found (python-OBD, GPL) is reference only. `scan` therefore reads only the bitmaps
+(`ObdEcu::monitor_ids`); the records are tracked in #345.
