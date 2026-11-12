@@ -226,7 +226,7 @@ If the profile has a `[gateway_list]` ([profiles](profiles.md#gateway-list)) and
 reading the gateway's installed-module list and comparing it with the modules it tried:
 
 ```
-gateway lists 73 installed modules: 13 found, 29 silent, 31 not in profile
+gateway lists 73 installed modules: 20 found, 29 silent, 24 not in profile
   05 silent
   34 not in profile (request 0x755)
   22 not in profile (request 0x71D)
@@ -241,6 +241,10 @@ twice. The statuses:
 - `not tried`: a profile module has the address but scan skipped it, such as one that isn't plain UDS.
 - `not in profile`: no profile module has that VAG address. That includes a module the profile lists without a
   `vag_address`.
+
+A `found` module is only as certain as its profile address. On the A7, seven addresses (airbag 15, climate 08, parking
+brake 53, headlight range 55, tire pressure 65, camera 6C, rear lid 6D) are each the module's own claim, not confirmed by
+the gateway's list ([profiles](profiles.md#gateway-list)).
 
 If the list can't be read, scan prints a `warning:` and its result and exit status are unchanged. `--dry-run` says
 which two reads a live scan adds.

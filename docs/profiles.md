@@ -119,6 +119,13 @@ zero padding; the request ID table has 8 non-zero entries. A reply with another 
 confirmed: it looks like one byte per slot (`01` on the modules that answer on ISO-TP, `02` on those that don't) but that is a
 guess.
 
+On the A7 only six modules' addresses are confirmed by this list, each slot's request ID matching the module's (brakes
+`03`, acc `13`, acc 2 `8B`, sensor cluster `3B`, steering `44`, image processing `8E`). The airbag `15`, climate `08`,
+parking brake `53`, headlight range `55`, tire pressure `65`, camera `6C` and rear lid `6D` are each the module's own
+claim: the list has the address but no request ID for its slot, so each was matched by the name the module gave at its
+CAN ID (#231). Car session 12 (#334) checks them against each module's F197 and F19E, and they may be wrong. The head-up
+display's `82` comes from an Audi bulletin.
+
 ## Narrowing the policy
 
 `Profile::narrow` narrows a safety policy to the car's modules. Physical requests may then only go to a module's

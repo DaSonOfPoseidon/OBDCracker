@@ -202,6 +202,26 @@ fn a7_profile_gives_the_gateway_listed_modules_their_vag_address() {
 }
 
 #[test]
+fn a7_profile_pins_the_modules_own_claimed_vag_addresses() {
+    // Each address is the module's own claim, from the name it gave at that CAN ID in session 10
+    // (#304); the gateway's 2A2C table has no request ID for these slots (#231).
+    let a7 = Profile::builtin("a7").unwrap();
+    for (name, address, request) in [
+        ("airbag", 0x15, 0x715),
+        ("rear lid", 0x6D, 0x723),
+        ("camera", 0x6C, 0x726),
+        ("tire pressure", 0x65, 0x72A),
+        ("climate", 0x08, 0x746),
+        ("parking brake", 0x53, 0x752),
+        ("headlight range", 0x55, 0x754),
+    ] {
+        let module = a7.module(name).unwrap_or_else(|| panic!("{name} missing"));
+        assert_eq!(module.vag_address, Some(address), "{name}");
+        assert_eq!(module.request_id, request, "{name}");
+    }
+}
+
+#[test]
 fn a7_profile_has_the_expected_uds_modules() {
     let a7 = Profile::builtin("a7").unwrap();
     assert_eq!(a7.bitrate, 500_000);
