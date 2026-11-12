@@ -307,6 +307,7 @@ const MONITOR_STATUS_PID: u8 = 0x01;
 
 /// Whether the engine is spark or compression ignition, which decides what the last two bytes of
 /// the monitor status mean.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IgnitionType {
     /// Petrol and other spark-ignition engines.
@@ -352,6 +353,31 @@ pub enum MonitorKind {
     ParticulateFilter,
 }
 
+impl MonitorKind {
+    /// The monitor's name in a document: lower-case words joined by `_`, such as `fuel_system`.
+    #[must_use]
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Misfire => "misfire",
+            Self::FuelSystem => "fuel_system",
+            Self::Components => "components",
+            Self::Catalyst => "catalyst",
+            Self::HeatedCatalyst => "heated_catalyst",
+            Self::EvaporativeSystem => "evaporative_system",
+            Self::SecondaryAir => "secondary_air",
+            Self::AcRefrigerant => "ac_refrigerant",
+            Self::OxygenSensor => "oxygen_sensor",
+            Self::OxygenSensorHeater => "oxygen_sensor_heater",
+            Self::EgrVvt => "egr_vvt",
+            Self::NmhcCatalyst => "nmhc_catalyst",
+            Self::NoxScr => "nox_scr",
+            Self::BoostPressure => "boost_pressure",
+            Self::ExhaustGasSensor => "exhaust_gas_sensor",
+            Self::ParticulateFilter => "particulate_filter",
+        }
+    }
+}
+
 // The engine-specific monitors, by bit of bytes C and D. A bit with no entry is reserved.
 const SPARK_MONITORS: [(u8, MonitorKind); 8] = [
     (0, MonitorKind::Catalyst),
@@ -374,6 +400,7 @@ const COMPRESSION_MONITORS: [(u8, MonitorKind); 6] = [
 
 /// One monitor's state. `complete` means something only when `supported` is set: a module may
 /// send either value for a monitor it doesn't have.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Monitor {
     /// Whether the car has this monitor.
@@ -401,6 +428,14 @@ pub struct MonitorStatus {
     pub components: Monitor,
     engine_supported: u8,
     engine_incomplete: u8,
+}
+
+#[cfg(feature = "serde")]
+mod monitor_serde;
+
+// The bits of byte C or D that name a monitor.
+fn engine_mask(table: &[(u8, MonitorKind)]) -> u8 {
+    table.iter().fold(0, |mask, &(bit, _)| mask | (1 << bit))
 }
 
 impl MonitorStatus {
@@ -467,19 +502,24 @@ pub fn decode_monitor_status(reply: &[u8]) -> Result<MonitorStatus, Error> {
         supported: b & (1 << supported_bit) != 0,
         complete: b & (1 << (supported_bit + 4)) == 0,
     };
+    let ignition = if b & 0x08 == 0 {
+        IgnitionType::Spark
+    } else {
+        IgnitionType::Compression
+    };
+    let mask = engine_mask(match ignition {
+        IgnitionType::Spark => &SPARK_MONITORS,
+        IgnitionType::Compression => &COMPRESSION_MONITORS,
+    });
     Ok(MonitorStatus {
         mil_on: a & 0x80 != 0,
         dtc_count: a & 0x7F,
-        ignition: if b & 0x08 == 0 {
-            IgnitionType::Spark
-        } else {
-            IgnitionType::Compression
-        },
+        ignition,
         misfire: common(0),
         fuel_system: common(1),
         components: common(2),
-        engine_supported: c,
-        engine_incomplete: d,
+        engine_supported: c & mask,
+        engine_incomplete: d & mask,
     })
 }
 

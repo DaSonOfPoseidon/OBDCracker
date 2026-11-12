@@ -2,7 +2,7 @@
 //! text is an error.
 #![cfg(feature = "serde")]
 
-use obdcracker_core::obd::{Cvn, Dtc, Unit};
+use obdcracker_core::obd::{Cvn, Dtc, MonitorKind, MonitorStatus, Unit, decode_monitor_status};
 use obdcracker_core::response::{Error, NegativeResponse, Nrc};
 use obdcracker_core::uds::{DtcCount, DtcFormat, DtcRecord, DtcStatus, UdsDtc};
 use proptest::prelude::*;
@@ -135,6 +135,143 @@ fn unknown_fields_are_ignored() {
     let record: DtcRecord =
         serde_json::from_value(json!({"dtc": "0016A0", "status": "2F", "later": [1, 2]})).unwrap();
     assert_eq!(record.dtc, UdsDtc::new(0x16A0));
+}
+
+fn monitor_status(a: u8, b: u8, c: u8, d: u8) -> MonitorStatus {
+    decode_monitor_status(&[0x41, 0x01, a, b, c, d]).unwrap()
+}
+
+#[test]
+fn monitor_status_is_named_fields_and_every_monitor_of_its_engine_type() {
+    // The A7's diesel engine (session 11).
+    let engine = monitor_status(0x00, 0x2F, 0x28, 0x20);
+    let text = round_trip(&engine);
+    let document: serde_json::Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(document["mil_on"], json!(false));
+    assert_eq!(document["dtc_count"], json!(0));
+    assert_eq!(document["ignition"], json!("Compression"));
+    let monitors = document["monitors"].as_object().unwrap();
+    let names: Vec<&str> = engine.monitors().map(|(kind, _)| kind.name()).collect();
+    assert_eq!(monitors.len(), names.len());
+    for name in names {
+        assert!(monitors.contains_key(name), "{name}");
+    }
+    assert_eq!(
+        monitors["misfire"],
+        json!({"supported": true, "complete": true})
+    );
+    round_trip(&monitor_status(0x00, 0x04, 0x00, 0x00));
+}
+
+#[test]
+fn monitor_status_keeps_the_mil_count_and_incomplete_monitors() {
+    let status = monitor_status(0x83, 0x7F, 0xFF, 0xFF);
+    let text = round_trip(&status);
+    let document: serde_json::Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(document["mil_on"], json!(true));
+    assert_eq!(document["dtc_count"], json!(3));
+    assert_eq!(document["ignition"], json!("Compression"));
+    assert_eq!(
+        document["monitors"]["boost_pressure"],
+        json!({"supported": true, "complete": false})
+    );
+}
+
+#[test]
+fn a_decoded_status_drops_the_reserved_bits_so_it_reads_back_equal() {
+    // Compression ignition: C2, C4, D2 and D4 are reserved.
+    let status = monitor_status(0x00, 0x08, 0xFF, 0xFF);
+    round_trip(&status);
+    assert_eq!(status, monitor_status(0x00, 0x08, 0xEB, 0xEB));
+}
+
+fn valid_status() -> serde_json::Value {
+    serde_json::to_value(monitor_status(0x00, 0x08, 0x00, 0x00)).unwrap()
+}
+
+fn refuses(document: &serde_json::Value) {
+    assert!(
+        serde_json::from_value::<MonitorStatus>(document.clone()).is_err(),
+        "{document}"
+    );
+}
+
+#[test]
+fn monitor_status_refuses_a_document_that_isnt_one_status() {
+    let mut missing = valid_status();
+    missing["monitors"]
+        .as_object_mut()
+        .unwrap()
+        .remove("misfire");
+    refuses(&missing);
+
+    // A spark monitor in a compression engine's list.
+    let mut other = valid_status();
+    other["monitors"]["catalyst"] = json!({"supported": true, "complete": true});
+    refuses(&other);
+
+    let mut count = valid_status();
+    count["dtc_count"] = json!(128);
+    refuses(&count);
+
+    for field in ["mil_on", "dtc_count", "ignition", "monitors"] {
+        let mut without = valid_status();
+        without.as_object_mut().unwrap().remove(field);
+        refuses(&without);
+    }
+
+    let mut partial = valid_status();
+    partial["monitors"]["misfire"] = json!({"supported": true});
+    refuses(&partial);
+
+    let mut ignition = valid_status();
+    ignition["ignition"] = json!("Electric");
+    refuses(&ignition);
+}
+
+#[test]
+fn monitor_status_refuses_a_repeated_entry_and_ignores_an_unknown_one() {
+    let status = monitor_status(0x00, 0x2F, 0x28, 0x20);
+    let mut document = serde_json::to_value(status).unwrap();
+    document["later"] = json!(1);
+    document["monitors"]["later"] = json!({"supported": true, "complete": true});
+    assert_eq!(
+        serde_json::from_value::<MonitorStatus>(document).unwrap(),
+        status
+    );
+    let text = serde_json::to_string(&status).unwrap();
+    let twice = text.replacen(r#""mil_on":false"#, r#""mil_on":false,"mil_on":false"#, 1);
+    assert_ne!(twice, text);
+    assert!(serde_json::from_str::<MonitorStatus>(&twice).is_err());
+    let twice = text.replacen(
+        r#""misfire":{"supported":true,"complete":true}"#,
+        r#""misfire":{"supported":true,"complete":true},"misfire":{"supported":true,"complete":true}"#,
+        1,
+    );
+    assert_ne!(twice, text);
+    assert!(serde_json::from_str::<MonitorStatus>(&twice).is_err());
+}
+
+#[test]
+fn monitor_kind_names_are_unique_snake_case() {
+    let mut kinds = Vec::new();
+    for ignition in [0x00, 0x08] {
+        for (kind, _) in monitor_status(0, ignition, 0, 0).monitors() {
+            assert!(
+                kind.name()
+                    .bytes()
+                    .all(|b| b.is_ascii_lowercase() || b == b'_')
+            );
+            if !kinds.contains(&kind) {
+                kinds.push(kind);
+            }
+        }
+    }
+    let mut names: Vec<&str> = kinds.iter().map(|kind| kind.name()).collect();
+    names.sort_unstable();
+    names.dedup();
+    assert_eq!(names.len(), kinds.len());
+    assert_eq!(MonitorKind::Misfire.name(), "misfire");
 }
 
 proptest! {
