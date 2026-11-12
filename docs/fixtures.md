@@ -12,6 +12,9 @@ The other files in `crates/obdcracker-sim/fixtures/` aren't built into a car:
   formula at both ends of its range, the first and last code of each DTC system, full-width and empty calibration
   IDs). It has no car behind it, and is used with a two-module profile in `tests/standard_obd.rs`. The 255-entry
   limits are built in that test, not listed in the file.
+- [`obd-modes.toml`](../crates/obdcracker-sim/fixtures/obd-modes.toml) is in this format, but synthetic: what OBD-II
+  modes 02, 06, 07 and 0A answer, worked out by hand in `tests/obd_modes.rs`. The A7's fixture has none of these keys,
+  because the car's replies to them aren't known yet.
 - `opendbc-vag.toml`, `opendbc-other-makes.toml` and `opendbc-toyota.toml` are real identification replies from
   [commaai/opendbc](third-party.md), written by `scripts/import-opendbc.sh` and read by `tests/opendbc.rs`. They
   hold replies, not a car: a reply may sit behind an extended-address byte, which the sim can't address yet (#112).
@@ -54,7 +57,20 @@ groups", ISO 14229-1) are refused, as are repeats and more than 65535 (the count
 | `cvns` | Mode 09 PID 06: one per calibration ID, each 4 hex bytes. |
 | `ecu_name` | Mode 09 PID 0A: `acronym` (up to 4 characters) and `name` (up to 15), printable and without blanks. |
 | `dtcs` | Mode 03 codes such as `P0299`, up to 255. `P0000` is refused (it is the padding mode 03 replies use, SAE J1979), and so are repeats. |
+| `pending_dtcs` | Mode 07 codes, as for `dtcs`. Absent: the module doesn't support the mode (a physical request gets NRC 0x11, a broadcast no answer). `[]` is a reply with a count of 0. |
+| `permanent_dtcs` | Mode 0A codes, as for `pending_dtcs`. |
+| `freeze_frame` | Mode 02 frame 0, a table (below). Absent: the mode isn't supported. |
+| `monitor_ids` | Mode 06 monitor IDs: 2 hex digits each, such as `"21"`, without repeats. The bitmap IDs (0x00, 0x20, ...) are computed, so they are refused. Absent: the mode isn't supported. Only the bitmaps are answered; the test results behind an ID aren't. |
 | `pids` | Mode 01 PIDs: 2 hex digits mapped to the data bytes as hex, such as `"0C" = "0C 80"`. Bitmap PIDs (0x00, 0x20, ...) are computed, so they are refused. For a PID the decoder knows, the data must be exactly one reading of it (SAE J1979); a PID it doesn't know takes any non-empty data. |
+
+### `[ecu.obd.freeze_frame]`
+
+| Field | Meaning |
+|---|---|
+| `cause` | The DTC that stored the frame (mode 02 PID 02), such as `P0299`. Absent: no DTC stored it, and the module answers P0000 (SAE J1979). |
+| `pids` | The frame's PIDs, as the mode 01 `pids` table: 2 hex digits mapped to the data bytes as hex, bitmap PIDs refused, and each PID's data one reading of it. PID 02 is `cause`, so it is refused here, and a frame with `pids` needs a `cause`. |
+
+An empty table (`freeze_frame = {}`) is a module that supports mode 02 and has no frame.
 
 ### `[[ecu.did]]`
 
