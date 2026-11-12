@@ -1630,7 +1630,21 @@ mod requests {
                     assert_eq!(on_bus, std::slice::from_ref(&approved), "{index} {bit}");
                     continue;
                 }
-                assert!(result.is_err(), "{index} {bit}");
+                let err = result.unwrap_err().to_string();
+                // Once the digits were heard right they are an element the adapter may run, so a
+                // failure after them can't say nothing was sent, whether or not it ran.
+                if index < digits {
+                    assert!(
+                        err.contains("the request wasn't sent"),
+                        "{index} {bit}: {err}"
+                    );
+                } else {
+                    assert!(
+                        err.contains("the request may have been sent"),
+                        "{index} {bit}: {err}"
+                    );
+                    assert!(!err.contains("wasn't sent"), "{index} {bit}: {err}");
+                }
                 if on_bus.is_empty() {
                     assert!(
                         commands(&elm).last().unwrap().ends_with("XX"),
@@ -1649,6 +1663,39 @@ mod requests {
         // `A`, `B`, `S`, `T` and `M`: the check isn't passing vacuously.
         assert_eq!(same, 5);
         assert!(once > 0);
+    }
+
+    #[test]
+    fn a_batch_whose_tail_cant_be_written_says_it_may_have_been_sent() {
+        // The digits went out and were heard right; then the link is gone before `|STM`. The
+        // digits wait for a carriage return that never comes, but the error doesn't know that.
+        let mut elm = with_echo_shown(batching_stn(Duration::from_secs(60)));
+        let channel = open_channel(&mut elm, 0x5F);
+        let frame = Policy::read_only()
+            .approve_tp20_request(&channel, 0, &[0x1A, 0x9B])
+            .unwrap();
+        elm.link_mut().kill_after_writes = Some(1);
+        let err = elm.send(&frame).unwrap_err().to_string();
+        assert!(err.contains("the request may have been sent"), "{err}");
+        // The failure ends the driver; nothing more is written.
+        elm.link_mut().kill_after_writes = None;
+        let written = elm.link().written.len();
+        assert!(elm.send(&frame).is_err());
+        assert_eq!(elm.link().written.len(), written);
+    }
+
+    #[test]
+    fn a_batch_whose_tail_echo_cant_be_read_says_it_may_have_been_sent() {
+        // The link is gone as `|STM` is written, so the wait for its echo fails on the link.
+        let mut elm = with_echo_shown(batching_stn(Duration::from_secs(60)));
+        let channel = open_channel(&mut elm, 0x5F);
+        let frame = Policy::read_only()
+            .approve_tp20_request(&channel, 0, &[0x1A, 0x9B])
+            .unwrap();
+        elm.link_mut().close_after_write_of = Some(b"|STM".to_vec());
+        let err = elm.send(&frame).unwrap_err().to_string();
+        assert!(err.contains("link"), "{err}");
+        assert!(err.contains("the request may have been sent"), "{err}");
     }
 
     #[test]
@@ -1784,6 +1831,37 @@ mod requests {
         elm.link_mut().inject = b"|300 20 00 0E 5A 9B 41 42 43\r>".to_vec();
         assert_eq!(elm.recv(Duration::from_secs(1)).unwrap().payload[0], 0x20);
         let err = elm.recv(Duration::from_secs(1)).unwrap_err();
+        assert!(err.to_string().contains("stopped monitoring"), "{err}");
+    }
+
+    #[test]
+    fn a_prompt_after_a_monitor_line_with_no_pipe_is_still_a_failure() {
+        // The STN printed the frame's reply and then a monitor line with no pipe: the monitor
+        // has started whether or not the pipe was shown, so a later prompt is the adapter
+        // stopping on its own, not a batch whose `STM` never started.
+        let mut elm = with_echo_shown(batching_stn(Duration::from_secs(60)));
+        request_sent(&mut elm);
+        elm.link_mut().inject = b"300 20 00 0E 5A 9B 41 42 43\r>".to_vec();
+        assert_eq!(elm.recv(Duration::from_secs(1)).unwrap().payload[0], 0x20);
+        let err = elm.recv(Duration::from_secs(1)).unwrap_err();
+        assert!(err.to_string().contains("stopped monitoring"), "{err}");
+    }
+
+    #[test]
+    fn a_prompt_met_while_stopping_a_monitor_with_no_pipe_is_still_a_failure() {
+        // The same through `interrupt`: the next channel frame has to stop the monitor, and the
+        // prompt it meets first is not a batch that never started its monitor.
+        let mut elm = with_echo_shown(batching_stn(Duration::from_secs(60)));
+        let channel = request_sent(&mut elm);
+        elm.link_mut().inject = b"300 20 00 0E 5A 9B 41 42 43\r>".to_vec();
+        assert_eq!(elm.recv(Duration::from_secs(1)).unwrap().payload[0], 0x20);
+        let err = elm
+            .send(
+                &Policy::read_only()
+                    .approve_tp20_keep_alive(&channel)
+                    .unwrap(),
+            )
+            .unwrap_err();
         assert!(err.to_string().contains("stopped monitoring"), "{err}");
     }
 

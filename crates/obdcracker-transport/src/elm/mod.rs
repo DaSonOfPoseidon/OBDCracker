@@ -55,6 +55,11 @@ const MONITOR_ACK_STN: [&str; 2] = ["STCMM1", "STCMM0"];
 const BATCHING: [&str; 2] = ["STBC1", "STBC0"];
 // The pipe that joins the elements of a batch.
 const BATCH_PIPE: char = '|';
+// How a failed request line ends its message. A head that failed its echo check is ended with
+// `XX` before any carriage return, so nothing was run; once it passed, it is an element the
+// adapter may run, and whatever fails after it can't say it didn't.
+const REQUEST_NOT_SENT: &str = "the request wasn't sent";
+const REQUEST_MAYBE_SENT: &str = "the request may have been sent";
 
 // `AT CRA` patterns (docs/elm327.md#receive-filter): every diagnostic reply ID, and every
 // OBD-II emissions ECU's; for 29-bit IDs, every ISO 15765-4 reply to the tester and every VAG one.
@@ -251,7 +256,9 @@ pub struct Elm<L> {
     stbc: Stbc,
     // The request in progress was written with `STM` after it, as one batch: the adapter listens
     // for the frame's replies and then monitors without the host's help, so `monitoring` is set
-    // from the carriage return. A prompt then means the monitor never started.
+    // from the carriage return. A prompt then means the monitor never started, until the
+    // monitor's first line is read (with the pipe in front or without): after that it means the
+    // monitor stopped.
     batched: bool,
     // The `|` that precedes the second element's output is still to come, and allowed once. It
     // is only allowed until the line after the frame's own reply: a monitor that printed no pipe
@@ -791,13 +798,24 @@ impl<L: Link> Elm<L> {
         let (head, tail) = line.split_at(head_len);
         self.write(head.as_bytes())?;
         self.check_early_echo(head)?;
-        if !tail.is_empty() {
+        // The head was heard right, so it is a complete element the adapter may run at a carriage
+        // return, which a corrupted tail (or a corrupted `M`) can be: from here on a failure
+        // can't say the request wasn't sent.
+        let head_may_run = !tail.is_empty();
+        if head_may_run {
             before_tail(self);
-            self.write(tail.as_bytes())?;
-            self.check_early_echo(tail)?;
+            self.write(tail.as_bytes())
+                .map_err(|error| self.maybe_sent(error))?;
+            self.check_echo(tail, true)?;
         }
         let sent_at = Instant::now();
-        self.write(b"\r")?;
+        self.write(b"\r").map_err(|error| {
+            if head_may_run {
+                self.maybe_sent(error)
+            } else {
+                error
+            }
+        })?;
         Ok(sent_at)
     }
 
@@ -1235,10 +1253,12 @@ impl<L: Link> Elm<L> {
                         return Ok(Some(Event::Prompt));
                     }
                     // The request's echo is not a reply. The first line after it is the frame's
-                    // own reply, and the second one is the monitor's, with no pipe in front.
+                    // own reply, and the second one is the monitor's, with no pipe in front:
+                    // the monitor is running all the same, so a later prompt is it stopping.
                     Event::Line(text) if self.batch_pipe && self.echo.is_none() => {
                         if std::mem::replace(&mut self.batch_replied, true) {
                             self.batch_pipe = false;
+                            self.batched = false;
                         }
                         return Ok(Some(Event::Line(text)));
                     }
@@ -2358,6 +2378,25 @@ impl<L: Link> Elm<L> {
     // line is caught before it reaches the bus. An adapter that echoes nothing on the first
     // request is taken to echo whole lines only (docs/elm327.md#safety).
     fn check_early_echo(&mut self, line: &str) -> Result<(), Error> {
+        self.check_echo(line, false)
+    }
+
+    // Marks a failure as one that may have come after the request went out (see `write_line`).
+    fn maybe_sent(&mut self, error: Error) -> Error {
+        match error {
+            Error::Adapter(why) => self.break_down(format!("{why}; {REQUEST_MAYBE_SENT}")),
+            other => other,
+        }
+    }
+
+    // `check_early_echo` for the rest of a line whose head was heard right (`head_passed`), when
+    // every failure, a read of the link included, says the request may have been sent.
+    fn check_echo(&mut self, line: &str, head_passed: bool) -> Result<(), Error> {
+        let outcome = if head_passed {
+            REQUEST_MAYBE_SENT
+        } else {
+            REQUEST_NOT_SENT
+        };
         let mut echoed = vec![0; line.len()];
         let mut got = 0;
         let deadline = Instant::now() + ECHO_WAIT;
@@ -2368,7 +2407,13 @@ impl<L: Link> Elm<L> {
             else {
                 break;
             };
-            got += self.read(&mut echoed[got..], left)?;
+            got += self.read(&mut echoed[got..], left).map_err(|error| {
+                if head_passed {
+                    self.maybe_sent(error)
+                } else {
+                    error
+                }
+            })?;
         }
         echoed.truncate(got);
         if echoed.is_empty() && self.early_echo.is_none() {
@@ -2403,7 +2448,7 @@ impl<L: Link> Elm<L> {
         };
         // Best effort: the driver stops either way, and reconnecting resets the adapter.
         let _ = self.write(KILL);
-        Err(self.break_down(format!("{why}; the request wasn't sent")))
+        Err(self.break_down(format!("{why}; {outcome}")))
     }
 
     // Classifies a line printed after a request: `None` for its echo. Anything but a reply

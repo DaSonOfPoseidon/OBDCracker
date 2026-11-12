@@ -1388,6 +1388,9 @@ pub struct FakeLink {
     pub fail_writes: bool,
     /// The link goes down after this many more writes: the next one and every read fail.
     pub kill_after_writes: Option<usize>,
+    /// The link goes down just after the next write of exactly these bytes went through: every
+    /// later read and write fails.
+    pub close_after_write_of: Option<Vec<u8>>,
     /// Waits this long before delivering the next write of exactly these bytes, as a slow link
     /// would.
     pub slow_write_of: Option<(Vec<u8>, Duration)>,
@@ -1415,6 +1418,7 @@ impl FakeLink {
             byte_rate: Some(115_200 / 10),
             fail_writes: false,
             kill_after_writes: None,
+            close_after_write_of: None,
             slow_write_of: None,
             slow_reads_after: None,
             slow_reads: VecDeque::new(),
@@ -1450,6 +1454,7 @@ impl Link for FakeLink {
         {
             std::thread::sleep(wait);
         }
+        let sent = bytes;
         self.written.extend_from_slice(bytes);
         let number = self.writes.len();
         self.writes.push(bytes.to_vec());
@@ -1479,6 +1484,10 @@ impl Link for FakeLink {
             bytes[index] ^= bits;
         }
         self.elm.write(&bytes);
+        if self.close_after_write_of.as_deref() == Some(sent) {
+            self.close_after_write_of = None;
+            self.closed = true;
+        }
         Ok(())
     }
 
