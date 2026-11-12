@@ -250,8 +250,9 @@ STBC1                             <OK        batching on (FRPM 8.15); only an ex
   frame on the bus doesn't change. They are echoed and checked *before* `|STM` is written, then `|STM` is, then the
   carriage return: with the pipe in the line, `XX` after a misheard digit would end only the last element, and the
   damaged digits would run as an element of their own (section 4).
-- **After the carriage return** the driver is monitoring and logs the `STM` as a command, as for a monitor it starts
-  itself. The adapter prints the frame's own replies, then, with the pipe in front, the monitor's frames, and no prompt
+- **After the carriage return** the driver is monitoring and has logged the `STM` as a command, as for a monitor it
+  starts itself: once the digits were written and echoed right, before `|STM` was written (a head that failed leaves no
+  `STM` entry). The adapter prints the frame's own replies, then, with the pipe in front, the monitor's frames, and no prompt
   until the driver stops it. The pipe is accepted once, as a prefix of the first line after the frame's reply, or alone on a
   line, only while a batched line is in progress; after a second line without it, or anywhere else, a `|` is
   unexpected output (a monitor that printed no pipe doesn't leave one to be taken later). The manual's examples put it

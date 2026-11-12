@@ -771,9 +771,19 @@ impl<L: Link> Elm<L> {
     // and checked before the rest is written, and the rest before the carriage return: a
     // misheard digit is then ended with `XX` into a line that isn't hex, and a batch's pipe
     // never gets the chance to make the damaged digits an element of their own, which the
-    // adapter would send.
-    fn write_line(&mut self, line: &str, head_len: usize) -> Result<Instant, Error> {
+    // adapter would send. `before_tail` runs just before the line's rest is written (or, for an
+    // adapter that doesn't echo early, the whole line), and only if there is a rest: the audit
+    // log's entry for a command the head's failure kept from being written.
+    fn write_line(
+        &mut self,
+        line: &str,
+        head_len: usize,
+        before_tail: impl FnOnce(&mut Self),
+    ) -> Result<Instant, Error> {
         if self.early_echo == Some(false) {
+            if head_len < line.len() {
+                before_tail(self);
+            }
             let sent_at = Instant::now();
             self.write(format!("{line}\r").as_bytes())?;
             return Ok(sent_at);
@@ -782,6 +792,7 @@ impl<L: Link> Elm<L> {
         self.write(head.as_bytes())?;
         self.check_early_echo(head)?;
         if !tail.is_empty() {
+            before_tail(self);
             self.write(tail.as_bytes())?;
             self.check_early_echo(tail)?;
         }
@@ -1582,17 +1593,20 @@ impl<L: Link> Transport for Elm<L> {
         } else {
             digits
         };
-        // Noted however it ends, as `start_monitor` does: a misheard `STM` may still have run.
-        let at = SystemTime::now();
-        let written = self.write_line(&line, if batched { head_len } else { line.len() });
-        if batched {
-            self.note(LinkEvent::Command {
-                at,
-                command: MONITOR_STN.to_owned(),
-                answer: Vec::new(),
-            });
-        }
-        let sent_at = written?;
+        // The `STM` is noted before its bytes are written, as `start_monitor` does, and however
+        // that write ends: a misheard `STM` may still have run. A head that failed first means
+        // it was never written, so it isn't noted.
+        let sent_at = self.write_line(
+            &line,
+            if batched { head_len } else { line.len() },
+            |elm| {
+                elm.note(LinkEvent::Command {
+                    at: SystemTime::now(),
+                    command: MONITOR_STN.to_owned(),
+                    answer: Vec::new(),
+                });
+            },
+        )?;
         if batched {
             self.monitoring = true;
             self.batched = true;

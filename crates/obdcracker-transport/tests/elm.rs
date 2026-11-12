@@ -1818,6 +1818,23 @@ mod requests {
     }
 
     #[test]
+    fn a_batched_stm_is_not_logged_when_the_digits_before_it_were_misheard() {
+        // The `STM` is logged once the digits are written and echoed right, before its own bytes
+        // go out: a wrong echo ends the line with the kill and `|STM` is never written.
+        let mut elm = with_echo_shown(batching_stn(Duration::from_secs(60)));
+        let channel = open_channel(&mut elm, 0x5F);
+        elm.take_events();
+        let frame = Policy::read_only()
+            .approve_tp20_request(&channel, 0, &[0x1A, 0x9B])
+            .unwrap();
+        elm.link_mut().corrupt_write_of = Some((b"1000021A9B".to_vec(), 3, 0x01));
+        let err = elm.send(&frame).unwrap_err();
+        assert!(err.to_string().contains("echoed"), "{err}");
+        assert!(logged_commands(&mut elm).is_empty());
+        assert!(!commands(&elm).iter().any(|c| c.contains("STM")));
+    }
+
+    #[test]
     fn a_batched_stm_and_the_probe_are_logged_when_their_writes_fail() {
         // The audit log is written before the adapter acts, and however the write ends: a line
         // that failed part-way may still have run.
