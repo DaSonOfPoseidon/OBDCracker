@@ -8,7 +8,7 @@ use obdcracker_core::obd::{Cvn, Dtc, Unit, decode_monitor_status};
 use obdcracker_core::response::{Error as ReplyError, NegativeResponse, Nrc};
 use obdcracker_core::uds::{DtcCount, DtcFormat, DtcRecord, DtcStatus, UdsDtc};
 use obdcracker_transport::Response;
-use obdcracker_transport::dtc::{DtcDetail, RecordData};
+use obdcracker_transport::dtc::{DtcDetail, DtcReading, RecordData};
 use obdcracker_transport::elm::AdapterInfo;
 use obdcracker_transport::fingerprint::{
     Calibration, DidValue, Fingerprint, Identification, ReadError, UdsModule,
@@ -272,6 +272,7 @@ fn sample_scan() -> Scan {
                 dtc: UdsDtc::new(0x0004_0100),
                 status: DtcStatus(0x2F),
             }]),
+            dtc_details: None,
             answered: true,
         }],
     }
@@ -315,6 +316,7 @@ fn a_scan_is_written_as_documented() {
                 "dids": [{"did": "F191", "value": {"Text": "0BK927156AM"}}],
                 "dtc_count": {"value": {"availability": "FF", "format": "00", "count": 1}},
                 "dtcs": {"value": [{"dtc": "040100", "status": "2F"}]},
+                "dtc_details": null,
                 "answered": true,
             }],
         })),
@@ -825,4 +827,46 @@ proptest! {
         };
         round_trip(&sweep, None);
     }
+}
+
+#[test]
+fn a_scans_dtc_details_are_written_as_documented_and_an_old_scan_lacks_them() {
+    let mut scan = sample_scan();
+    scan.modules[0].dtc_details = Some(vec![DtcReading {
+        dtc: UdsDtc::new(0x0004_0100),
+        detail: DtcDetail {
+            snapshots: Err(refusal()),
+            extended_data: Some(Ok(RecordData {
+                status: DtcStatus(0x2F),
+                records: vec![0x01, 0x05],
+            })),
+            out_of_step: false,
+        },
+    }]);
+    let document = round_trip(&scan, None);
+    assert_eq!(
+        document["modules"][0]["dtc_details"],
+        json!([{
+            "dtc": "040100",
+            "detail": {
+                "snapshots": {"error": {"Reply": {"Negative": {"sid": "22", "nrc": "31"}}}},
+                "extended_data": {"value": {"status": "2F", "records": "01 05"}},
+                "out_of_step": false,
+            },
+        }])
+    );
+    // No DTC listed is an empty list, which isn't the same as not asked for.
+    scan.modules[0].dtc_details = Some(vec![]);
+    let document = round_trip(&scan, None);
+    assert_eq!(document["modules"][0]["dtc_details"], json!([]));
+
+    // A scan from before the field reads with `None`.
+    let mut old = serde_json::to_value(sample_scan()).unwrap();
+    old["modules"][0]
+        .as_object_mut()
+        .unwrap()
+        .remove("dtc_details")
+        .unwrap();
+    let read: Scan = serde_json::from_value(old).unwrap();
+    assert_eq!(read.modules[0].dtc_details, None);
 }

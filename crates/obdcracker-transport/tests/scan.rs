@@ -7,6 +7,7 @@ use obdcracker_core::obd::{Dtc, Unit};
 use obdcracker_core::response::{Error as ReplyError, NegativeResponse, Nrc};
 use obdcracker_core::uds::{DiagnosticSession, DtcCount, DtcFormat, DtcRecord, DtcStatus, UdsDtc};
 use obdcracker_safety::{Approved, Policy};
+use obdcracker_transport::dtc::{DtcDetail, RecordData};
 use obdcracker_transport::fingerprint::{DidValue, FingerprintError, ReadError, UdsModule};
 use obdcracker_transport::scan::{
     DidFormat, ExtraDid, ObdEcu, PidValue, SCAN_DIDS, Scan, ScanModule, ScanOptions, scan,
@@ -1389,4 +1390,276 @@ fn a_refused_tester_present_is_reported_as_its_own_refusal() {
             reply: vec![0x7F, 0x3E, 0x22],
         })
     );
+}
+
+// A module with two DTCs. The first is what the A7's gateway listed in car session 6 (#124):
+// 0016A0 with status 01, whose snapshot read was refused with `7F 19 13` and whose extended data
+// came back with no records (`59 06 00 16 A0 01`). The second has records of both kinds.
+fn detail_car(first_snapshots: Vec<Response>) -> Car {
+    Car::new(move |id, request| match (id, request) {
+        (0x7E0, [0x19, 0x01, 0xAF]) => vec![reply(0x7E8, &[0x59, 0x01, 0xFF, 0x01, 0x00, 0x02])],
+        (0x7E0, [0x19, 0x02, 0xAF]) => vec![reply(
+            0x7E8,
+            &[
+                0x59, 0x02, 0xFF, //
+                0x00, 0x16, 0xA0, 0x01, //
+                0x02, 0x99, 0x00, 0x08,
+            ],
+        )],
+        (0x7E0, [0x19, 0x04, 0x00, 0x16, 0xA0, 0xFF]) => first_snapshots.clone(),
+        (0x7E0, [0x19, 0x06, 0x00, 0x16, 0xA0, 0xFF]) => {
+            vec![reply(0x7E8, &[0x59, 0x06, 0x00, 0x16, 0xA0, 0x01])]
+        }
+        (0x7E0, [0x19, 0x04, 0x02, 0x99, 0x00, 0xFF]) => vec![reply(
+            0x7E8,
+            &[
+                0x59, 0x04, 0x02, 0x99, 0x00, 0x08, 0x01, 0x01, 0x01, 0x02, 0x00, 0x12,
+            ],
+        )],
+        (0x7E0, [0x19, 0x06, 0x02, 0x99, 0x00, 0xFF]) => vec![reply(
+            0x7E8,
+            &[0x59, 0x06, 0x02, 0x99, 0x00, 0x08, 0x01, 0x05],
+        )],
+        _ => Vec::new(),
+    })
+}
+
+fn refused_snapshots() -> Vec<Response> {
+    vec![reply(0x7E8, &[0x7F, 0x19, 0x13])]
+}
+
+fn with_detail() -> ScanOptions {
+    let mut options = ScanOptions::default();
+    options.dtc_detail = true;
+    options
+}
+
+fn detail_requests(car: &Car) -> Vec<&str> {
+    car.sent
+        .iter()
+        .map(String::as_str)
+        .filter(|sent| sent.starts_with("7E0 19 04") || sent.starts_with("7E0 19 06"))
+        .collect()
+}
+
+fn scan_detail(car: &mut Car) -> Scan {
+    scan_with(
+        car,
+        &Policy::read_only(),
+        &[engine(&[])],
+        TIMING,
+        &with_detail(),
+    )
+    .unwrap()
+}
+
+#[test]
+fn dtc_detail_reads_each_listed_dtcs_snapshots_then_extended_data() {
+    let mut car = detail_car(refused_snapshots());
+    let got = scan_detail(&mut car);
+    assert_eq!(
+        detail_requests(&car),
+        [
+            "7E0 19 04 00 16 A0 FF",
+            "7E0 19 06 00 16 A0 FF",
+            "7E0 19 04 02 99 00 FF",
+            "7E0 19 06 02 99 00 FF",
+        ]
+    );
+    // They follow the module's own DTC reads, which are unchanged.
+    let list = car.sent.iter().position(|s| s == "7E0 19 02 AF").unwrap();
+    assert_eq!(car.sent[list + 1], "7E0 19 04 00 16 A0 FF");
+
+    let module = &got.modules[0];
+    assert_eq!(module.dtcs.as_ref().map(Vec::len), Ok(2));
+    let details = module.dtc_details.as_ref().unwrap();
+    let [first, second] = &details[..] else {
+        panic!("{details:?}");
+    };
+    assert_eq!(first.dtc, UdsDtc::new(0x00_16A0));
+    assert_eq!(
+        first.detail,
+        DtcDetail {
+            snapshots: Err(ReadError::Reply(ReplyError::Negative(NegativeResponse {
+                sid: 0x19,
+                nrc: Nrc::IncorrectMessageLength,
+            }))),
+            extended_data: Some(Ok(RecordData {
+                status: DtcStatus(0x01),
+                records: vec![],
+            })),
+            out_of_step: false,
+        }
+    );
+    assert_eq!(second.dtc, UdsDtc::new(0x02_9900));
+    assert_eq!(
+        second.detail,
+        DtcDetail {
+            snapshots: Ok(RecordData {
+                status: DtcStatus(0x08),
+                records: vec![0x01, 0x01, 0x01, 0x02, 0x00, 0x12],
+            }),
+            extended_data: Some(Ok(RecordData {
+                status: DtcStatus(0x08),
+                records: vec![0x01, 0x05],
+            })),
+            out_of_step: false,
+        }
+    );
+}
+
+#[test]
+fn dtc_detail_is_off_unless_asked_for() {
+    let mut car = detail_car(refused_snapshots());
+    let got = scan(&mut car, &Policy::read_only(), &[engine(&[])], TIMING).unwrap();
+    assert_eq!(detail_requests(&car), Vec::<&str>::new());
+    assert_eq!(got.modules[0].dtc_details, None);
+}
+
+#[test]
+fn dtc_detail_reads_nothing_for_a_module_with_no_dtcs() {
+    let mut car = Car::new(|id, request| match (id, request) {
+        (0x7E0, [0x19, 0x02, 0xAF]) => vec![reply(0x7E8, &[0x59, 0x02, 0xFF])],
+        _ => Vec::new(),
+    });
+    let got = scan_detail(&mut car);
+    assert_eq!(detail_requests(&car), Vec::<&str>::new());
+    assert_eq!(got.modules[0].dtc_details, Some(vec![]));
+}
+
+#[test]
+fn dtc_detail_reads_nothing_where_the_dtc_list_failed() {
+    for list in [
+        Vec::new(),
+        vec![reply(0x7E8, &[0x7F, 0x19, 0x12])],
+        // Cut short in the middle of a DTC
+        vec![reply(0x7E8, &[0x59, 0x02, 0xFF, 0x00, 0x16])],
+    ] {
+        let mut car = Car::new(move |id, request| match (id, request) {
+            (0x7E0, [0x19, 0x02, 0xAF]) => list.clone(),
+            _ => Vec::new(),
+        });
+        let got = scan_detail(&mut car);
+        assert_eq!(detail_requests(&car), Vec::<&str>::new());
+        assert!(got.modules[0].dtcs.is_err());
+        assert_eq!(got.modules[0].dtc_details, None);
+    }
+}
+
+#[test]
+fn dtc_detail_stops_a_module_once_a_read_goes_unanswered() {
+    // The first snapshot read gets no answer, so the extended data isn't asked, and a late
+    // answer could pass for the next DTC's: nothing more is sent to this module.
+    let mut car = detail_car(Vec::new());
+    let got = scan_detail(&mut car);
+    assert_eq!(detail_requests(&car), ["7E0 19 04 00 16 A0 FF"]);
+    let details = got.modules[0].dtc_details.as_ref().unwrap();
+    assert_eq!(details.len(), 1);
+    assert_eq!(details[0].detail.snapshots, Err(ReadError::NoReply));
+    assert_eq!(details[0].detail.extended_data, None);
+    assert!(details[0].detail.out_of_step);
+}
+
+#[test]
+fn dtc_detail_stops_a_module_that_says_it_is_busy() {
+    // Busy to the snapshot read, or to the extended data after it.
+    for (busy_to, requests) in [
+        (0x04, ["7E0 19 04 00 16 A0 FF"].as_slice()),
+        (
+            0x06,
+            ["7E0 19 04 00 16 A0 FF", "7E0 19 06 00 16 A0 FF"].as_slice(),
+        ),
+    ] {
+        let mut car = detail_car(refused_snapshots());
+        let mut answer = std::mem::replace(&mut car.answer, Box::new(|_, _| Vec::new()));
+        car.answer = Box::new(move |id, request| match request {
+            [0x19, sub, 0x00, 0x16, 0xA0, 0xFF] if *sub == busy_to => {
+                vec![reply(0x7E8, &[0x7F, 0x19, 0x21])]
+            }
+            _ => answer(id, request),
+        });
+        let got = scan_detail(&mut car);
+        // The second DTC isn't asked: the module is still on the first.
+        assert_eq!(detail_requests(&car), requests, "{busy_to:02X}");
+        let details = got.modules[0].dtc_details.as_ref().unwrap();
+        assert_eq!(details.len(), 1, "{busy_to:02X}");
+        assert!(!details[0].detail.out_of_step, "{busy_to:02X}");
+    }
+}
+
+#[test]
+fn dtc_detail_reads_a_dtc_the_module_lists_twice_once() {
+    let mut car = Car::new(|id, request| match (id, request) {
+        (0x7E0, [0x19, 0x02, 0xAF]) => vec![reply(
+            0x7E8,
+            &[
+                0x59, 0x02, 0xFF, //
+                0x00, 0x16, 0xA0, 0x01, //
+                0x00, 0x16, 0xA0, 0x01,
+            ],
+        )],
+        (0x7E0, [0x19, 0x04, ..]) => refused_snapshots(),
+        (0x7E0, [0x19, 0x06, 0x00, 0x16, 0xA0, 0xFF]) => {
+            vec![reply(0x7E8, &[0x59, 0x06, 0x00, 0x16, 0xA0, 0x01])]
+        }
+        _ => Vec::new(),
+    });
+    let got = scan_detail(&mut car);
+    assert_eq!(
+        detail_requests(&car),
+        ["7E0 19 04 00 16 A0 FF", "7E0 19 06 00 16 A0 FF"]
+    );
+    assert_eq!(got.modules[0].dtc_details.as_ref().unwrap().len(), 1);
+}
+
+#[test]
+fn an_adapter_failure_during_the_detail_reads_stops_the_scan() {
+    // Fail the second detail request: everything before it is the scan without detail, plus one.
+    let mut plain = detail_car(refused_snapshots());
+    scan(&mut plain, &Policy::read_only(), &[engine(&[])], TIMING).unwrap();
+    let mut car = detail_car(refused_snapshots());
+    car.fail_after = Some(plain.sent.len() + 1);
+    let got = scan_with(
+        &mut car,
+        &Policy::read_only(),
+        &[engine(&[])],
+        TIMING,
+        &with_detail(),
+    );
+    assert_eq!(
+        got,
+        Err(FingerprintError::Transport(Error::Adapter(
+            "unplugged".to_owned()
+        )))
+    );
+    assert_eq!(detail_requests(&car), ["7E0 19 04 00 16 A0 FF"]);
+}
+
+#[test]
+fn dtc_detail_doesnt_take_a_reply_that_names_another_dtc_as_the_answer() {
+    // The first DTC's extended data is answered with the second's: that may be a late answer to
+    // an earlier request, so it isn't this read's, and the module is left alone after it.
+    let mut car = detail_car(refused_snapshots());
+    let mut answer = std::mem::replace(&mut car.answer, Box::new(|_, _| Vec::new()));
+    car.answer = Box::new(move |id, request| match request {
+        [0x19, 0x06, 0x00, 0x16, 0xA0, 0xFF] => {
+            vec![reply(
+                0x7E8,
+                &[0x59, 0x06, 0x02, 0x99, 0x00, 0x08, 0x01, 0x05],
+            )]
+        }
+        _ => answer(id, request),
+    });
+    let got = scan_detail(&mut car);
+    assert_eq!(
+        detail_requests(&car),
+        ["7E0 19 04 00 16 A0 FF", "7E0 19 06 00 16 A0 FF"]
+    );
+    let details = got.modules[0].dtc_details.as_ref().unwrap();
+    assert_eq!(details.len(), 1);
+    assert_eq!(
+        details[0].detail.extended_data,
+        Some(Err(ReadError::NoReply))
+    );
+    assert!(details[0].detail.out_of_step);
 }
