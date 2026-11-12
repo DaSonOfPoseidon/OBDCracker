@@ -4,7 +4,7 @@
 
 use std::fmt::Debug;
 
-use obdcracker_core::obd::{Cvn, Dtc, Unit};
+use obdcracker_core::obd::{Cvn, Dtc, Unit, decode_monitor_status};
 use obdcracker_core::response::{Error as ReplyError, NegativeResponse, Nrc};
 use obdcracker_core::uds::{DtcCount, DtcFormat, DtcRecord, DtcStatus, UdsDtc};
 use obdcracker_transport::Response;
@@ -15,7 +15,7 @@ use obdcracker_transport::fingerprint::{
 };
 use obdcracker_transport::json::{self, parse_bytes};
 use obdcracker_transport::read_dids::DidsData;
-use obdcracker_transport::scan::{ModuleScan, ObdEcu, PidValue, Scan};
+use obdcracker_transport::scan::{FreezeFrame, ModuleScan, ObdEcu, PidValue, Scan};
 use obdcracker_transport::sweep::{Stop, Sweep, Why};
 use obdcracker_transport::voltage::LowVoltage;
 use obdcracker_transport::{Error, hex};
@@ -137,6 +137,13 @@ fn refusal() -> ReadError {
     }))
 }
 
+fn not_supported() -> ReadError {
+    ReadError::Reply(ReplyError::Negative(NegativeResponse {
+        sid: 0x0A,
+        nrc: Nrc::ServiceNotSupported,
+    }))
+}
+
 fn sample_fingerprint() -> Fingerprint {
     Fingerprint {
         ecus: vec![
@@ -238,6 +245,19 @@ fn sample_scan() -> Scan {
             supported_info: Ok(vec![0x00, 0x02, 0x0A]),
             ecu_name: Ok("ECM-EngineControl".to_owned()),
             stored_dtcs: Ok(vec![Dtc::new(0x0401)]),
+            monitor_status: Some(Ok(decode_monitor_status(&[
+                0x41, 0x01, 0x81, 0x0F, 0x65, 0x41,
+            ])
+            .unwrap())),
+            pending_dtcs: Some(Ok(vec![Dtc::new(0x0299)])),
+            permanent_dtcs: Some(Err(not_supported())),
+            freeze_frame: Some(Ok(FreezeFrame {
+                cause: Some(Dtc::new(0x0299)),
+                pids: Ok(vec![(0x0C, Ok(PidValue::Raw(vec![0x01, 0x02])))]),
+                pids_cut_short: Some((0x20, ReadError::NoReply)),
+            })),
+            monitor_ids: Some(Ok(vec![0x01, 0x21])),
+            monitor_ids_cut_short: Some((0x40, ReadError::NoReply)),
         }],
         modules: vec![ModuleScan {
             name: "transmission".to_owned(),
@@ -273,6 +293,21 @@ fn a_scan_is_written_as_documented() {
                 "supported_info": {"value": ["00", "02", "0A"]},
                 "ecu_name": {"value": "ECM-EngineControl"},
                 "stored_dtcs": {"value": ["P0401"]},
+                "monitor_status": {"value": {
+                    "mil_on": true,
+                    "dtc_count": 1,
+                    "ignition": "Compression",
+                    "monitors": status_monitors(),
+                }},
+                "pending_dtcs": {"value": ["P0299"]},
+                "permanent_dtcs": {"error": {"Reply": {"Negative": {"sid": "0A", "nrc": "11"}}}},
+                "freeze_frame": {"value": {
+                    "cause": "P0299",
+                    "pids": {"value": [{"pid": "0C", "value": {"Raw": "01 02"}}]},
+                    "pids_cut_short": {"pid": "20", "error": "NoReply"},
+                }},
+                "monitor_ids": {"value": ["01", "21"]},
+                "monitor_ids_cut_short": {"mid": "40", "error": "NoReply"},
             }],
             "modules": [{
                 "name": "transmission",
@@ -284,6 +319,88 @@ fn a_scan_is_written_as_documented() {
             }],
         })),
     );
+}
+
+// What the sample's `41 01 81 0F 65 41` says: the engine is diesel (B bit 3), so C and D are the
+// compression monitors; the reserved bits (2 and 4) aren't listed.
+fn status_monitors() -> Value {
+    let on = |complete| json!({"supported": true, "complete": complete});
+    let off = json!({"supported": false, "complete": true});
+    json!({
+        "misfire": on(true),
+        "fuel_system": on(true),
+        "components": on(true),
+        "nmhc_catalyst": on(false),
+        "nox_scr": off,
+        "boost_pressure": off,
+        "exhaust_gas_sensor": on(true),
+        "particulate_filter": on(false),
+        "egr_vvt": off,
+    })
+}
+
+#[test]
+fn a_scan_from_before_the_new_reads_still_reads_with_them_missing() {
+    let mut document = serde_json::to_value(sample_scan()).unwrap();
+    let ecu = document["ecus"][0].as_object_mut().unwrap();
+    for field in [
+        "monitor_status",
+        "pending_dtcs",
+        "permanent_dtcs",
+        "freeze_frame",
+        "monitor_ids",
+        "monitor_ids_cut_short",
+    ] {
+        ecu.remove(field).unwrap();
+    }
+    let scan: Scan = serde_json::from_value(document).unwrap();
+    let ecu = &scan.ecus[0];
+    assert_eq!(ecu.monitor_status, None);
+    assert_eq!(ecu.pending_dtcs, None);
+    assert_eq!(ecu.permanent_dtcs, None);
+    assert_eq!(ecu.freeze_frame, None);
+    assert_eq!(ecu.monitor_ids, None);
+    assert_eq!(ecu.monitor_ids_cut_short, None);
+}
+
+#[test]
+fn the_new_scan_fields_say_not_read_as_null() {
+    let mut scan = sample_scan();
+    scan.ecus[0].monitor_status = None;
+    scan.ecus[0].pending_dtcs = None;
+    scan.ecus[0].permanent_dtcs = None;
+    scan.ecus[0].freeze_frame = None;
+    scan.ecus[0].monitor_ids = None;
+    scan.ecus[0].monitor_ids_cut_short = None;
+    let document = round_trip(&scan, None);
+    for field in [
+        "monitor_status",
+        "pending_dtcs",
+        "permanent_dtcs",
+        "freeze_frame",
+        "monitor_ids",
+        "monitor_ids_cut_short",
+    ] {
+        assert_eq!(document["ecus"][0][field], Value::Null, "{field}");
+    }
+}
+
+#[test]
+fn a_freeze_frame_with_no_cause_and_one_that_failed_round_trip() {
+    let mut scan = sample_scan();
+    scan.ecus[0].freeze_frame = Some(Ok(FreezeFrame {
+        cause: None,
+        pids: Ok(vec![]),
+        pids_cut_short: None,
+    }));
+    let document = round_trip(&scan, None);
+    assert_eq!(
+        document["ecus"][0]["freeze_frame"],
+        json!({"value": {"cause": null, "pids": {"value": []}, "pids_cut_short": null}})
+    );
+    scan.ecus[0].freeze_frame = Some(Err(not_supported()));
+    scan.ecus[0].monitor_ids = Some(Err(ReadError::NoReply));
+    round_trip(&scan, None);
 }
 
 #[test]

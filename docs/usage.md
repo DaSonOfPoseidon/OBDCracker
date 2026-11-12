@@ -212,13 +212,47 @@ obdcracker --profile a7 scan
 ```
 
 Reads everything the default diagnostic session allows, without changing any module's session. From each emissions
-ECU it reads every supported mode 01 PID, mode 09 PIDs 00 and 0A, and mode 03 stored DTCs (on an adapter whose driver
-paces its replies, PID 0A and mode 03 are asked of each ECU in turn rather than by broadcast;
-[details](scanning.md#module-discovery)). From each plain-UDS module
+ECU it reads every supported mode 01 PID, mode 09 PIDs 00 and 0A, mode 03 stored DTCs, mode 07 pending DTCs and
+mode 0A permanent DTCs (on an adapter whose driver paces its replies, PID 0A and modes 03, 07 and 0A are asked of each
+ECU in turn rather than by broadcast; [details](scanning.md#module-discovery)), then the freeze frame (mode 02) and the
+supported mode 06 monitor IDs. From each plain-UDS module
 in the profile it reads the standard identification DIDs plus the profile's own DIDs, and its DTCs (`19 01 AF`,
 `19 02 AF`). It lists only DTCs that are failed, pending, confirmed or failed since the last clear, not the module's
 untested codes. DIDs whose length the profile gives are read three to a request; any a reply leaves out or doesn't fit
 are read again one at a time, and must then be exactly that length.
+
+### Readiness, pending and permanent DTCs, freeze frame, mode 06
+
+After each ECU's stored DTCs, `scan` prints what a generic scan tool shows, each line starting with the ECU's CAN ID:
+
+```
+7E8 MIL off, 0 DTCs, compression ignition
+7E8 monitor misfire complete (continuous)
+7E8 monitor fuel system incomplete (continuous)
+7E8 monitor exhaust gas sensor incomplete
+7E8 pending DTCs P0299
+7E8 permanent DTCs (none)
+7E8 freeze frame stored by P0299
+7E8 freeze frame PID 05 90 °C
+7E8 mode 06 monitor IDs 01, 21
+```
+
+- **MIL and monitors** come from the mode 01 PID 01 reply, with no extra request: the lamp, the DTC count, the engine
+  type and one line per monitor the ECU supports, `complete` or `incomplete`. Misfire, fuel system and components are
+  continuous monitors. The rest run only when the car's conditions allow, so `incomplete` can just mean the drive
+  cycle hasn't happened. An ECU without PID 01 prints none of these, and a reply that doesn't decode prints
+  `readiness (<why>)`.
+- **Pending (mode 07) and permanent (mode 0A) DTCs** print as a list, `(none)`, `(not supported)` where the ECU
+  refused the mode, or `(<why>)` where the read failed. A broadcast an ECU doesn't support gets no answer, so
+  `(no reply)` is also what an ECU without the mode shows; after an answered mode 07 it reads
+  `(no reply; older ECUs ignore mode 0A)`.
+- **The freeze frame** (mode 02, frame 0) starts with the DTC that stored it (PID 02). `freeze frame (none)` is a
+  stored code of P0000, and then no more is read. Otherwise each PID the frame holds prints as in mode 01, and a PID
+  that failed prints why.
+- **Mode 06** prints the monitor IDs the ECU supports. The test results behind them aren't read yet (#345).
+
+The scan sends 2 more broadcasts for modes 07 and 0A, 1 for the freeze frame's cause (more when a frame is stored: its
+bitmaps and each PID in it) and 1 or more for the mode 06 bitmaps. With no ECU known by then, modes 02 and 06 aren't sent at all.
 
 ### Gateway list
 
@@ -452,17 +486,19 @@ A DID's, CALID's or ECU name's text is in double quotes (`\"` and `\\` for those
 
 - **Exit status:** 0 when nothing changed, 1 when something did (as `diff(1)` does), 2 on an error.
 - **What is compared:** each emissions ECU's calibration IDs and CVNs by slot (`fingerprint`), its supported mode 01 and
-  mode 09 PIDs, name and stored DTCs (`scan`), the modules found, each module's DIDs (a DID's text, bytes, "not set", or
+  mode 09 PIDs, name and stored DTCs (`scan`), its pending and permanent DTCs, the MIL and each readiness monitor both
+  reads say it supports (`scan`: `7E8 MIL: off → on`, `7E8 monitor exhaust gas sensor: incomplete → complete`), the modules found, each module's DIDs (a DID's text, bytes, "not set", or
   why it wasn't read, and a DID only one document has), whether it answered, and its DTCs: new, cleared, or with a
-  changed status (`scan`). Part and software numbers are DIDs, so they show here. The live values of mode 01 PIDs and a
-  DTC count aren't compared, since they change on every run.
+  changed status (`scan`). Part and software numbers are DIDs, so they show here. The live values of mode 01 PIDs, a DTC
+  count, a freeze frame and the mode 06 monitor IDs aren't compared, since they change on every run. A scan from before
+  these reads (JSON schema 1) compares with a newer one without reporting them as changes.
 - **Matching:** ECUs by their reply CAN ID, and modules by name and reply CAN ID together, so a module that answers on
   another ID is one removed and one added. An ECU or module in only one document is one line; what it holds isn't listed.
 - **A list that failed:** if a list (calibration IDs, DTCs, ...) couldn't be read in one document and was in the other, the
   line says it can't be compared (`engine DTCs can't be compared: old read, new no reply`) instead of listing every entry
   as new or cleared.
 - **Order:** the same whatever order the documents list things in: ECUs by CAN ID, then modules by name and CAN ID, and within
-  each by DID or DTC. A file that lists the same ECU, module, DID or DTC twice (a hand-edited one) is an error that names
+  each by DID or DTC. A file that lists the same ECU, module, DID, DTC or PID twice (a hand-edited one) is an error that names
   the file and the entry (status 2): which entry is the car's can't be told, so nothing is compared.
 - **VINs:** a VIN is shown only when it changed (`vin`: `7E8 VIN <old> → <new>`; `scan`: the F190 line). An ECU that only one
   `vin` document has is `7E8 ECU added` or `removed`, without its VIN.

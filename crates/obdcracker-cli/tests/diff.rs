@@ -237,6 +237,68 @@ fn a_scan_reports_dtcs_and_answers_but_not_live_values_and_never_an_unchanged_vi
 }
 
 #[test]
+fn a_scan_from_before_the_new_reads_compares_with_one_after_them() {
+    let scratch = Scratch::new("scan-schema-1");
+    let new = sim(&["scan"]);
+    assert_eq!(new["schema"], 2);
+    // What schema 1 wrote: no MIL or monitors, pending and permanent DTCs, freeze frame or mode 06.
+    let mut old = new.clone();
+    old["schema"] = json!(1);
+    for ecu in old["result"]["ecus"].as_array_mut().unwrap() {
+        for field in [
+            "monitor_status",
+            "pending_dtcs",
+            "permanent_dtcs",
+            "freeze_frame",
+            "monitor_ids",
+            "monitor_ids_cut_short",
+        ] {
+            ecu.as_object_mut().unwrap().remove(field).unwrap();
+        }
+    }
+    let (old_path, new_path) = (
+        scratch.document("old.json", &old),
+        scratch.document("new.json", &new),
+    );
+    for (first, second) in [(&old_path, &new_path), (&new_path, &old_path)] {
+        let out = scratch.diff(&[], first, second);
+        assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+        assert_eq!(stdout(&out), "no changes\n");
+    }
+}
+
+#[test]
+fn a_scan_reports_the_mil_a_monitor_and_pending_dtcs() {
+    let scratch = Scratch::new("scan-readiness");
+    let old = sim(&["scan"]);
+    // The sim's A7 engine has session 11's `41 01 00 2F 28 20`, so it has a status to change.
+    let engine = &old["result"]["ecus"][0];
+    assert_eq!(engine["monitor_status"]["value"]["mil_on"], json!(false));
+    let mut new = old.clone();
+    let status = &mut new["result"]["ecus"][0]["monitor_status"]["value"];
+    status["mil_on"] = json!(true);
+    status["monitors"]["exhaust_gas_sensor"]["complete"] = json!(true);
+    new["result"]["ecus"][0]["pending_dtcs"] = json!({"value": ["P0299"]});
+    new["result"]["ecus"][0]["permanent_dtcs"] = json!({"value": ["P0420"]});
+    let (old_path, new_path) = (
+        scratch.document("old.json", &old),
+        scratch.document("new.json", &new),
+    );
+    let out = scratch.diff(&[], &old_path, &new_path);
+    assert_eq!(out.status.code(), Some(1), "{}", stderr(&out));
+    // The sim's A7 answers neither list, so each is a failed read on the old side.
+    assert_eq!(
+        lines(&out),
+        [
+            "7E8 pending DTCs can't be compared: old no reply, new read",
+            "7E8 permanent DTCs can't be compared: old no reply, new read",
+            "7E8 MIL: off → on",
+            "7E8 monitor exhaust gas sensor: incomplete → complete",
+        ]
+    );
+}
+
+#[test]
 fn a_vin_is_shown_only_when_it_changed() {
     let scratch = Scratch::new("vin");
     let old = sim(&["vin"]);
@@ -494,7 +556,7 @@ fn json_prints_the_changes_in_the_usual_envelope() {
     assert_eq!(
         document,
         json!({
-            "schema": 1,
+            "schema": 2,
             "command": "diff",
             "obdcracker": env!("CARGO_PKG_VERSION"),
             "result": {
@@ -616,7 +678,7 @@ fn a_schema_this_build_doesnt_read_is_refused() {
     let scratch = Scratch::new("schema");
     let good = sim(&["vin"]);
     let good_path = scratch.document("good.json", &good);
-    for schema in [json!(0), json!(2), json!(u32::MAX), json!(-1), json!("1")] {
+    for schema in [json!(0), json!(3), json!(u32::MAX), json!(-1), json!("1")] {
         let mut bad = good.clone();
         bad["schema"] = schema.clone();
         let path = scratch.document("bad.json", &bad);
@@ -624,10 +686,10 @@ fn a_schema_this_build_doesnt_read_is_refused() {
         refused(&scratch, &good_path, &path, "bad.json");
     }
     let mut bad = good.clone();
-    bad["schema"] = json!(2);
+    bad["schema"] = json!(3);
     refused(
         &scratch,
-        &scratch.document("v2.json", &bad),
+        &scratch.document("v3.json", &bad),
         &good_path,
         "isn't one this build reads",
     );

@@ -710,3 +710,75 @@ pub(crate) mod pid_failure {
             .map(|failure| failure.map(|failure| (failure.pid.0, failure.error)))
     }
 }
+
+// `Option<Result<Vec<u8>, E>>` of PIDs or monitor IDs, as in `outcome_pids`, `null` for `None`.
+pub(crate) mod option_outcome_pids {
+    use super::{
+        Byte, Deserialize, DeserializeOwned, Deserializer, PidList, Serialize, Serializer, Wire,
+    };
+
+    #[expect(clippy::ref_option, reason = "serde's `with` passes a reference")]
+    pub(crate) fn serialize<E: Serialize, S: Serializer>(
+        result: &Option<Result<Vec<u8>, E>>,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        result
+            .as_ref()
+            .map(|result| match result {
+                Ok(ids) => Wire::<_, &E>::Value(PidList(ids)),
+                Err(error) => Wire::Error(error),
+            })
+            .serialize(serializer)
+    }
+
+    pub(crate) fn deserialize<'de, E, D>(
+        deserializer: D,
+    ) -> Result<Option<Result<Vec<u8>, E>>, D::Error>
+    where
+        E: DeserializeOwned,
+        D: Deserializer<'de>,
+    {
+        Ok(
+            Option::<Wire<Vec<Byte>, E>>::deserialize(deserializer)?.map(|wire| match wire {
+                Wire::Value(ids) => Ok(ids.into_iter().map(|id| id.0).collect()),
+                Wire::Error(error) => Err(error),
+            }),
+        )
+    }
+}
+
+#[derive(Serialize, Deserialize)]
+struct MidFailure<E> {
+    mid: Byte,
+    error: E,
+}
+
+// `Option<(u8, E)>` of a monitor ID bitmap that failed, as `{"mid": ..., "error": ...}`.
+pub(crate) mod mid_failure {
+    use super::{
+        Byte, Deserialize, DeserializeOwned, Deserializer, MidFailure, Serialize, Serializer,
+    };
+
+    #[expect(clippy::ref_option, reason = "serde's `with` passes a reference")]
+    pub(crate) fn serialize<E: Serialize, S: Serializer>(
+        failure: &Option<(u8, E)>,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        failure
+            .as_ref()
+            .map(|(mid, error)| MidFailure {
+                mid: Byte(*mid),
+                error,
+            })
+            .serialize(serializer)
+    }
+
+    pub(crate) fn deserialize<'de, E, D>(deserializer: D) -> Result<Option<(u8, E)>, D::Error>
+    where
+        E: DeserializeOwned,
+        D: Deserializer<'de>,
+    {
+        Option::<MidFailure<E>>::deserialize(deserializer)
+            .map(|failure| failure.map(|failure| (failure.mid.0, failure.error)))
+    }
+}

@@ -25,7 +25,7 @@ obdcracker --json fingerprint > fingerprint.json
 ## The envelope
 
 ```json
-{"schema": 1, "command": "vin", "obdcracker": "0.1.0", "result": [{"source": "7E8", "vin": "WAU2MBFC6EN093415"}]}
+{"schema": 2, "command": "vin", "obdcracker": "0.1.0", "result": [{"source": "7E8", "vin": "WAU2MBFC6EN093415"}]}
 ```
 
 | Field | Meaning |
@@ -40,6 +40,11 @@ a changed meaning or text form, a variant removed, or a variant added to an enum
 version before has no value for it). Adding a field to an object doesn't. A reader reads every version up to the one
 it knows, refuses a higher one, and ignores object entries it doesn't know, a `value`/`error` object's included. Old
 versions keep parsing: a change that would break them gets a new version, and the reader keeps the old form.
+
+| Version | What it added |
+|---|---|
+| 1 | the first format |
+| 2 | the `diff` kinds `ObdPendingDtcNew`, `ObdPendingDtcCleared`, `ObdPermanentDtcNew`, `ObdPermanentDtcCleared`, `MilChanged` and `MonitorChanged`, and the `List` values `ObdPendingDtcs`, `ObdPermanentDtcs` and `MonitorStatus`. A `scan` from version 1 lacks the new `ecus[]` fields below, and `diff` compares nothing of them |
 
 ## Field forms
 
@@ -169,7 +174,30 @@ no value is stored (a VIN of 17 dashes).
     "pids_cut_short": null,
     "supported_info": {"value": ["02", "04", "06", "0A"]},
     "ecu_name": {"value": "ECM-EngineControl"},
-    "stored_dtcs": {"value": ["P0401"]}
+    "stored_dtcs": {"value": ["P0401"]},
+    "monitor_status": {"value": {
+      "mil_on": false, "dtc_count": 0, "ignition": "Compression",
+      "monitors": {
+        "misfire": {"supported": true, "complete": true},
+        "fuel_system": {"supported": true, "complete": false},
+        "components": {"supported": true, "complete": true},
+        "nmhc_catalyst": {"supported": false, "complete": true},
+        "nox_scr": {"supported": false, "complete": true},
+        "boost_pressure": {"supported": true, "complete": true},
+        "exhaust_gas_sensor": {"supported": true, "complete": false},
+        "particulate_filter": {"supported": false, "complete": true},
+        "egr_vvt": {"supported": false, "complete": true}
+      }
+    }},
+    "pending_dtcs": {"value": ["P0299"]},
+    "permanent_dtcs": {"error": {"Reply": {"Negative": {"sid": "0A", "nrc": "11"}}}},
+    "freeze_frame": {"value": {
+      "cause": "P0299",
+      "pids": {"value": [{"pid": "05", "value": {"Quantity": {"value": 63.0, "unit": "Celsius"}}}]},
+      "pids_cut_short": null
+    }},
+    "monitor_ids": {"value": ["01", "21"]},
+    "monitor_ids_cut_short": null
   }],
   "modules": [{
     "name": "transmission",
@@ -187,6 +215,29 @@ no value is stored (a VIN of 17 dashes).
   decoded yet. `pids_cut_short` is `{"pid": "20", "error": ...}` when a later bitmap page was missing or garbled, and
   `null` otherwise.
 - `supported_info` is the mode 09 PIDs the ECU supports.
+- `monitor_status` is the MIL, DTC count and readiness monitors from the mode 01 PID 01 reply (the bytes `pids`
+  also holds as `Raw`, so there is no extra request): `ignition` is `"Spark"` or `"Compression"`, and each entry of
+  `monitors` says whether the ECU `supported` the monitor and whether it is `complete`. A monitor the ECU doesn't
+  support is reported as sent, so read `complete` only where `supported` is true. `monitors` holds the monitors of
+  the engine's `ignition` type, named in snake case: `misfire`, `fuel_system` and `components` (the three every
+  engine runs continuously), `egr_vvt`, then for `"Compression"` `nmhc_catalyst`, `nox_scr`, `boost_pressure`,
+  `exhaust_gas_sensor` and `particulate_filter`, and for `"Spark"` `catalyst`, `heated_catalyst`,
+  `evaporative_system`, `secondary_air`, `ac_refrigerant`, `oxygen_sensor` and `oxygen_sensor_heater`. It is `null`
+  when the ECU doesn't support PID 01, and `{"error": ...}` when the reply didn't decode.
+- `pending_dtcs` (mode 07) and `permanent_dtcs` (mode 0A) are DTC lists like `stored_dtcs`. An ECU that refuses a
+  mode as not supported (NRC `11`, written `{"error": {"Reply": {"Negative": {"sid": "0A", "nrc": "11"}}}}`) doesn't
+  have that list, which is not a failed read. An ECU that stays silent is `{"error": "NoReply"}`: a broadcast
+  request for a mode an ECU doesn't support gets no answer, and older ECUs ignore mode 0A.
+- `freeze_frame` is freeze frame 0 (mode 02). `cause` is the DTC that stored it, or `null` for P0000, which means
+  there is no frame and nothing else was read; `pids` and `pids_cut_short` are as for the mode 01 PIDs above, without
+  PID 02. It is `{"error": ...}` when the ECU refused mode 02 or didn't answer.
+- `monitor_ids` is the mode 06 monitor IDs the ECU supports, other than the bitmap IDs (`00`, `20`, ...); the test
+  results behind them aren't read. `monitor_ids_cut_short` is `{"mid": "40", "error": ...}` when a later bitmap was
+  missing or garbled, and `null` otherwise.
+- `monitor_status`, `pending_dtcs`, `permanent_dtcs`, `freeze_frame`, `monitor_ids` and `monitor_ids_cut_short` are
+  new in version 2. A version 1 document lacks them and reads with `null` for each, and `diff` compares nothing of
+  them. In a version 2 document only `monitor_status` (an ECU without PID 01) and `monitor_ids_cut_short` (a list that
+  wasn't cut) are `null`; the others always have a value or an error.
 - `modules[].dtcs` are the DTCs with a fault bit set, as the 6 hex digits of the UDS DTC. The `P0401-00` form the text
   output shows for a module whose `dtc_count.format` is `"00"` or `"04"` is the first two bytes as the J2012 code and
   the third as the failure type.
@@ -276,6 +327,10 @@ that couldn't be read is `{"error": ...}`, as above.
 | `PidsCutShortChanged` | `source`, `old`, `new` (the bitmap PID the PID list was cut at, or `null`) |
 | `EcuNameChanged` | `source`, `old`, `new` (each `{"value": ...}` or `{"error": ...}`) |
 | `ObdDtcNew`, `ObdDtcCleared` | `source`, `dtc` |
+| `ObdPendingDtcNew`, `ObdPendingDtcCleared` | `source`, `dtc` (a mode 07 DTC) |
+| `ObdPermanentDtcNew`, `ObdPermanentDtcCleared` | `source`, `dtc` (a mode 0A DTC) |
+| `MilChanged` | `source`, `old`, `new` (booleans: whether the MIL was on) |
+| `MonitorChanged` | `source`, `monitor` (a monitor name, as in `scan`), `old`, `new` (booleans: whether it was complete) |
 | `VinChanged` | `source`, `old`, `new` |
 | `ModuleAdded`, `ModuleRemoved` | `module` |
 | `AnsweredChanged` | `module`, `old`, `new` (booleans) |
@@ -287,7 +342,7 @@ that couldn't be read is `{"error": ...}`, as above.
 
 `module` is `{"name": ..., "response_id": ...}`. `scope` is `{"kind": "Ecu", "source": ...}` or
 `{"kind": "Module", "name": ..., "response_id": ...}`. `list` is `Calids`, `Cvns`, `ObdPids`, `ObdInfo`, `ObdDtcs`,
-`UdsDtcs` or `Dids`, and `old` and `new` are each the error that list failed with, or `null` if it was read.
+`ObdPendingDtcs`, `ObdPermanentDtcs`, `MonitorStatus`, `UdsDtcs` or `Dids`, and `old` and `new` are each the error that list failed with, or `null` if it was read.
 A kind added later raises the schema version, like any new variant.
 
 ### `dtc`

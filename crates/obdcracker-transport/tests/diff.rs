@@ -2,15 +2,15 @@
 //! that a failed read is never reported as every entry having gone.
 
 use obdcracker_core::obd::Unit;
-use obdcracker_core::obd::{Cvn, Dtc};
-use obdcracker_core::response::Error as ReplyError;
+use obdcracker_core::obd::{Cvn, Dtc, MonitorKind, MonitorStatus, decode_monitor_status};
+use obdcracker_core::response::{Error as ReplyError, NegativeResponse, Nrc};
 use obdcracker_core::uds::{DtcCount, DtcFormat, DtcRecord, DtcStatus, UdsDtc};
 use obdcracker_transport::diff::{self, Change, DuplicateError, Input, List, ModuleId, Scope};
 use obdcracker_transport::fingerprint::{
     Calibration, DidValue, Fingerprint, Identification, ReadError, UdsModule,
 };
 use obdcracker_transport::read_dids::DidsData;
-use obdcracker_transport::scan::{ModuleScan, ObdEcu, PidValue, Scan};
+use obdcracker_transport::scan::{FreezeFrame, ModuleScan, ObdEcu, PidValue, Scan};
 use obdcracker_transport::sweep::Sweep;
 use proptest::prelude::*;
 
@@ -489,7 +489,21 @@ fn obd_ecu(source: u32) -> ObdEcu {
         supported_info: Ok(vec![0x02, 0x04]),
         ecu_name: Ok("ECM-EngineControl".to_owned()),
         stored_dtcs: Ok(vec![Dtc::new(0x0401)]),
+        monitor_status: Some(Ok(status(0x00, 0x2F, 0x28, 0x20))),
+        pending_dtcs: Some(Ok(vec![])),
+        permanent_dtcs: Some(Ok(vec![])),
+        freeze_frame: Some(Ok(FreezeFrame {
+            cause: None,
+            pids: Ok(vec![]),
+            pids_cut_short: None,
+        })),
+        monitor_ids: Some(Ok(vec![0x01, 0x02])),
+        monitor_ids_cut_short: None,
     }
+}
+
+fn status(a: u8, b: u8, c: u8, d: u8) -> MonitorStatus {
+    decode_monitor_status(&[0x41, 0x01, a, b, c, d]).unwrap()
 }
 
 fn module_scan(name: &str, response_id: u32) -> ModuleScan {
@@ -574,10 +588,194 @@ fn the_supported_pids_and_mode_09_pids_and_the_name_are_compared() {
 }
 
 #[test]
+fn pending_and_permanent_dtcs_are_new_or_cleared_like_stored_ones() {
+    let mut old = scan(vec![obd_ecu(0x7E8)], Vec::new());
+    old.ecus[0].pending_dtcs = Some(Ok(vec![Dtc::new(0x0401)]));
+    old.ecus[0].permanent_dtcs = Some(Ok(vec![Dtc::new(0x0420)]));
+    let mut new = old.clone();
+    new.ecus[0].pending_dtcs = Some(Ok(vec![Dtc::new(0x0171)]));
+    new.ecus[0].permanent_dtcs = Some(Ok(vec![Dtc::new(0x0420), Dtc::new(0x0300)]));
+    let changes = diff_scan(&old, &new);
+    assert_eq!(
+        changes,
+        [
+            Change::ObdPendingDtcNew {
+                source: 0x7E8,
+                dtc: Dtc::new(0x0171)
+            },
+            Change::ObdPendingDtcCleared {
+                source: 0x7E8,
+                dtc: Dtc::new(0x0401)
+            },
+            Change::ObdPermanentDtcNew {
+                source: 0x7E8,
+                dtc: Dtc::new(0x0300)
+            },
+        ]
+    );
+    assert_eq!(
+        lines(&changes),
+        [
+            "7E8 pending DTC new: P0171",
+            "7E8 pending DTC cleared: P0401",
+            "7E8 permanent DTC new: P0300",
+        ]
+    );
+    new.ecus[0].permanent_dtcs = Some(Ok(vec![]));
+    assert_eq!(
+        lines(&diff_scan(&old, &new))[2],
+        "7E8 permanent DTC cleared: P0420"
+    );
+}
+
+#[test]
+fn a_pending_or_permanent_list_that_failed_is_one_change_and_not_supported_is_a_failure() {
+    let mut old = scan(vec![obd_ecu(0x7E8)], Vec::new());
+    old.ecus[0].permanent_dtcs = Some(Ok(vec![Dtc::new(0x0420)]));
+    let mut new = old.clone();
+    let not_supported = ReadError::Reply(ReplyError::Negative(NegativeResponse {
+        sid: 0x0A,
+        nrc: Nrc::ServiceNotSupported,
+    }));
+    new.ecus[0].permanent_dtcs = Some(Err(not_supported.clone()));
+    new.ecus[0].pending_dtcs = Some(Err(ReadError::NoReply));
+    assert_eq!(
+        diff_scan(&old, &new),
+        [
+            Change::Unreadable {
+                scope: Scope::Ecu { source: 0x7E8 },
+                list: List::ObdPendingDtcs,
+                old: None,
+                new: Some(ReadError::NoReply),
+            },
+            Change::Unreadable {
+                scope: Scope::Ecu { source: 0x7E8 },
+                list: List::ObdPermanentDtcs,
+                old: None,
+                new: Some(not_supported),
+            },
+        ]
+    );
+    // Failing the same way twice isn't a change.
+    old.ecus[0].pending_dtcs = Some(Err(ReadError::NoReply));
+    new.ecus[0].permanent_dtcs = old.ecus[0].permanent_dtcs.clone();
+    assert_eq!(diff_scan(&old, &new), []);
+}
+
+#[test]
+fn a_read_a_side_never_made_is_not_compared() {
+    // A document from before the read has none of these.
+    let old = scan(vec![obd_ecu(0x7E8)], Vec::new());
+    let mut older = old.clone();
+    older.ecus[0].monitor_status = None;
+    older.ecus[0].pending_dtcs = None;
+    older.ecus[0].permanent_dtcs = None;
+    let mut new = old.clone();
+    new.ecus[0].pending_dtcs = Some(Ok(vec![Dtc::new(0x0171)]));
+    new.ecus[0].permanent_dtcs = Some(Err(ReadError::NoReply));
+    new.ecus[0].monitor_status = Some(Ok(status(0x81, 0x2F, 0x28, 0x20)));
+    assert_eq!(diff_scan(&older, &new), []);
+    assert_eq!(diff_scan(&new, &older), []);
+}
+
+#[test]
+fn the_mil_turning_on_or_off_is_a_change() {
+    let old = scan(vec![obd_ecu(0x7E8)], Vec::new());
+    let mut new = old.clone();
+    new.ecus[0].monitor_status = Some(Ok(status(0x81, 0x2F, 0x28, 0x20)));
+    let changes = diff_scan(&old, &new);
+    assert_eq!(
+        changes,
+        [Change::MilChanged {
+            source: 0x7E8,
+            old: false,
+            new: true
+        }]
+    );
+    assert_eq!(lines(&changes), ["7E8 MIL: off → on"]);
+    assert_eq!(lines(&diff_scan(&new, &old)), ["7E8 MIL: on → off"]);
+}
+
+#[test]
+fn a_monitor_going_complete_or_incomplete_is_a_change_in_bit_order() {
+    // The A7 engine's diesel monitors: boost (D3) and exhaust gas sensor (D5) supported, the
+    // sensor incomplete.
+    let old = scan(vec![obd_ecu(0x7E8)], Vec::new());
+    let mut new = old.clone();
+    // The sensor completes and the boost monitor, supported and complete, doesn't.
+    new.ecus[0].monitor_status = Some(Ok(status(0x00, 0x2F, 0x28, 0x08)));
+    let changes = diff_scan(&old, &new);
+    assert_eq!(
+        lines(&changes),
+        [
+            "7E8 monitor boost pressure: complete → incomplete",
+            "7E8 monitor exhaust gas sensor: incomplete → complete",
+        ]
+    );
+    assert_eq!(
+        changes[0],
+        Change::MonitorChanged {
+            source: 0x7E8,
+            monitor: MonitorKind::BoostPressure,
+            old: true,
+            new: false,
+        }
+    );
+}
+
+#[test]
+fn a_monitor_only_counts_where_both_reads_support_it() {
+    let old = scan(vec![obd_ecu(0x7E8)], Vec::new());
+    let mut new = old.clone();
+    // Nothing supported: the incomplete bits mean nothing then. And a spark engine's monitors
+    // aren't the diesel's: only those both have are compared.
+    new.ecus[0].monitor_status = Some(Ok(status(0x00, 0x2F, 0x00, 0xFF)));
+    assert_eq!(diff_scan(&old, &new), []);
+    new.ecus[0].monitor_status = Some(Ok(status(0x00, 0x27, 0xFF, 0xFF)));
+    assert_eq!(diff_scan(&old, &new), []);
+    // Where the engine type changes, the three common monitors still compare.
+    new.ecus[0].monitor_status = Some(Ok(status(0x00, 0x37, 0xFF, 0xFF)));
+    assert_eq!(
+        lines(&diff_scan(&old, &new)),
+        ["7E8 monitor misfire: complete → incomplete"]
+    );
+}
+
+#[test]
+fn a_status_that_failed_is_one_change() {
+    let old = scan(vec![obd_ecu(0x7E8)], Vec::new());
+    let mut new = old.clone();
+    new.ecus[0].monitor_status = Some(Err(ReadError::NoReply));
+    assert_eq!(
+        diff_scan(&old, &new),
+        [Change::Unreadable {
+            scope: Scope::Ecu { source: 0x7E8 },
+            list: List::MonitorStatus,
+            old: None,
+            new: Some(ReadError::NoReply),
+        }]
+    );
+}
+
+#[test]
+fn freeze_frames_and_mode_06_ids_are_not_compared() {
+    let old = scan(vec![obd_ecu(0x7E8)], Vec::new());
+    let mut new = old.clone();
+    new.ecus[0].freeze_frame = Some(Ok(FreezeFrame {
+        cause: Some(Dtc::new(0x0299)),
+        pids: Ok(vec![(0x04, Ok(PidValue::Raw(vec![1])))]),
+        pids_cut_short: Some((0x20, ReadError::NoReply)),
+    }));
+    new.ecus[0].monitor_ids = Some(Ok(vec![0x01, 0x21]));
+    new.ecus[0].monitor_ids_cut_short = Some((0x40, ReadError::NoReply));
+    assert_eq!(diff_scan(&old, &new), []);
+}
+
+#[test]
 fn stored_emissions_dtcs_are_new_or_cleared() {
     let old = scan(vec![obd_ecu(0x7E8)], Vec::new());
     let mut new = old.clone();
-    new.ecus[0].stored_dtcs = Ok(vec![Dtc::new(0x0171), Dtc::new(0x0171), Dtc::new(0x0300)]);
+    new.ecus[0].stored_dtcs = Ok(vec![Dtc::new(0x0171), Dtc::new(0x0300)]);
     let changes = diff_scan(&old, &new);
     assert_eq!(
         changes,
@@ -882,6 +1080,57 @@ mod json {
     }
 
     #[test]
+    fn the_readiness_and_dtc_list_changes_are_written_as_documented() {
+        let source = 0x7E8;
+        let dtc = Dtc::new(0x0299);
+        let changes = [
+            Change::ObdPendingDtcNew { source, dtc },
+            Change::ObdPendingDtcCleared { source, dtc },
+            Change::ObdPermanentDtcNew { source, dtc },
+            Change::ObdPermanentDtcCleared { source, dtc },
+            Change::MilChanged {
+                source,
+                old: false,
+                new: true,
+            },
+            Change::MonitorChanged {
+                source,
+                monitor: MonitorKind::ExhaustGasSensor,
+                old: false,
+                new: true,
+            },
+            Change::Unreadable {
+                scope: Scope::Ecu { source },
+                list: List::MonitorStatus,
+                old: None,
+                new: Some(ReadError::NoReply),
+            },
+            Change::Unreadable {
+                scope: Scope::Ecu { source },
+                list: List::ObdPermanentDtcs,
+                old: None,
+                new: Some(ReadError::NoReply),
+            },
+        ];
+        assert_eq!(
+            written(&changes),
+            json!([
+                {"change": "ObdPendingDtcNew", "source": "7E8", "dtc": "P0299"},
+                {"change": "ObdPendingDtcCleared", "source": "7E8", "dtc": "P0299"},
+                {"change": "ObdPermanentDtcNew", "source": "7E8", "dtc": "P0299"},
+                {"change": "ObdPermanentDtcCleared", "source": "7E8", "dtc": "P0299"},
+                {"change": "MilChanged", "source": "7E8", "old": false, "new": true},
+                {"change": "MonitorChanged", "source": "7E8", "monitor": "exhaust_gas_sensor",
+                 "old": false, "new": true},
+                {"change": "Unreadable", "scope": {"kind": "Ecu", "source": "7E8"},
+                 "list": "MonitorStatus", "old": null, "new": "NoReply"},
+                {"change": "Unreadable", "scope": {"kind": "Ecu", "source": "7E8"},
+                 "list": "ObdPermanentDtcs", "old": null, "new": "NoReply"},
+            ])
+        );
+    }
+
+    #[test]
     fn a_did_on_one_side_only_is_null_and_a_failed_list_names_its_scope() {
         let changes = [
             Change::DidChanged {
@@ -1133,6 +1382,33 @@ fn every_ecu_change_has_a_line() {
             source,
             dtc: Dtc::new(0x0401),
         },
+        Change::ObdPendingDtcNew {
+            source,
+            dtc: Dtc::new(0x0401),
+        },
+        Change::ObdPendingDtcCleared {
+            source,
+            dtc: Dtc::new(0x0401),
+        },
+        Change::ObdPermanentDtcNew {
+            source,
+            dtc: Dtc::new(0x0401),
+        },
+        Change::ObdPermanentDtcCleared {
+            source,
+            dtc: Dtc::new(0x0401),
+        },
+        Change::MilChanged {
+            source,
+            old: false,
+            new: true,
+        },
+        Change::MonitorChanged {
+            source,
+            monitor: MonitorKind::Catalyst,
+            old: false,
+            new: true,
+        },
         Change::VinChanged {
             source,
             old: "a".to_owned(),
@@ -1287,11 +1563,27 @@ fn a_scan_that_repeats_an_ecu_module_did_or_dtc_is_refused() {
     did.modules[0].dids.push(text(0xF187, "other"));
     let mut dtc = clean.clone();
     dtc.modules[0].dtcs = Ok(vec![record(0x16A0, 8), record(0x16A0, 0)]);
+    let dtc_twice = || Ok(vec![Dtc::new(0x0171), Dtc::new(0x0171)]);
+    let mut stored = clean.clone();
+    stored.ecus[0].stored_dtcs = dtc_twice();
+    let mut pid = clean.clone();
+    pid.ecus[0].pids = Ok(vec![(0x05, Ok(PidValue::Raw(vec![1]))); 2]);
+    let mut info = clean.clone();
+    info.ecus[0].supported_info = Ok(vec![0x02, 0x02]);
+    let mut pending = clean.clone();
+    pending.ecus[0].pending_dtcs = Some(dtc_twice());
+    let mut permanent = clean.clone();
+    permanent.ecus[0].permanent_dtcs = Some(dtc_twice());
     for (bad, entry) in [
         (&ecu, "ECU 7E8"),
         (&module, "module engine (0x7E8)"),
         (&did, "DID F187 of engine (0x7E8)"),
         (&dtc, "DTC 0016A0 of engine (0x7E8)"),
+        (&stored, "stored DTC P0171 of ECU 7E8"),
+        (&pid, "PID 05 of ECU 7E8"),
+        (&info, "mode 09 PID 02 of ECU 7E8"),
+        (&pending, "pending DTC P0171 of ECU 7E8"),
+        (&permanent, "permanent DTC P0171 of ECU 7E8"),
     ] {
         let expected = |input| DuplicateError {
             input,
@@ -1309,7 +1601,16 @@ fn a_scan_that_repeats_an_ecu_module_did_or_dtc_is_refused() {
     // A DTC list that failed has nothing to repeat
     let mut failed = clean.clone();
     failed.modules[0].dtcs = Err(ReadError::NoReply);
+    failed.ecus[0].stored_dtcs = Err(ReadError::NoReply);
+    failed.ecus[0].pids = Err(ReadError::NoReply);
+    failed.ecus[0].pending_dtcs = Some(Err(ReadError::NoReply));
     assert_eq!(diff_scan(&failed, &failed), []);
+    // A repeat is refused even when the other document never made the read
+    let mut unread = clean.clone();
+    unread.ecus[0].pending_dtcs = None;
+    unread.ecus[0].permanent_dtcs = None;
+    assert!(diff::diff_scan(&pending, &unread).is_err());
+    assert!(diff::diff_scan(&unread, &permanent).is_err());
 }
 
 #[test]

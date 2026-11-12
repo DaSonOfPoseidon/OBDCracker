@@ -184,6 +184,19 @@ pub enum ReadError {
     },
 }
 
+impl ReadError {
+    /// Whether the module refused the service as not supported (NRC 0x11), which says the module
+    /// doesn't have what was asked for, unlike a timeout or any other refusal.
+    #[must_use]
+    pub fn is_not_supported(&self) -> bool {
+        matches!(
+            self,
+            Self::Reply(response::Error::Negative(refusal))
+                if refusal.nrc == response::Nrc::ServiceNotSupported
+        )
+    }
+}
+
 impl fmt::Display for ReadError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
