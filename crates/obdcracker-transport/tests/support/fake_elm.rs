@@ -75,6 +75,24 @@ pub struct FakeElm {
     pub monitor_startup: Duration,
     // When the monitor started by the last `STM` or `ATMA` prints from.
     monitor_from: Instant,
+    /// An STN without batched commands (firmware older than FRPM rev. F): `STBC` answers `?`.
+    pub stbc_unsupported: bool,
+    /// What `STBC` prints instead of `OK` or `?`, as an adapter that says something else would.
+    pub stbc_says: Option<String>,
+    /// A batch whose last element is `STM` loses it: the STN prints its prompt when the first
+    /// element's listen ends and never monitors, as if the batch had been aborted.
+    pub batch_drops_monitor: bool,
+    /// Print the `|` that precedes the second element's output in a batch (STN FRPM, sections
+    /// 8.15 and 16.2.2). Off, the STN prints none.
+    pub batch_pipe: bool,
+    // The line being run is a batch whose last element, `STM`, starts when the first element's
+    // listen ends.
+    batch_pending: bool,
+    // ...but what follows the request isn't `STM`: it fails, as a command the adapter doesn't
+    // know does, once the request is done.
+    batch_bad_tail: bool,
+    // The next line printed starts with the pipe that follows the first element's output.
+    pipe_next: bool,
     // Frames waiting for the adapter to start monitoring (`delay_from_monitor`).
     held: Vec<(Duration, u32, Vec<u8>)>,
     // Frames on the bus that haven't reached the adapter yet.
@@ -187,6 +205,9 @@ pub struct Settings {
     /// With `AT R0` it returns to its prompt at once, and a frame the module sends then is lost
     /// (datasheet p. 23).
     pub responses: bool,
+    /// Whether the STN parses batched commands (`STBC 1`, STN FRPM, sections 8.15 and 16.0): a
+    /// line of elements separated by `|` runs from left to right, under one prompt.
+    pub batching: bool,
 }
 
 impl Settings {
@@ -239,6 +260,7 @@ impl Default for Settings {
             variable_dlc: false,
             monitor_ack: false,
             responses: true,
+            batching: false,
         }
     }
 }
@@ -270,6 +292,13 @@ impl FakeElm {
             delay_from_monitor: false,
             monitor_startup: Duration::ZERO,
             monitor_from: Instant::now(),
+            stbc_unsupported: false,
+            stbc_says: None,
+            batch_drops_monitor: false,
+            batch_pipe: true,
+            batch_pending: false,
+            batch_bad_tail: false,
+            pipe_next: false,
             held: Vec::new(),
             bus: Vec::new(),
             lost_frames: Vec::new(),
@@ -379,6 +408,9 @@ impl FakeElm {
     }
 
     fn print(&mut self, line: &str) {
+        if std::mem::take(&mut self.pipe_next) && line != "STOPPED" {
+            self.output.push_back(b'|');
+        }
         self.output.extend(line.bytes());
         self.output.push_back(b'\r');
         if self.settings.linefeeds {
@@ -386,7 +418,10 @@ impl FakeElm {
         }
     }
 
+    // The adapter is done with what it was running, a batch included: nothing of one goes on.
     fn prompt(&mut self) {
+        self.batch_pending = false;
+        self.pipe_next = false;
         self.output.push_back(b'\r');
         self.output.push_back(b'>');
         self.output.extend(std::mem::take(&mut self.after_prompt));
@@ -433,6 +468,24 @@ impl FakeElm {
         }
         if let Some(at) = line.strip_prefix("AT") {
             self.at(at);
+        } else if line.contains('|') {
+            self.batch(&line);
+        } else if let Some(mode) = line
+            .strip_prefix("STBC")
+            .filter(|mode| !mode.starts_with("OF"))
+        {
+            // An STN's batched commands switch (STN FRPM, section 8.15): `OK` for 0 and 1, and `?`
+            // from an adapter without them, such as a plain ELM327.
+            let ok = self.sti.is_some() && !self.stbc_unsupported && matches!(mode, "0" | "1");
+            if let Some(says) = self.stbc_says.clone() {
+                self.print(&says);
+            } else {
+                if ok {
+                    self.settings.batching = mode == "1";
+                }
+                self.print(if ok { "OK" } else { "?" });
+            }
+            self.prompt();
         } else if line == "STM" {
             // Monitor with the filters as set; an STN's command (STN FRPM, section 8.9), unknown
             // to a plain ELM327.
@@ -724,7 +777,7 @@ impl FakeElm {
             return;
         }
         if !self.settings.responses {
-            self.prompt();
+            self.end_listen();
             return;
         }
         self.answer(header, &bytes, false);
@@ -845,11 +898,11 @@ impl FakeElm {
         self.schedule_late_frames(header, &bytes);
         if one_frame && printed > 0 {
             // The listen ended with its first frame.
-            self.prompt();
+            self.end_listen();
         } else if !logical && self.listen_raw && !self.settings.caf {
             self.listening = true;
         } else if !self.hang_after_request {
-            self.prompt();
+            self.end_listen();
         }
     }
 
@@ -871,10 +924,51 @@ impl FakeElm {
         }
     }
 
+    // A batch of a request and `STM` (STN FRPM, section 16): the request runs as it would alone,
+    // and `STM` starts when its listen ends, with no host in between (`end_listen`).
+    fn batch(&mut self, line: &str) {
+        let mut elements = line.split('|');
+        let request = elements.next().unwrap_or_default();
+        if !self.settings.batching || self.sti.is_none() || parse_hex(request).is_none() {
+            self.print("?");
+            self.prompt();
+            return;
+        }
+        // Left to right: the request goes out even if what follows it is refused.
+        self.batch_bad_tail = !(elements.next() == Some("STM") && elements.next().is_none());
+        self.batch_pending = true;
+        self.request(request);
+    }
+
+    // The end of a request's listen: its prompt, or in a batch the next element, `STM`, which
+    // starts at once whatever `monitor_startup` is: the STN's own switch, not the host's.
+    fn end_listen(&mut self) {
+        if !std::mem::take(&mut self.batch_pending) {
+            self.prompt();
+            return;
+        }
+        if std::mem::take(&mut self.batch_bad_tail) {
+            self.print("?");
+            self.prompt();
+            return;
+        }
+        if self.batch_drops_monitor {
+            self.prompt();
+            return;
+        }
+        self.pipe_next = self.batch_pipe;
+        self.monitor_all = false;
+        self.start_monitoring_after(Duration::ZERO);
+    }
+
     // Starts monitoring, which puts the frames held for it on the bus.
     fn start_monitoring(&mut self) {
+        self.start_monitoring_after(self.monitor_startup);
+    }
+
+    fn start_monitoring_after(&mut self, startup: Duration) {
         self.monitoring = true;
-        let now = Instant::now() + self.monitor_startup;
+        let now = Instant::now() + startup;
         self.monitor_from = now;
         let held = std::mem::take(&mut self.held);
         self.bus.extend(
@@ -934,7 +1028,7 @@ impl FakeElm {
                 }
                 if self.listening && self.listen_one_frame {
                     self.listening = false;
-                    self.prompt();
+                    self.end_listen();
                 }
             } else {
                 self.lost_frames.push((id, data));

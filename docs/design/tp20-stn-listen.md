@@ -1,7 +1,7 @@
 # Design: hearing a TP2.0 answer that starts right after the module's ACK on an STN
 
-Status: **proposed (#333), not built.** Phase 1 of the fix: the research and a failing replay of car session 11. The
-driver isn't changed yet.
+Status: **method approved for building (#333), built, not yet run on the car.** The research and the failing replay
+of car session 11 came first; the fix is in the same PR. Section 5 is what the car still has to confirm (#334).
 
 On an OBDLink (STN2232) a TP2.0 module ACKs the tester's data frame and starts its multi-frame answer a few
 milliseconds later. The STN ends its listen with its prompt after the ACK, the driver then writes `STM`, and the
@@ -12,9 +12,10 @@ frame, in all three passes.
 
 ## What you are approving
 
-1. **The method (section 3):** on an STN, write a channel frame and `STM` as one batched line (`<frame digits>|STM`,
-   OBDLink Batched Commands, `STBC 1`), so the STN starts monitoring itself when the frame's listen ends, with no
-   round trip to the host in between.
+1. **The method (section 3):** on an STN, write a channel data frame or ACK and `STM` as one batched line
+   (`<frame digits>|STM`, OBDLink Batched Commands, `STBC 1`), so the STN starts monitoring itself when the frame's
+   listen ends, with no round trip to the host in between. `STBC 1` is probed when raw mode starts and only an exact
+   `OK` counts.
 2. **A fallback order (section 3)** if session 12 shows the batch doesn't work on the car's firmware.
 3. **What isn't changed:** the frame's bytes, the policy and audit path, and a plain ELM327's byte stream (section 4).
 4. **What session 12 (#334) must check** before the fix is called done (section 5).
@@ -224,31 +225,48 @@ sends again. **Rejected: no source says the module would.**
 
 ```
                                   one time, with the other raw-mode switches
-STBC 1                            <OK        batching on (FRPM 8.15), written like the other switches
-STCMM 1, ...                      <OK        as today
+STBC1                             <OK        batching on (FRPM 8.15); only an exact OK counts
 
-                                  every frame on an open channel (Target::Tp20Channel), as one line
-12000322F187|STM                  <12000322F187|STM   echo, checked before the carriage return
-                                  <300 B3 |300 22 .. |300 23 .. |300 14 47 20   frames, the monitor's after a `|`
+                                  a data frame or an ACK on an open channel, as one line
+1000021A9B|STM                    <1000021A9B|STM      echo of the digits, checked, then of |STM, checked, then CR
+                                  <300 B1 |300 22 .. |300 23 .. |300 14 47 20   frames, the monitor's after a `|`
 ```
 
-- The line is the approved payload's digits, then the constant `|STM`. Nothing else is appended, and the digits are the
-  ones sent today (`hex(payload)` without spaces), so the frame on the bus doesn't change.
-- **When it's used:** `Target::Tp20Channel` frames on an STN that took `STBC 1` and has shown it echoes each character
-  (as `start_monitor` requires today). A setup and the rest of the adapter's requests aren't batched. A disconnect (`A8`) is
-  a channel frame whose reply is one frame, heard by its own listen as today, and nothing follows it, so it isn't
-  batched either.
-- **Batching is switched on with the raw-mode switches and off with them** (`STBC 0` goes in `RAW_OFF`'s place on an
-  STN), so an ISO-TP request never runs with `?` answers to the string commands. It's written like the other mode
-  switches: echo checked before the carriage return, and two or more non-hex letters (`STBC` has `S`, `T`, `B`, `C`: `B`
-  and `C` are hex, so `S` and `T` are the two), so one flipped bit can't make a bus request. **Unverified in the car; a
-  test flips every bit, as for the other switches.**
-- **Today's re-arm stays.** If the STN answers `?` to `STBC 1`, nothing is batched and the driver does what it does
-  now (a prompt in a listen, then `STM`), so `recv`'s comment about the lost frames stays true for that case and is
-  reworded, not removed.
-- **If a prompt arrives with the monitor not running** (the STN dropped the batch's tail: an error before `STM`, or
-  `?`), the driver falls back to its re-arm for that frame and logs it, rather than failing: no frame was lost that the
-  re-arm wouldn't also lose.
+- **The probe.** Entering raw mode on an STN sends `STBC 1`, written like the other switches (echo checked before the
+  carriage return; `S` and `T` are non-hex, so one flipped bit can't make a bus request). An exact `OK` turns batching
+  on. Any other answer (`?`, nothing that parses as an answer, anything else) keeps today's prompt-then-`STM` path
+  exactly, and `STBC` isn't sent again that session. Leaving raw mode sends `STBC 0` if it was turned on and checks
+  its `OK` the same way (anything else fails the adapter closed). A plain ELM327 is never sent `STBC`. Both commands
+  and their answers are logged as commands. If the adapter doesn't answer the probe at all, the driver fails it closed
+  as it does for any command, since the same adapter can't take the next one either.
+- **Which frames.** A data frame (opcodes `0x0` to `0x3`) and an ACK (`0xB`). A data frame is answered by the module's
+  ACK and then its answer. An ACK of a block's last frame (`0x0`, more to follow) is answered by the next block, which
+  is the same gap, and the driver can't tell it from the ACK of a last packet, so every ACK is batched; the monitor
+  after the last one runs until the next frame stops it, as the re-arm's monitor does. The parameters (`A0`), the
+  channel test (`A3`) and the disconnect (`A8`) are answered by one frame, which their own listen prints (a keep-alive
+  sent while an answer is pending is answered by one `A1` too), so they aren't batched. The setup and every other
+  request are as before.
+- **The line.** The approved payload's digits, then the constant `|STM`. The digits are the ones sent today, so the
+  frame on the bus doesn't change. They are echoed and checked *before* `|STM` is written, then `|STM` is, then the
+  carriage return: with the pipe in the line, `XX` after a misheard digit would end only the last element, and the
+  damaged digits would run as an element of their own (section 4).
+- **After the carriage return** the driver is monitoring and logs the `STM` as a command, as for a monitor it starts
+  itself. The adapter prints the frame's own replies, then, with the pipe in front, the monitor's frames, and no prompt
+  until the driver stops it. The pipe is accepted once, as a prefix of the first line after the frame's, or alone on a
+  line, only while a batched line is in progress; a `|` anywhere else is unexpected output. The manual's examples put it
+  before each later element's first output line (8.15), which is the one place taken.
+- **A prompt before the pipe is seen** means the batch ended without its monitor (an error before `STM`, or it was
+  dropped): the driver starts `STM` itself, as it does for an adapter without batching, and the frame that lost nothing
+  more than the re-arm would. A prompt after the pipe is the monitor stopping on its own, a failure, as for any monitor.
+- **An `X` while the frame's listen is still running** (the module's ACK is slow, and the next frame goes out) has no
+  documented effect on a batch. The manual says an interrupted monitor may abort "the remainder of the batch" (16.1).
+  The driver assumes the worst, that `X` ends the whole batch with no `STM`, and reads `STOPPED` and the prompt as
+  `interrupt` does for a listen: the adapter is idle, the flags are cleared, and the next frame is a new batch. If the
+  STN instead goes on to `STM`, no prompt comes and `interrupt` fails the adapter closed after `COMMAND_WAIT`, as for any
+  adapter that doesn't stop. The fake models the worst case (`an_interrupt_before_the_batch_reaches_its_monitor_...`),
+  and session 12 shows which it is.
+- **Today's re-arm stays** for an STN that refuses `STBC` and for a plain ELM327, so `recv`'s comment about the lost
+  frames is reworded to say which adapters still have the gap, not removed.
 
 **Fallback, if session 12 finds no usable batch** (`STBC` refused, or a raw frame isn't a batch element, or the monitor
 starts late): (d) for the data frames, with `ATR0` set when the channel's first data frame goes out and `ATR1` before
@@ -260,31 +278,48 @@ smaller wins, and the design should be reopened before building either.
 - **No new frame and no new send path.** The batch is built inside `Elm::send` from an `Approved`, as the `STPX` line is
   today. A frame still comes only from the policy (`approve_tp20_request`, `approve_tp20_ack`, and the rest, unchanged),
   and a transport still takes only `&Approved`. The suffix is a constant, so a caller can't put anything after the
-  frame.
-- **The frame's bytes don't change**, and the audit log still logs the request before it is sent. The `STM` it starts
-  is logged as a command, as `start_monitor` does now, and every frame the monitor prints is logged like any reply.
-- **Every bit-flip is covered by the echo check:** the line is echoed as typed and compared before the carriage
-  return, and a mismatch ends it with `XX\r` ([`elm327.md`](../elm327.md#safety)). A flip in the frame's digits is the
-  case that exists today. A flip in `|STM` leaves non-hex letters in the line, so it can't be a hex request. **A test
-  flips every bit of the whole line**, the carriage return included.
+  frame, and only a data frame or an ACK on a channel gets it.
+- **The frame's bytes don't change**, and the audit log still logs the request (its payload) before it is sent. The
+  `STM` it starts is logged as a command when the line is written, as `start_monitor` does now, the `STBC` probe and
+  its answer are logged as commands, and every frame the monitor prints is logged like any reply.
+- **Every bit-flip is covered by the echo check, with one more case than before.** The digits are echoed and compared
+  before `|STM` is written, and `|STM` before the carriage return; a mismatch ends the line with `XX\r`
+  ([`elm327.md`](../elm327.md#safety)).
+  - A flip in the digits is ended into `<damaged>XX`, which isn't hex: nothing is sent, as today.
+  - A flip in `|STM` ends `<checked digits>|<damaged>XX`, and the checked digits are a complete first element. The
+    adapter runs it: **the approved frame goes out once**, the second element is refused with `?`, and the driver stops.
+    The same happens when a flip turns the `M` into a carriage return (`0x4D ^ 0x40`). It is never another frame: the
+    digits were checked first. A test flips every bit of the whole line and asserts exactly this (`on_bus` is empty or
+    the approved frame).
+  - The carriage return's own flip leaves the line held, unrun. The next write is `X`, which gets no `STOPPED`, and
+    the driver fails the adapter closed (the class in [`pitfalls.md`](../pitfalls.md) for every line).
+  - Checking the whole line before the pipe was the first draft's mistake: `XX` would have ended only the last
+    element, leaving damaged digits as a first element the adapter sent. It is a new entry in `pitfalls.md`.
 - **ECU replies are still untrusted.** The sequence check, the frame limit and the ID filter are unchanged: the fix
   puts frames in front of the session, it doesn't loosen what the session does with them.
 
 ## 5. What session 12 (#334) must check
 
-1. `STBC 1` answers `OK` on the OBDLink EX (STN2232 v5.12.4), and `STBC 0` puts it back. If it answers `?`, record the
-   firmware ID (`STI`) and stop: the fallback applies.
-2. A batched channel frame on an open channel, first with a harmless one (`A3|STM`, a channel test), then with each of
-   the reads: the audit log shows the frame, `STM`, and every frame the module sent, with timestamps. Look for:
-   - the `|` where it's printed, and any prompt before the first monitored frame (none is expected);
-   - `22 F1 87` on 52 and on 20 read whole (`62 F1 87` and 11 bytes on 52), in all three passes, with no framing error;
-   - the time from the module's ACK to its first data frame and to the frame after it, which the session 11 log couldn't
-     give. That decides whether any gap is left and whether a ms margin matters.
-3. The same channel after an `X`: a frame sent while the batch's listen is still running (a slow module) writes `X`
-   and reads `STOPPED` and the prompt, with `STM` not started behind it, and then the next frame is batched.
-4. A module that never answers: one timeout, the monitor still up, no frame written.
-5. No `CAN ERROR` and no repeated frame: the monitor still acknowledges (`STCMM 1`, #301).
-6. The plain-ELM327 path isn't reachable on this car (the OBDLink is an STN): the test for it is the exact byte stream in
+1. **Does the OBDLink EX (STN2232 v5.12.4) have `STBC`?** `STBC 1` answers `OK`, and `STBC 0` puts it back. If it answers
+   `?`, record the firmware ID (`STI`) and stop: the fallback applies (the driver already does what it did before).
+2. **Is a raw `CAF0` frame a valid batch element?** A batched channel frame on an open channel, first with a harmless
+   one (a channel test is never batched by the driver, so use a data frame `10 89`), then with each read: the audit log
+   shows the frame, the `STM` and every frame the module sent, with timestamps. The module has to ACK the frame
+   (`B1`): that shows the frame was transmitted, not dropped for the batch.
+3. **Where does the `|` land?** On the first monitored line (`|300 22 ..`), on a line of its own, or not at all. The driver
+   takes it once in the first two places and tolerates the third; a line the log shows with it anywhere else is the thing
+   to report.
+4. **What does `X` do to a batch?** Send the next frame while the module's ACK is still pending (a slow module, or the
+   `A3` right after a data frame): does the adapter print `STOPPED` and its prompt with no monitor (what the fake models), or
+   does it go on to `STM` (the driver then fails closed after 2 s)?
+5. **How fast does the STN go from its listen to `STM`?** The time from the module's ACK to its first data frame and to
+   the frames after it, which the session 11 log couldn't give. `22 F1 87` on 52 and on 20 read whole (`62 F1 87` and
+   11 bytes on 52), in all three passes, with no framing error and nothing in `lost`. If a frame is still missing, this
+   is the number that says how far the STN's own switch is from instant.
+6. **No `CAN ERROR`, no repeated frame:** the monitor still acknowledges (`STCMM 1`, #301).
+7. **A module that never answers:** one timeout, the monitor still up, no frame written.
+8. **Raw mode ends with `STBC 0` and `OK`**, and the next ISO-TP request is read as before.
+9. The plain-ELM327 path isn't reachable on this car (the OBDLink is an STN): the test for it is the exact byte stream in
    the fake, and `adapters.md` keeps saying the timing on a real module is rechecked.
 
 ## Open questions
@@ -296,20 +331,26 @@ smaller wins, and the design should be reopened before building either.
 4. **Whether `lost_frames` is the real behaviour** (an acknowledged frame dropped by the STN), or the frames are never
    received. The same fix applies, but the fake's wording depends on it.
 
-## The repro, and what it does and doesn't show
+## The tests, and what they do and don't show
 
-`tests/elm.rs` has two tests, one per module, replaying the session 11 exchange: setup, parameters, `10 89`, `1A 9B`,
-`22 F1 87`. They are `#[ignore = "fails until #333"]`. Run them with `--include-ignored`: both fail today with the
-car's own error (`Framing([14, 47, 20])` on 52, `Framing([23, 30, 39, ...])` on 20), and both pass with
-`FakeElm::monitor_startup` set to zero (the monitor starting at once), which is how to tell the failure is the window
-and not the replay.
+`tests/elm.rs` replays the session 11 exchange for each module: setup, parameters, `10 89`, `1A 9B`, `22 F1 87`
+(`..._heard_whole_module_52` and `..._module_20`). They failed before the fix with the car's own error
+(`Framing([14, 47, 20])` on 52, `Framing([23, 30, 39, ...])` on 20), and pass with the batch. They also passed with
+`FakeElm::monitor_startup` at zero before it, which is how to tell the failure was the window and not the replay.
+`with_batching_refused_the_old_gap_remains` runs the same replay on an STN whose `STBC` answers `?` and shows the old
+gap on record (the framing error again).
 
 - The fake gets `monitor_startup`: how long after its command line `STM` or `ATMA` takes to print. A frame that reaches
   the adapter before then goes to `lost_frames`. It is zero by default, so the tests that time the module's frames from
-  the monitor's start (`delay_from_monitor`, #297) are unchanged, and the repro sets 45 ms.
+  the monitor's start (`delay_from_monitor`, #297) are unchanged, and the replays set 45 ms. A batch's `STM` starts at
+  once, as the STN's own switch (`stbc` and `batch_*` knobs: `stbc_unsupported`, `stbc_says`, `batch_drops_monitor`,
+  `batch_pipe`).
 - The module's frames are scheduled from its own ACK, 60 ms after the tester's frame, and not from `STM`. That is the
   difference from `a_tp20_answer_right_after_the_ack_is_heard_and_acked`, which passes because it counts from `STM` and
-  so can't lose a frame while the driver re-arms (a new entry in [`pitfalls.md`](../pitfalls.md) comes with the fix).
+  so can't lose a frame while the driver re-arms ([`pitfalls.md`](../pitfalls.md)).
 - The times are wider than the car's (45 ms against about 16 to 20; the first lost frames 10 and 20 ms after the ACK,
   the heard one 100 ms) so a loaded test thread can't move a frame across the monitor's start. They replay what the
-  car showed, not its exact timing, and the part number's first bytes are invented.
+  car showed, not its exact timing, and the part number's first bytes are invented. With batching the replays no longer
+  depend on that margin, since the monitor starts with the frame's listen.
+- The fake can't say how fast a real STN goes from its listen to `STM`; it makes it instant. Section 5, item 5, is what
+  measures it.
