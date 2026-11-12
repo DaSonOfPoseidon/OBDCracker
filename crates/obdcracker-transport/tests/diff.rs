@@ -2,7 +2,7 @@
 //! that a failed read is never reported as every entry having gone.
 
 use obdcracker_core::obd::Unit;
-use obdcracker_core::obd::{Cvn, Dtc};
+use obdcracker_core::obd::{Cvn, Dtc, MonitorStatus, decode_monitor_status};
 use obdcracker_core::response::Error as ReplyError;
 use obdcracker_core::uds::{DtcCount, DtcFormat, DtcRecord, DtcStatus, UdsDtc};
 use obdcracker_transport::diff::{self, Change, DuplicateError, Input, List, ModuleId, Scope};
@@ -10,7 +10,7 @@ use obdcracker_transport::fingerprint::{
     Calibration, DidValue, Fingerprint, Identification, ReadError, UdsModule,
 };
 use obdcracker_transport::read_dids::DidsData;
-use obdcracker_transport::scan::{ModuleScan, ObdEcu, PidValue, Scan};
+use obdcracker_transport::scan::{FreezeFrame, ModuleScan, ObdEcu, PidValue, Scan};
 use obdcracker_transport::sweep::Sweep;
 use proptest::prelude::*;
 
@@ -489,7 +489,21 @@ fn obd_ecu(source: u32) -> ObdEcu {
         supported_info: Ok(vec![0x02, 0x04]),
         ecu_name: Ok("ECM-EngineControl".to_owned()),
         stored_dtcs: Ok(vec![Dtc::new(0x0401)]),
+        monitor_status: Some(Ok(status(0x00, 0x2F, 0x28, 0x20))),
+        pending_dtcs: Some(Ok(vec![])),
+        permanent_dtcs: Some(Ok(vec![])),
+        freeze_frame: Some(Ok(FreezeFrame {
+            cause: None,
+            pids: Ok(vec![]),
+            pids_cut_short: None,
+        })),
+        monitor_ids: Some(Ok(vec![0x01, 0x02])),
+        monitor_ids_cut_short: None,
     }
+}
+
+fn status(a: u8, b: u8, c: u8, d: u8) -> MonitorStatus {
+    decode_monitor_status(&[0x41, 0x01, a, b, c, d]).unwrap()
 }
 
 fn module_scan(name: &str, response_id: u32) -> ModuleScan {

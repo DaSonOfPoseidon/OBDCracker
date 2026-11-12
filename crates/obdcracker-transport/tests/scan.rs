@@ -509,6 +509,10 @@ fn reads_obd_data_then_each_modules_dids_and_dtcs() {
         "7DF 09 00",
         "7DF 09 0A",
         "7DF 03",
+        "7DF 07",
+        "7DF 0A",
+        "7DF 02 02 00",
+        "7DF 06 00",
     ]
     .map(str::to_owned)
     .to_vec();
@@ -534,6 +538,12 @@ fn reads_obd_data_then_each_modules_dids_and_dtcs() {
                 supported_info: Ok(vec![0x02, 0x04, 0x06, 0x0A]),
                 ecu_name: Ok("ECM-EngineControl".to_owned()),
                 stored_dtcs: Ok(vec![Dtc::new(0x0299)]),
+                monitor_status: None,
+                pending_dtcs: Some(Err(ReadError::NoReply)),
+                permanent_dtcs: Some(Err(ReadError::NoReply)),
+                freeze_frame: Some(Err(ReadError::NoReply)),
+                monitor_ids: Some(Err(ReadError::NoReply)),
+                monitor_ids_cut_short: None,
             },
             ObdEcu {
                 source: 0x7E9,
@@ -542,6 +552,12 @@ fn reads_obd_data_then_each_modules_dids_and_dtcs() {
                 supported_info: Err(ReadError::NoReply),
                 ecu_name: Err(ReadError::NoReply),
                 stored_dtcs: Ok(vec![]),
+                monitor_status: None,
+                pending_dtcs: Some(Err(ReadError::NoReply)),
+                permanent_dtcs: Some(Err(ReadError::NoReply)),
+                freeze_frame: Some(Err(ReadError::NoReply)),
+                monitor_ids: Some(Err(ReadError::NoReply)),
+                monitor_ids_cut_short: None,
             },
         ]
     );

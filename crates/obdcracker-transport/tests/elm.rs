@@ -5444,6 +5444,13 @@ mod paced_reads {
                 Dtc::new(0x0200 | tag),
                 Dtc::new(0x0300 | tag),
             ]),
+            // The fleet answers none of the later modes.
+            monitor_status: None,
+            pending_dtcs: Some(Err(ReadError::NoReply)),
+            permanent_dtcs: Some(Err(ReadError::NoReply)),
+            freeze_frame: Some(Err(ReadError::NoReply)),
+            monitor_ids: Some(Err(ReadError::NoReply)),
+            monitor_ids_cut_short: None,
         }
     }
 
@@ -5474,6 +5481,9 @@ mod paced_reads {
         let mut expected = broadcasts(&[&[0x01, 0x00], &[0x01, 0x0C], &[0x09, 0x00]]);
         expected.extend(physical_reads(&[0x09, 0x0A], 8));
         expected.extend(physical_reads(&[0x03], 8));
+        expected.extend(physical_reads(&[0x07], 8));
+        expected.extend(physical_reads(&[0x0A], 8));
+        expected.extend(broadcasts(&[&[0x02, 0x02, 0x00], &[0x06, 0x00]]));
         assert_eq!(sent(&elm), expected);
         assert_flow_control_per_ecu(&elm, 8);
     }
@@ -5509,6 +5519,10 @@ mod paced_reads {
                 &[0x09, 0x00],
                 &[0x09, 0x0A],
                 &[0x03],
+                &[0x07],
+                &[0x0A],
+                &[0x02, 0x02, 0x00],
+                &[0x06, 0x00],
             ])
         );
     }

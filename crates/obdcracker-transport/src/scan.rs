@@ -3,7 +3,9 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use obdcracker_core::obd::{self, Dtc, SupportedPids, Unit, Value};
+use obdcracker_core::obd::{
+    self, Dtc, FreezeFrameValue, MonitorStatus, SupportedPids, Unit, Value,
+};
 use obdcracker_core::response::{self, Error as ReplyError};
 use obdcracker_core::uds::{self, DiagnosticSession, DtcCount, DtcRecord, did};
 use obdcracker_safety::{Approved, Policy, Protocol, SupplyVoltage, Target};
@@ -12,7 +14,7 @@ use crate::fingerprint::{
     DidValue, FingerprintError, LongRead, ReadError, UdsModule, ask, broadcast, decode_did_value,
     decoded, from,
 };
-use crate::{Error, ExtendedSession, S3, SessionError, Timing, Transport};
+use crate::{Error, ExtendedSession, Response, S3, SessionError, Timing, Transport};
 
 /// The identification DIDs (ISO 14229-1 annex C) read from every module, in this order:
 /// F187, F188, F189, F18A, F18B, F18C, F190 (VIN), F191, F192, F193, F194, F195, F197, F19E.
@@ -134,6 +136,62 @@ pub struct ObdEcu {
     /// Its stored emissions DTCs (mode 03).
     #[cfg_attr(feature = "serde", serde(with = "crate::json::outcome"))]
     pub stored_dtcs: Result<Vec<Dtc>, ReadError>,
+    /// Its MIL, DTC count and readiness monitors, from the mode 01 PID 01 reply that
+    /// [`ObdEcu::pids`] also holds as raw bytes. `None` if the ECU doesn't support PID 01, or the
+    /// document this was read from predates it.
+    #[cfg_attr(
+        feature = "serde",
+        serde(default, with = "crate::json::option_outcome")
+    )]
+    pub monitor_status: Option<Result<MonitorStatus, ReadError>>,
+    /// Its pending emissions DTCs (mode 07). A refusal as not supported shows in
+    /// [`ReadError::is_not_supported`]. `None` only in a document that predates the read.
+    #[cfg_attr(
+        feature = "serde",
+        serde(default, with = "crate::json::option_outcome")
+    )]
+    pub pending_dtcs: Option<Result<Vec<Dtc>, ReadError>>,
+    /// Its permanent emissions DTCs (mode 0A), read as [`ObdEcu::pending_dtcs`] is.
+    #[cfg_attr(
+        feature = "serde",
+        serde(default, with = "crate::json::option_outcome")
+    )]
+    pub permanent_dtcs: Option<Result<Vec<Dtc>, ReadError>>,
+    /// Its freeze frame 0 (mode 02). `None` only in a document that predates the read.
+    #[cfg_attr(
+        feature = "serde",
+        serde(default, with = "crate::json::option_outcome")
+    )]
+    pub freeze_frame: Option<Result<FreezeFrame, ReadError>>,
+    /// The mode 06 monitor IDs it supports, other than the bitmap IDs (00, 20, …). The test
+    /// results behind them aren't read. A later bitmap that's missing or garbled ends the list
+    /// there ([`ObdEcu::monitor_ids_cut_short`]). `None` only in a document that predates the
+    /// read.
+    #[cfg_attr(
+        feature = "serde",
+        serde(default, with = "crate::json::option_outcome_pids")
+    )]
+    pub monitor_ids: Option<Result<Vec<u8>, ReadError>>,
+    /// Where its monitor ID list was cut short, if it was: the later bitmap ID (20, 40, …) it
+    /// said it supports but that was missing or couldn't be decoded, and why.
+    #[cfg_attr(feature = "serde", serde(default, with = "crate::json::mid_failure"))]
+    pub monitor_ids_cut_short: Option<(u8, ReadError)>,
+}
+
+/// One ECU's freeze frame 0: the data it stored when the DTC that caused it was set.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[derive(Debug, Clone, PartialEq)]
+pub struct FreezeFrame {
+    /// The DTC that stored the frame (mode 02 PID 02), or `None` if it says P0000, which means
+    /// the ECU has no frame. Nothing else is read then.
+    pub cause: Option<Dtc>,
+    /// Each PID the frame holds other than the bitmap PIDs (00, 20, …) and the cause (02), and its
+    /// value. An error if the first bitmap (PID 00) was missing or couldn't be decoded.
+    #[cfg_attr(feature = "serde", serde(with = "crate::json::pid_readings"))]
+    pub pids: Result<Vec<PidReading>, ReadError>,
+    /// Where its PID list was cut short, as [`ObdEcu::pids_cut_short`] says for mode 01.
+    #[cfg_attr(feature = "serde", serde(with = "crate::json::pid_failure"))]
+    pub pids_cut_short: Option<(u8, ReadError)>,
 }
 
 /// A mode 01 PID's value.
@@ -227,13 +285,41 @@ pub fn scan_with<T: Transport + ?Sized>(
     let info_request = approve(Target::ObdFunctional, &obd::vehicle_info(0x00))?;
     let name_request = LongRead::approve(policy, &obd::vehicle_info(0x0A))?;
     let dtc_request = LongRead::approve(policy, &obd::stored_dtcs())?;
+    let pending_request = LongRead::approve(policy, &obd::pending_dtcs())?;
+    let permanent_request = LongRead::approve(policy, &obd::permanent_dtcs())?;
+    // Mode 02's PIDs depend on the frame's bitmaps too.
+    let frame_requests = (0..=u8::MAX)
+        .map(|pid| approve(Target::ObdFunctional, &obd::freeze_frame(pid, FRAME)))
+        .collect::<Result<Vec<_>, _>>()?;
+    let monitor_id_requests = (0..=u8::MAX)
+        .step_by(0x20)
+        .map(|mid| approve(Target::ObdFunctional, &obd::monitor_results(mid)))
+        .collect::<Result<Vec<_>, _>>()?;
     let module_requests = modules
         .iter()
         .map(|scanned| module_requests(policy, scanned, options))
         .collect::<Result<Vec<ModuleRequests>, ScanError>>()?;
 
-    let supported = supported_pids(transport, &pid_requests, timing)?;
-    let mut values = pid_values(transport, &pid_requests, &supported, timing)?;
+    let supported = supported_pids(
+        transport,
+        |pid| &pid_requests[usize::from(pid)],
+        None,
+        decode_bitmap,
+        timing,
+    )?;
+    let mut statuses = BTreeMap::new();
+    let mut values = pid_values(
+        transport,
+        &pid_requests,
+        &supported,
+        timing,
+        decode_pid_value,
+        |pid, source, replies| {
+            if pid == MONITOR_STATUS_PID {
+                statuses.insert(source, from(replies, source, obd::decode_monitor_status));
+            }
+        },
+    )?;
 
     let info = broadcast(transport, &info_request, timing)?;
     // Where each ECU is asked in turn (`LongRead`), these are the ones that answered so far.
@@ -244,11 +330,24 @@ pub fn scan_with<T: Transport + ?Sized>(
         .collect();
     let names = name_request.read(transport, &known, timing)?;
     let dtcs = dtc_request.read(transport, &known, timing)?;
-    let sources: BTreeSet<u32> = supported
-        .keys()
-        .copied()
-        .chain(info.iter().chain(&names).chain(&dtcs).map(|r| r.source))
+    let known: Vec<u32> = known
+        .into_iter()
+        .chain(names.iter().chain(&dtcs).map(|r| r.source))
         .collect();
+    let pending = pending_request.read(transport, &known, timing)?;
+    let permanent = permanent_request.read(transport, &known, timing)?;
+    let sources: BTreeSet<u32> = known
+        .into_iter()
+        .chain(pending.iter().chain(&permanent).map(|r| r.source))
+        .collect();
+    let mut frames = freeze_frames(transport, &frame_requests, &sources, timing)?;
+    let monitor_ids = supported_pids(
+        transport,
+        |mid| &monitor_id_requests[usize::from(mid / 0x20)],
+        Some(&sources),
+        obd::decode_supported_monitor_ids,
+        timing,
+    )?;
     let ecus = sources
         .into_iter()
         .map(|source| {
@@ -256,10 +355,24 @@ pub fn scan_with<T: Transport + ?Sized>(
                 .get(&source)
                 .cloned()
                 .unwrap_or((Err(ReadError::NoReply), None));
+            let (monitor_ids, monitor_ids_cut_short) = monitor_ids
+                .get(&source)
+                .cloned()
+                .unwrap_or((Err(ReadError::NoReply), None));
             ObdEcu {
                 source,
                 pids: pids.map(|_| values.remove(&source).unwrap_or_default()),
                 pids_cut_short,
+                monitor_status: statuses.remove(&source),
+                pending_dtcs: Some(from(&pending, source, |payload| {
+                    Ok(obd::decode_pending_dtcs(payload)?.collect())
+                })),
+                permanent_dtcs: Some(from(&permanent, source, |payload| {
+                    Ok(obd::decode_permanent_dtcs(payload)?.collect())
+                })),
+                freeze_frame: Some(frames.remove(&source).unwrap_or(Err(ReadError::NoReply))),
+                monitor_ids: Some(monitor_ids),
+                monitor_ids_cut_short,
                 supported_info: from(&info, source, |payload| {
                     Ok(obd::decode_supported_info(payload)?.iter().collect())
                 }),
@@ -518,18 +631,28 @@ struct Chain {
 type Supported = (Result<Vec<u8>, ReadError>, Option<(u8, ReadError)>);
 
 // Each ECU that answered the first bitmap and the PIDs it supports, per
-// docs/scanning.md#module-discovery. PID E0 is the last bitmap.
-fn supported_pids<T: Transport + ?Sized>(
+// docs/scanning.md#module-discovery. PID E0 is the last bitmap. `request` gives the request for
+// the bitmap at a base, and `decode` reads its reply. With `ecus`, only those ECUs' answers count,
+// and nothing is sent if there are none.
+fn supported_pids<'a, T: Transport + ?Sized>(
     transport: &mut T,
-    pid_requests: &[Approved],
+    request: impl Fn(u8) -> &'a Approved,
+    ecus: Option<&BTreeSet<u32>>,
+    decode: impl Fn(&[u8], u8) -> Result<SupportedPids, ReplyError>,
     timing: Timing,
 ) -> Result<BTreeMap<u32, Supported>, ScanError> {
     let mut chains: BTreeMap<u32, Chain> = BTreeMap::new();
+    if ecus.is_some_and(BTreeSet::is_empty) {
+        return Ok(BTreeMap::new());
+    }
     let mut base = 0u8;
     loop {
-        let replies = broadcast(transport, &pid_requests[usize::from(base)], timing)?;
+        let replies = broadcast(transport, request(base), timing)?;
         let after = base.checked_add(0x20);
         for reply in &replies {
+            if ecus.is_some_and(|ecus| !ecus.contains(&reply.source)) {
+                continue;
+            }
             let chain = if base == 0 {
                 chains.entry(reply.source).or_insert(Chain {
                     pids: Ok(Vec::new()),
@@ -544,7 +667,7 @@ fn supported_pids<T: Transport + ?Sized>(
                 }
             };
             chain.next = None;
-            match decoded(&reply.payload, |payload| decode_bitmap(payload, base)) {
+            match decoded(&reply.payload, |payload| decode(payload, base)) {
                 Ok(bitmap) => {
                     if let Ok(pids) = &mut chain.pids {
                         pids.extend(bitmap.iter().filter(|pid| pid % 0x20 != 0));
@@ -573,11 +696,15 @@ fn supported_pids<T: Transport + ?Sized>(
         .collect())
 }
 
+// Each PID that any ECU in `supported` lists, read once by broadcast. `decode` reads a reply, and
+// `seen` is told each reply set for each ECU that listed the PID.
 fn pid_values<T: Transport + ?Sized>(
     transport: &mut T,
     pid_requests: &[Approved],
     supported: &BTreeMap<u32, Supported>,
     timing: Timing,
+    decode: impl Fn(&[u8], u8) -> Result<PidValue, ReplyError>,
+    mut seen: impl FnMut(u8, u32, &[Response]),
 ) -> Result<BTreeMap<u32, Vec<PidReading>>, ScanError> {
     let wanted: BTreeSet<u8> = supported
         .values()
@@ -590,12 +717,88 @@ fn pid_values<T: Transport + ?Sized>(
         let replies = broadcast(transport, &pid_requests[usize::from(pid)], timing)?;
         for (&source, (pids, _)) in supported {
             if pids.as_ref().is_ok_and(|pids| pids.contains(&pid)) {
-                let value = from(&replies, source, |payload| decode_pid_value(payload, pid));
+                let value = from(&replies, source, |payload| decode(payload, pid));
                 values.entry(source).or_default().push((pid, value));
+                seen(pid, source, &replies);
             }
         }
     }
     Ok(values)
+}
+
+// Each ECU in `ecus`' freeze frame 0: its cause (PID 02), then, for an ECU that has one, the PIDs
+// its bitmaps list. Nothing is sent if there are no ECUs.
+fn freeze_frames<T: Transport + ?Sized>(
+    transport: &mut T,
+    requests: &[Approved],
+    ecus: &BTreeSet<u32>,
+    timing: Timing,
+) -> Result<BTreeMap<u32, Result<FreezeFrame, ReadError>>, ScanError> {
+    let mut frames = BTreeMap::new();
+    if ecus.is_empty() {
+        return Ok(frames);
+    }
+    let replies = broadcast(transport, &requests[usize::from(FRAME_CAUSE_PID)], timing)?;
+    let mut stored = BTreeMap::new();
+    for &source in ecus {
+        match from(&replies, source, decode_frame_cause) {
+            Ok(Some(cause)) => {
+                stored.insert(source, cause);
+            }
+            Ok(None) => {
+                frames.insert(
+                    source,
+                    Ok(FreezeFrame {
+                        cause: None,
+                        pids: Ok(Vec::new()),
+                        pids_cut_short: None,
+                    }),
+                );
+            }
+            Err(e) => {
+                frames.insert(source, Err(e));
+            }
+        }
+    }
+    if stored.is_empty() {
+        return Ok(frames);
+    }
+    let with_frame: BTreeSet<u32> = stored.keys().copied().collect();
+    let mut supported = supported_pids(
+        transport,
+        |pid| &requests[usize::from(pid)],
+        Some(&with_frame),
+        decode_frame_bitmap,
+        timing,
+    )?;
+    // The cause was read first, and isn't a value of its own.
+    for (pids, _) in supported.values_mut() {
+        if let Ok(pids) = pids {
+            pids.retain(|&pid| pid != FRAME_CAUSE_PID);
+        }
+    }
+    let mut values = pid_values(
+        transport,
+        requests,
+        &supported,
+        timing,
+        decode_frame_pid,
+        |_, _, _| {},
+    )?;
+    for (source, cause) in stored {
+        let (pids, pids_cut_short) = supported
+            .remove(&source)
+            .unwrap_or((Err(ReadError::NoReply), None));
+        frames.insert(
+            source,
+            Ok(FreezeFrame {
+                cause: Some(cause),
+                pids: pids.map(|_| values.remove(&source).unwrap_or_default()),
+                pids_cut_short,
+            }),
+        );
+    }
+    Ok(frames)
 }
 
 fn scan_module<T: Transport + ?Sized>(
@@ -812,5 +1015,34 @@ fn decode_pid_value(payload: &[u8], pid: u8) -> Result<PidValue, ReplyError> {
         Value::Quantity { value, unit } => Ok(PidValue::Quantity { value, unit }),
         Value::Raw(data) => Ok(PidValue::Raw(data.to_vec())),
         Value::Supported(_) => Err(ReplyError::Malformed),
+    }
+}
+
+// The freeze frame scan reads: the first.
+const FRAME: u8 = 0;
+const FRAME_CAUSE_PID: u8 = 0x02;
+const MONITOR_STATUS_PID: u8 = 0x01;
+
+fn decode_frame_cause(payload: &[u8]) -> Result<Option<Dtc>, ReplyError> {
+    match obd::decode_freeze_frame(payload, FRAME_CAUSE_PID, FRAME)? {
+        FreezeFrameValue::Cause(cause) => Ok(cause),
+        FreezeFrameValue::Pid(_) => Err(ReplyError::Malformed),
+    }
+}
+
+fn decode_frame_bitmap(payload: &[u8], base: u8) -> Result<SupportedPids, ReplyError> {
+    match obd::decode_freeze_frame(payload, base, FRAME)? {
+        FreezeFrameValue::Pid(Value::Supported(bitmap)) => Ok(bitmap),
+        _ => Err(ReplyError::Malformed),
+    }
+}
+
+fn decode_frame_pid(payload: &[u8], pid: u8) -> Result<PidValue, ReplyError> {
+    match obd::decode_freeze_frame(payload, pid, FRAME)? {
+        FreezeFrameValue::Pid(Value::Quantity { value, unit }) => {
+            Ok(PidValue::Quantity { value, unit })
+        }
+        FreezeFrameValue::Pid(Value::Raw(data)) => Ok(PidValue::Raw(data.to_vec())),
+        _ => Err(ReplyError::Malformed),
     }
 }
