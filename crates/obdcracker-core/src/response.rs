@@ -233,6 +233,7 @@ fn matches(request: &[u8], reply: &[u8], pending: bool) -> bool {
         [NEGATIVE, ..] => false,
         [first, echo @ ..] if *first == sid.wrapping_add(POSITIVE_OFFSET) => match sid {
             0x01 => echo.first().is_some_and(|pid| asked.contains(pid)),
+            0x02 => echo.first_chunk::<2>().is_some_and(|got| asked == got),
             0x09 => echo.first().is_some_and(|pid| asked.first() == Some(pid)),
             0x22 => echo
                 .first_chunk::<2>()

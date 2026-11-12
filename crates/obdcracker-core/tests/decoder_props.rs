@@ -49,7 +49,8 @@ proptest! {
     }
 
     #[test]
-    fn obd_decoders_never_panic(reply in any_reply()) {
+    fn obd_decoders_never_panic(reply in any_reply(), pid in any::<u8>(), frame in any::<u8>()) {
+        let _ = obd::decode_freeze_frame(&reply, pid, frame);
         if let Ok(readings) = obd::decode_current_data(&reply) {
             readings.for_each(drop);
         }

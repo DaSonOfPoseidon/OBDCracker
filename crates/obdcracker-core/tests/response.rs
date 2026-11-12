@@ -270,3 +270,24 @@ fn a_dtc_detail_reply_must_echo_the_dtc_asked_for() {
     ));
     assert!(answers(&[0x19, 0x02, 0xAF], &[0x59, 0x02, 0xFF]));
 }
+
+#[test]
+fn answers_matches_the_echoed_freeze_frame_pid_and_frame() {
+    let request = [0x02, 0x0C, 0x00];
+    assert!(answers(&request, &[0x42, 0x0C, 0x00, 0x1A, 0xF8]));
+    assert!(!answers(&request, &[0x42, 0x0D, 0x00, 0x30]));
+    assert!(!answers(&request, &[0x42, 0x0C, 0x01, 0x1A, 0xF8]));
+    assert!(!answers(&request, &[0x42, 0x0C]));
+    assert!(!answers(&request, &[0x42]));
+    assert!(!answers(&request, &[0x41, 0x0C, 0x00, 0x1A, 0xF8]));
+    assert!(answers(&request, &[0x7F, 0x02, 0x31]));
+    assert!(!answers(&request, &[0x7F, 0x01, 0x31]));
+}
+
+#[test]
+fn answers_matches_pending_and_permanent_dtc_replies_by_service() {
+    assert!(answers(&[0x07], &[0x47, 0x00]));
+    assert!(!answers(&[0x07], &[0x43, 0x00]));
+    assert!(answers(&[0x0A], &[0x4A, 0x00]));
+    assert!(!answers(&[0x0A], &[0x47, 0x00]));
+}

@@ -11,6 +11,9 @@ use crate::response::{Error, positive, printable};
 /// Mode 01: current powertrain data.
 pub const CURRENT_DATA: u8 = 0x01;
 
+/// Mode 02: freeze frame data.
+pub const FREEZE_FRAME: u8 = 0x02;
+
 /// Mode 03: stored (confirmed) emissions DTCs.
 pub const STORED_DTCS: u8 = 0x03;
 
@@ -221,6 +224,61 @@ impl<'a> Iterator for Readings<'a> {
     }
 }
 
+/// A mode 02 request for one PID of one freeze frame (0 is the first).
+#[must_use]
+pub fn freeze_frame(pid: u8, frame: u8) -> [u8; 3] {
+    [FREEZE_FRAME, pid, frame]
+}
+
+/// A value from a freeze frame.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum FreezeFrameValue<'a> {
+    /// PID 0x02: the code that stored the frame, or `None` for P0000, which says there is none.
+    Cause(Option<Dtc>),
+    /// Any other PID, decoded as in mode 01.
+    Pid(Value<'a>),
+}
+
+/// Decodes a mode 02 reply to a request for `pid` in freeze frame `frame` (`42 <pid> <frame>`
+/// and the value). The reply must echo both, and a PID with a known length must have exactly
+/// that many bytes. One that isn't known comes back as [`Value::Raw`].
+pub fn decode_freeze_frame(
+    reply: &[u8],
+    pid: u8,
+    frame: u8,
+) -> Result<FreezeFrameValue<'_>, Error> {
+    let [got_pid, got_frame, data @ ..] = positive(FREEZE_FRAME, reply)? else {
+        return Err(Error::TooShort);
+    };
+    if *got_pid != pid || *got_frame != frame {
+        return Err(Error::Malformed);
+    }
+    if pid == CAUSE_PID {
+        return match *data {
+            [hi, lo] => Ok(FreezeFrameValue::Cause(
+                Some(u16::from_be_bytes([hi, lo]))
+                    .filter(|&code| code != 0)
+                    .map(Dtc),
+            )),
+            [_] | [] => Err(Error::TooShort),
+            _ => Err(Error::Malformed),
+        };
+    }
+    if !is_known(pid) {
+        return if data.is_empty() {
+            Err(Error::TooShort)
+        } else {
+            Ok(FreezeFrameValue::Pid(Value::Raw(data)))
+        };
+    }
+    match decode_pid(pid, data) {
+        Some((len, value)) if len == data.len() => Ok(FreezeFrameValue::Pid(value)),
+        Some(_) => Err(Error::Malformed),
+        None => Err(Error::TooShort),
+    }
+}
+
+const CAUSE_PID: u8 = 0x02;
 const MONITOR_STATUS_PID: u8 = 0x01;
 
 /// Whether the engine is spark or compression ignition, which decides what the last two bytes of

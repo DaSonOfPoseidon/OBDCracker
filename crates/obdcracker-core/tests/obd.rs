@@ -541,6 +541,137 @@ mod monitor_status {
     }
 }
 
+mod freeze_frame {
+    use obdcracker_core::obd::{
+        Dtc, FreezeFrameValue, SupportedPids, Unit, Value, decode_freeze_frame, freeze_frame,
+    };
+    use obdcracker_core::response::{Error, NegativeResponse, Nrc};
+
+    #[test]
+    fn builds_the_request() {
+        assert_eq!(freeze_frame(0x0C, 0), [0x02, 0x0C, 0x00]);
+        assert_eq!(freeze_frame(0x02, 0xFF), [0x02, 0x02, 0xFF]);
+    }
+
+    #[test]
+    fn decodes_a_pid_like_mode_01() {
+        assert_eq!(
+            decode_freeze_frame(&[0x42, 0x0C, 0x00, 0x1A, 0xF8], 0x0C, 0),
+            Ok(FreezeFrameValue::Pid(Value::Quantity {
+                value: 1726.0,
+                unit: Unit::Rpm
+            }))
+        );
+        assert_eq!(
+            decode_freeze_frame(&[0x42, 0x05, 0x02, 0x7B], 0x05, 2),
+            Ok(FreezeFrameValue::Pid(Value::Quantity {
+                value: 83.0,
+                unit: Unit::Celsius
+            }))
+        );
+        assert_eq!(
+            decode_freeze_frame(&[0x42, 0x00, 0x00, 0xBE, 0x1F, 0xA8, 0x13], 0x00, 0),
+            Ok(FreezeFrameValue::Pid(Value::Supported(SupportedPids::new(
+                0x00,
+                [0xBE, 0x1F, 0xA8, 0x13]
+            ))))
+        );
+    }
+
+    #[test]
+    fn pid_02_is_the_code_that_caused_the_frame() {
+        assert_eq!(
+            decode_freeze_frame(&[0x42, 0x02, 0x00, 0x01, 0x33], 0x02, 0),
+            Ok(FreezeFrameValue::Cause(Some(Dtc::new(0x0133))))
+        );
+        assert_eq!(
+            decode_freeze_frame(&[0x42, 0x02, 0x00, 0x00, 0x00], 0x02, 0),
+            Ok(FreezeFrameValue::Cause(None))
+        );
+    }
+
+    #[test]
+    fn pid_02_is_exactly_two_bytes() {
+        assert_eq!(
+            decode_freeze_frame(&[0x42, 0x02, 0x00, 0x01], 0x02, 0),
+            Err(Error::TooShort)
+        );
+        assert_eq!(
+            decode_freeze_frame(&[0x42, 0x02, 0x00], 0x02, 0),
+            Err(Error::TooShort)
+        );
+        assert_eq!(
+            decode_freeze_frame(&[0x42, 0x02, 0x00, 0x01, 0x33, 0x00], 0x02, 0),
+            Err(Error::Malformed)
+        );
+    }
+
+    #[test]
+    fn an_unknown_pid_keeps_its_bytes() {
+        assert_eq!(
+            decode_freeze_frame(&[0x42, 0xE1, 0x00, 0x7B, 0x01], 0xE1, 0),
+            Ok(FreezeFrameValue::Pid(Value::Raw(&[0x7B, 0x01])))
+        );
+        assert_eq!(
+            decode_freeze_frame(&[0x42, 0xE1, 0x00], 0xE1, 0),
+            Err(Error::TooShort)
+        );
+    }
+
+    #[test]
+    fn a_known_pid_has_exactly_its_length() {
+        assert_eq!(
+            decode_freeze_frame(&[0x42, 0x0C, 0x00, 0x1A], 0x0C, 0),
+            Err(Error::TooShort)
+        );
+        assert_eq!(
+            decode_freeze_frame(&[0x42, 0x0C, 0x00], 0x0C, 0),
+            Err(Error::TooShort)
+        );
+        assert_eq!(
+            decode_freeze_frame(&[0x42, 0x0C, 0x00, 0x1A, 0xF8, 0x00], 0x0C, 0),
+            Err(Error::Malformed)
+        );
+        assert_eq!(
+            decode_freeze_frame(&[0x42, 0x05, 0x00, 0x7B, 0x7B], 0x05, 0),
+            Err(Error::Malformed)
+        );
+    }
+
+    #[test]
+    fn the_echoed_pid_and_frame_must_be_the_requested_ones() {
+        let reply = [0x42, 0x0C, 0x01, 0x1A, 0xF8];
+        assert!(decode_freeze_frame(&reply, 0x0C, 1).is_ok());
+        assert_eq!(decode_freeze_frame(&reply, 0x0C, 0), Err(Error::Malformed));
+        assert_eq!(decode_freeze_frame(&reply, 0x0D, 1), Err(Error::Malformed));
+        assert_eq!(
+            decode_freeze_frame(&[0x42, 0x02, 0x00, 0x01, 0x33], 0x0C, 0),
+            Err(Error::Malformed)
+        );
+    }
+
+    #[test]
+    fn rejects_other_services_refusals_and_empty_replies() {
+        assert_eq!(
+            decode_freeze_frame(&[0x41, 0x0C, 0x00, 0x1A, 0xF8], 0x0C, 0),
+            Err(Error::WrongService(0x41))
+        );
+        assert_eq!(
+            decode_freeze_frame(&[0x7F, 0x02, 0x31], 0x0C, 0),
+            Err(Error::Negative(NegativeResponse {
+                sid: 0x02,
+                nrc: Nrc::RequestOutOfRange
+            }))
+        );
+        assert_eq!(decode_freeze_frame(&[], 0x0C, 0), Err(Error::TooShort));
+        assert_eq!(decode_freeze_frame(&[0x42], 0x0C, 0), Err(Error::TooShort));
+        assert_eq!(
+            decode_freeze_frame(&[0x42, 0x0C], 0x0C, 0),
+            Err(Error::TooShort)
+        );
+    }
+}
+
 mod vehicle_info {
     use obdcracker_core::obd::{
         EcuName, check_vin, decode_calids, decode_cvns, decode_ecu_name, decode_supported_info,

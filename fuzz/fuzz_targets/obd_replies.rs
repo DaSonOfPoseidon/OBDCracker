@@ -12,6 +12,10 @@ fuzz_target!(|data: &[u8]| {
         let (request, reply) = rest.split_at(usize::from(*split).min(rest.len()));
         let _ = response::answers(request, reply);
         let _ = response::answers_after_pending(request, reply);
+        // The request's own bytes stand in for the PID and frame the caller asked for.
+        if let [_, pid, frame, ..] = request {
+            let _ = obd::decode_freeze_frame(reply, *pid, *frame);
+        }
     }
     if let Ok(readings) = obd::decode_current_data(data) {
         readings.for_each(drop);
