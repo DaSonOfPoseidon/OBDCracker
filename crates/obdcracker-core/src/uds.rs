@@ -399,9 +399,11 @@ impl DtcStatus {
     }
 }
 
-/// Each set flag, in bit order, such as `failed, confirmed`; `no flags` if none is set.
-impl fmt::Display for DtcStatus {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+impl DtcStatus {
+    /// The name of each set flag, in bit order: `failed`, `failed this cycle`, `pending`,
+    /// `confirmed`, `not tested since clear`, `failed since clear`, `not tested this cycle` and
+    /// `lamp`.
+    pub fn flags(self) -> impl Iterator<Item = &'static str> {
         const NAMES: [&str; 8] = [
             "failed",
             "failed this cycle",
@@ -412,9 +414,16 @@ impl fmt::Display for DtcStatus {
             "not tested this cycle",
             "lamp",
         ];
-        let mut set = (0..8u8)
-            .filter(|&n| self.bit(n))
-            .map(|n| NAMES[usize::from(n)]);
+        (0..8u8)
+            .filter(move |&n| self.bit(n))
+            .map(|n| NAMES[usize::from(n)])
+    }
+}
+
+/// Each set flag, in bit order, such as `failed, confirmed`; `no flags` if none is set.
+impl fmt::Display for DtcStatus {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut set = self.flags();
         match set.next() {
             None => f.write_str("no flags"),
             Some(first) => {
@@ -562,8 +571,9 @@ pub fn decode_dtc_count(reply: &[u8]) -> Result<DtcCount, Error> {
     })
 }
 
-/// One DTC and its status.
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+/// One DTC and its status. With the `serde` feature it is written with a `flags` list of the
+/// status's flag names ([`DtcStatus::flags`]) too, which is never read back: the status says it.
+#[cfg_attr(feature = "serde", derive(serde::Deserialize))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DtcRecord {
     /// The DTC.

@@ -315,7 +315,11 @@ fn a_scan_is_written_as_documented() {
                 "response_id": "7E9",
                 "dids": [{"did": "F191", "value": {"Text": "0BK927156AM"}}],
                 "dtc_count": {"value": {"availability": "FF", "format": "00", "count": 1}},
-                "dtcs": {"value": [{"dtc": "040100", "status": "2F"}]},
+                "dtcs": {"value": [{
+                    "dtc": "040100",
+                    "status": "2F",
+                    "flags": ["failed", "failed this cycle", "pending", "confirmed", "failed since clear"],
+                }]},
                 "dtc_details": null,
                 "answered": true,
             }],

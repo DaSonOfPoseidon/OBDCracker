@@ -163,6 +163,34 @@ mod read_dtc_information {
     }
 
     #[test]
+    fn a_status_lists_its_flag_names_in_bit_order() {
+        assert_eq!(DtcStatus(0x00).flags().count(), 0);
+        assert_eq!(
+            DtcStatus(0x2F).flags().collect::<Vec<_>>(),
+            [
+                "failed",
+                "failed this cycle",
+                "pending",
+                "confirmed",
+                "failed since clear"
+            ]
+        );
+        // The same names the text form joins, for every status.
+        for status in 0..=u8::MAX {
+            let names: Vec<_> = DtcStatus(status).flags().collect();
+            let text = DtcStatus(status).to_string();
+            assert_eq!(
+                text,
+                if names.is_empty() {
+                    "no flags".to_owned()
+                } else {
+                    names.join(", ")
+                }
+            );
+        }
+    }
+
+    #[test]
     fn builds_the_requests() {
         assert_eq!(dtc_count_by_status_mask(0xFF), [0x19, 0x01, 0xFF]);
         assert_eq!(dtcs_by_status_mask(0x08), [0x19, 0x02, 0x08]);
