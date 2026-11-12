@@ -1685,6 +1685,20 @@ mod requests {
     }
 
     #[test]
+    fn a_batch_whose_tail_echo_cant_be_read_says_it_may_have_been_sent() {
+        // The link is gone as `|STM` is written, so the wait for its echo fails on the link.
+        let mut elm = with_echo_shown(batching_stn(Duration::from_secs(60)));
+        let channel = open_channel(&mut elm, 0x5F);
+        let frame = Policy::read_only()
+            .approve_tp20_request(&channel, 0, &[0x1A, 0x9B])
+            .unwrap();
+        elm.link_mut().close_after_write_of = Some(b"|STM".to_vec());
+        let err = elm.send(&frame).unwrap_err().to_string();
+        assert!(err.contains("link"), "{err}");
+        assert!(err.contains("the request may have been sent"), "{err}");
+    }
+
+    #[test]
     fn a_flipped_carriage_return_leaves_a_batched_frame_off_the_bus() {
         // The adapter holds the unfinished line and never runs it (the driver's next write is the
         // class `docs/pitfalls.md` describes for every line, not a batch's alone).

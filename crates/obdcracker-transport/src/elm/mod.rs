@@ -806,7 +806,7 @@ impl<L: Link> Elm<L> {
             before_tail(self);
             self.write(tail.as_bytes())
                 .map_err(|error| self.maybe_sent(error))?;
-            self.check_echo(tail, REQUEST_MAYBE_SENT)?;
+            self.check_echo(tail, true)?;
         }
         let sent_at = Instant::now();
         self.write(b"\r").map_err(|error| {
@@ -2378,7 +2378,7 @@ impl<L: Link> Elm<L> {
     // line is caught before it reaches the bus. An adapter that echoes nothing on the first
     // request is taken to echo whole lines only (docs/elm327.md#safety).
     fn check_early_echo(&mut self, line: &str) -> Result<(), Error> {
-        self.check_echo(line, REQUEST_NOT_SENT)
+        self.check_echo(line, false)
     }
 
     // Marks a failure as one that may have come after the request went out (see `write_line`).
@@ -2389,9 +2389,14 @@ impl<L: Link> Elm<L> {
         }
     }
 
-    // `check_early_echo`, ending its failure with `outcome`: what the caller knows of whether the
-    // adapter ran the request.
-    fn check_echo(&mut self, line: &str, outcome: &str) -> Result<(), Error> {
+    // `check_early_echo` for the rest of a line whose head was heard right (`head_passed`), when
+    // every failure, a read of the link included, says the request may have been sent.
+    fn check_echo(&mut self, line: &str, head_passed: bool) -> Result<(), Error> {
+        let outcome = if head_passed {
+            REQUEST_MAYBE_SENT
+        } else {
+            REQUEST_NOT_SENT
+        };
         let mut echoed = vec![0; line.len()];
         let mut got = 0;
         let deadline = Instant::now() + ECHO_WAIT;
@@ -2402,7 +2407,13 @@ impl<L: Link> Elm<L> {
             else {
                 break;
             };
-            got += self.read(&mut echoed[got..], left)?;
+            got += self.read(&mut echoed[got..], left).map_err(|error| {
+                if head_passed {
+                    self.maybe_sent(error)
+                } else {
+                    error
+                }
+            })?;
         }
         echoed.truncate(got);
         if echoed.is_empty() && self.early_echo.is_none() {
