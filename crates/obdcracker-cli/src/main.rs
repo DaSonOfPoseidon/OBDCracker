@@ -1550,8 +1550,8 @@ fn run_read_dids<T: Transport>(
             println!("a live read sends the request once");
         }
         println!(
-            "the request goes to {} ({:03X}), and the reply is checked to hold each DID in order, \
-             with its length where the profile gives one",
+            "the request goes to {} ({:03X}), and the reply is checked to hold the DIDs in order \
+             (a module may leave some out), with its length where the profile gives one",
             module.name, module.request_id
         );
         return ExitCode::SUCCESS;
@@ -1593,15 +1593,23 @@ fn did_list(dids: &[u16]) -> String {
         .join(" ")
 }
 
-// Each DID that could be split with its bytes, then the rest as the module sent it.
+// Each DID in request order: its bytes if it could be split, or that the reply left it out. Then
+// the DIDs the bytes of the rest hold, as the module sent them.
 fn print_dids_data(id: u32, name: &str, dids: &[u16], found: &DidsData) {
-    for (did, data) in &found.split {
-        println!("{id:03X} {name} {did:04X} [{}]", hex(data));
+    let mut unsplit = Vec::new();
+    for &did in dids {
+        if let Some((_, data)) = found.split.iter().find(|(split, _)| *split == did) {
+            println!("{id:03X} {name} {did:04X} [{}]", hex(data));
+        } else if found.left_out.contains(&did) {
+            println!("{id:03X} {name} {did:04X} (not in the reply)");
+        } else {
+            unsplit.push(did);
+        }
     }
     if !found.unsplit.is_empty() {
         println!(
             "{id:03X} {name} {} not split, as the profile gives no length for the first [{}]",
-            did_list(&dids[found.split.len()..]),
+            did_list(&unsplit),
             hex(&found.unsplit)
         );
     }

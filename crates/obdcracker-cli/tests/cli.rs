@@ -2003,17 +2003,19 @@ mod read_dids {
 
     #[test]
     fn a_reply_that_doesnt_fit_is_reported_and_fails() {
-        // F189 is missing from the answer, as a module may leave out a DID it doesn't have.
-        let mut missing = vec![0x62, 0xF1, 0x87];
-        missing.extend(data(0x41, 11));
-        missing.extend([0xF1, 0x90]);
-        missing.extend(data(0x41, 17));
-        missing.extend([0xF1, 0x91]);
-        missing.extend(data(0x41, 11));
+        // F190 comes before F189, which is not the order asked for.
+        let mut swapped = vec![0x62, 0xF1, 0x87];
+        swapped.extend(data(0x41, 11));
+        swapped.extend([0xF1, 0x90]);
+        swapped.extend(data(0x41, 17));
+        swapped.extend([0xF1, 0x89]);
+        swapped.extend(data(0x41, 4));
+        swapped.extend([0xF1, 0x91]);
+        swapped.extend(data(0x41, 11));
         // Bytes after the last DID.
         let mut extra = four_dids_reply();
         extra.push(0x00);
-        for (what, reply) in [("a missing DID", missing), ("extra bytes", extra)] {
+        for (what, reply) in [("a DID out of order", swapped), ("extra bytes", extra)] {
             let log = temp_log("read-dids-misfit");
             let out = read_dids(adapter(false, reply), &log, &[], KNOWN);
             let stdout = String::from_utf8_lossy(&out.stdout);
@@ -2027,6 +2029,85 @@ mod read_dids {
             // Nothing of it is shown as a value.
             assert!(!stdout.contains("F187 ["), "{what}: {stdout}");
         }
+    }
+
+    #[test]
+    fn a_did_the_module_leaves_out_is_shown_as_such_and_the_read_succeeds() {
+        // The A7's transmission answered F188 with nothing, as ISO 14229-1 lets it.
+        let mut reply = vec![0x62, 0xF1, 0x87];
+        reply.extend(data(0x41, 11));
+        reply.extend([0xF1, 0x89]);
+        reply.extend(data(0x42, 4));
+        reply.extend([0xF1, 0x91]);
+        reply.extend(data(0x43, 11));
+        let request = vec![0x22, 0xF1, 0x87, 0xF1, 0x88, 0xF1, 0x89, 0xF1, 0x91];
+        let addr = wifi_elm(with_transmission(request, reply));
+        let log = temp_log("read-dids-left-out");
+        let out = read_dids(addr, &log, &[], "F187,F188,F189,F191");
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(out.status.success(), "{stderr}");
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert_eq!(
+            stdout.lines().collect::<Vec<_>>(),
+            [
+                format!("7E9 transmission F187 [{}]", hex("41", 11)),
+                "7E9 transmission F188 (not in the reply)".to_owned(),
+                format!("7E9 transmission F189 [{}]", hex("42", 4)),
+                format!("7E9 transmission F191 [{}]", hex("43", 11)),
+            ]
+        );
+    }
+
+    #[test]
+    fn the_unsplit_dids_are_named_after_the_ones_the_module_left_out() {
+        // F187 is left out, and F188 has no length in the profile: F188, F189 and F191 are
+        // what the unsplit bytes hold, not F187.
+        let mut reply = vec![0x62, 0xF1, 0x88, 0x01, 0x02, 0xF1, 0x89];
+        reply.extend(data(0x42, 4));
+        reply.extend([0xF1, 0x91]);
+        reply.extend(data(0x43, 11));
+        let request = vec![0x22, 0xF1, 0x87, 0xF1, 0x88, 0xF1, 0x89, 0xF1, 0x91];
+        let addr = wifi_elm(with_transmission(request, reply));
+        let log = temp_log("read-dids-unsplit-left-out");
+        let out = read_dids(addr, &log, &[], "F187,F188,F189,F191");
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(out.status.success(), "{stderr}");
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        let lines: Vec<&str> = stdout.lines().collect();
+        assert_eq!(lines.len(), 2, "{stdout}");
+        assert_eq!(lines[0], "7E9 transmission F187 (not in the reply)");
+        assert!(
+            lines[1].starts_with("7E9 transmission F188 F189 F191 not split"),
+            "{stdout}"
+        );
+        assert!(lines[1].contains("[F1 88 01 02 F1 89 "), "{stdout}");
+    }
+
+    #[test]
+    fn a_did_the_simulated_car_doesnt_have_is_left_out() {
+        let log = temp_log("read-dids-sim-left-out");
+        let out = obdcracker(&[
+            "--sim",
+            "a7",
+            "--audit-log",
+            log.to_str().unwrap(),
+            "read-dids",
+            "--module",
+            "transmission",
+            "--did",
+            "F187,F1FF,F189",
+        ]);
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert!(
+            out.status.success(),
+            "{stdout}{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let lines: Vec<&str> = stdout.lines().collect();
+        assert_eq!(lines.len(), 3, "{stdout}");
+        assert!(lines[0].starts_with("7E9 transmission F187 ["), "{stdout}");
+        assert_eq!(lines[1], "7E9 transmission F1FF (not in the reply)");
+        assert!(lines[2].starts_with("7E9 transmission F189 ["), "{stdout}");
     }
 
     #[test]
@@ -2762,6 +2843,27 @@ mod json {
         let split = result["read"]["value"]["split"].as_array().unwrap();
         assert_eq!(split.len(), 2, "{result}");
         assert_eq!(split[0]["did"], "F189");
+        assert_eq!(result["read"]["value"]["left_out"], json!([]));
+        assert_eq!(result["read"]["value"]["unsplit"], "");
+    }
+
+    #[test]
+    fn read_dids_names_the_dids_the_reply_left_out() {
+        let out = sim(
+            "json-read-dids-left-out",
+            &[
+                "read-dids",
+                "--module",
+                "transmission",
+                "--did",
+                "F189,F1FF,F191",
+            ],
+        );
+        assert!(out.status.success(), "{}", stderr(&out));
+        let result = document(&out, "read-dids");
+        let split = result["read"]["value"]["split"].as_array().unwrap();
+        assert_eq!(split.len(), 2, "{result}");
+        assert_eq!(result["read"]["value"]["left_out"], json!(["F1FF"]));
         assert_eq!(result["read"]["value"]["unsplit"], "");
     }
 

@@ -108,8 +108,13 @@ fn read(
 }
 
 fn data(split: &[(u16, &[u8])], unsplit: &[u8]) -> DidsData {
+    with_left_out(split, &[], unsplit)
+}
+
+fn with_left_out(split: &[(u16, &[u8])], left_out: &[u16], unsplit: &[u8]) -> DidsData {
     DidsData {
         split: split.iter().map(|&(did, d)| (did, d.to_vec())).collect(),
+        left_out: left_out.to_vec(),
         unsplit: unsplit.to_vec(),
     }
 }
@@ -317,14 +322,6 @@ fn a_negative_reply_is_the_refusal_and_silence_is_no_reply() {
 
 #[test]
 fn a_reply_that_doesnt_fit_is_reported_with_its_bytes_and_not_trusted() {
-    // A DID the module left out (ISO 14229-1 allows it): F188 is missing.
-    let missing = vec![
-        0x62, 0xF1, 0x87, 0xAA, 0xBB, 0xF1, 0x89, 0xDD, 0xEE, 0xFF, 0xF1, 0x91, 0x11,
-    ];
-    let mut car = Car::saying(&missing);
-    let (error, bytes) = undecodable(read(&mut car, &FOUR, lengths));
-    assert_eq!((error, bytes), (ReplyError::Malformed, missing));
-
     // Bytes left over after the last DID.
     let mut extra = reply();
     extra.push(0x00);
@@ -334,8 +331,8 @@ fn a_reply_that_doesnt_fit_is_reported_with_its_bytes_and_not_trusted() {
         (ReplyError::Malformed, extra)
     );
 
-    // Short: the last DID's data is cut off, or the reply stops after an echo.
-    for cut in [15, 14, 13, 5, 3] {
+    // Short: the last DID's data is cut off, or the reply stops inside an echo or a DID's data.
+    for cut in [15, 14, 4, 3] {
         let short = reply()[..cut].to_vec();
         let mut car = Car::saying(&short);
         let (error, bytes) = undecodable(read(&mut car, &FOUR, lengths));
@@ -360,17 +357,14 @@ fn a_reply_that_doesnt_fit_is_reported_with_its_bytes_and_not_trusted() {
 
 #[test]
 fn a_reply_with_no_lengths_is_still_checked_as_far_as_it_can_be() {
-    // It must begin with the first DID's echo, and have room for every DID's echo and a data byte.
-    let mut car = Car::saying(&[0x62, 0xF1, 0x88, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06]);
+    // A reply that begins with an echo of no DID asked for isn't an answer to this request.
+    let mut car = Car::saying(&[0x62, 0xF1, 0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06]);
     assert_eq!(
-        undecodable(read(&mut car, &FOUR, no_lengths)).0,
-        ReplyError::Malformed
+        read(&mut car, &FOUR, no_lengths).unwrap(),
+        Err(ReadError::NoReply)
     );
-    // 4 DIDs need at least 12 bytes after the 62.
-    let short = vec![
-        0x62, 0xF1, 0x87, 1, 0xF1, 0x88, 2, 0xF1, 0x89, 3, 0xF1, 0x91,
-    ];
-    let mut car = Car::saying(&short);
+    // The first DID with no known length needs a data byte after its echo.
+    let mut car = Car::saying(&[0x62, 0xF1, 0x87]);
     assert_eq!(
         undecodable(read(&mut car, &FOUR, no_lengths)).0,
         ReplyError::TooShort
@@ -389,6 +383,230 @@ fn a_reply_with_no_lengths_is_still_checked_as_far_as_it_can_be() {
     );
 }
 
+// ---- a module leaves out the DIDs it doesn't support (ISO 14229-1, #332) ----------------------
+
+// The A7's engine, TCU and gateway each answered `22 F187 F188 F189 F191` without F188.
+const ENGINE: [u8; 33] = [
+    0x62, 0xF1, 0x87, 0x34, 0x47, 0x30, 0x39, 0x30, 0x37, 0x34, 0x30, 0x31, 0x4E, 0x20, 0xF1, 0x89,
+    0x30, 0x30, 0x31, 0x36, 0xF1, 0x91, 0x34, 0x47, 0x30, 0x39, 0x30, 0x37, 0x34, 0x30, 0x31, 0x45,
+    0x20,
+];
+const TCU: [u8; 33] = [
+    0x62, 0xF1, 0x87, 0x34, 0x47, 0x30, 0x39, 0x32, 0x37, 0x31, 0x35, 0x38, 0x51, 0x20, 0xF1, 0x89,
+    0x31, 0x30, 0x30, 0x38, 0xF1, 0x91, 0x30, 0x42, 0x4B, 0x39, 0x32, 0x37, 0x31, 0x35, 0x36, 0x41,
+    0x4D,
+];
+const GATEWAY: [u8; 33] = [
+    0x62, 0xF1, 0x87, 0x34, 0x47, 0x30, 0x39, 0x30, 0x37, 0x34, 0x36, 0x38, 0x41, 0x44, 0xF1, 0x89,
+    0x30, 0x30, 0x35, 0x30, 0xF1, 0x91, 0x34, 0x47, 0x30, 0x39, 0x30, 0x37, 0x34, 0x36, 0x38, 0x41,
+    0x43,
+];
+
+// The profile's lengths on the A7: no F188, which is the DID every module left out.
+fn a7_lengths(did: u16) -> Option<usize> {
+    match did {
+        0xF187 | 0xF191 => Some(11),
+        0xF189 => Some(4),
+        _ => None,
+    }
+}
+
+#[test]
+fn a_did_the_module_leaves_out_is_reported_not_malformed() {
+    for (reply, f187, f189, f191) in [
+        (&ENGINE, &ENGINE[3..14], &ENGINE[16..20], &ENGINE[22..]),
+        (&TCU, &TCU[3..14], &TCU[16..20], &TCU[22..]),
+        (&GATEWAY, &GATEWAY[3..14], &GATEWAY[16..20], &GATEWAY[22..]),
+    ] {
+        let mut car = Car::saying(reply);
+        assert_eq!(
+            read(&mut car, &FOUR, a7_lengths).unwrap().unwrap(),
+            with_left_out(
+                &[(0xF187, f187), (0xF189, f189), (0xF191, f191)],
+                &[0xF188],
+                &[]
+            )
+        );
+    }
+    // The same when the profile does give F188 a length: it is left out all the same.
+    let mut car = Car::saying(&ENGINE);
+    let with_f188 = |did| a7_lengths(did).or(if did == 0xF188 { Some(20) } else { None });
+    assert_eq!(
+        read(&mut car, &FOUR, with_f188).unwrap().unwrap().left_out,
+        [0xF188]
+    );
+}
+
+#[test]
+fn a_did_with_no_length_matters_only_when_the_reply_has_it() {
+    // F188 is the unknown one and isn't in the reply, so the rest splits.
+    let mut car = Car::saying(&TCU);
+    let got = read(&mut car, &FOUR, a7_lengths).unwrap().unwrap();
+    assert_eq!(got.split.len(), 3);
+    assert_eq!(got.unsplit, Vec::<u8>::new());
+    // F189 is the unknown one and is in the reply, not last: from it on, nothing is split.
+    let mut car = Car::saying(&TCU);
+    let no_f189 = |did| a7_lengths(did).filter(|_| did != 0xF189);
+    assert_eq!(
+        read(&mut car, &FOUR, no_f189).unwrap().unwrap(),
+        with_left_out(&[(0xF187, &TCU[3..14])], &[0xF188], &TCU[14..])
+    );
+}
+
+// The DIDs a reply holds (echo and data), what they split into, and the DIDs it leaves out.
+type Case<'a> = (&'a [&'a [u8]], &'a [(u16, &'a [u8])], &'a [u16]);
+
+#[test]
+fn any_dids_but_not_all_can_be_left_out() {
+    let f187 = [0xF1, 0x87, 0xAA, 0xBB];
+    let f188 = [0xF1, 0x88, 0xCC];
+    let f189 = [0xF1, 0x89, 0xDD, 0xEE, 0xFF];
+    let f191 = [0xF1, 0x91, 0x11];
+    let cases: [Case; 6] = [
+        // The first, the last, several in a row, and all but one.
+        (
+            &[&f188, &f189, &f191],
+            &[
+                (0xF188, &[0xCC]),
+                (0xF189, &[0xDD, 0xEE, 0xFF]),
+                (0xF191, &[0x11]),
+            ],
+            &[0xF187],
+        ),
+        (
+            &[&f187, &f188, &f189],
+            &[
+                (0xF187, &[0xAA, 0xBB]),
+                (0xF188, &[0xCC]),
+                (0xF189, &[0xDD, 0xEE, 0xFF]),
+            ],
+            &[0xF191],
+        ),
+        (
+            &[&f187, &f191],
+            &[(0xF187, &[0xAA, 0xBB]), (0xF191, &[0x11])],
+            &[0xF188, 0xF189],
+        ),
+        (
+            &[&f187],
+            &[(0xF187, &[0xAA, 0xBB])],
+            &[0xF188, 0xF189, 0xF191],
+        ),
+        (&[&f191], &[(0xF191, &[0x11])], &[0xF187, 0xF188, 0xF189]),
+        (
+            &[&f189, &f191],
+            &[(0xF189, &[0xDD, 0xEE, 0xFF]), (0xF191, &[0x11])],
+            &[0xF187, 0xF188],
+        ),
+    ];
+    for (present, split, left_out) in cases {
+        let mut payload = vec![0x62];
+        payload.extend(present.iter().flat_map(|did| did.iter().copied()));
+        let mut car = Car::saying(&payload);
+        assert_eq!(
+            read(&mut car, &FOUR, lengths).unwrap().unwrap(),
+            with_left_out(split, left_out, &[]),
+            "{payload:02X?}"
+        );
+    }
+}
+
+#[test]
+fn a_last_did_of_unknown_length_takes_the_rest_even_after_left_out_dids() {
+    let mut car = Car::saying(&[0x62, 0xF1, 0x87, 0xAA, 0xBB, 0xF1, 0x91, 0x11, 0x22]);
+    let last_unknown = |did| lengths(did).filter(|_| did != 0xF191);
+    assert_eq!(
+        read(&mut car, &FOUR, last_unknown).unwrap().unwrap(),
+        with_left_out(
+            &[(0xF187, &[0xAA, 0xBB]), (0xF191, &[0x11, 0x22])],
+            &[0xF188, 0xF189],
+            &[]
+        )
+    );
+}
+
+#[test]
+fn the_unsplit_bytes_start_at_the_first_unknown_did_after_the_left_out_ones() {
+    // F187 is left out and F188 has no length: F188's echo opens the unsplit bytes, and F189 and
+    // F191 aren't claimed as left out because the bytes after F188's can't be read.
+    let mut car = Car::saying(&[0x62, 0xF1, 0x88, 0xCC, 0xF1, 0x91, 0x11]);
+    assert_eq!(
+        read(&mut car, &FOUR, no_lengths).unwrap().unwrap(),
+        with_left_out(&[], &[0xF187], &[0xF1, 0x88, 0xCC, 0xF1, 0x91, 0x11])
+    );
+    // The same after a split DID, and a DID that is last takes the rest.
+    let only_f187 = |did| lengths(did).filter(|_| did == 0xF187);
+    let mut car = Car::saying(&[
+        0x62, 0xF1, 0x87, 0xAA, 0xBB, 0xF1, 0x89, 0xDD, 0xF1, 0x91, 0x11,
+    ]);
+    assert_eq!(
+        read(&mut car, &FOUR, only_f187).unwrap().unwrap(),
+        with_left_out(
+            &[(0xF187, &[0xAA, 0xBB])],
+            &[0xF188],
+            &[0xF1, 0x89, 0xDD, 0xF1, 0x91, 0x11]
+        )
+    );
+    // An unknown-length DID still needs a data byte after its echo.
+    let mut car = Car::saying(&[0x62, 0xF1, 0x88]);
+    assert_eq!(
+        undecodable(read(&mut car, &FOUR, no_lengths)).0,
+        ReplyError::TooShort
+    );
+}
+
+#[test]
+fn a_reply_that_leaves_out_every_did_is_not_an_answer() {
+    // A module with none of the DIDs says `7F 22 31`, so `62` alone, or cut inside an echo, is
+    // never a success.
+    for payload in [&[0x62][..], &[0x62, 0xF1][..]] {
+        let mut car = Car::saying(payload);
+        let got = read(&mut car, &FOUR, lengths).unwrap();
+        assert!(got.is_err(), "{payload:02X?}: {got:?}");
+    }
+}
+
+#[test]
+fn left_out_dids_dont_loosen_the_echo_the_order_or_the_end() {
+    let f187 = [0xF1, 0x87, 0xAA, 0xBB];
+    let f189 = [0xF1, 0x89, 0xDD, 0xEE, 0xFF];
+    let cases: [(&str, Vec<u8>); 5] = [
+        ("out of order", [&[0x62][..], &f189, &f187].concat()),
+        ("repeated", [&[0x62][..], &f187, &f187].concat()),
+        (
+            "not asked for",
+            [&[0x62][..], &f187, &[0xF1, 0x00, 0x01]].concat(),
+        ),
+        (
+            "leftover after the last DID",
+            [&[0x62][..], &f187, &f189, &[0xF1, 0x91, 0x11, 0x00]].concat(),
+        ),
+        (
+            "leftover after an early end",
+            [&[0x62][..], &f187, &[0x00]].concat(),
+        ),
+    ];
+    for (what, payload) in cases {
+        let mut car = Car::saying(&payload);
+        let got = read(&mut car, &FOUR, lengths).unwrap();
+        assert!(
+            matches!(got, Err(ReadError::Undecodable { .. })),
+            "{what}: {got:?}"
+        );
+    }
+    // A leftover byte after an early end is a 1-byte echo, which is short; the others are wrong.
+    let mut car = Car::saying(&[&[0x62][..], &f187, &[0x00]].concat());
+    assert_eq!(
+        undecodable(read(&mut car, &FOUR, lengths)).0,
+        ReplyError::TooShort
+    );
+    let mut car = Car::saying(&[&[0x62][..], &f189, &f187].concat());
+    assert_eq!(
+        undecodable(read(&mut car, &FOUR, lengths)).0,
+        ReplyError::Malformed
+    );
+}
+
 #[test]
 fn a_reply_to_another_service_isnt_this_ones() {
     let mut car = Car::saying(&[0x50, 0x03, 0x00, 0x32, 0x01, 0xF4]);
@@ -401,24 +619,29 @@ fn a_reply_to_another_service_isnt_this_ones() {
 
 // ---- any reply -----------------------------------------------------------------------------
 
+// A DID's place in the request.
+fn place(did: u16) -> usize {
+    FOUR.iter().position(|&d| d == did).unwrap()
+}
+
 proptest! {
     // However the module's bytes are, nothing panics, and a reply that is accepted is exactly
-    // the echoes and data it was split into: nothing dropped, nothing made up.
+    // the echoes and data it was split into: nothing dropped, nothing made up. Every DID asked
+    // for is split, left out, or in the unsplit bytes, once, in request order.
     #[test]
     fn an_accepted_reply_is_reassembled_exactly(
         body in proptest::collection::vec(any::<u8>(), 0..48),
         positive in 0u8..4,
+        first in 0usize..4,
         known in proptest::collection::vec(proptest::option::of(0usize..5), 4),
     ) {
         let mut payload = if positive > 0 { vec![0x62] } else { Vec::new() };
         // Often begin as a real reply does, so the checks past the first echo run.
         if positive > 1 {
-            payload.extend([0xF1, 0x87]);
+            payload.extend(FOUR[first].to_be_bytes());
         }
         payload.extend(body);
-        let length_of = |did: u16| {
-            FOUR.iter().position(|&d| d == did).and_then(|i| known[i])
-        };
+        let length_of = |did: u16| known[place(did)];
         let mut car = Car::saying(&payload);
         if let Ok(Ok(got)) = read(&mut car, &FOUR, length_of) {
             let mut again = vec![0x62];
@@ -432,13 +655,51 @@ proptest! {
             }
             again.extend(&got.unsplit);
             prop_assert_eq!(again, payload);
-            if !got.unsplit.is_empty() {
-                prop_assert_eq!(&got.unsplit[..2], &FOUR[got.split.len()].to_be_bytes());
-            }
-            // In request order, from the first DID.
-            for (index, (did, _)) in got.split.iter().enumerate() {
-                prop_assert_eq!(*did, FOUR[index]);
+
+            let split: Vec<u16> = got.split.iter().map(|(did, _)| *did).collect();
+            prop_assert!(split.windows(2).all(|w| place(w[0]) < place(w[1])));
+            prop_assert!(got.left_out.windows(2).all(|w| place(w[0]) < place(w[1])));
+            let mut named = [split, got.left_out.clone()].concat();
+            named.sort_by_key(|&did| place(did));
+            // Nothing is both, and what's named is the DIDs from the first one on, with no gap.
+            prop_assert_eq!(&named[..], &FOUR[..named.len()]);
+            if got.unsplit.is_empty() {
+                prop_assert_eq!(named.len(), FOUR.len());
+                prop_assert!(!got.split.is_empty());
+            } else {
+                // The unsplit bytes open with the echo of the first DID not named, whose length
+                // isn't known, and a data byte.
+                let next = FOUR[named.len()];
+                prop_assert_eq!(&got.unsplit[..2], &next.to_be_bytes());
+                prop_assert!(got.unsplit.len() >= 3);
+                prop_assert!(length_of(next).is_none_or(|l| l == 0));
             }
         }
+    }
+
+    // A reply that holds any non-empty subset of the DIDs, in order, with every length known,
+    // splits into exactly those DIDs, and the others are left out.
+    #[test]
+    fn any_subset_of_the_dids_can_be_left_out(
+        mask in 1u8..16,
+        data in proptest::collection::vec(any::<u8>(), 4 * 4),
+    ) {
+        let length = |did: u16| 1 + place(did);
+        let mut payload = vec![0x62];
+        let mut split = Vec::new();
+        let mut left_out = Vec::new();
+        for (index, &did) in FOUR.iter().enumerate() {
+            if mask >> index & 1 == 1 {
+                let bytes = data[index * 4..index * 4 + length(did)].to_vec();
+                payload.extend(did.to_be_bytes());
+                payload.extend(&bytes);
+                split.push((did, bytes));
+            } else {
+                left_out.push(did);
+            }
+        }
+        let mut car = Car::saying(&payload);
+        let got = read(&mut car, &FOUR, |did| Some(length(did))).unwrap().unwrap();
+        prop_assert_eq!(got, DidsData { split, left_out, unsplit: Vec::new() });
     }
 }

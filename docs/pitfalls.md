@@ -342,6 +342,12 @@ Each entry names the class, what to check, and where it bit us.
   is (a malformed or empty one abandons too), and only then clear what the completion consumed (PR #261, Codex).
   A bad frame that parses as a consecutive frame (wrong sequence number) ends its transfer too: report it and what it
   ended as it arrives, not at the next request, as `docs/raw-can.md` promises (#263).
+- **A multi-DID `22` reply may leave out the DIDs the module doesn't support.** ISO 14229-1 has it refuse with `7F 22 31`
+  only when it supports none of them. `read-dids` required every echo in turn, so the A7's engine, TCU and gateway, which
+  all left out F188, were each called malformed (#332, car session 11). A splitter allows a skipped DID and still checks
+  the echo (one of the DIDs not yet matched, so the order holds and none repeats), each known length, and the bytes left
+  over; the skipped DIDs are reported, never dropped; and a reply that leaves out all of them is no answer. Where it
+  can't split (an unknown length), it must not claim the DIDs after as left out.
 
 ## Links and adapters
 

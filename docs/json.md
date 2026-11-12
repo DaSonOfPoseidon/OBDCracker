@@ -229,17 +229,20 @@ still be in the extended session, and `out_of_step` is whether a late answer may
 ```json
 {
   "module": {"name": "transmission", "request_id": "7E1", "response_id": "7E9"},
-  "dids": ["F189", "F191"],
+  "dids": ["F188", "F189", "F191"],
   "read": {"value": {
     "split": [{"did": "F189", "data": "31 30 30 38"}, {"did": "F191", "data": "30 42 4B 39 32 37 31 35 36 41 4D"}],
+    "left_out": ["F188"],
     "unsplit": ""
   }}
 }
 ```
 
 `dids` is what was asked for, in order. `read` is `{"error": ...}` when the module refused. `split` is the DIDs whose
-data could be told apart, and `unsplit` is the bytes from the first DID whose length the profile doesn't give, as the
-module sent them, empty when every DID was split.
+data could be told apart, and `left_out` is the DIDs asked for that the reply doesn't have, which is how a module says it
+doesn't support them (a list of DID strings, in request order; a document from before it existed has none, and still
+reads). `unsplit` is the bytes from the first DID in the reply whose length the profile doesn't give, as the module sent
+them, empty when every DID was split or left out; the DIDs after that one aren't in `left_out`.
 
 ### `diff`
 
