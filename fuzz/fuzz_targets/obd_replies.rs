@@ -12,12 +12,26 @@ fuzz_target!(|data: &[u8]| {
         let (request, reply) = rest.split_at(usize::from(*split).min(rest.len()));
         let _ = response::answers(request, reply);
         let _ = response::answers_after_pending(request, reply);
+        // The request's own bytes stand in for the PID and frame the caller asked for.
+        if let [_, pid, frame, ..] = request {
+            let _ = obd::decode_freeze_frame(reply, *pid, *frame);
+            let _ = obd::decode_supported_monitor_ids(reply, *pid);
+        }
     }
     if let Ok(readings) = obd::decode_current_data(data) {
         readings.for_each(drop);
     }
-    if let Ok(dtcs) = obd::decode_stored_dtcs(data) {
-        dtcs.for_each(|dtc| drop(dtc.to_string()));
+    for decode in [
+        obd::decode_stored_dtcs,
+        obd::decode_pending_dtcs,
+        obd::decode_permanent_dtcs,
+    ] {
+        if let Ok(dtcs) = decode(data) {
+            dtcs.for_each(|dtc| drop(dtc.to_string()));
+        }
+    }
+    if let Ok(status) = obd::decode_monitor_status(data) {
+        status.monitors().for_each(drop);
     }
     let _ = obd::decode_supported_info(data);
     let _ = obd::decode_vin(data);

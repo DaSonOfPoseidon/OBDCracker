@@ -8,7 +8,9 @@ use proptest::prelude::*;
 const ENGINE: Target = Target::Physical(0x7E0);
 
 // Kept separate from the crate's own tables, so a change to the allowlist has to change this too.
-const READ_SERVICES: [u8; 7] = [0x01, 0x03, 0x09, 0x10, 0x19, 0x22, 0x3E];
+const READ_SERVICES: [u8; 11] = [
+    0x01, 0x02, 0x03, 0x06, 0x07, 0x09, 0x0A, 0x10, 0x19, 0x22, 0x3E,
+];
 const FLASH_SERVICES: [u8; 7] = [0x11, 0x31, 0x34, 0x35, 0x36, 0x37, 0x3D];
 // KWP2000 (ISO 14230-3): ReadStatusOfDTC, ReadDTCByStatus, ReadEcuIdentification,
 // ReadDataByLocalIdentifier, ReadDataByCommonIdentifier (one ID), TesterPresent.
@@ -17,8 +19,12 @@ const KWP2000_READ_SERVICES: [u8; 6] = [0x17, 0x18, 0x1A, 0x21, 0x22, 0x3E];
 const UDS_READS: &[&[u8]] = &[
     &[0x01, 0x0C],
     &[0x01, 0x0C, 0x0D, 0x05, 0x0F, 0x10, 0x11],
+    &[0x02, 0x0C, 0x00],
     &[0x03],
+    &[0x06, 0x01],
+    &[0x07],
     &[0x09, 0x02],
+    &[0x0A],
     &[0x10, 0x01],
     &[0x10, 0x03],
     &[0x10, 0x81],
@@ -69,7 +75,15 @@ fn approve_kwp2000(target: Target, payload: &[u8]) -> Result<Tier, Rejection> {
 
 #[test]
 fn approves_obd_reads_on_the_functional_address() {
-    for payload in [&[0x01, 0x0C][..], &[0x03], &[0x09, 0x02]] {
+    for payload in [
+        &[0x01, 0x0C][..],
+        &[0x02, 0x0C, 0x00],
+        &[0x03],
+        &[0x06, 0x01],
+        &[0x07],
+        &[0x09, 0x02],
+        &[0x0A],
+    ] {
         assert_eq!(approve(Target::ObdFunctional, payload), Ok(Tier::Read));
     }
 }
@@ -315,18 +329,63 @@ fn rejects_services_that_silence_or_drive_the_car() {
 fn rejects_malformed_reads() {
     for payload in [
         &[][..],
-        &[0x22],                      // no DID
-        &[0x22, 0xF1],                // half a DID
-        &[0x01],                      // mode 01 with no PID
-        &[0x01, 1, 2, 3, 4, 5, 6, 7], // more than six PIDs
-        &[0x03, 0x00],                // mode 03 takes no data
-        &[0x09],                      // mode 09 with no PID
-        &[0x10, 0x03, 0x00],          // trailing byte
-        &[0x3E, 0x01],                // unknown subfunction
-        &[0x10, 0x60],                // unknown session
-        &[0x19],                      // no subfunction
+        &[0x22],                         // no DID
+        &[0x22, 0xF1],                   // half a DID
+        &[0x01],                         // mode 01 with no PID
+        &[0x01, 1, 2, 3, 4, 5, 6, 7],    // more than six PIDs
+        &[0x02],                         // mode 02 with no PID or frame
+        &[0x02, 0x0C],                   // mode 02 with no frame number
+        &[0x02, 0x0C, 0x00, 0x0D, 0x00], // mode 02 takes one PID and frame
+        &[0x03, 0x00],                   // mode 03 takes no data
+        &[0x06],                         // mode 06 with no MID
+        &[0x06, 0x01, 0x02],             // mode 06 takes one MID
+        &[0x07, 0x00],                   // mode 07 takes no data
+        &[0x09],                         // mode 09 with no PID
+        &[0x0A, 0x00],                   // mode 0A takes no data
+        &[0x10, 0x03, 0x00],             // trailing byte
+        &[0x3E, 0x01],                   // unknown subfunction
+        &[0x10, 0x60],                   // unknown session
+        &[0x19],                         // no subfunction
     ] {
         assert!(approve(ENGINE, payload).is_err(), "{payload:02X?}");
+    }
+}
+
+// SID and the number of data bytes each OBD-II mode takes.
+const OBD_MODE_SHAPES: [(u8, usize); 4] = [(0x02, 2), (0x06, 1), (0x07, 0), (0x0A, 0)];
+
+#[test]
+fn obd_modes_02_06_07_and_0a_are_reads_of_exactly_their_shape() {
+    for (sid, len) in OBD_MODE_SHAPES {
+        for data_len in 0..=len + 2 {
+            let mut payload = vec![sid];
+            payload.resize(1 + data_len, 0x01);
+            for target in [Target::ObdFunctional, ENGINE] {
+                let result = approve(target, &payload);
+                if data_len == len {
+                    assert_eq!(result, Ok(Tier::Read), "{payload:02X?} to {target:?}");
+                } else {
+                    assert_eq!(
+                        result,
+                        Err(Rejection::NotAllowed),
+                        "{payload:02X?} to {target:?}"
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn obd_modes_02_06_07_and_0a_are_not_kwp2000_services() {
+    for (sid, len) in OBD_MODE_SHAPES {
+        let mut payload = vec![sid];
+        payload.resize(1 + len, 0x01);
+        assert_eq!(
+            approve_kwp2000(ENGINE, &payload),
+            Err(Rejection::NotAllowed),
+            "{payload:02X?}"
+        );
     }
 }
 

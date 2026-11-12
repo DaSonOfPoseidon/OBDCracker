@@ -213,6 +213,27 @@ mod stored_dtcs {
     }
 
     #[test]
+    fn p0000_is_padding_not_a_code() {
+        assert_eq!(codes(&[0x43, 0x01, 0x00, 0x00]), Vec::<String>::new());
+        assert_eq!(
+            codes(&[0x43, 0x03, 0x00, 0x00, 0x04, 0x01, 0x00, 0x00]),
+            ["P0401"]
+        );
+    }
+
+    #[test]
+    fn padding_still_counts_toward_the_count() {
+        assert_eq!(
+            decode_stored_dtcs(&[0x43, 0x02, 0x00, 0x00]).err(),
+            Some(Error::Malformed)
+        );
+        assert_eq!(
+            decode_stored_dtcs(&[0x43, 0x01, 0x00, 0x00, 0x00]).err(),
+            Some(Error::Malformed)
+        );
+    }
+
+    #[test]
     fn top_bits_pick_the_system_and_the_first_digit() {
         assert_eq!(Dtc::new(0x1234).to_string(), "P1234");
         assert_eq!(Dtc::new(0x4567).to_string(), "C0567");
@@ -232,6 +253,504 @@ mod stored_dtcs {
         assert_eq!(
             decode_stored_dtcs(&[0x41, 0x00]).err(),
             Some(Error::WrongService(0x41))
+        );
+    }
+}
+
+mod pending_and_permanent_dtcs {
+    use obdcracker_core::obd::{
+        decode_pending_dtcs, decode_permanent_dtcs, decode_stored_dtcs, pending_dtcs,
+        permanent_dtcs,
+    };
+    use obdcracker_core::response::{Error, NegativeResponse, Nrc};
+
+    #[test]
+    fn builds_the_requests() {
+        assert_eq!(pending_dtcs(), [0x07]);
+        assert_eq!(permanent_dtcs(), [0x0A]);
+    }
+
+    #[test]
+    fn decodes_codes_skipping_padding() {
+        let pending: Vec<_> = decode_pending_dtcs(&[0x47, 0x02, 0x04, 0x01, 0x00, 0x00])
+            .unwrap()
+            .map(|dtc| dtc.to_string())
+            .collect();
+        assert_eq!(pending, ["P0401"]);
+        let permanent: Vec<_> = decode_permanent_dtcs(&[0x4A, 0x02, 0x01, 0x13, 0xC1, 0x00])
+            .unwrap()
+            .map(|dtc| dtc.to_string())
+            .collect();
+        assert_eq!(permanent, ["P0113", "U0100"]);
+        assert_eq!(decode_pending_dtcs(&[0x47, 0x00]).unwrap().count(), 0);
+        assert_eq!(decode_permanent_dtcs(&[0x4A, 0x00]).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn each_decoder_takes_only_its_own_reply() {
+        assert_eq!(
+            decode_pending_dtcs(&[0x43, 0x00]).err(),
+            Some(Error::WrongService(0x43))
+        );
+        assert_eq!(
+            decode_pending_dtcs(&[0x4A, 0x00]).err(),
+            Some(Error::WrongService(0x4A))
+        );
+        assert_eq!(
+            decode_permanent_dtcs(&[0x47, 0x00]).err(),
+            Some(Error::WrongService(0x47))
+        );
+        assert_eq!(
+            decode_stored_dtcs(&[0x47, 0x00]).err(),
+            Some(Error::WrongService(0x47))
+        );
+    }
+
+    #[test]
+    fn count_must_match_the_codes() {
+        for reply in [
+            &[0x47, 0x02, 0x04, 0x01][..],
+            &[0x47, 0x01, 0x04, 0x01, 0x01, 0x13],
+            &[0x47, 0x00, 0x04, 0x01],
+            &[0x47, 0x01, 0x04, 0x01, 0xAA],
+            &[0x47, 0x01, 0x04],
+        ] {
+            assert_eq!(decode_pending_dtcs(reply).err(), Some(Error::Malformed));
+        }
+        assert_eq!(decode_pending_dtcs(&[0x47]).err(), Some(Error::TooShort));
+        assert_eq!(
+            decode_permanent_dtcs(&[0x4A, 0x01, 0x04]).err(),
+            Some(Error::Malformed)
+        );
+        assert_eq!(decode_permanent_dtcs(&[]).err(), Some(Error::TooShort));
+    }
+
+    #[test]
+    fn a_refusal_is_a_negative_response() {
+        assert_eq!(
+            decode_pending_dtcs(&[0x7F, 0x07, 0x12]).err(),
+            Some(Error::Negative(NegativeResponse {
+                sid: 0x07,
+                nrc: Nrc::SubFunctionNotSupported
+            }))
+        );
+        assert_eq!(
+            decode_permanent_dtcs(&[0x7F, 0x0A, 0x11]).err(),
+            Some(Error::Negative(NegativeResponse {
+                sid: 0x0A,
+                nrc: Nrc::ServiceNotSupported
+            }))
+        );
+    }
+}
+
+mod monitor_status {
+    use obdcracker_core::obd::{
+        IgnitionType, Monitor, MonitorKind, MonitorStatus, decode_monitor_status,
+    };
+    use obdcracker_core::response::Error;
+
+    const DONE: Monitor = Monitor {
+        supported: true,
+        complete: true,
+    };
+    const NOT_DONE: Monitor = Monitor {
+        supported: true,
+        complete: false,
+    };
+
+    fn status(a: u8, b: u8, c: u8, d: u8) -> MonitorStatus {
+        decode_monitor_status(&[0x41, 0x01, a, b, c, d]).unwrap()
+    }
+
+    fn supported(status: &MonitorStatus) -> Vec<MonitorKind> {
+        status
+            .monitors()
+            .filter(|(_, monitor)| monitor.supported)
+            .map(|(kind, _)| kind)
+            .collect()
+    }
+
+    #[test]
+    fn decodes_the_a7_engines_reply() {
+        // The sim's engine answer to 01 01; the A7 is a diesel.
+        let status = status(0x00, 0x2F, 0x28, 0x20);
+        assert!(!status.mil_on);
+        assert_eq!(status.dtc_count, 0);
+        assert_eq!(status.ignition, IgnitionType::Compression);
+        assert_eq!(status.misfire, DONE);
+        assert_eq!(status.fuel_system, NOT_DONE);
+        assert_eq!(status.components, DONE);
+        assert_eq!(
+            supported(&status),
+            [
+                MonitorKind::Misfire,
+                MonitorKind::FuelSystem,
+                MonitorKind::Components,
+                MonitorKind::BoostPressure,
+                MonitorKind::ExhaustGasSensor,
+            ]
+        );
+        assert_eq!(status.monitor(MonitorKind::BoostPressure), Some(DONE));
+        assert_eq!(
+            status.monitor(MonitorKind::ExhaustGasSensor),
+            Some(NOT_DONE)
+        );
+        assert_eq!(
+            status
+                .monitor(MonitorKind::ParticulateFilter)
+                .map(|m| m.supported),
+            Some(false)
+        );
+    }
+
+    #[test]
+    fn mil_and_the_count_share_the_first_byte() {
+        let on = status(0xFF, 0, 0, 0);
+        assert!(on.mil_on);
+        assert_eq!(on.dtc_count, 127);
+        let off = status(0x7F, 0, 0, 0);
+        assert!(!off.mil_on);
+        assert_eq!(off.dtc_count, 127);
+        let one = status(0x81, 0, 0, 0);
+        assert!(one.mil_on);
+        assert_eq!(one.dtc_count, 1);
+        let none = status(0x00, 0, 0, 0);
+        assert!(!none.mil_on);
+        assert_eq!(none.dtc_count, 0);
+    }
+
+    #[test]
+    fn spark_ignition_names_the_engine_monitors_differently() {
+        // Misfire, fuel system and components supported, all complete; every spark monitor supported.
+        let status = status(0x00, 0x07, 0xFF, 0x00);
+        assert_eq!(status.ignition, IgnitionType::Spark);
+        assert_eq!(
+            supported(&status),
+            [
+                MonitorKind::Misfire,
+                MonitorKind::FuelSystem,
+                MonitorKind::Components,
+                MonitorKind::Catalyst,
+                MonitorKind::HeatedCatalyst,
+                MonitorKind::EvaporativeSystem,
+                MonitorKind::SecondaryAir,
+                MonitorKind::AcRefrigerant,
+                MonitorKind::OxygenSensor,
+                MonitorKind::OxygenSensorHeater,
+                MonitorKind::EgrVvt,
+            ]
+        );
+        assert_eq!(status.monitor(MonitorKind::Catalyst), Some(DONE));
+        assert_eq!(status.monitor(MonitorKind::BoostPressure), None);
+        assert_eq!(status.monitor(MonitorKind::ParticulateFilter), None);
+    }
+
+    #[test]
+    fn compression_ignition_names_every_engine_monitor() {
+        let status = status(0x00, 0x08, 0xEB, 0x81);
+        assert_eq!(status.ignition, IgnitionType::Compression);
+        assert_eq!(
+            supported(&status),
+            [
+                MonitorKind::NmhcCatalyst,
+                MonitorKind::NoxScr,
+                MonitorKind::BoostPressure,
+                MonitorKind::ExhaustGasSensor,
+                MonitorKind::ParticulateFilter,
+                MonitorKind::EgrVvt,
+            ]
+        );
+        assert_eq!(status.monitor(MonitorKind::NmhcCatalyst), Some(NOT_DONE));
+        assert_eq!(status.monitor(MonitorKind::EgrVvt), Some(NOT_DONE));
+        assert_eq!(status.monitor(MonitorKind::NoxScr), Some(DONE));
+        assert_eq!(status.monitor(MonitorKind::Catalyst), None);
+        assert_eq!(status.monitor(MonitorKind::AcRefrigerant), None);
+    }
+
+    #[test]
+    fn the_common_monitors_read_their_own_bits() {
+        // Misfire not supported but incomplete, fuel system supported and incomplete, components
+        // supported and complete.
+        let status = status(0x00, 0b0011_0110, 0, 0);
+        assert_eq!(
+            status.misfire,
+            Monitor {
+                supported: false,
+                complete: false
+            }
+        );
+        assert_eq!(status.fuel_system, NOT_DONE);
+        assert_eq!(status.components, DONE);
+    }
+
+    #[test]
+    fn nothing_supported_reports_no_supported_monitors() {
+        for ignition_bit in [0x00, 0x08] {
+            let status = status(0x00, ignition_bit, 0, 0);
+            assert_eq!(supported(&status), Vec::<MonitorKind>::new());
+        }
+    }
+
+    #[test]
+    fn a_complete_bit_on_an_unsupported_monitor_is_reported_not_refused() {
+        let status = status(0x00, 0b0111_0000, 0x00, 0xFF);
+        assert_eq!(
+            status.misfire,
+            Monitor {
+                supported: false,
+                complete: false
+            }
+        );
+        assert_eq!(
+            status.monitor(MonitorKind::Catalyst),
+            Some(Monitor {
+                supported: false,
+                complete: false
+            })
+        );
+    }
+
+    #[test]
+    fn reserved_bits_are_not_monitors() {
+        // Compression ignition bits C2 and C4, and B7, are reserved.
+        let status = status(0x00, 0x88, 0x14, 0x14);
+        assert_eq!(supported(&status), Vec::<MonitorKind>::new());
+    }
+
+    #[test]
+    fn the_reply_is_exactly_pid_01_and_four_bytes() {
+        assert_eq!(
+            decode_monitor_status(&[0x41, 0x01, 0, 0, 0]).err(),
+            Some(Error::Malformed)
+        );
+        assert_eq!(
+            decode_monitor_status(&[0x41, 0x01, 0, 0, 0, 0, 0]).err(),
+            Some(Error::Malformed)
+        );
+        assert_eq!(
+            decode_monitor_status(&[0x41, 0x02, 0, 0, 0, 0]).err(),
+            Some(Error::Malformed)
+        );
+        assert_eq!(decode_monitor_status(&[0x41]).err(), Some(Error::TooShort));
+        assert_eq!(decode_monitor_status(&[]).err(), Some(Error::TooShort));
+        assert_eq!(
+            decode_monitor_status(&[0x43, 0x01, 0, 0, 0, 0]).err(),
+            Some(Error::WrongService(0x43))
+        );
+    }
+}
+
+mod freeze_frame {
+    use obdcracker_core::obd::{
+        Dtc, FreezeFrameValue, SupportedPids, Unit, Value, decode_freeze_frame, freeze_frame,
+    };
+    use obdcracker_core::response::{Error, NegativeResponse, Nrc};
+
+    #[test]
+    fn builds_the_request() {
+        assert_eq!(freeze_frame(0x0C, 0), [0x02, 0x0C, 0x00]);
+        assert_eq!(freeze_frame(0x02, 0xFF), [0x02, 0x02, 0xFF]);
+    }
+
+    #[test]
+    fn decodes_a_pid_like_mode_01() {
+        assert_eq!(
+            decode_freeze_frame(&[0x42, 0x0C, 0x00, 0x1A, 0xF8], 0x0C, 0),
+            Ok(FreezeFrameValue::Pid(Value::Quantity {
+                value: 1726.0,
+                unit: Unit::Rpm
+            }))
+        );
+        assert_eq!(
+            decode_freeze_frame(&[0x42, 0x05, 0x02, 0x7B], 0x05, 2),
+            Ok(FreezeFrameValue::Pid(Value::Quantity {
+                value: 83.0,
+                unit: Unit::Celsius
+            }))
+        );
+        assert_eq!(
+            decode_freeze_frame(&[0x42, 0x00, 0x00, 0xBE, 0x1F, 0xA8, 0x13], 0x00, 0),
+            Ok(FreezeFrameValue::Pid(Value::Supported(SupportedPids::new(
+                0x00,
+                [0xBE, 0x1F, 0xA8, 0x13]
+            ))))
+        );
+    }
+
+    #[test]
+    fn pid_02_is_the_code_that_caused_the_frame() {
+        assert_eq!(
+            decode_freeze_frame(&[0x42, 0x02, 0x00, 0x01, 0x33], 0x02, 0),
+            Ok(FreezeFrameValue::Cause(Some(Dtc::new(0x0133))))
+        );
+        assert_eq!(
+            decode_freeze_frame(&[0x42, 0x02, 0x00, 0x00, 0x00], 0x02, 0),
+            Ok(FreezeFrameValue::Cause(None))
+        );
+    }
+
+    #[test]
+    fn pid_02_is_exactly_two_bytes() {
+        assert_eq!(
+            decode_freeze_frame(&[0x42, 0x02, 0x00, 0x01], 0x02, 0),
+            Err(Error::TooShort)
+        );
+        assert_eq!(
+            decode_freeze_frame(&[0x42, 0x02, 0x00], 0x02, 0),
+            Err(Error::TooShort)
+        );
+        assert_eq!(
+            decode_freeze_frame(&[0x42, 0x02, 0x00, 0x01, 0x33, 0x00], 0x02, 0),
+            Err(Error::Malformed)
+        );
+    }
+
+    #[test]
+    fn an_unknown_pid_keeps_its_bytes() {
+        assert_eq!(
+            decode_freeze_frame(&[0x42, 0xE1, 0x00, 0x7B, 0x01], 0xE1, 0),
+            Ok(FreezeFrameValue::Pid(Value::Raw(&[0x7B, 0x01])))
+        );
+        assert_eq!(
+            decode_freeze_frame(&[0x42, 0xE1, 0x00], 0xE1, 0),
+            Err(Error::TooShort)
+        );
+    }
+
+    #[test]
+    fn a_known_pid_has_exactly_its_length() {
+        assert_eq!(
+            decode_freeze_frame(&[0x42, 0x0C, 0x00, 0x1A], 0x0C, 0),
+            Err(Error::TooShort)
+        );
+        assert_eq!(
+            decode_freeze_frame(&[0x42, 0x0C, 0x00], 0x0C, 0),
+            Err(Error::TooShort)
+        );
+        assert_eq!(
+            decode_freeze_frame(&[0x42, 0x0C, 0x00, 0x1A, 0xF8, 0x00], 0x0C, 0),
+            Err(Error::Malformed)
+        );
+        assert_eq!(
+            decode_freeze_frame(&[0x42, 0x05, 0x00, 0x7B, 0x7B], 0x05, 0),
+            Err(Error::Malformed)
+        );
+    }
+
+    #[test]
+    fn the_echoed_pid_and_frame_must_be_the_requested_ones() {
+        let reply = [0x42, 0x0C, 0x01, 0x1A, 0xF8];
+        assert!(decode_freeze_frame(&reply, 0x0C, 1).is_ok());
+        assert_eq!(decode_freeze_frame(&reply, 0x0C, 0), Err(Error::Malformed));
+        assert_eq!(decode_freeze_frame(&reply, 0x0D, 1), Err(Error::Malformed));
+        assert_eq!(
+            decode_freeze_frame(&[0x42, 0x02, 0x00, 0x01, 0x33], 0x0C, 0),
+            Err(Error::Malformed)
+        );
+    }
+
+    #[test]
+    fn rejects_other_services_refusals_and_empty_replies() {
+        assert_eq!(
+            decode_freeze_frame(&[0x41, 0x0C, 0x00, 0x1A, 0xF8], 0x0C, 0),
+            Err(Error::WrongService(0x41))
+        );
+        assert_eq!(
+            decode_freeze_frame(&[0x7F, 0x02, 0x31], 0x0C, 0),
+            Err(Error::Negative(NegativeResponse {
+                sid: 0x02,
+                nrc: Nrc::RequestOutOfRange
+            }))
+        );
+        assert_eq!(decode_freeze_frame(&[], 0x0C, 0), Err(Error::TooShort));
+        assert_eq!(decode_freeze_frame(&[0x42], 0x0C, 0), Err(Error::TooShort));
+        assert_eq!(
+            decode_freeze_frame(&[0x42, 0x0C], 0x0C, 0),
+            Err(Error::TooShort)
+        );
+    }
+}
+
+mod monitor_results {
+    use obdcracker_core::obd::{decode_supported_monitor_ids, monitor_results};
+    use obdcracker_core::response::{Error, NegativeResponse, Nrc};
+
+    #[test]
+    fn builds_the_request() {
+        assert_eq!(monitor_results(0x00), [0x06, 0x00]);
+        assert_eq!(monitor_results(0x21), [0x06, 0x21]);
+    }
+
+    #[test]
+    fn decodes_each_bitmap_from_its_own_base() {
+        let first =
+            decode_supported_monitor_ids(&[0x46, 0x00, 0xC0, 0x00, 0x00, 0x01], 0x00).unwrap();
+        assert_eq!(first.iter().collect::<Vec<_>>(), [0x01, 0x02, 0x20]);
+        let second =
+            decode_supported_monitor_ids(&[0x46, 0x20, 0x80, 0x00, 0x00, 0x00], 0x20).unwrap();
+        assert_eq!(second.iter().collect::<Vec<_>>(), [0x21]);
+        let last =
+            decode_supported_monitor_ids(&[0x46, 0xE0, 0x00, 0x00, 0x00, 0x00], 0xE0).unwrap();
+        assert_eq!(last.iter().count(), 0);
+    }
+
+    #[test]
+    fn the_echoed_monitor_id_must_be_the_requested_bitmap() {
+        let reply = [0x46, 0x20, 0x80, 0x00, 0x00, 0x00];
+        assert!(decode_supported_monitor_ids(&reply, 0x20).is_ok());
+        assert_eq!(
+            decode_supported_monitor_ids(&reply, 0x00).err(),
+            Some(Error::Malformed)
+        );
+    }
+
+    #[test]
+    fn only_bitmap_monitor_ids_are_decoded() {
+        for mid in [0x01, 0x1F, 0x21, 0xE1, 0xFF] {
+            let reply = [0x46, mid, 0x80, 0x00, 0x00, 0x00];
+            assert_eq!(
+                decode_supported_monitor_ids(&reply, mid).err(),
+                Some(Error::Malformed),
+                "{mid:02X}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_bitmap_is_exactly_four_bytes() {
+        for reply in [
+            &[0x46, 0x00, 0xC0, 0x00, 0x00][..],
+            &[0x46, 0x00, 0xC0, 0x00, 0x00, 0x01, 0x00],
+            &[0x46, 0x00],
+        ] {
+            assert_eq!(
+                decode_supported_monitor_ids(reply, 0x00).err(),
+                Some(Error::Malformed)
+            );
+        }
+        assert_eq!(
+            decode_supported_monitor_ids(&[0x46], 0x00).err(),
+            Some(Error::TooShort)
+        );
+        assert_eq!(
+            decode_supported_monitor_ids(&[], 0x00).err(),
+            Some(Error::TooShort)
+        );
+    }
+
+    #[test]
+    fn rejects_other_services_and_refusals() {
+        assert_eq!(
+            decode_supported_monitor_ids(&[0x49, 0x00, 0, 0, 0, 0], 0x00).err(),
+            Some(Error::WrongService(0x49))
+        );
+        assert_eq!(
+            decode_supported_monitor_ids(&[0x7F, 0x06, 0x12], 0x00).err(),
+            Some(Error::Negative(NegativeResponse {
+                sid: 0x06,
+                nrc: Nrc::SubFunctionNotSupported
+            }))
         );
     }
 }

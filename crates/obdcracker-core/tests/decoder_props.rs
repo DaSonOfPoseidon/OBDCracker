@@ -49,12 +49,30 @@ proptest! {
     }
 
     #[test]
-    fn obd_decoders_never_panic(reply in any_reply()) {
+    fn obd_decoders_never_panic(reply in any_reply(), pid in any::<u8>(), frame in any::<u8>()) {
+        let _ = obd::decode_freeze_frame(&reply, pid, frame);
+        if let Ok(bitmap) = obd::decode_supported_monitor_ids(&reply, pid) {
+            prop_assert_eq!(pid % 0x20, 0);
+            bitmap.iter().for_each(drop);
+        }
         if let Ok(readings) = obd::decode_current_data(&reply) {
             readings.for_each(drop);
         }
-        if let Ok(dtcs) = obd::decode_stored_dtcs(&reply) {
-            dtcs.for_each(|dtc| drop(dtc.to_string()));
+        for decode in [
+            obd::decode_stored_dtcs,
+            obd::decode_pending_dtcs,
+            obd::decode_permanent_dtcs,
+        ] {
+            if let Ok(dtcs) = decode(&reply) {
+                for dtc in dtcs {
+                    prop_assert_ne!(dtc.code(), 0);
+                    drop(dtc.to_string());
+                }
+            }
+        }
+        if let Ok(status) = obd::decode_monitor_status(&reply) {
+            prop_assert!(status.dtc_count <= 127);
+            status.monitors().for_each(drop);
         }
         let _ = obd::decode_supported_info(&reply);
         let _ = obd::decode_vin(&reply);

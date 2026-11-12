@@ -8,7 +8,7 @@
 | Physical | CAN FD | newer cars | not yet |
 | Transport | ISO-TP (ISO 15765-2), normal and extended addressing | almost everyone; Toyota uses extended addressing | done (classic CAN, both addressing modes) |
 | Transport | VW TP2.0 | older VAG module designs; likely the A7's comfort and infotainment modules, which don't answer on ISO-TP (#92) | channel setup, data transfer with ACKs and keep-alive, and disconnect, all built by the policy itself (`tp20::ChannelSession`, #142); through the ELM driver on an adapter that echoes each character (`scan --discover-tp20` opens VAG's `10 89` session, then reads each module's identification, by `22 F1 87` and `22 F1 9E` if it refuses `1A 9B` as not supported), and over raw CAN with `gsusb` and `socketcan` ([raw-can.md](raw-can.md#vw-tp20); run against a fake and `vcan`, not yet on a car); the timing on a real module, and the monitor-mode listening after each frame (#227), which acknowledges the frames it hears (#301), are rechecked in the next car session (#218, #169) |
-| Diagnostic | OBD-II (SAE J1979) | every car | decoding done for mode 01 (supported PIDs, load, coolant, RPM, speed, intake temp, MAF, throttle and pedal positions, run time, distances, warm-ups, barometric pressure, catalyst, ambient and oil temperatures, injection timing, fuel rate, torque, module voltage), mode 03 DTCs, mode 09 VIN (with its fields, model years and check digit), CALID, CVN and ECU name |
+| Diagnostic | OBD-II (SAE J1979) | every car | decoding done for mode 01 (the MIL and readiness monitors in PID 01, supported PIDs, load, coolant, RPM, speed, intake temp, MAF, throttle and pedal positions, run time, distances, warm-ups, barometric pressure, catalyst, ambient and oil temperatures, injection timing, fuel rate, torque, module voltage), mode 02 freeze frame values, mode 03, 07 and 0A DTCs, the mode 06 supported-monitor-ID bitmaps (the test results themselves aren't decoded yet), mode 09 VIN (with its fields, model years and check digit), CALID, CVN and ECU name |
 | Diagnostic | UDS (ISO 14229) | most modules from about 2010 | decoding done for 0x22 (single and multi-DID), 0x19 (0x01, 0x02, 0x0A) and negative response codes; the extended session (0x10 03, kept with 0x3E 00, left with 0x10 01) for reads that need it |
 | Diagnostic | KWP2000 (ISO 14230-3) over CAN | VAG TP2.0 modules, Toyota enhanced diagnostics before about 2018 | its own allowlist is done (#122); sent on TP2.0 channels (#142), one-frame requests of up to 5 bytes; not yet on ISO-TP |
 
@@ -66,6 +66,8 @@ this one's. A positive reply must start with the request's service ID + 0x40 and
 | Service | Echo that must match |
 |---|---|
 | mode 01 | one of the requested PIDs (unsupported PIDs are left out of the reply) |
+| mode 02 | the PID and the frame number |
+| mode 06 | the monitor ID |
 | mode 09 | the PID |
 | `0x22` | one of the requested DIDs |
 | `0x10`, `0x19`, `0x3E` | the subfunction, without the suppress-positive-response bit (bit 7) |
@@ -82,9 +84,54 @@ check what it reads.
 ## OBD-II decoding
 
 - Mode 03 is decoded in the CAN format (ISO 15765-4): a count byte, then that many two-byte codes, such as
-  `43 02 04 01 01 13` for P0401 and P0113. Pre-CAN protocols (J1850, ISO 9141-2, ISO 14230-4) have no count byte and use
-  zero-padded groups of three, so their replies aren't decoded.
+  `43 02 04 01 01 13` for P0401 and P0113. The count must equal the codes in the reply, but P0000 isn't yielded: a
+  module fills unused slots with it (SAE J1979), so `43 01 00 00` is a reply with no codes. Pre-CAN protocols (J1850, ISO 9141-2, ISO 14230-4) have no count byte and use
+  zero-padded groups of three, so their replies aren't decoded. Mode 07 (pending) and mode 0A (permanent) use the same
+  layout under `47` and `4A`.
 - Mode 01 leaves out unsupported PIDs. A PID the decoder doesn't know ends the readings, as its length is unknown.
 - Mode 09 text fields (VIN, CALID, ECU name) are printable ASCII after trimming 0x00 padding, and a field of nothing
   but padding is malformed, except a CALID slot, which is empty (the 2014 A7's engine sends one). A VIN uses digits and upper case letters except I, O and Q. An ECU name has no blanks
   between words (SAE J1979-DA), such as `EngineControl`.
+
+### Monitor status (mode 01 PID 01)
+
+`decode_monitor_status` reads exactly `41 01 A B C D`; `decode_current_data` still returns PID 01 as raw bytes. The bit
+layout is SAE J1979 / ISO 15031-5 (PID 01):
+
+| Byte | Bits |
+|---|---|
+| A | bit 7: MIL on; bits 6-0: confirmed DTC count (0 to 127) |
+| B | bits 0-2: misfire, fuel system, components supported; bit 3: 0 spark ignition, 1 compression ignition; bits 4-6: misfire, fuel system, components **not** complete; bit 7 reserved |
+| C | engine-specific monitors supported, by bit (below) |
+| D | the same monitors **not** complete (a set bit means not complete) |
+
+| Bit of C and D | Spark ignition | Compression ignition |
+|---|---|---|
+| 0 | catalyst | NMHC catalyst |
+| 1 | heated catalyst | NOx/SCR |
+| 2 | evaporative system | reserved |
+| 3 | secondary air system | boost pressure |
+| 4 | A/C refrigerant (reserved in newer editions) | reserved |
+| 5 | oxygen sensor | exhaust gas sensor |
+| 6 | oxygen sensor heater | PM filter |
+| 7 | EGR and/or VVT | EGR and/or VVT |
+
+A monitor's `complete` flag is the inverse of its not-complete bit and means something only if the monitor is
+supported: it is reported as sent, and a set or clear bit on an unsupported monitor isn't an error. Reserved bits are
+ignored. The 2014 A7's engine answers `00 2F 28 20`: a compression-ignition engine with misfire and components complete,
+the fuel system not, boost pressure complete and the exhaust gas sensor not.
+
+### Freeze frame (mode 02)
+
+A request names one PID and one frame number (`02 <pid> <frame>`), and the reply echoes both (`42 <pid> <frame>` and the
+value), so `decode_freeze_frame` takes the PID and frame that were asked for and refuses any other echo. The value is
+decoded as in mode 01, and a PID with a known length must have exactly that many bytes. PID 02 is the code that stored
+the frame: two bytes, where P0000 means none.
+
+### On-board monitor test results (mode 06)
+
+`decode_supported_monitor_ids` reads the supported-monitor-ID bitmaps (`06 00`, `06 20`, …, `06 E0`) as `46 <mid>` and four
+bytes, laid out like the mode 01 PID bitmaps. The test records for any other monitor ID aren't decoded yet: the layout
+of a record (monitor ID, test ID, unit and scaling ID, test value, minimum and maximum, and whether the monitor ID
+repeats in each record) couldn't be checked against the standard or a permissively licensed implementation, and
+the one public implementation found (python-OBD, GPL) is reference only. The records follow with the scan wiring.

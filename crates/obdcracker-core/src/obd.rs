@@ -11,8 +11,20 @@ use crate::response::{Error, positive, printable};
 /// Mode 01: current powertrain data.
 pub const CURRENT_DATA: u8 = 0x01;
 
+/// Mode 02: freeze frame data.
+pub const FREEZE_FRAME: u8 = 0x02;
+
+/// Mode 06: on-board monitor test results.
+pub const MONITOR_RESULTS: u8 = 0x06;
+
 /// Mode 03: stored (confirmed) emissions DTCs.
 pub const STORED_DTCS: u8 = 0x03;
+
+/// Mode 07: pending DTCs, found during the current or last driving cycle.
+pub const PENDING_DTCS: u8 = 0x07;
+
+/// Mode 0A: permanent DTCs, which only the car's own monitors can clear.
+pub const PERMANENT_DTCS: u8 = 0x0A;
 
 /// Mode 09: vehicle information.
 pub const VEHICLE_INFO: u8 = 0x09;
@@ -215,6 +227,262 @@ impl<'a> Iterator for Readings<'a> {
     }
 }
 
+/// A mode 06 request for one monitor ID.
+#[must_use]
+pub fn monitor_results(mid: u8) -> [u8; 2] {
+    [MONITOR_RESULTS, mid]
+}
+
+/// Decodes a mode 06 reply to a request for the supported-monitor-ID bitmap `mid` (0x00, 0x20,
+/// 0x40, …, 0xE0): `46 <mid>` and four bytes. Any other monitor ID is malformed here, because
+/// the test records after it aren't decoded; see
+/// [`docs/protocols.md#on-board-monitor-test-results-mode-06`](https://github.com/DaSonOfPoseidon/OBDCracker/blob/main/docs/protocols.md#on-board-monitor-test-results-mode-06).
+pub fn decode_supported_monitor_ids(reply: &[u8], mid: u8) -> Result<SupportedPids, Error> {
+    let [got, data @ ..] = positive(MONITOR_RESULTS, reply)? else {
+        return Err(Error::TooShort);
+    };
+    if *got != mid || !mid.is_multiple_of(0x20) {
+        return Err(Error::Malformed);
+    }
+    let bitmap = data.try_into().map_err(|_| Error::Malformed)?;
+    Ok(SupportedPids::new(mid, bitmap))
+}
+
+/// A mode 02 request for one PID of one freeze frame (0 is the first).
+#[must_use]
+pub fn freeze_frame(pid: u8, frame: u8) -> [u8; 3] {
+    [FREEZE_FRAME, pid, frame]
+}
+
+/// A value from a freeze frame.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum FreezeFrameValue<'a> {
+    /// PID 0x02: the code that stored the frame, or `None` for P0000, which says there is none.
+    Cause(Option<Dtc>),
+    /// Any other PID, decoded as in mode 01.
+    Pid(Value<'a>),
+}
+
+/// Decodes a mode 02 reply to a request for `pid` in freeze frame `frame` (`42 <pid> <frame>`
+/// and the value). The reply must echo both, and a PID with a known length must have exactly
+/// that many bytes. One that isn't known comes back as [`Value::Raw`].
+pub fn decode_freeze_frame(
+    reply: &[u8],
+    pid: u8,
+    frame: u8,
+) -> Result<FreezeFrameValue<'_>, Error> {
+    let [got_pid, got_frame, data @ ..] = positive(FREEZE_FRAME, reply)? else {
+        return Err(Error::TooShort);
+    };
+    if *got_pid != pid || *got_frame != frame {
+        return Err(Error::Malformed);
+    }
+    if pid == CAUSE_PID {
+        return match *data {
+            [hi, lo] => Ok(FreezeFrameValue::Cause(
+                Some(u16::from_be_bytes([hi, lo]))
+                    .filter(|&code| code != 0)
+                    .map(Dtc),
+            )),
+            [_] | [] => Err(Error::TooShort),
+            _ => Err(Error::Malformed),
+        };
+    }
+    if !is_known(pid) {
+        return if data.is_empty() {
+            Err(Error::TooShort)
+        } else {
+            Ok(FreezeFrameValue::Pid(Value::Raw(data)))
+        };
+    }
+    match decode_pid(pid, data) {
+        Some((len, value)) if len == data.len() => Ok(FreezeFrameValue::Pid(value)),
+        Some(_) => Err(Error::Malformed),
+        None => Err(Error::TooShort),
+    }
+}
+
+const CAUSE_PID: u8 = 0x02;
+const MONITOR_STATUS_PID: u8 = 0x01;
+
+/// Whether the engine is spark or compression ignition, which decides what the last two bytes of
+/// the monitor status mean.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IgnitionType {
+    /// Petrol and other spark-ignition engines.
+    Spark,
+    /// Diesel and other compression-ignition engines.
+    Compression,
+}
+
+/// An on-board diagnostic monitor of the emissions system.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MonitorKind {
+    /// Misfire (both engine types).
+    Misfire,
+    /// Fuel system (both engine types).
+    FuelSystem,
+    /// Comprehensive components (both engine types).
+    Components,
+    /// Catalyst (spark).
+    Catalyst,
+    /// Heated catalyst (spark).
+    HeatedCatalyst,
+    /// Evaporative system (spark).
+    EvaporativeSystem,
+    /// Secondary air system (spark).
+    SecondaryAir,
+    /// A/C refrigerant (spark; reserved in newer editions of J1979).
+    AcRefrigerant,
+    /// Oxygen sensor (spark).
+    OxygenSensor,
+    /// Oxygen sensor heater (spark).
+    OxygenSensorHeater,
+    /// EGR and/or VVT system (both engine types).
+    EgrVvt,
+    /// Non-methane hydrocarbon catalyst (compression).
+    NmhcCatalyst,
+    /// `NOx` and/or SCR aftertreatment (compression).
+    NoxScr,
+    /// Boost pressure (compression).
+    BoostPressure,
+    /// Exhaust gas sensor (compression).
+    ExhaustGasSensor,
+    /// Particulate matter filter (compression).
+    ParticulateFilter,
+}
+
+// The engine-specific monitors, by bit of bytes C and D. A bit with no entry is reserved.
+const SPARK_MONITORS: [(u8, MonitorKind); 8] = [
+    (0, MonitorKind::Catalyst),
+    (1, MonitorKind::HeatedCatalyst),
+    (2, MonitorKind::EvaporativeSystem),
+    (3, MonitorKind::SecondaryAir),
+    (4, MonitorKind::AcRefrigerant),
+    (5, MonitorKind::OxygenSensor),
+    (6, MonitorKind::OxygenSensorHeater),
+    (7, MonitorKind::EgrVvt),
+];
+const COMPRESSION_MONITORS: [(u8, MonitorKind); 6] = [
+    (0, MonitorKind::NmhcCatalyst),
+    (1, MonitorKind::NoxScr),
+    (3, MonitorKind::BoostPressure),
+    (5, MonitorKind::ExhaustGasSensor),
+    (6, MonitorKind::ParticulateFilter),
+    (7, MonitorKind::EgrVvt),
+];
+
+/// One monitor's state. `complete` means something only when `supported` is set: a module may
+/// send either value for a monitor it doesn't have.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Monitor {
+    /// Whether the car has this monitor.
+    pub supported: bool,
+    /// Whether it has finished since the codes were last cleared.
+    pub complete: bool,
+}
+
+/// The MIL and readiness monitors from mode 01 PID 01.
+///
+/// See [`docs/protocols.md#monitor-status-mode-01-pid-01`](https://github.com/DaSonOfPoseidon/OBDCracker/blob/main/docs/protocols.md#monitor-status-mode-01-pid-01).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MonitorStatus {
+    /// Whether the malfunction indicator lamp is on.
+    pub mil_on: bool,
+    /// How many emissions DTCs are confirmed, 0 to 127.
+    pub dtc_count: u8,
+    /// Whether the engine is spark or compression ignition.
+    pub ignition: IgnitionType,
+    /// The misfire monitor.
+    pub misfire: Monitor,
+    /// The fuel system monitor.
+    pub fuel_system: Monitor,
+    /// The comprehensive component monitor.
+    pub components: Monitor,
+    engine_supported: u8,
+    engine_incomplete: u8,
+}
+
+impl MonitorStatus {
+    fn engine_monitor(&self, bit: u8) -> Monitor {
+        Monitor {
+            supported: self.engine_supported & (1 << bit) != 0,
+            complete: self.engine_incomplete & (1 << bit) == 0,
+        }
+    }
+
+    fn engine_table(&self) -> &'static [(u8, MonitorKind)] {
+        match self.ignition {
+            IgnitionType::Spark => &SPARK_MONITORS,
+            IgnitionType::Compression => &COMPRESSION_MONITORS,
+        }
+    }
+
+    /// The state of `kind`, or `None` if this engine type has no such monitor.
+    #[must_use]
+    pub fn monitor(&self, kind: MonitorKind) -> Option<Monitor> {
+        match kind {
+            MonitorKind::Misfire => Some(self.misfire),
+            MonitorKind::FuelSystem => Some(self.fuel_system),
+            MonitorKind::Components => Some(self.components),
+            _ => self
+                .engine_table()
+                .iter()
+                .find(|(_, k)| *k == kind)
+                .map(|&(bit, _)| self.engine_monitor(bit)),
+        }
+    }
+
+    /// Every monitor this engine type has, supported or not: the three common ones, then the
+    /// engine-specific ones in bit order.
+    pub fn monitors(&self) -> impl Iterator<Item = (MonitorKind, Monitor)> + '_ {
+        [
+            (MonitorKind::Misfire, self.misfire),
+            (MonitorKind::FuelSystem, self.fuel_system),
+            (MonitorKind::Components, self.components),
+        ]
+        .into_iter()
+        .chain(
+            self.engine_table()
+                .iter()
+                .map(|&(bit, kind)| (kind, self.engine_monitor(bit))),
+        )
+    }
+}
+
+/// Decodes a mode 01 reply for PID 01 alone (`41 01 A B C D`). The reply must be exactly that:
+/// other PIDs, or more bytes, are malformed. [`decode_current_data`] leaves PID 01 as
+/// [`Value::Raw`].
+pub fn decode_monitor_status(reply: &[u8]) -> Result<MonitorStatus, Error> {
+    let [pid, data @ ..] = positive(CURRENT_DATA, reply)? else {
+        return Err(Error::TooShort);
+    };
+    let &[a, b, c, d] = data else {
+        return Err(Error::Malformed);
+    };
+    if *pid != MONITOR_STATUS_PID {
+        return Err(Error::Malformed);
+    }
+    let common = |supported_bit: u8| Monitor {
+        supported: b & (1 << supported_bit) != 0,
+        complete: b & (1 << (supported_bit + 4)) == 0,
+    };
+    Ok(MonitorStatus {
+        mil_on: a & 0x80 != 0,
+        dtc_count: a & 0x7F,
+        ignition: if b & 0x08 == 0 {
+            IgnitionType::Spark
+        } else {
+            IgnitionType::Compression
+        },
+        misfire: common(0),
+        fuel_system: common(1),
+        components: common(2),
+        engine_supported: c,
+        engine_incomplete: d,
+    })
+}
+
 /// A mode 03 request for every stored emissions DTC.
 #[must_use]
 pub fn stored_dtcs() -> [u8; 1] {
@@ -248,9 +516,14 @@ impl fmt::Display for Dtc {
 }
 
 /// Decodes a mode 03 reply in the CAN format (ISO 15765-4): a count byte, then that many
-/// two-byte codes. Pre-CAN layouts aren't decoded; see [`docs/protocols.md#obd-ii-decoding`](https://github.com/DaSonOfPoseidon/OBDCracker/blob/main/docs/protocols.md#obd-ii-decoding).
+/// two-byte codes. The count must match the bytes, and the codes skip P0000, the padding a module
+/// fills unused slots with. Pre-CAN layouts aren't decoded; see [`docs/protocols.md#obd-ii-decoding`](https://github.com/DaSonOfPoseidon/OBDCracker/blob/main/docs/protocols.md#obd-ii-decoding).
 pub fn decode_stored_dtcs(reply: &[u8]) -> Result<Dtcs<'_>, Error> {
-    let (&count, codes) = positive(STORED_DTCS, reply)?
+    decode_dtc_list(STORED_DTCS, reply)
+}
+
+fn decode_dtc_list(request_sid: u8, reply: &[u8]) -> Result<Dtcs<'_>, Error> {
+    let (&count, codes) = positive(request_sid, reply)?
         .split_first()
         .ok_or(Error::TooShort)?;
     if codes.len() != usize::from(count) * 2 {
@@ -259,7 +532,7 @@ pub fn decode_stored_dtcs(reply: &[u8]) -> Result<Dtcs<'_>, Error> {
     Ok(Dtcs(codes.as_chunks::<2>().0.iter()))
 }
 
-/// The codes in a mode 03 reply.
+/// The codes in a mode 03, 07 or 0A reply, without P0000 padding.
 #[derive(Debug, Clone)]
 pub struct Dtcs<'a>(slice::Iter<'a, [u8; 2]>);
 
@@ -267,8 +540,34 @@ impl Iterator for Dtcs<'_> {
     type Item = Dtc;
 
     fn next(&mut self) -> Option<Dtc> {
-        self.0.next().map(|&pair| Dtc(u16::from_be_bytes(pair)))
+        self.0
+            .by_ref()
+            .map(|&pair| u16::from_be_bytes(pair))
+            .find(|&code| code != 0)
+            .map(Dtc)
     }
+}
+
+/// A mode 07 request for every pending emissions DTC.
+#[must_use]
+pub fn pending_dtcs() -> [u8; 1] {
+    [PENDING_DTCS]
+}
+
+/// A mode 0A request for every permanent emissions DTC.
+#[must_use]
+pub fn permanent_dtcs() -> [u8; 1] {
+    [PERMANENT_DTCS]
+}
+
+/// Decodes a mode 07 reply: the same layout and checks as [`decode_stored_dtcs`], under `0x47`.
+pub fn decode_pending_dtcs(reply: &[u8]) -> Result<Dtcs<'_>, Error> {
+    decode_dtc_list(PENDING_DTCS, reply)
+}
+
+/// Decodes a mode 0A reply: the same layout and checks as [`decode_stored_dtcs`], under `0x4A`.
+pub fn decode_permanent_dtcs(reply: &[u8]) -> Result<Dtcs<'_>, Error> {
+    decode_dtc_list(PERMANENT_DTCS, reply)
 }
 
 /// A mode 09 request for one PID.

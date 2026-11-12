@@ -625,9 +625,13 @@ fn classify_uds(payload: &[u8]) -> Option<(Tier, Kind)> {
     let sub = data.first().map(|b| b & 0x7F);
     let class = match sid {
         0x01 if (1..=6).contains(&data.len()) => (Tier::Read, Kind::Obd),
-        0x03 if data.is_empty() => (Tier::Read, Kind::Obd),
+        // Mode 02 takes one PID and one frame number.
+        0x02 if data.len() == 2 => (Tier::Read, Kind::Obd),
+        // Modes 03, 07 and 0A take no data.
+        0x03 | 0x07 | 0x0A if data.is_empty() => (Tier::Read, Kind::Obd),
         0x04 if data.is_empty() => (Tier::ClearDtc, Kind::Obd),
-        0x09 if data.len() == 1 => (Tier::Read, Kind::Obd),
+        // Mode 06 takes one monitor ID, and mode 09 one PID.
+        0x06 | 0x09 if data.len() == 1 => (Tier::Read, Kind::Obd),
         // Default and extended sessions are reads; programming is flashing.
         0x10 if data.len() == 1 => match sub? {
             0x01 | 0x03 => (Tier::Read, Kind::Physical),
