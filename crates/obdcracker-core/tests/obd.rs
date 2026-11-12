@@ -672,6 +672,89 @@ mod freeze_frame {
     }
 }
 
+mod monitor_results {
+    use obdcracker_core::obd::{decode_supported_monitor_ids, monitor_results};
+    use obdcracker_core::response::{Error, NegativeResponse, Nrc};
+
+    #[test]
+    fn builds_the_request() {
+        assert_eq!(monitor_results(0x00), [0x06, 0x00]);
+        assert_eq!(monitor_results(0x21), [0x06, 0x21]);
+    }
+
+    #[test]
+    fn decodes_each_bitmap_from_its_own_base() {
+        let first =
+            decode_supported_monitor_ids(&[0x46, 0x00, 0xC0, 0x00, 0x00, 0x01], 0x00).unwrap();
+        assert_eq!(first.iter().collect::<Vec<_>>(), [0x01, 0x02, 0x20]);
+        let second =
+            decode_supported_monitor_ids(&[0x46, 0x20, 0x80, 0x00, 0x00, 0x00], 0x20).unwrap();
+        assert_eq!(second.iter().collect::<Vec<_>>(), [0x21]);
+        let last =
+            decode_supported_monitor_ids(&[0x46, 0xE0, 0x00, 0x00, 0x00, 0x00], 0xE0).unwrap();
+        assert_eq!(last.iter().count(), 0);
+    }
+
+    #[test]
+    fn the_echoed_monitor_id_must_be_the_requested_bitmap() {
+        let reply = [0x46, 0x20, 0x80, 0x00, 0x00, 0x00];
+        assert!(decode_supported_monitor_ids(&reply, 0x20).is_ok());
+        assert_eq!(
+            decode_supported_monitor_ids(&reply, 0x00).err(),
+            Some(Error::Malformed)
+        );
+    }
+
+    #[test]
+    fn only_bitmap_monitor_ids_are_decoded() {
+        for mid in [0x01, 0x1F, 0x21, 0xE1, 0xFF] {
+            let reply = [0x46, mid, 0x80, 0x00, 0x00, 0x00];
+            assert_eq!(
+                decode_supported_monitor_ids(&reply, mid).err(),
+                Some(Error::Malformed),
+                "{mid:02X}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_bitmap_is_exactly_four_bytes() {
+        for reply in [
+            &[0x46, 0x00, 0xC0, 0x00, 0x00][..],
+            &[0x46, 0x00, 0xC0, 0x00, 0x00, 0x01, 0x00],
+            &[0x46, 0x00],
+        ] {
+            assert_eq!(
+                decode_supported_monitor_ids(reply, 0x00).err(),
+                Some(Error::Malformed)
+            );
+        }
+        assert_eq!(
+            decode_supported_monitor_ids(&[0x46], 0x00).err(),
+            Some(Error::TooShort)
+        );
+        assert_eq!(
+            decode_supported_monitor_ids(&[], 0x00).err(),
+            Some(Error::TooShort)
+        );
+    }
+
+    #[test]
+    fn rejects_other_services_and_refusals() {
+        assert_eq!(
+            decode_supported_monitor_ids(&[0x49, 0x00, 0, 0, 0, 0], 0x00).err(),
+            Some(Error::WrongService(0x49))
+        );
+        assert_eq!(
+            decode_supported_monitor_ids(&[0x7F, 0x06, 0x12], 0x00).err(),
+            Some(Error::Negative(NegativeResponse {
+                sid: 0x06,
+                nrc: Nrc::SubFunctionNotSupported
+            }))
+        );
+    }
+}
+
 mod vehicle_info {
     use obdcracker_core::obd::{
         EcuName, check_vin, decode_calids, decode_cvns, decode_ecu_name, decode_supported_info,

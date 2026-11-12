@@ -15,6 +15,7 @@ fuzz_target!(|data: &[u8]| {
         // The request's own bytes stand in for the PID and frame the caller asked for.
         if let [_, pid, frame, ..] = request {
             let _ = obd::decode_freeze_frame(reply, *pid, *frame);
+            let _ = obd::decode_supported_monitor_ids(reply, *pid);
         }
     }
     if let Ok(readings) = obd::decode_current_data(data) {

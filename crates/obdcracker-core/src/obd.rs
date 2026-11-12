@@ -14,6 +14,9 @@ pub const CURRENT_DATA: u8 = 0x01;
 /// Mode 02: freeze frame data.
 pub const FREEZE_FRAME: u8 = 0x02;
 
+/// Mode 06: on-board monitor test results.
+pub const MONITOR_RESULTS: u8 = 0x06;
+
 /// Mode 03: stored (confirmed) emissions DTCs.
 pub const STORED_DTCS: u8 = 0x03;
 
@@ -222,6 +225,27 @@ impl<'a> Iterator for Readings<'a> {
         self.rest = &data[len..];
         Some(Ok(Reading { pid, value }))
     }
+}
+
+/// A mode 06 request for one monitor ID.
+#[must_use]
+pub fn monitor_results(mid: u8) -> [u8; 2] {
+    [MONITOR_RESULTS, mid]
+}
+
+/// Decodes a mode 06 reply to a request for the supported-monitor-ID bitmap `mid` (0x00, 0x20,
+/// 0x40, …, 0xE0): `46 <mid>` and four bytes. Any other monitor ID is malformed here, because
+/// the test records after it aren't decoded; see
+/// [`docs/protocols.md#on-board-monitor-test-results-mode-06`](https://github.com/DaSonOfPoseidon/OBDCracker/blob/main/docs/protocols.md#on-board-monitor-test-results-mode-06).
+pub fn decode_supported_monitor_ids(reply: &[u8], mid: u8) -> Result<SupportedPids, Error> {
+    let [got, data @ ..] = positive(MONITOR_RESULTS, reply)? else {
+        return Err(Error::TooShort);
+    };
+    if *got != mid || !mid.is_multiple_of(0x20) {
+        return Err(Error::Malformed);
+    }
+    let bitmap = data.try_into().map_err(|_| Error::Malformed)?;
+    Ok(SupportedPids::new(mid, bitmap))
 }
 
 /// A mode 02 request for one PID of one freeze frame (0 is the first).

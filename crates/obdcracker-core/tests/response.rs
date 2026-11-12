@@ -285,6 +285,17 @@ fn answers_matches_the_echoed_freeze_frame_pid_and_frame() {
 }
 
 #[test]
+fn answers_matches_the_echoed_monitor_id() {
+    let request = [0x06, 0x01];
+    assert!(answers(&request, &[0x46, 0x01, 0x01, 0x0B]));
+    assert!(answers(&request, &[0x46, 0x01]));
+    assert!(!answers(&request, &[0x46, 0x02, 0x01, 0x0B]));
+    assert!(!answers(&request, &[0x46]));
+    assert!(!answers(&request, &[0x43, 0x01]));
+    assert!(answers(&request, &[0x7F, 0x06, 0x12]));
+}
+
+#[test]
 fn answers_matches_pending_and_permanent_dtc_replies_by_service() {
     assert!(answers(&[0x07], &[0x47, 0x00]));
     assert!(!answers(&[0x07], &[0x43, 0x00]));
