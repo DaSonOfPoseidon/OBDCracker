@@ -59,7 +59,7 @@ different value.
 | PID, and a bare byte such as a status or an NRC | 2 upper-case hex digits | `"0C"`, `"31"` |
 | OBD-II DTC | the J2012 text | `"P0401"` |
 | UDS DTC | 6 upper-case hex digits, as `dtc` takes it | `"0016A0"` |
-| DTC status | 2 hex digits, one flag per bit (ISO 14229-1 D.2) | `"2F"` |
+| DTC status | 2 hex digits, one flag per bit (ISO 14229-1 D.2). A scan's `dtcs` entry also lists the names of the set bits | `"2F"` |
 | DTC format | 2 hex digits | `"00"` |
 | CVN | 8 upper-case hex digits | `"9BF7470D"` |
 | Text | a JSON string | `"4G0907401N"` |
@@ -204,7 +204,18 @@ no value is stored (a VIN of 17 dashes).
     "response_id": "7E9",
     "dids": [{"did": "F191", "value": {"Text": "0BK927156AM"}}],
     "dtc_count": {"value": {"availability": "FF", "format": "00", "count": 1}},
-    "dtcs": {"value": [{"dtc": "040100", "status": "2F"}]},
+    "dtcs": {"value": [{
+      "dtc": "040100", "status": "2F",
+      "flags": ["failed", "failed this cycle", "pending", "confirmed", "failed since clear"]
+    }]},
+    "dtc_details": [{
+      "dtc": "040100",
+      "detail": {
+        "snapshots": {"error": {"Reply": {"Negative": {"sid": "19", "nrc": "13"}}}},
+        "extended_data": {"value": {"status": "2F", "records": ""}},
+        "out_of_step": false
+      }
+    }],
     "answered": true
   }]
 }
@@ -241,6 +252,17 @@ no value is stored (a VIN of 17 dashes).
 - `modules[].dtcs` are the DTCs with a fault bit set, as the 6 hex digits of the UDS DTC. The `P0401-00` form the text
   output shows for a module whose `dtc_count.format` is `"00"` or `"04"` is the first two bytes as the J2012 code and
   the third as the failure type.
+- `modules[].dtcs[].flags` names the status's set bits, in bit order (`failed`, `failed this cycle`, `pending`,
+  `confirmed`, `not tested since clear`, `failed since clear`, `not tested this cycle`, `lamp`), as the text output
+  prints them, for a reader that doesn't decode `status`. A reader takes the status from `status`: `flags` is never read
+  back. It was added without a new schema version, since a field added to an object doesn't need one.
+- `modules[].dtc_details` is `null` unless `--dtc-detail` was given and the module's DTC list was read. Then it lists,
+  for each DTC in `dtcs` in its order and each once, what `dtc` reads: `detail` is the same object as `dtc`'s
+  ([below](#dtc)). It is empty for a module that lists no DTC, and shorter than `dtcs` where the module said it was busy
+  or a read went unanswered: the last entry is the one that stopped it (its `detail` has `out_of_step` true, or a
+  refusal with NRC `21`), and the DTCs after it weren't asked. A document from before the field lacks it and reads as
+  `null`. `diff` doesn't compare it.
+- A profile's names for DTCs (`[[module.dtc]]`) are in the text output only.
 - `answered` is whether the module answered anything at all, a refusal included.
 - **What isn't in it:** the discovery passes, the TP2.0 pass and the gateway's installed-module list are written to
   stderr. A module that `--discover` or `--discover-29bit` found and the profile doesn't list is in `modules`, named

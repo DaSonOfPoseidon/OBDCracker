@@ -221,6 +221,28 @@ in the profile it reads the standard identification DIDs plus the profile's own 
 untested codes. DIDs whose length the profile gives are read three to a request; any a reply leaves out or doesn't fit
 are read again one at a time, and must then be exactly that length.
 
+### `--dtc-detail`
+
+```sh
+obdcracker --profile a7 scan --dtc-detail  # also read each listed DTC's snapshots and extended data
+```
+
+Also reads, for each DTC a module lists, its snapshot records (`19 04 <DTC> FF`) and extended data records
+(`19 06 <DTC> FF`), the same reads as [`dtc`](#dtc), and prints them under the DTC in the same form:
+
+```text
+77A gateway DTC 0016A0 failed (status 01)
+77A gateway DTC 0016A0 snapshots (service 0x19 refused: incorrect message length or invalid format (0x13))
+77A gateway DTC 0016A0 extended data: none (status 01, failed)
+```
+
+A module with no DTCs, or whose DTC list wasn't read, is asked nothing more. A module that says it is busy or leaves a
+read unanswered gets no more of them, and a line says how many DTCs weren't read and why; an unanswered read also prints
+the same note as `dtc` about connecting again. A DTC whose profile has a name prints it in quotes after its code
+([profile `[[module.dtc]]`](profiles.md#dtc-names)). The reads take a request or two per DTC, so a module with many
+DTCs takes a while. They go after the module's other reads, and `diff` leaves them out because they change between runs.
+`--dry-run` lists them.
+
 ### Readiness, pending and permanent DTCs, freeze frame, mode 06
 
 After each ECU's stored DTCs, `scan` prints what a generic scan tool shows, each line starting with the ECU's CAN ID:
@@ -408,7 +430,9 @@ identifiers, so they aren't split up. A snapshot reply whose first record is sho
 declares (each a 2-byte DID and data), or that declares none, is shown as undecodable, with its bytes. A refusal of
 one read doesn't stop the other. If the snapshot read goes unanswered, the extended data isn't asked, because a late
 refusal doesn't say which read it answers; nor if the module says it's busy (NRC 0x21), since it's still on the first.
-The code can't be 000000 (no code) or FFFFFF (every group). If the module answers nothing, the command fails.
+The code can't be 000000 (no code) or FFFFFF (every group). If the module answers nothing, the command fails. If the
+profile names the DTC (`[[module.dtc]]`), the name is printed in quotes after the code. [`scan --dtc-detail`](#--dtc-detail)
+reads these for every DTC a module lists.
 
 `--record 01` reads only that record of each instead (`19 04 <DTC> 01`, then `19 06 <DTC> 01`), as two hex digits;
 the default is `FF`, every record. `FE` is refused: it means every OBD record only to the extended data read. It's

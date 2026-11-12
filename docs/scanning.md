@@ -70,6 +70,25 @@ and warning lamp. The "not tested" bits are left out, since with them a module l
 which on the A7 is its whole table (#49). Only status bits the module says it supports count, so a module that
 ignores the mask can't list untested DTCs.
 
+### DTC detail
+
+With `ScanOptions::dtc_detail`, `scan_with` then reads each listed DTC's snapshot records (`19 04 <DTC> FF`) and
+extended data records (`19 06 <DTC> FF`) with `read_dtc_detail`, one DTC after another in the order the module listed
+them, and a DTC it lists twice once. Nothing is sent for a module whose DTC list wasn't read (`ModuleScan::dtc_details`
+is `None`) or lists none (`Some` of an empty list). These reads come after everything else for the module, the
+extended-session DIDs included, so a read that goes unanswered leaves nothing to read after it.
+
+A module that says it is busy (NRC 0x21) to either read, or leaves one unanswered, gets no more of them: the busy one
+is still on the read, and a late answer to the unanswered one could pass for the next DTC's. The entry that stopped it
+is the last in `dtc_details`, so a list shorter than `dtcs` is a stop, and the entry says why (`DtcDetail::busy`,
+`DtcDetail::out_of_step`). A read that went unanswered also leaves the connection out of step for the next request, as
+for `dtc`. A reply that names another DTC than the one asked for isn't an answer either (it may be a late one), so it
+is a stop of the same kind. A refusal of one read doesn't stop the other, or the next DTC: the A7 gateway refused the
+snapshot read with `7F 19 13` and answered the extended data with no records (#124).
+
+The records are as the module sent them (`dtc` explains how to read them), and `dtc_details` isn't part of `diff`, since
+snapshots and counters change between runs.
+
 ## Gateway list
 
 When the vehicle profile has a `[gateway_list]` and its gateway answered the scan, scan sends two more reads to it:
