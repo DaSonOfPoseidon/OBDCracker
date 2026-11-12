@@ -775,7 +775,7 @@ fn freeze_frames_and_mode_06_ids_are_not_compared() {
 fn stored_emissions_dtcs_are_new_or_cleared() {
     let old = scan(vec![obd_ecu(0x7E8)], Vec::new());
     let mut new = old.clone();
-    new.ecus[0].stored_dtcs = Ok(vec![Dtc::new(0x0171), Dtc::new(0x0171), Dtc::new(0x0300)]);
+    new.ecus[0].stored_dtcs = Ok(vec![Dtc::new(0x0171), Dtc::new(0x0300)]);
     let changes = diff_scan(&old, &new);
     assert_eq!(
         changes,
@@ -1564,6 +1564,12 @@ fn a_scan_that_repeats_an_ecu_module_did_or_dtc_is_refused() {
     let mut dtc = clean.clone();
     dtc.modules[0].dtcs = Ok(vec![record(0x16A0, 8), record(0x16A0, 0)]);
     let dtc_twice = || Ok(vec![Dtc::new(0x0171), Dtc::new(0x0171)]);
+    let mut stored = clean.clone();
+    stored.ecus[0].stored_dtcs = dtc_twice();
+    let mut pid = clean.clone();
+    pid.ecus[0].pids = Ok(vec![(0x05, Ok(PidValue::Raw(vec![1]))); 2]);
+    let mut info = clean.clone();
+    info.ecus[0].supported_info = Ok(vec![0x02, 0x02]);
     let mut pending = clean.clone();
     pending.ecus[0].pending_dtcs = Some(dtc_twice());
     let mut permanent = clean.clone();
@@ -1573,6 +1579,9 @@ fn a_scan_that_repeats_an_ecu_module_did_or_dtc_is_refused() {
         (&module, "module engine (0x7E8)"),
         (&did, "DID F187 of engine (0x7E8)"),
         (&dtc, "DTC 0016A0 of engine (0x7E8)"),
+        (&stored, "stored DTC P0171 of ECU 7E8"),
+        (&pid, "PID 05 of ECU 7E8"),
+        (&info, "mode 09 PID 02 of ECU 7E8"),
         (&pending, "pending DTC P0171 of ECU 7E8"),
         (&permanent, "permanent DTC P0171 of ECU 7E8"),
     ] {
@@ -1592,6 +1601,8 @@ fn a_scan_that_repeats_an_ecu_module_did_or_dtc_is_refused() {
     // A DTC list that failed has nothing to repeat
     let mut failed = clean.clone();
     failed.modules[0].dtcs = Err(ReadError::NoReply);
+    failed.ecus[0].stored_dtcs = Err(ReadError::NoReply);
+    failed.ecus[0].pids = Err(ReadError::NoReply);
     failed.ecus[0].pending_dtcs = Some(Err(ReadError::NoReply));
     assert_eq!(diff_scan(&failed, &failed), []);
     // A repeat is refused even when the other document never made the read

@@ -498,7 +498,7 @@ A DID's, CALID's or ECU name's text is in double quotes (`\"` and `\\` for those
   line says it can't be compared (`engine DTCs can't be compared: old read, new no reply`) instead of listing every entry
   as new or cleared.
 - **Order:** the same whatever order the documents list things in: ECUs by CAN ID, then modules by name and CAN ID, and within
-  each by DID or DTC. A file that lists the same ECU, module, DID or DTC twice (a hand-edited one) is an error that names
+  each by DID or DTC. A file that lists the same ECU, module, DID, DTC or PID twice (a hand-edited one) is an error that names
   the file and the entry (status 2): which entry is the car's can't be told, so nothing is compared.
 - **VINs:** a VIN is shown only when it changed (`vin`: `7E8 VIN <old> → <new>`; `scan`: the F190 line). An ECU that only one
   `vin` document has is `7E8 ECU added` or `removed`, without its VIN.
