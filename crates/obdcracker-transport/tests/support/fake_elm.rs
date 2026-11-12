@@ -777,7 +777,7 @@ impl FakeElm {
             return;
         }
         if !self.settings.responses {
-            self.end_listen();
+            self.end_listen(Instant::now());
             return;
         }
         self.answer(header, &bytes, false);
@@ -898,11 +898,11 @@ impl FakeElm {
         self.schedule_late_frames(header, &bytes);
         if one_frame && printed > 0 {
             // The listen ended with its first frame.
-            self.end_listen();
+            self.end_listen(Instant::now());
         } else if !logical && self.listen_raw && !self.settings.caf {
             self.listening = true;
         } else if !self.hang_after_request {
-            self.end_listen();
+            self.end_listen(Instant::now());
         }
     }
 
@@ -941,8 +941,10 @@ impl FakeElm {
     }
 
     // The end of a request's listen: its prompt, or in a batch the next element, `STM`, which
-    // starts at once whatever `monitor_startup` is: the STN's own switch, not the host's.
-    fn end_listen(&mut self) {
+    // starts at once whatever `monitor_startup` is: the STN's own switch, not the host's. `at` is
+    // when the listen ended: for a frame that ended it, the frame's own time on the bus, not the
+    // clock when the fake got round to it, so the test thread being descheduled loses no frame.
+    fn end_listen(&mut self, at: Instant) {
         if !std::mem::take(&mut self.batch_pending) {
             self.prompt();
             return;
@@ -958,17 +960,17 @@ impl FakeElm {
         }
         self.pipe_next = self.batch_pipe;
         self.monitor_all = false;
-        self.start_monitoring_after(Duration::ZERO);
+        self.start_monitoring_after(at, Duration::ZERO);
     }
 
     // Starts monitoring, which puts the frames held for it on the bus.
     fn start_monitoring(&mut self) {
-        self.start_monitoring_after(self.monitor_startup);
+        self.start_monitoring_after(Instant::now(), self.monitor_startup);
     }
 
-    fn start_monitoring_after(&mut self, startup: Duration) {
+    fn start_monitoring_after(&mut self, from: Instant, startup: Duration) {
         self.monitoring = true;
-        let now = Instant::now() + startup;
+        let now = from + startup;
         self.monitor_from = now;
         let held = std::mem::take(&mut self.held);
         self.bus.extend(
@@ -1028,7 +1030,7 @@ impl FakeElm {
                 }
                 if self.listening && self.listen_one_frame {
                     self.listening = false;
-                    self.end_listen();
+                    self.end_listen(at);
                 }
             } else {
                 self.lost_frames.push((id, data));

@@ -551,6 +551,11 @@ Each entry names the class, what to check, and where it bit us.
   them on the bus whatever the adapter is doing, give the adapter's monitor a start-up time
   (`FakeElm::monitor_startup`), and let the frames that reach it before then go to `lost_frames`. A test of the old
   path keeps the gap on record (`with_batching_refused_the_old_gap_remains`).
+- **A fake that starts a simulated adapter state from the wall clock when it handles an event loses frames to
+  scheduling.** The batched monitor started at `Instant::now()` inside `poll`, so a test thread descheduled until the ACK
+  and the answer behind it were both due found the answer before `monitor_from`, and lost (Codex, #339). Start a state
+  the adapter changes by itself at the scheduled time of the event that changed it (`end_listen(at)`), and one the host
+  causes at the time the fake handled the host's write.
 - **A separator in a line makes its first part a command of its own.** An STN runs `<hex>|STM` as two elements, left to
   right, so a misheard digit that the driver ended with `XX` would have left the damaged digits as a complete hex element
   to send, `XX` ending only the last one. Check the part that can become a request before the separator is written

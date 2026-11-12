@@ -1725,9 +1725,70 @@ mod requests {
     }
 
     #[test]
+    fn a_batched_monitor_starts_at_the_acks_time_however_late_the_host_reads() {
+        // The module's ACK reaches the adapter over the bus, and its answer follows 1 ms later.
+        // The STN switches to monitoring at the ACK, so a host that reads only when both are
+        // long due (a descheduled test thread) still hears the answer.
+        let mut car = FakeElm::new(Box::new(|header, request| match (header, request) {
+            (0x200, [0x5F, 0xC0, ..]) => {
+                vec![(0x25F, vec![0x00, 0xD0, 0x00, 0x03, 0x40, 0x07, 0x01])]
+            }
+            (0x740, [0xA0, ..]) => vec![(0x300, vec![0xA1, 0x0F, 0x8A, 0xFF, 0x32, 0xFF])],
+            _ => Vec::new(),
+        }));
+        car.sti = Some("STN2232 v5.12.4".into());
+        car.listen_raw = true;
+        car.listen_one_frame = true;
+        car.stbc_unsupported = false;
+        car.delayed = Some(Box::new(|header, request| match (header, request) {
+            (0x740, [0x10, 0x00, 0x02, 0x1A, 0x9B]) => vec![
+                (Duration::from_millis(2), 0x300, vec![0xB1]),
+                (
+                    Duration::from_millis(3),
+                    0x300,
+                    vec![0x20, 0x00, 0x0E, 0x5A, 0x9B, 0x41, 0x42, 0x43],
+                ),
+            ],
+            _ => Vec::new(),
+        }));
+        let mut elm = with_echo_shown(car);
+        let policy = Policy::read_only();
+        let setup = policy.approve_tp20_setup(0x5F).unwrap();
+        elm.send(&setup).unwrap();
+        let reply = elm.recv(Duration::from_secs(1)).unwrap();
+        let channel = policy
+            .tp20_channel(&setup, reply.source, &reply.payload)
+            .unwrap();
+        while elm.recv(Duration::from_secs(1)).is_ok() {}
+        elm.send(&policy.approve_tp20_parameters(&channel).unwrap())
+            .unwrap();
+        assert_eq!(elm.recv(Duration::from_secs(1)).unwrap().payload[0], 0xA1);
+        elm.send(
+            &policy
+                .approve_tp20_request(&channel, 0, &[0x1A, 0x9B])
+                .unwrap(),
+        )
+        .unwrap();
+        std::thread::sleep(Duration::from_millis(100));
+        assert_eq!(elm.recv(Duration::from_secs(1)).unwrap().payload, [0xB1]);
+        assert_eq!(elm.recv(Duration::from_secs(1)).unwrap().payload[0], 0x20);
+        assert_eq!(elm.link().elm.lost_frames, []);
+    }
+
+    #[test]
     fn a_prompt_after_the_batch_started_its_monitor_is_still_a_failure() {
         // Once the monitor's first line has come (its output follows the pipe), a prompt is the
         // adapter stopping on its own, as for a monitor started by `STM`.
+        let mut elm = with_echo_shown(batching_stn(Duration::from_secs(60)));
+        request_sent(&mut elm);
+        elm.link_mut().inject = b"|300 20 00 0E 5A 9B 41 42 43\r>".to_vec();
+        assert_eq!(elm.recv(Duration::from_secs(1)).unwrap().payload[0], 0x20);
+        let err = elm.recv(Duration::from_secs(1)).unwrap_err();
+        assert!(err.to_string().contains("stopped monitoring"), "{err}");
+    }
+
+    #[test]
+    fn a_second_pipe_in_a_batch_and_a_pipe_outside_one_are_unexpected_output() {
         let mut elm = with_echo_shown(batching_stn(Duration::from_secs(60)));
         request_sent(&mut elm);
         elm.link_mut().inject =
