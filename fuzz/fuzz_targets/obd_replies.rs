@@ -16,8 +16,14 @@ fuzz_target!(|data: &[u8]| {
     if let Ok(readings) = obd::decode_current_data(data) {
         readings.for_each(drop);
     }
-    if let Ok(dtcs) = obd::decode_stored_dtcs(data) {
-        dtcs.for_each(|dtc| drop(dtc.to_string()));
+    for decode in [
+        obd::decode_stored_dtcs,
+        obd::decode_pending_dtcs,
+        obd::decode_permanent_dtcs,
+    ] {
+        if let Ok(dtcs) = decode(data) {
+            dtcs.for_each(|dtc| drop(dtc.to_string()));
+        }
     }
     let _ = obd::decode_supported_info(data);
     let _ = obd::decode_vin(data);

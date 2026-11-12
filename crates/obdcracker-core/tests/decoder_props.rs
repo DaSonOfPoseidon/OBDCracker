@@ -53,10 +53,16 @@ proptest! {
         if let Ok(readings) = obd::decode_current_data(&reply) {
             readings.for_each(drop);
         }
-        if let Ok(dtcs) = obd::decode_stored_dtcs(&reply) {
-            for dtc in dtcs {
-                prop_assert_ne!(dtc.code(), 0);
-                drop(dtc.to_string());
+        for decode in [
+            obd::decode_stored_dtcs,
+            obd::decode_pending_dtcs,
+            obd::decode_permanent_dtcs,
+        ] {
+            if let Ok(dtcs) = decode(&reply) {
+                for dtc in dtcs {
+                    prop_assert_ne!(dtc.code(), 0);
+                    drop(dtc.to_string());
+                }
             }
         }
         let _ = obd::decode_supported_info(&reply);

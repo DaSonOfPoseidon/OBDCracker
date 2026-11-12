@@ -14,6 +14,12 @@ pub const CURRENT_DATA: u8 = 0x01;
 /// Mode 03: stored (confirmed) emissions DTCs.
 pub const STORED_DTCS: u8 = 0x03;
 
+/// Mode 07: pending DTCs, found during the current or last driving cycle.
+pub const PENDING_DTCS: u8 = 0x07;
+
+/// Mode 0A: permanent DTCs, which only the car's own monitors can clear.
+pub const PERMANENT_DTCS: u8 = 0x0A;
+
 /// Mode 09: vehicle information.
 pub const VEHICLE_INFO: u8 = 0x09;
 
@@ -278,6 +284,28 @@ impl Iterator for Dtcs<'_> {
             .find(|&code| code != 0)
             .map(Dtc)
     }
+}
+
+/// A mode 07 request for every pending emissions DTC.
+#[must_use]
+pub fn pending_dtcs() -> [u8; 1] {
+    [PENDING_DTCS]
+}
+
+/// A mode 0A request for every permanent emissions DTC.
+#[must_use]
+pub fn permanent_dtcs() -> [u8; 1] {
+    [PERMANENT_DTCS]
+}
+
+/// Decodes a mode 07 reply: the same layout and checks as [`decode_stored_dtcs`], under `0x47`.
+pub fn decode_pending_dtcs(reply: &[u8]) -> Result<Dtcs<'_>, Error> {
+    decode_dtc_list(PENDING_DTCS, reply)
+}
+
+/// Decodes a mode 0A reply: the same layout and checks as [`decode_stored_dtcs`], under `0x4A`.
+pub fn decode_permanent_dtcs(reply: &[u8]) -> Result<Dtcs<'_>, Error> {
+    decode_dtc_list(PERMANENT_DTCS, reply)
 }
 
 /// A mode 09 request for one PID.

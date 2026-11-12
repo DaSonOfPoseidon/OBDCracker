@@ -257,6 +257,93 @@ mod stored_dtcs {
     }
 }
 
+mod pending_and_permanent_dtcs {
+    use obdcracker_core::obd::{
+        decode_pending_dtcs, decode_permanent_dtcs, decode_stored_dtcs, pending_dtcs,
+        permanent_dtcs,
+    };
+    use obdcracker_core::response::{Error, NegativeResponse, Nrc};
+
+    #[test]
+    fn builds_the_requests() {
+        assert_eq!(pending_dtcs(), [0x07]);
+        assert_eq!(permanent_dtcs(), [0x0A]);
+    }
+
+    #[test]
+    fn decodes_codes_skipping_padding() {
+        let pending: Vec<_> = decode_pending_dtcs(&[0x47, 0x02, 0x04, 0x01, 0x00, 0x00])
+            .unwrap()
+            .map(|dtc| dtc.to_string())
+            .collect();
+        assert_eq!(pending, ["P0401"]);
+        let permanent: Vec<_> = decode_permanent_dtcs(&[0x4A, 0x02, 0x01, 0x13, 0xC1, 0x00])
+            .unwrap()
+            .map(|dtc| dtc.to_string())
+            .collect();
+        assert_eq!(permanent, ["P0113", "U0100"]);
+        assert_eq!(decode_pending_dtcs(&[0x47, 0x00]).unwrap().count(), 0);
+        assert_eq!(decode_permanent_dtcs(&[0x4A, 0x00]).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn each_decoder_takes_only_its_own_reply() {
+        assert_eq!(
+            decode_pending_dtcs(&[0x43, 0x00]).err(),
+            Some(Error::WrongService(0x43))
+        );
+        assert_eq!(
+            decode_pending_dtcs(&[0x4A, 0x00]).err(),
+            Some(Error::WrongService(0x4A))
+        );
+        assert_eq!(
+            decode_permanent_dtcs(&[0x47, 0x00]).err(),
+            Some(Error::WrongService(0x47))
+        );
+        assert_eq!(
+            decode_stored_dtcs(&[0x47, 0x00]).err(),
+            Some(Error::WrongService(0x47))
+        );
+    }
+
+    #[test]
+    fn count_must_match_the_codes() {
+        for reply in [
+            &[0x47, 0x02, 0x04, 0x01][..],
+            &[0x47, 0x01, 0x04, 0x01, 0x01, 0x13],
+            &[0x47, 0x00, 0x04, 0x01],
+            &[0x47, 0x01, 0x04, 0x01, 0xAA],
+            &[0x47, 0x01, 0x04],
+        ] {
+            assert_eq!(decode_pending_dtcs(reply).err(), Some(Error::Malformed));
+        }
+        assert_eq!(decode_pending_dtcs(&[0x47]).err(), Some(Error::TooShort));
+        assert_eq!(
+            decode_permanent_dtcs(&[0x4A, 0x01, 0x04]).err(),
+            Some(Error::Malformed)
+        );
+        assert_eq!(decode_permanent_dtcs(&[]).err(), Some(Error::TooShort));
+    }
+
+    #[test]
+    fn a_refusal_is_a_negative_response() {
+        assert_eq!(
+            decode_pending_dtcs(&[0x7F, 0x07, 0x12]).err(),
+            Some(Error::Negative(NegativeResponse {
+                sid: 0x07,
+                nrc: Nrc::SubFunctionNotSupported
+            }))
+        );
+        assert_eq!(
+            decode_permanent_dtcs(&[0x7F, 0x0A, 0x11]).err(),
+            Some(Error::Negative(NegativeResponse {
+                sid: 0x0A,
+                nrc: Nrc::ServiceNotSupported
+            }))
+        );
+    }
+}
+
 mod vehicle_info {
     use obdcracker_core::obd::{
         EcuName, check_vin, decode_calids, decode_cvns, decode_ecu_name, decode_supported_info,
