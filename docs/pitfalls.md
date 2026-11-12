@@ -556,6 +556,12 @@ Each entry names the class, what to check, and where it bit us.
   and the answer behind it were both due found the answer before `monitor_from`, and lost (Codex, #339). Start a state
   the adapter changes by itself at the scheduled time of the event that changed it (`end_listen(at)`), and one the host
   causes at the time the fake handled the host's write.
+- **A flag that allows a token once, in one place, must be cleared where that place ends, and a log entry must follow
+  the write it records.** `batch_pipe` stayed armed from the carriage return to the next prompt, so a monitor that
+  printed no pipe had a later line's `|` taken for the batch's own (#338). The batched `STM` was logged before the
+  head's digits were written, so a wrong head echo left an entry for a command never sent (#340). Clear such a flag
+  at the end of the place it applies, not only on the event it waits for, and log an element of a multi-write line
+  just before its own bytes go out, once the earlier ones are written and checked.
 - **A separator in a line makes its first part a command of its own.** An STN runs `<hex>|STM` as two elements, left to
   right, so a misheard digit that the driver ended with `XX` would have left the damaged digits as a complete hex element
   to send, `XX` ending only the last one. Check the part that can become a request before the separator is written

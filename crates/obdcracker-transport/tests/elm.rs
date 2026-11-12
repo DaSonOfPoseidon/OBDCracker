@@ -1811,7 +1811,8 @@ mod requests {
         // batch's pipe isn't still to come, so a `|` that starts a later line is not taken for it.
         let mut elm = with_echo_shown(batching_stn(Duration::from_secs(60)));
         request_sent(&mut elm);
-        elm.link_mut().inject = b"300 20 00 0E 5A 9B 41 42 43\r|300 01 44 45 46 47 48 49 4A\r".to_vec();
+        elm.link_mut().inject =
+            b"300 20 00 0E 5A 9B 41 42 43\r|300 01 44 45 46 47 48 49 4A\r".to_vec();
         assert_eq!(elm.recv(Duration::from_secs(1)).unwrap().payload[0], 0x20);
         let err = elm.recv(Duration::from_secs(1)).unwrap_err();
         assert!(err.to_string().contains("unexpected output"), "{err}");
@@ -1830,7 +1831,7 @@ mod requests {
         elm.link_mut().corrupt_write_of = Some((b"1000021A9B".to_vec(), 3, 0x01));
         let err = elm.send(&frame).unwrap_err();
         assert!(err.to_string().contains("echoed"), "{err}");
-        assert!(logged_commands(&mut elm).is_empty());
+        assert_eq!(logged_commands(&mut elm), []);
         assert!(!commands(&elm).iter().any(|c| c.contains("STM")));
     }
 

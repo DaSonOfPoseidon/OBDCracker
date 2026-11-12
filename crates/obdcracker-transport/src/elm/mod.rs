@@ -1596,17 +1596,14 @@ impl<L: Link> Transport for Elm<L> {
         // The `STM` is noted before its bytes are written, as `start_monitor` does, and however
         // that write ends: a misheard `STM` may still have run. A head that failed first means
         // it was never written, so it isn't noted.
-        let sent_at = self.write_line(
-            &line,
-            if batched { head_len } else { line.len() },
-            |elm| {
+        let sent_at =
+            self.write_line(&line, if batched { head_len } else { line.len() }, |elm| {
                 elm.note(LinkEvent::Command {
                     at: SystemTime::now(),
                     command: MONITOR_STN.to_owned(),
                     answer: Vec::new(),
                 });
-            },
-        )?;
+            })?;
         if batched {
             self.monitoring = true;
             self.batched = true;
