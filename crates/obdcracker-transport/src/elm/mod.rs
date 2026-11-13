@@ -242,6 +242,14 @@ pub struct Elm<L> {
     filter: String,
     // A request is out and the adapter hasn't printed its prompt yet.
     busy: bool,
+    // The request in progress goes to one module whose reply ID is known (`Target::Physical`
+    // or `Physical29`), so no other ECU answers it and the module's own final reply ends what the
+    // adapter listens for.
+    physical: bool,
+    // The last reply `recv` gave is the whole, final reply of that module (not a `7F xx 78`), and
+    // `recv` hasn't been asked for anything since. The adapter is still listening out its
+    // timeout, so `ready` stops it instead of waiting for the prompt (docs/elm327.md#timing).
+    answered: bool,
     // The request in progress is a frame on an open TP2.0 channel, so when the adapter's listen
     // ends before the caller's wait does, `recv` monitors the channel instead of going quiet
     // (docs/elm327.md#vw-tp20-channel-frames).
@@ -419,6 +427,8 @@ impl<L: Link> Elm<L> {
             flow: None,
             filter: WIDE_FILTER.to_owned(),
             busy: false,
+            physical: false,
+            answered: false,
             listen: false,
             monitoring: false,
             monitor_overflow: false,
@@ -926,8 +936,9 @@ impl<L: Link> Elm<L> {
     // Fails if the adapter can't be trusted; otherwise waits for any request still running.
     fn ready(&mut self) -> Result<(), Error> {
         self.trusted()?;
-        // A monitor prints no prompt, so nothing else can be written until it's stopped.
-        if self.busy && self.monitoring {
+        // A monitor prints no prompt, so nothing else can be written until it's stopped. Nor is a
+        // listen for more replies worth waiting out once the one module asked has answered.
+        if self.busy && (self.monitoring || self.answered) {
             self.interrupt()?;
         }
         if !self.busy {
@@ -957,6 +968,7 @@ impl<L: Link> Elm<L> {
             }
         }
         self.busy = false;
+        self.answered = false;
         self.take_overflow()?;
         self.check_idle()
     }
@@ -1130,6 +1142,7 @@ impl<L: Link> Elm<L> {
         }
         self.listen = false;
         self.busy = false;
+        self.answered = false;
         self.batched = false;
         self.batch_pipe = false;
         self.drop_senders();
@@ -1501,6 +1514,22 @@ fn leaves_unknown_state(status: Status) -> bool {
     status.loses_settings() || status == Status::Stopped
 }
 
+// Whether `request` goes to one module (not a broadcast or a TP2.0 frame) whose reply ID is known:
+// the receive filter is then that ID, so nothing but the module's own reply can answer it.
+fn to_one_known_module(request: &Approved) -> bool {
+    request.reply_id().is_some()
+        && matches!(
+            request.target(),
+            Target::Physical(_) | Target::Physical29(_)
+        )
+}
+
+// `7F xx 78`: the module is busy and answers again later. Any longer or odd reply that carries
+// the code counts too: a wrong guess here only keeps the adapter listening.
+fn response_pending(payload: &[u8]) -> bool {
+    payload.first() == Some(&0x7F) && payload.get(2) == Some(&0x78)
+}
+
 // Exactly two hex digits. `from_str_radix` alone would also take `+1`.
 fn hex_byte(text: &str) -> Option<u8> {
     if text.len() == 2 && text.bytes().all(|b| b.is_ascii_hexdigit()) {
@@ -1635,6 +1664,8 @@ impl<L: Link> Transport for Elm<L> {
         self.quiet = Duration::ZERO;
         self.echo = Some(line);
         self.busy = true;
+        self.physical = to_one_known_module(request);
+        self.answered = false;
         self.listen = raw && matches!(request.target(), Target::Tp20Channel(_));
         self.drop_senders();
         Ok(())
@@ -1713,6 +1744,8 @@ impl<L: Link> Transport for Elm<L> {
 
     fn recv(&mut self, timeout: Duration) -> Result<Response, Error> {
         self.ready_to_receive()?;
+        // Only the reply this call returns can end the request.
+        self.answered = false;
         let deadline = Instant::now() + timeout.min(LONGEST_WAIT);
         loop {
             // A monitor can stay quiet for as long as the caller waits, so only the caller's
@@ -1740,6 +1773,7 @@ impl<L: Link> Transport for Elm<L> {
                         continue;
                     }
                     self.busy = false;
+                    self.answered = false;
                     return Err(Error::Timeout);
                 }
                 Some(Event::Overlong) => {
@@ -1752,6 +1786,9 @@ impl<L: Link> Transport for Elm<L> {
                     }
                     Some(Line::Frame(frame)) => {
                         if let Some(reply) = self.feed(frame.id(), frame.data(), &text) {
+                            // A module that said it's busy answers again; any other reply is its
+                            // last. Another request to it is then free to stop the adapter's listen.
+                            self.answered = self.physical && !response_pending(&reply.payload);
                             return Ok(reply);
                         }
                     }
@@ -2036,6 +2073,9 @@ impl<L: Link> Elm<L> {
         self.quiet = Duration::ZERO;
         self.echo = Some(line);
         self.busy = true;
+        // A transfer in segments is only sent to a module whose reply ID is known.
+        self.physical = true;
+        self.answered = false;
         self.listen = false;
         Ok(())
     }
@@ -2080,6 +2120,7 @@ impl<L: Link> Elm<L> {
                 Some(Event::Prompt) => {
                     self.prompt_after_request()?;
                     self.busy = false;
+                    self.answered = false;
                     break;
                 }
                 Some(Event::Overlong) => {
@@ -2169,6 +2210,7 @@ impl<L: Link> Elm<L> {
                 Some(Event::Prompt) => {
                     self.prompt_after_request()?;
                     self.busy = false;
+                    self.answered = false;
                     listening = false;
                 }
                 Some(Event::Line(text)) => match self.reply_line(&text)? {

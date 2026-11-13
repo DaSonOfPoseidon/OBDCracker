@@ -369,6 +369,15 @@ Each entry names the class, what to check, and where it bit us.
   channel as a test it didn't expect. Make the adapter listen without sending (the driver monitors the bus, `STM` or
   `AT MA`), and check what a mode does with the filter you set: on an STN `AT MA` and `STMA` pass every ID. A state that has no prompt of its own (a monitor) makes every prompt a failure: check each path
   that reads one, not only the wait, or the adapter's cached state outlives a monitor that ended unseen (Codex).
+- **An adapter prints its prompt only after its listen, so a fake that prints it at once hides a second of waiting.**
+  The ELM327 keeps listening for more replies until `AT ST` runs out, about 1.02 s, so every request after a reply
+  waited that second: 1040 ms between car session 11's warm-up reply and `ATCAF0`, though the module answered in 60 ms
+  (#90). The fake printed the prompt with the reply, so no test saw it. Model the listen (`FakeElm::listen_after_reply`)
+  and assert how long the next request takes. Cutting the listen short is only safe when nothing more is due: one
+  module with a known reply ID, a final reply (not `7F xx 78`), and `recv` not asked for more since. A broadcast, a
+  module on the wide filter, a response-pending reply and a request whose `recv` timed out all keep waiting for the
+  prompt, because a second ECU may answer 300 ms after the first. Clear the flag on every path that ends or restarts
+  the request, and test each case that must still wait, not only the one that is sped up.
 - **A silent listener on a bus where it's the only receiver makes the sender repeat and error out.** A CAN
   frame needs one node to acknowledge it. Behind the gateway the diagnostic bus has two nodes, the module and the
   adapter, so an adapter whose monitor stays silent (`STCMM 0`, `AT CSM 1`, the default) leaves every frame of the

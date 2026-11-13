@@ -3904,6 +3904,41 @@ mod caf0 {
     }
 
     #[test]
+    fn atcaf0_doesnt_wait_out_the_warm_up_replys_listen() {
+        // Car session 11: 1040 ms passed between the warm-up's reply and `ATCAF0`, because the
+        // adapter was still listening for more and only printed its prompt after `AT ST FF`.
+        let mut car = FakeElm::new(Box::new(|header, request| match (header, request) {
+            (0x7E0, [0x22, 0xF1, 0x87]) => vec![(0x7E8, vec![0x62, 0xF1, 0x87, 0x34])],
+            (REQUEST_ID, _) => vec![(REPLY_ID, ANSWER.to_vec())],
+            _ => Vec::new(),
+        }))
+        .with_module(module());
+        car.listen_after_reply = Some(ADAPTER_TIMEOUT);
+        let mut elm = connect(car);
+        elm.send(&approve(Target::Physical(0x7E0), &[0x22, 0xF1, 0x87]))
+            .unwrap();
+        assert_eq!(elm.recv(Duration::from_secs(1)).unwrap().source, 0x7E8);
+        let started = Instant::now();
+        elm.send(&request(9)).unwrap();
+        assert!(
+            started.elapsed() < Duration::from_millis(500),
+            "{:?}",
+            started.elapsed()
+        );
+        assert!(commands(&elm).iter().any(|c| c == "ATCAF0"));
+        assert_eq!(elm.recv(Duration::from_secs(1)).unwrap().payload, ANSWER);
+        // The answer to a request sent in segments ends the listen the same way.
+        let started = Instant::now();
+        elm.send(&request(9)).unwrap();
+        assert!(
+            started.elapsed() < Duration::from_millis(500),
+            "{:?}",
+            started.elapsed()
+        );
+        assert_eq!(elm.recv(Duration::from_secs(1)).unwrap().payload, ANSWER);
+    }
+
+    #[test]
     fn the_next_request_waits_out_a_stopped_transfer_and_one_after_a_success_doesnt() {
         // A first frame the module accepted and a flow control that never lets the rest go: the
         // module keeps the half transfer and ignores a first frame until it drops it after 1 s.
@@ -4583,6 +4618,291 @@ mod response_pending {
             elm.send(&approve(Target::Physical(0x7E0), &[0x09, 0x02]))
                 .is_ok()
         );
+    }
+}
+
+// A real adapter listens for more replies after each one until its timeout runs out
+// (`FakeElm::listen_after_reply`), so a request sent next has to end that listen or wait it out.
+mod listening_after_a_reply {
+    use super::*;
+
+    const ANSWER: &[u8] = b"\x62\xF1\x87\x34\x47\x30\x39";
+
+    // The engine ECU, answering `22 F1 87` at once.
+    fn engine() -> FakeElm {
+        let mut car = FakeElm::new(Box::new(|header, request| match (header, request) {
+            (0x7E0, [0x22, 0xF1, 0x87]) => vec![(0x7E8, ANSWER.to_vec())],
+            _ => Vec::new(),
+        }));
+        car.listen_after_reply = Some(ADAPTER_TIMEOUT);
+        car
+    }
+
+    // The way `scan` reads: one request, its answer, nothing after it.
+    fn read_f187(elm: &mut Elm<FakeLink>, target: Target, source: u32) -> Response {
+        let read = approve(target, &[0x22, 0xF1, 0x87]);
+        let mut got = exchange(
+            elm,
+            &read,
+            Expect::Module(source),
+            Elm::<FakeLink>::timing(),
+        )
+        .unwrap();
+        got.remove(0)
+    }
+
+    #[test]
+    fn the_fake_prints_its_prompt_only_when_the_listen_runs_out_or_a_byte_stops_it() {
+        let mut elm = connect(engine());
+        read_f187(&mut elm, Target::Physical(0x7E0), 0x7E8);
+        let fake = &mut elm.link_mut().elm;
+        fake.poll();
+        assert!(!fake.has_output(), "a prompt right after the reply");
+        std::thread::sleep(ADAPTER_TIMEOUT + Duration::from_millis(50));
+        fake.poll();
+        assert_eq!(fake.read(64), b"\r>");
+
+        let mut elm = connect(engine());
+        read_f187(&mut elm, Target::Physical(0x7E0), 0x7E8);
+        let fake = &mut elm.link_mut().elm;
+        fake.write(b"X");
+        assert_eq!(fake.read(64), b"STOPPED\r\r>");
+        assert_eq!(fake.interrupted, 1);
+    }
+
+    #[test]
+    fn the_fake_restarts_its_timeout_after_each_frame_it_prints() {
+        // Late frames 300 ms apart, each inside the 400 ms timeout but the second beyond it from
+        // the reply: a real adapter counts its timeout from the last frame.
+        let mut car = FakeElm::new(Box::new(|header, request| match (header, request) {
+            (0x7E0, [0x22, 0xF1, 0x87]) => vec![(0x7E8, vec![0x7F, 0x22, 0x78])],
+            _ => Vec::new(),
+        }));
+        car.delayed = Some(Box::new(|_, _| {
+            vec![
+                (
+                    Duration::from_millis(300),
+                    0x7E8,
+                    vec![0x03, 0x7F, 0x22, 0x78],
+                ),
+                (
+                    Duration::from_millis(600),
+                    0x7E8,
+                    vec![0x03, 0x7F, 0x22, 0x79],
+                ),
+            ]
+        }));
+        car.listen_after_reply = Some(Duration::from_millis(400));
+        let mut elm = connect(car);
+        elm.send(&approve(Target::Physical(0x7E0), &[0x22, 0xF1, 0x87]))
+            .unwrap();
+        elm.recv(Duration::from_secs(1)).unwrap();
+        let fake = &mut elm.link_mut().elm;
+        std::thread::sleep(Duration::from_millis(700));
+        fake.poll();
+        let heard = String::from_utf8(fake.read(256)).unwrap();
+        assert!(heard.contains("03 7F 22 78"), "{heard:?}");
+        assert!(heard.contains("03 7F 22 79"), "{heard:?}");
+        assert!(!heard.contains('>'), "{heard:?}");
+        // 400 ms after the last frame, the listen runs out.
+        std::thread::sleep(Duration::from_millis(500));
+        fake.poll();
+        assert_eq!(fake.read(64), b"\r>");
+    }
+
+    #[test]
+    fn a_physical_reply_does_not_wait_out_the_adapter_timeout() {
+        let mut elm = connect(engine());
+        let target = Target::Physical(0x7E0);
+        assert_eq!(read_f187(&mut elm, target, 0x7E8).payload, ANSWER);
+        // The module has answered, so the adapter's listen for more is stopped, not waited out.
+        let started = Instant::now();
+        assert_eq!(read_f187(&mut elm, target, 0x7E8).payload, ANSWER);
+        assert!(
+            started.elapsed() < Duration::from_millis(500),
+            "{:?}",
+            started.elapsed()
+        );
+        assert_eq!(elm.link().elm.interrupted, 1);
+        let stops = elm.link().writes.iter().filter(|w| *w == b"X").count();
+        assert_eq!(stops, 1);
+    }
+
+    #[test]
+    fn a_multi_frame_physical_reply_is_whole_before_the_listen_is_stopped() {
+        let payload: Vec<u8> = [0x62, 0xF1, 0x90]
+            .into_iter()
+            .chain(b"WAUZZZ4G1EN000000".iter().copied())
+            .collect();
+        let long = payload.clone();
+        let mut car = FakeElm::new(Box::new(move |header, request| match (header, request) {
+            (0x7E0, [0x22, 0xF1, 0x90]) => vec![(0x7E8, long.clone())],
+            _ => Vec::new(),
+        }));
+        car.listen_after_reply = Some(ADAPTER_TIMEOUT);
+        let mut elm = connect(car);
+        let read = approve(Target::Physical(0x7E0), &[0x22, 0xF1, 0x90]);
+        for _ in 0..2 {
+            let started = Instant::now();
+            let got = exchange(
+                &mut elm,
+                &read,
+                Expect::Module(0x7E8),
+                Elm::<FakeLink>::timing(),
+            )
+            .unwrap();
+            assert_eq!(got[0].payload, payload);
+            assert!(started.elapsed() < Duration::from_millis(500));
+        }
+        assert_eq!(elm.link().elm.interrupted, 1);
+    }
+
+    #[test]
+    fn a_physical_request_that_got_no_reply_still_waits_for_the_prompt() {
+        // Nothing answered, so there's nothing to cut short: the adapter's `NO DATA` and prompt
+        // end the request, and nothing is written to stop it.
+        let mut elm = connect(engine());
+        let silent = approve(Target::Physical(0x7E0), &[0x09, 0x02]);
+        let got = exchange(
+            &mut elm,
+            &silent,
+            Expect::Module(0x7E8),
+            Elm::<FakeLink>::timing(),
+        );
+        assert_eq!(got, Err(Error::Timeout));
+        elm.send(&silent).unwrap();
+        assert_eq!(elm.link().elm.interrupted, 0);
+    }
+
+    #[test]
+    fn a_reply_after_one_the_caller_read_past_isnt_cut_early() {
+        // `recv` gave a reply, then timed out waiting for another: the request isn't known to be
+        // answered, so the next one waits for the prompt as before.
+        let mut elm = connect(engine());
+        elm.send(&approve(Target::Physical(0x7E0), &[0x22, 0xF1, 0x87]))
+            .unwrap();
+        assert_eq!(elm.recv(Duration::from_secs(1)).unwrap().payload, ANSWER);
+        assert_eq!(elm.recv(Duration::from_millis(100)), Err(Error::Timeout));
+        elm.send(&approve(Target::Physical(0x7E0), &[0x22, 0xF1, 0x87]))
+            .unwrap();
+        assert_eq!(elm.link().elm.interrupted, 0);
+    }
+
+    #[test]
+    fn a_broadcast_still_hears_a_second_ecu_300_ms_after_the_first() {
+        // 7E8 answers at once and 7E9 300 ms later, both inside the adapter's listen.
+        let mut car = FakeElm::new(Box::new(|header, request| match (header, request) {
+            (0x7DF, [0x01, 0x00]) => vec![(0x7E8, vec![0x41, 0x00, 0xBE, 0x3E, 0xB8, 0x13])],
+            _ => Vec::new(),
+        }));
+        car.delayed = Some(Box::new(|header, request| match (header, request) {
+            (0x7DF, [0x01, 0x00]) => vec![(
+                Duration::from_millis(300),
+                0x7E9,
+                vec![0x06, 0x41, 0x00, 0x98, 0x3B, 0x80, 0x01],
+            )],
+            _ => Vec::new(),
+        }));
+        car.listen_after_reply = Some(ADAPTER_TIMEOUT);
+        let mut elm = connect(car);
+        elm.send(&approve(Target::ObdFunctional, &[0x01, 0x00]))
+            .unwrap();
+        let first = elm.recv(Duration::from_secs(1)).unwrap();
+        let second = elm.recv(Duration::from_secs(1)).unwrap();
+        assert_eq!((first.source, second.source), (0x7E8, 0x7E9));
+        assert_eq!(second.payload, [0x41, 0x00, 0x98, 0x3B, 0x80, 0x01]);
+        // More ECUs may still answer a broadcast, so the next request waits for the prompt.
+        elm.send(&approve(Target::Physical(0x7E0), &[0x22, 0xF1, 0x87]))
+            .unwrap();
+        assert_eq!(elm.link().elm.interrupted, 0);
+    }
+
+    #[test]
+    fn an_answer_after_response_pending_is_still_heard() {
+        // The module is busy, says so, and answers 1.5 s later, while the adapter keeps listening
+        // as an STN does for P2*.
+        let mut car = FakeElm::new(Box::new(|header, request| match (header, request) {
+            (0x7E0, [0x22, 0xF1, 0x87]) => vec![(0x7E8, vec![0x7F, 0x22, 0x78])],
+            _ => Vec::new(),
+        }));
+        car.delayed = Some(Box::new(|header, request| match (header, request) {
+            (0x7E0, [0x22, 0xF1, 0x87]) => vec![(
+                Duration::from_millis(1500),
+                0x7E8,
+                vec![0x07, 0x62, 0xF1, 0x87, 0x34, 0x47, 0x30, 0x39],
+            )],
+            _ => Vec::new(),
+        }));
+        car.listen_after_reply = Some(Duration::from_millis(2500));
+        let mut elm = connect(car);
+        let got = read_f187(&mut elm, Target::Physical(0x7E0), 0x7E8);
+        assert_eq!(got.payload, ANSWER);
+        assert_eq!(elm.link().elm.interrupted, 0);
+        // That was the module's last word, so the next request stops the rest of the listen.
+        let started = Instant::now();
+        elm.send(&approve(Target::Physical(0x7E0), &[0x09, 0x02]))
+            .unwrap();
+        assert!(started.elapsed() < Duration::from_millis(500));
+        assert_eq!(elm.link().elm.interrupted, 1);
+    }
+
+    #[test]
+    fn a_response_pending_reply_is_not_the_end_of_the_listen() {
+        // The caller stops at `7F 22 78` and sends again: the module hasn't answered, so the
+        // driver waits for the adapter's prompt and doesn't write anything to stop it.
+        let mut car = FakeElm::new(Box::new(|header, request| match (header, request) {
+            (0x7E0, [0x22, 0xF1, 0x87]) => vec![(0x7E8, vec![0x7F, 0x22, 0x78])],
+            _ => Vec::new(),
+        }));
+        car.listen_after_reply = Some(Duration::from_millis(300));
+        let mut elm = connect(car);
+        let read = approve(Target::Physical(0x7E0), &[0x22, 0xF1, 0x87]);
+        elm.send(&read).unwrap();
+        assert_eq!(
+            elm.recv(Duration::from_secs(1)).unwrap().payload,
+            [0x7F, 0x22, 0x78]
+        );
+        elm.send(&read).unwrap();
+        assert_eq!(elm.link().elm.interrupted, 0);
+    }
+
+    #[test]
+    fn a_cut_that_crosses_the_prompt_is_refused_not_run() {
+        // The adapter's timeout runs out just as `X` is written: `X` starts a line, which the
+        // driver ends as `XX` and the adapter refuses.
+        let mut car = engine();
+        car.listen_ends_on_write = true;
+        let mut elm = connect(car);
+        let target = Target::Physical(0x7E0);
+        read_f187(&mut elm, target, 0x7E8);
+        assert_eq!(read_f187(&mut elm, target, 0x7E8).payload, ANSWER);
+        assert_eq!(elm.link().elm.sent.len(), 2);
+        assert!(
+            commands(&elm).iter().any(|c| c == "XX"),
+            "{:?}",
+            commands(&elm)
+        );
+    }
+
+    #[test]
+    fn a_module_with_no_known_reply_id_is_waited_for_to_the_prompt() {
+        // Without a reply ID the receive filter is wide, so another module may still answer.
+        let mut car = FakeElm::new(Box::new(|header, request| match (header, request) {
+            (0x710, [0x22, 0xF1, 0x87]) => vec![(0x77A, ANSWER.to_vec())],
+            _ => Vec::new(),
+        }));
+        car.listen_after_reply = Some(Duration::from_millis(300));
+        let mut elm = connect(car);
+        let read = approve(Target::Physical(0x710), &[0x22, 0xF1, 0x87]);
+        assert_eq!(read.reply_id(), None);
+        assert_eq!(
+            read_f187(&mut elm, Target::Physical(0x710), 0x77A).payload,
+            ANSWER
+        );
+        let started = Instant::now();
+        elm.send(&read).unwrap();
+        assert!(started.elapsed() >= Duration::from_millis(200));
+        assert_eq!(elm.link().elm.interrupted, 0);
     }
 }
 
