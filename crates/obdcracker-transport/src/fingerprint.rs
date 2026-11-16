@@ -473,7 +473,7 @@ pub fn check_vin<T: Transport + ?Sized>(
     })
 }
 
-fn approve_ecu_list(policy: &Policy) -> Result<Approved, FingerprintError> {
+pub(crate) fn approve_ecu_list(policy: &Policy) -> Result<Approved, FingerprintError> {
     policy
         .approve(
             Protocol::Uds,
@@ -485,7 +485,7 @@ fn approve_ecu_list(policy: &Policy) -> Result<Approved, FingerprintError> {
 
 // The reply IDs of the ECUs to ask one at a time: those that answer `01 00` where a broadcast of a
 // long request can overflow the transport, and none elsewhere, where nothing extra is sent.
-fn ecus_to_ask<T: Transport + ?Sized>(
+pub(crate) fn ecus_to_ask<T: Transport + ?Sized>(
     transport: &mut T,
     ecu_list_request: &Approved,
     timing: Timing,
@@ -540,6 +540,7 @@ const OBD_ECUS: usize = 8;
 // An OBD-II request whose replies can be long, approved as the broadcast and as a request to each
 // emissions ECU alone. Where the transport can't take eight ECUs' long replies at once
 // (`Transport::broadcasts_can_overflow`) it is asked of each ECU in turn.
+#[derive(Debug)]
 pub(crate) struct LongRead {
     broadcast: Approved,
     // By request ID, 0x7E0 first. `None` where the policy refuses that ECU's ID, or says it

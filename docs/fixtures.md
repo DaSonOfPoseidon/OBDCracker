@@ -63,6 +63,8 @@ groups", ISO 14229-1) are refused, as are repeats and more than 65535 (the count
 | `monitor_ids` | Mode 06 monitor IDs: 2 hex digits each, such as `"21"`, without repeats. The bitmap IDs (0x00, 0x20, ...) are computed, so they are refused. Absent: the mode isn't supported. Only the bitmaps are answered; the test results behind an ID aren't. |
 | `pids` | Mode 01 PIDs: 2 hex digits mapped to the data bytes as hex, such as `"0C" = "0C 80"`. Bitmap PIDs (0x00, 0x20, ...) are computed, so they are refused. For a PID the decoder knows, the data must be exactly one reading of it (SAE J1979); a PID it doesn't know takes any non-empty data. |
 
+A fixture's PID has one value. For a value that changes on each request, a test calls `Ecu::set_pid_sequence(pid, values)` on a built `SimBus`: the first request that names the PID gets `values[0]`, the next `values[1]`, and every one after the last gets the last. It takes the same data as `pids` (the same length check, no bitmap PIDs), lists the PID in the module's bitmaps, and replaces that PID's fixed value; calling it again starts over. A request for several PIDs advances each PID it names once.
+
 ### `[ecu.obd.freeze_frame]`
 
 | Field | Meaning |

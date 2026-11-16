@@ -147,7 +147,7 @@ pub fn read_dids<T: Transport + ?Sized>(
 }
 
 // `reply` against the DIDs asked for, in order.
-fn split(
+pub(crate) fn split(
     reply: &[u8],
     dids: &[u16],
     length_of: &impl Fn(u16) -> Option<usize>,

@@ -5,7 +5,8 @@ use std::time::{Duration, Instant};
 
 use obdcracker_core::response::Nrc;
 
-use crate::fixture::DtcService;
+use crate::FixtureError;
+use crate::fixture::{DtcService, decodes_exactly};
 
 /// A module's diagnostic session.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -29,8 +30,11 @@ pub enum Fault {
 
 #[derive(Debug, Default)]
 pub(crate) struct Obd {
-    // Bitmap PIDs are computed from these.
+    // Bitmap PIDs are computed from these. A PID in `sequences` is in here too, holding its
+    // first value, so the bitmaps list it.
     pub(crate) pids: BTreeMap<u8, Vec<u8>>,
+    // Mode 01 PIDs whose value changes on each request that names them.
+    pub(crate) sequences: BTreeMap<u8, Sequence>,
     // Item count and data bytes.
     pub(crate) info: BTreeMap<u8, (u8, Vec<u8>)>,
     pub(crate) dtcs: Vec<u16>,
@@ -40,6 +44,14 @@ pub(crate) struct Obd {
     pub(crate) permanent_dtcs: Option<Vec<u16>>,
     pub(crate) freeze_frame: Option<FreezeFrame>,
     pub(crate) monitor_ids: Option<BTreeSet<u8>>,
+}
+
+#[derive(Debug)]
+pub(crate) struct Sequence {
+    // Never empty.
+    values: Vec<Vec<u8>>,
+    // How many requests have named the PID.
+    served: usize,
 }
 
 // Freeze frame 0. The cause is PID 02; `None` says P0000, no frame.
@@ -128,6 +140,37 @@ impl Ecu {
         self.fault = fault;
     }
 
+    /// Makes mode 01 PID `pid` answer `values[0]` to the first request that names it,
+    /// `values[1]` to the next, and so on, then the last value to every request after that. Each
+    /// value is the PID's data, as a fixture's `[ecu.obd.pids]` gives it. A request for several
+    /// PIDs advances each PID it names once. The PID is listed in the module's supported-PID
+    /// bitmaps, and replaces any fixed value or earlier sequence it had, which starts over.
+    ///
+    /// # Errors
+    ///
+    /// [`FixtureError::NotObd`] for a module with no OBD-II data, and [`FixtureError::Value`] for
+    /// no values, a bitmap PID (those are computed), or a value that isn't exactly one reading of
+    /// the PID (the length SAE J1979 gives it; a PID this crate doesn't decode takes any length).
+    /// Nothing changes then.
+    pub fn set_pid_sequence(&mut self, pid: u8, values: Vec<Vec<u8>>) -> Result<(), FixtureError> {
+        let Some(obd) = &mut self.obd else {
+            return Err(FixtureError::NotObd(self.name.clone()));
+        };
+        let bad = |why: &str| FixtureError::Value(format!("PID {pid:02X}: {why}"));
+        let Some(first) = values.first() else {
+            return Err(bad("a sequence needs at least one value"));
+        };
+        if pid.is_multiple_of(0x20) {
+            return Err(bad("bitmap PIDs are computed"));
+        }
+        if !values.iter().all(|value| decodes_exactly(pid, value)) {
+            return Err(bad("wrong data length for this PID (SAE J1979)"));
+        }
+        obd.pids.insert(pid, first.clone());
+        obd.sequences.insert(pid, Sequence { values, served: 0 });
+        Ok(())
+    }
+
     pub(crate) fn has_obd(&self) -> bool {
         self.obd.is_some()
     }
@@ -171,7 +214,7 @@ impl Ecu {
             return replies;
         }
         match sid {
-            0x01 | 0x02 | 0x03 | 0x06 | 0x07 | 0x09 | 0x0A => match &self.obd {
+            0x01 | 0x02 | 0x03 | 0x06 | 0x07 | 0x09 | 0x0A => match &mut self.obd {
                 Some(obd) if obd.supports(sid) => obd.answer(sid, data).into_iter().collect(),
                 // A module without OBD-II stays out of broadcast requests.
                 None if functional => Vec::new(),
@@ -332,7 +375,7 @@ impl Obd {
     }
 
     // OBD-II modules don't answer what they don't support, so this is None then.
-    fn answer(&self, sid: u8, data: &[u8]) -> Option<Vec<u8>> {
+    fn answer(&mut self, sid: u8, data: &[u8]) -> Option<Vec<u8>> {
         let mut reply = vec![sid + POSITIVE_OFFSET];
         match (sid, data) {
             (0x01, pids) if (1..=6).contains(&pids.len()) => {
@@ -340,11 +383,12 @@ impl Obd {
                     if let Some(bitmap) = self.pid_bitmap(pid) {
                         reply.push(pid);
                         reply.extend(bitmap);
-                    } else if let Some(value) = self.pids.get(&pid) {
+                    } else if let Some(value) = self.current_value(pid) {
                         reply.push(pid);
                         reply.extend(value);
                     }
                 }
+                self.advance_sequences(pids);
             }
             (0x03, []) => dtc_list(&mut reply, &self.dtcs),
             (0x07, []) => dtc_list(&mut reply, self.pending_dtcs.as_ref()?),
@@ -381,6 +425,25 @@ impl Obd {
             _ => return None,
         }
         (reply.len() > 1).then_some(reply)
+    }
+
+    // A mode 01 PID's data for this request. A sequence doesn't move on here, so a PID named
+    // twice in one request answers the same value twice.
+    fn current_value(&self, pid: u8) -> Option<Vec<u8>> {
+        let Some(sequence) = self.sequences.get(&pid) else {
+            return self.pids.get(&pid).cloned();
+        };
+        let last = sequence.values.len() - 1;
+        Some(sequence.values[sequence.served.min(last)].clone())
+    }
+
+    // Moves each sequence the request named on to its next value, once however often it was named.
+    fn advance_sequences(&mut self, pids: &[u8]) {
+        for (pid, sequence) in &mut self.sequences {
+            if pids.contains(pid) {
+                sequence.served = sequence.served.saturating_add(1);
+            }
+        }
     }
 
     // The 4 data bytes of a mode 01 bitmap PID (0x00, 0x20, …), if the module supports it:

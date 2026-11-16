@@ -244,7 +244,7 @@ impl Approved {
 
 /// Decides which requests may be sent. Read-only is the only policy for now; unlocking a higher
 /// tier will need a cargo feature, an explicit runtime unlock, and passing preconditions.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Policy {
     unlocked: Tier,
     // With a vehicle profile, the only modules physical requests may go to.

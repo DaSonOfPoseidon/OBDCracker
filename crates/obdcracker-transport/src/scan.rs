@@ -685,13 +685,13 @@ struct Chain {
     cut_short: Option<(u8, ReadError)>,
 }
 
-type Supported = (Result<Vec<u8>, ReadError>, Option<(u8, ReadError)>);
+pub(crate) type Supported = (Result<Vec<u8>, ReadError>, Option<(u8, ReadError)>);
 
 // Each ECU that answered the first bitmap and the PIDs it supports, per
 // docs/scanning.md#module-discovery. PID E0 is the last bitmap. `request` gives the request for
 // the bitmap at a base, and `decode` reads its reply. With `ecus`, only those ECUs' answers count,
 // and nothing is sent if there are none.
-fn supported_pids<'a, T: Transport + ?Sized>(
+pub(crate) fn supported_pids<'a, T: Transport + ?Sized>(
     transport: &mut T,
     request: impl Fn(u8) -> &'a Approved,
     ecus: Option<&BTreeSet<u32>>,
@@ -1095,7 +1095,7 @@ fn single_reading(payload: &[u8], pid: u8) -> Result<Value<'_>, ReplyError> {
     Ok(reading.value)
 }
 
-fn decode_bitmap(payload: &[u8], base: u8) -> Result<SupportedPids, ReplyError> {
+pub(crate) fn decode_bitmap(payload: &[u8], base: u8) -> Result<SupportedPids, ReplyError> {
     match single_reading(payload, base)? {
         Value::Supported(bitmap) => Ok(bitmap),
         _ => Err(ReplyError::Malformed),

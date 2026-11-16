@@ -144,7 +144,7 @@ fn is_hex(text: &str) -> bool {
 
 // Whether `data` is exactly one reading of `pid`, as obd::decode_current_data reads it. A PID
 // the decoder doesn't know takes any length.
-fn decodes_exactly(pid: u8, data: &[u8]) -> bool {
+pub(crate) fn decodes_exactly(pid: u8, data: &[u8]) -> bool {
     let mut reply = vec![0x41, pid];
     reply.extend(data);
     obd::decode_current_data(&reply).is_ok_and(|mut readings| {

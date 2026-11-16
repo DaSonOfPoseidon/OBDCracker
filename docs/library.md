@@ -178,6 +178,70 @@ assert_eq!(serde_json::to_string(&scan)?, r#"{"ecus":[],"modules":[]}"#);
 # fn main() {}
 ```
 
+## Live data
+
+`transport::live::Poller` reads a fixed list of mode 01 PIDs, and DIDs from profile modules, again and again. Each
+`poll` returns one `Sample`: when it started and finished, each emissions ECU's decoded value for every PID (in the order
+you gave them), and each module's answer to its `22` request. It never sleeps: you do, and `next_due` says until when.
+
+```rust,no_run
+use std::time::{Duration, Instant};
+
+use obdcracker::safety::Policy;
+use obdcracker::transport::live::{Poller, next_due};
+use obdcracker::transport::{Timing, Transport};
+
+fn watch(adapter: &mut impl Transport) -> Result<(), Box<dyn std::error::Error>> {
+    // Engine speed, vehicle speed, coolant temperature and intake manifold pressure: one request a poll.
+    let mut poller = Poller::new(&Policy::read_only(), &[0x0C, 0x0D, 0x05, 0x0B], Vec::new())?;
+    let every = Duration::from_millis(500);
+    loop {
+        let sample = poller.poll(adapter, Timing::default())?;
+        for (ecu, readings) in &sample.pids {
+            for (pid, reading) in readings {
+                println!("{ecu:03X} {pid:02X} {reading:?}");
+            }
+        }
+        let due = next_due(sample.started, every, Instant::now());
+        std::thread::sleep(due.saturating_duration_since(Instant::now()));
+    }
+}
+```
+
+- **Requests.** `Poller::new` approves every request, so a refusal is an error from `new` and nothing is sent. A
+  supported-PID bitmap (0x00, 0x20, ...) or a PID named twice is refused. The first poll that finds an ECU reads every
+  ECU's supported-PID bitmaps (`01 00`, `01 20`, ... as far as each chains them, as `scan` does), and a poll asks again
+  until one answers. Then PIDs this crate decodes (`obd::is_known_pid`) go up to six to a request (SAE J1979), in the
+  order given; any other PID is asked alone, since its length isn't known and its reply would swallow the PIDs after it.
+  A PID no ECU lists is never sent: it is in `Sample::unsupported_pids`, and each ECU's entry for it is
+  `ReadError::NoReply`. A list where no PID is listed, and no DID is polled, is `PollError::NothingSupported`. A
+  request is a broadcast, and only the ECUs that list one of its PIDs owe an answer to it; where the adapter can't take
+  eight ECUs' long replies at once, it goes to each of those on its own request ID instead, as `fingerprint` does. An ECU that comes online after the bitmaps were
+  read is missed until you build a new poller. An ECU whose first bitmap is refused or malformed is left out of the
+  poll, and one whose chain breaks keeps the PIDs listed before the break: both are in `Sample::bitmap_errors`.
+- **Replies are untrusted.** One ECU's reply must hold only PIDs that were asked for, each once, each with all its data,
+  and nothing after. Anything else (an extra or repeated PID, a cut-off value, a byte left over) is
+  `ReadError::Undecodable` for every PID of that request for that ECU, with the reply, and the other ECUs' values are
+  unaffected. A PID the ECU leaves out of an otherwise good reply is `ReadError::NoReply`, which is how an ECU says it
+  doesn't support it. An ECU that sent nothing has no entry.
+- **DIDs.** Each `DidPoll` is one module and its DIDs (at most `read_dids::MAX_DIDS`, none twice), with the data length
+  where the profile gives one. A module's DIDs are one `22` request, split as `read_dids` does, and come back as
+  `DidsData`: bytes, which you show as text or hex as the profile says. A module is named once per poller. An ELM327
+  sends a request over 7 bytes (4 or more DIDs) only once an earlier request has shown that it echoes each character,
+  which a poll's PID request does; a poller of DIDs alone must send a shorter request first.
+- **Late replies.** A request nobody answers may only be answered late, and a reply gives no sign of which poll it
+  belongs to: the next poll's identical request takes it as a fresh value. So `Sample::out_of_step` is set, and stays
+  set, once an ECU that lists a PID of a request doesn't answer it, a DID module gives no answer, the bitmaps get no
+  answer or an announced next bitmap doesn't come, or the adapter fails mid-poll. No value after that is known to be
+  fresh: reconnect and build a new `Poller` to clear it. An ECU that lists none of a request's PIDs owes no answer
+  (a broadcast reaches it and it ignores it), so its silence is normal and sets nothing; neither does a PID left out of a reply that answered the
+  rest.
+- **Timing.** `next_due(started, interval, now)` is `started + interval`, or `now` if that has passed, so a poll that
+  overran is followed by one at once and not by a backlog. An interval over an hour counts as an hour.
+
+For tests, a simulated car can give a PID a value that changes on each request (`Ecu::set_pid_sequence`,
+[fixtures](fixtures.md#ecuobd)).
+
 ## Comparing two reads
 
 `transport::diff` says what changed between two results you already have, such as a car's fingerprint before and after a
