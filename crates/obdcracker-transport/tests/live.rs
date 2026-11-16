@@ -22,6 +22,14 @@ struct Car {
     sent: Vec<String>,
     overflow: bool,
     fail_after: Option<usize>,
+    // The PIDs each ECU lists, which it says in answer to the supported-PID bitmap requests (the
+    // answer closure doesn't see those while this is set).
+    listed: Vec<(u32, Vec<u8>)>,
+}
+
+// A mode 01 request for a supported-PID bitmap: 01 00, 01 20, ...
+fn is_bitmap(request: &[u8]) -> bool {
+    matches!(request, [0x01, pid] if pid % 0x20 == 0)
 }
 
 impl Car {
@@ -32,7 +40,57 @@ impl Car {
             sent: Vec::new(),
             overflow: false,
             fail_after: None,
+            listed: Vec::new(),
         }
+    }
+
+    // `source` lists `pids` (and answers the bitmaps that show it).
+    fn listing(mut self, source: u32, pids: impl IntoIterator<Item = u8>) -> Self {
+        self.listed.push((source, pids.into_iter().collect()));
+        self
+    }
+
+    // What the ECUs say to the request for the bitmap at `base`.
+    fn bitmap_replies(&self, base: u8) -> Vec<Response> {
+        let mut replies = Vec::new();
+        for (source, pids) in &self.listed {
+            // A page is asked for only if the one before listed a PID above it.
+            if base != 0 && !pids.iter().any(|&pid| pid > base) {
+                continue;
+            }
+            let mut bits = 0u32;
+            for &pid in pids {
+                if pid > base && u16::from(pid) <= u16::from(base) + 32 {
+                    bits |= 1 << (32 - (pid - base));
+                }
+            }
+            if pids
+                .iter()
+                .any(|&pid| u16::from(pid) > u16::from(base) + 32)
+            {
+                bits |= 1;
+            }
+            let mut payload = vec![0x41, base];
+            payload.extend(bits.to_be_bytes());
+            replies.push(reply(*source, &payload));
+        }
+        replies
+    }
+
+    // What was sent besides the supported-PID bitmap requests.
+    fn batches(&self) -> Vec<&str> {
+        self.sent
+            .iter()
+            .map(String::as_str)
+            .filter(|sent| {
+                let bytes: Vec<u8> = sent
+                    .split(' ')
+                    .skip(1)
+                    .filter_map(|byte| u8::from_str_radix(byte, 16).ok())
+                    .collect();
+                !is_bitmap(&bytes)
+            })
+            .collect()
     }
 }
 
@@ -44,7 +102,12 @@ impl Transport for Car {
         let id = request.target().can_id();
         self.sent
             .push(format!("{id:03X} {}", hex(request.payload())));
-        self.replies.extend((self.answer)(id, request.payload()));
+        if is_bitmap(request.payload()) && !self.listed.is_empty() {
+            self.replies
+                .extend(self.bitmap_replies(request.payload()[1]));
+        } else {
+            self.replies.extend((self.answer)(id, request.payload()));
+        }
         Ok(())
     }
 
@@ -115,7 +178,27 @@ const ENGINE_PIDS: &[(u8, &[u8])] = &[
     (0x04, &[0xFF]),
     (0x11, &[0x00]),
     (0x0F, &[0x00]),
+    (0x1B, &[0x01]),
+    (0x1E, &[0x00]),
 ];
+
+const TCU_PIDS: &[(u8, &[u8])] = &[(0x0C, &[0x00, 0x04]), (0x0D, &[0x00])];
+
+fn pids_of(table: &[(u8, &[u8])]) -> Vec<u8> {
+    table.iter().map(|&(pid, _)| pid).collect()
+}
+
+// A car with the engine alone, which answers PIDs from `ENGINE_PIDS`.
+fn engine_car() -> Car {
+    Car::new(engine_only).listing(ENGINE, pids_of(ENGINE_PIDS))
+}
+
+// A car with the engine and the TCU, which has fewer PIDs.
+fn two_ecu_car() -> Car {
+    Car::new(each_ecus_reply::two_ecus)
+        .listing(ENGINE, pids_of(ENGINE_PIDS))
+        .listing(TCU, pids_of(TCU_PIDS))
+}
 
 fn engine_only(id: u32, request: &[u8]) -> Vec<Response> {
     if id == 0x7DF {
@@ -285,10 +368,11 @@ mod building {
 mod batching {
     use super::*;
 
+    // What a poll of `pids` sends, if the engine lists them all.
     fn requests(pids: &[u8]) -> Vec<String> {
-        let mut car = Car::new(engine_only);
+        let mut car = Car::new(engine_only).listing(ENGINE, pids.iter().copied());
         poller(pids).poll(&mut car, TIMING).unwrap();
-        car.sent
+        car.batches().into_iter().map(str::to_owned).collect()
     }
 
     #[test]
@@ -333,14 +417,14 @@ mod batching {
 
     #[test]
     fn readings_come_back_in_the_order_given_whatever_the_requests() {
+        const TABLE: &[(u8, &[u8])] = &[(0x0C, &[0x1A, 0xF8]), (0x1B, &[1, 2, 3]), (0x0D, &[0x32])];
         let mut car = Car::new(|id, request| {
             if id != 0x7DF {
                 return Vec::new();
             }
-            let table: &[(u8, &[u8])] =
-                &[(0x0C, &[0x1A, 0xF8]), (0x1B, &[1, 2, 3]), (0x0D, &[0x32])];
-            ecu_answer(ENGINE, table, request)
-        });
+            ecu_answer(ENGINE, TABLE, request)
+        })
+        .listing(ENGINE, pids_of(TABLE));
         let sample = poller(&[0x0D, 0x1B, 0x0C]).poll(&mut car, TIMING).unwrap();
         assert_eq!(
             sample.pids[&ENGINE],
@@ -354,7 +438,7 @@ mod batching {
 
     #[test]
     fn a_poll_reads_all_six_known_values() {
-        let mut car = Car::new(engine_only);
+        let mut car = engine_car();
         let sample = poller(&[0x0C, 0x0D, 0x05, 0x0B, 0x04, 0x11])
             .poll(&mut car, TIMING)
             .unwrap();
@@ -376,19 +460,17 @@ mod batching {
 
     #[test]
     fn every_poll_sends_the_same_requests_again() {
-        let mut car = Car::new(engine_only);
+        let mut car = engine_car();
         let mut poller = poller(&[0x0C, 0x1B]);
         for _ in 0..3 {
             poller.poll(&mut car, TIMING).unwrap();
         }
-        assert_eq!(car.sent, ["7DF 01 0C", "7DF 01 1B"].repeat(3));
+        assert_eq!(car.batches(), ["7DF 01 0C", "7DF 01 1B"].repeat(3));
     }
 }
 
 mod each_ecus_reply {
     use super::*;
-
-    const TCU_PIDS: &[(u8, &[u8])] = &[(0x0C, &[0x00, 0x04]), (0x0D, &[0x00])];
 
     pub(super) fn two_ecus(id: u32, request: &[u8]) -> Vec<Response> {
         if id != 0x7DF {
@@ -401,9 +483,9 @@ mod each_ecus_reply {
 
     #[test]
     fn two_ecus_answering_one_batch_each_keep_their_own_values() {
-        let mut car = Car::new(two_ecus);
+        let mut car = two_ecu_car();
         let sample = poller(&[0x0C, 0x0D]).poll(&mut car, TIMING).unwrap();
-        assert_eq!(car.sent, ["7DF 01 0C 0D"]);
+        assert_eq!(car.batches(), ["7DF 01 0C 0D"]);
         assert_eq!(
             sample.pids[&ENGINE],
             [
@@ -422,7 +504,7 @@ mod each_ecus_reply {
 
     #[test]
     fn a_pid_an_ecu_leaves_out_is_not_answered_and_the_rest_are_read() {
-        let mut car = Car::new(two_ecus);
+        let mut car = two_ecu_car();
         // The TCU has no coolant temperature or load.
         let sample = poller(&[0x05, 0x0C, 0x04]).poll(&mut car, TIMING).unwrap();
         assert_eq!(
@@ -443,7 +525,9 @@ mod each_ecus_reply {
             // The TCU answers the known batch, and not the PID asked alone.
             (0x7DF, [0x01, 0x1B]) => ecu_answer(ENGINE, &[(0x1B, &[9])], request),
             _ => two_ecus(id, request),
-        });
+        })
+        .listing(ENGINE, pids_of(ENGINE_PIDS))
+        .listing(TCU, pids_of(TCU_PIDS));
         let sample = poller(&[0x0C, 0x1B]).poll(&mut car, TIMING).unwrap();
         assert_eq!(
             sample.pids[&TCU],
@@ -465,6 +549,8 @@ mod each_ecus_reply {
             replies.extend(ecu_answer(TCU, TCU_PIDS, request));
             replies
         })
+        .listing(ENGINE, pids_of(ENGINE_PIDS))
+        .listing(TCU, pids_of(TCU_PIDS))
     }
 
     // Every PID the engine was asked for is undecodable, with its reply, and the TCU's are read.
@@ -556,7 +642,9 @@ mod each_ecus_reply {
                     .filter(|r| r.source == TCU),
             );
             replies
-        });
+        })
+        .listing(ENGINE, pids_of(ENGINE_PIDS))
+        .listing(TCU, pids_of(TCU_PIDS));
         let sample = poller(&[0x0C, 0x0D]).poll(&mut car, TIMING).unwrap();
         let refused = Err(ReadError::Reply(ReplyError::Negative(
             obdcracker_core::response::NegativeResponse {
@@ -572,17 +660,21 @@ mod each_ecus_reply {
     }
 
     #[test]
-    fn a_silent_car_gives_no_ecus_and_one_request_per_batch() {
+    fn a_silent_car_gives_no_ecus_and_gets_only_the_first_bitmap_request_each_poll() {
         let mut car = Car::new(|_, _| Vec::new());
-        let sample = poller(&[0x0C, 0x1B]).poll(&mut car, TIMING).unwrap();
-        assert!(sample.pids.is_empty());
-        assert_eq!(car.sent.len(), 2);
+        let mut poller = poller(&[0x0C, 0x1B]);
+        for _ in 0..2 {
+            let sample = poller.poll(&mut car, TIMING).unwrap();
+            assert!(sample.pids.is_empty());
+            assert_eq!(sample.unsupported_pids, Vec::<u8>::new());
+        }
+        assert_eq!(car.sent, ["7DF 01 00", "7DF 01 00"]);
     }
 
     #[test]
     fn an_ecu_that_stops_answering_is_not_answered_for_that_poll_only() {
         let mut poller = poller(&[0x0C]);
-        let mut car = Car::new(two_ecus);
+        let mut car = two_ecu_car();
         assert_eq!(poller.poll(&mut car, TIMING).unwrap().pids.len(), 2);
         let mut car = Car::new(|id, request| {
             two_ecus(id, request)
@@ -596,15 +688,16 @@ mod each_ecus_reply {
 
     #[test]
     fn an_adapter_failure_is_an_error_and_loses_the_poll() {
-        let mut car = Car::new(two_ecus);
-        car.fail_after = Some(1);
+        let mut car = two_ecu_car();
+        // The bitmap request and the first batch go out; the second batch fails.
+        car.fail_after = Some(2);
         let mut poller = poller(&[0x0C, 0x1B]);
         assert_eq!(
             poller.poll(&mut car, TIMING).unwrap_err(),
             PollError::Transport(Error::Adapter("unplugged".to_owned()))
         );
         // Both requests were tried in order; the first went out, the second failed.
-        assert_eq!(car.sent, ["7DF 01 0C"]);
+        assert_eq!(car.batches(), ["7DF 01 0C"]);
     }
 }
 
@@ -614,20 +707,18 @@ mod an_ecu_asked_alone {
     // A transport that overflows on a broadcast of long replies: each ECU is asked on its own ID.
     fn overflow_car() -> Car {
         let mut car = Car::new(|id, request| match id {
-            0x7DF if request == [0x01, 0x00] => vec![
-                reply(ENGINE, &[0x41, 0x00, 0x18, 0x00, 0x00, 0x00]),
-                reply(TCU, &[0x41, 0x00, 0x18, 0x00, 0x00, 0x00]),
-            ],
             0x7E0 => ecu_answer(ENGINE, ENGINE_PIDS, request),
-            0x7E1 => ecu_answer(TCU, &[(0x0C, &[0x00, 0x04]), (0x0D, &[0x00])], request),
+            0x7E1 => ecu_answer(TCU, TCU_PIDS, request),
             _ => Vec::new(),
-        });
+        })
+        .listing(ENGINE, pids_of(ENGINE_PIDS))
+        .listing(TCU, pids_of(TCU_PIDS));
         car.overflow = true;
         car
     }
 
     #[test]
-    fn learns_the_ecus_once_and_then_asks_each_in_turn() {
+    fn reads_the_bitmaps_once_and_then_asks_each_in_turn() {
         let mut car = overflow_car();
         let mut poller = poller(&[0x0C, 0x0D]);
         let first = poller.poll(&mut car, TIMING).unwrap();
@@ -647,14 +738,38 @@ mod an_ecu_asked_alone {
     }
 
     #[test]
-    fn a_transport_that_cannot_overflow_sends_no_ecu_list_request() {
-        let mut car = Car::new(engine_only);
-        poller(&[0x0C]).poll(&mut car, TIMING).unwrap();
-        assert_eq!(car.sent, ["7DF 01 0C"]);
+    fn a_request_goes_only_to_the_ecus_that_list_one_of_its_pids() {
+        let mut car = overflow_car();
+        // The TCU lists neither.
+        poller(&[0x0F, 0x05]).poll(&mut car, TIMING).unwrap();
+        assert_eq!(car.batches(), ["7E0 01 0F 05"]);
     }
 
     #[test]
-    fn a_poll_of_dids_only_sends_no_ecu_list_request() {
+    fn an_ecu_asked_alone_that_lists_a_pid_and_stays_silent_is_flagged() {
+        let mut car = Car::new(|id, request| match id {
+            0x7E0 => ecu_answer(ENGINE, ENGINE_PIDS, request),
+            _ => Vec::new(),
+        })
+        .listing(ENGINE, pids_of(ENGINE_PIDS))
+        .listing(TCU, pids_of(TCU_PIDS));
+        car.overflow = true;
+        let sample = poller(&[0x0C]).poll(&mut car, TIMING).unwrap();
+        assert!(sample.pids.contains_key(&ENGINE));
+        assert!(sample.out_of_step);
+    }
+
+    #[test]
+    fn a_transport_that_cannot_overflow_reads_the_bitmaps_once_and_broadcasts() {
+        let mut car = engine_car();
+        let mut poller = poller(&[0x0C]);
+        poller.poll(&mut car, TIMING).unwrap();
+        poller.poll(&mut car, TIMING).unwrap();
+        assert_eq!(car.sent, ["7DF 01 00", "7DF 01 0C", "7DF 01 0C"]);
+    }
+
+    #[test]
+    fn a_poll_of_dids_only_reads_no_bitmaps() {
         let mut car = overflow_car();
         let dids = vec![DidPoll {
             module: UdsModule {
@@ -670,32 +785,170 @@ mod an_ecu_asked_alone {
     }
 }
 
-mod out_of_step {
+mod the_bitmaps {
     use super::each_ecus_reply::two_ecus;
     use super::*;
 
     #[test]
+    fn are_chained_as_far_as_each_ecu_lists() {
+        // The engine lists a PID in the second page (0x21 to 0x40), the TCU none.
+        let mut car = Car::new(engine_only)
+            .listing(ENGINE, [0x0C, 0x21])
+            .listing(TCU, [0x0C]);
+        let sample = poller(&[0x0C, 0x21]).poll(&mut car, TIMING).unwrap();
+        assert_eq!(car.sent, ["7DF 01 00", "7DF 01 20", "7DF 01 0C 21"]);
+        assert_eq!(sample.unsupported_pids, Vec::<u8>::new());
+    }
+
+    #[test]
+    fn a_pid_no_ecu_lists_is_not_sent_and_is_named_in_the_sample() {
+        let mut car = engine_car();
+        // 0x10 isn't in the engine's table.
+        let sample = poller(&[0x0C, 0x10, 0x0D]).poll(&mut car, TIMING).unwrap();
+        assert_eq!(car.batches(), ["7DF 01 0C 0D"]);
+        assert_eq!(sample.unsupported_pids, [0x10]);
+        assert_eq!(sample.pids[&ENGINE].len(), 3);
+        assert_eq!(sample.pids[&ENGINE][1], (0x10, Err(ReadError::NoReply)));
+        assert!(!sample.out_of_step);
+    }
+
+    #[test]
+    fn a_list_nothing_lists_is_an_error_and_sends_no_request_for_a_pid() {
+        let mut car = engine_car();
+        let mut poller = poller(&[0x10, 0x1F]);
+        for _ in 0..2 {
+            assert_eq!(
+                poller.poll(&mut car, TIMING).unwrap_err(),
+                PollError::NothingSupported(vec![0x10, 0x1F])
+            );
+        }
+        // The bitmaps were read the first time only.
+        assert_eq!(car.sent, ["7DF 01 00"]);
+        assert_eq!(
+            PollError::NothingSupported(vec![0x10, 0x1F]).to_string(),
+            "no ECU lists any of the PIDs 10 1F"
+        );
+    }
+
+    #[test]
+    fn a_list_nothing_lists_is_fine_beside_dids() {
+        let mut car = engine_car();
+        let dids = vec![DidPoll {
+            module: UdsModule {
+                name: "engine".to_owned(),
+                request_id: 0x7E0,
+                response_id: 0x7E8,
+            },
+            dids: vec![(0xF190, None)],
+        }];
+        let mut poller = Poller::new(&Policy::read_only(), &[0x10], dids).unwrap();
+        let sample = poller.poll(&mut car, TIMING).unwrap();
+        assert_eq!(sample.unsupported_pids, [0x10]);
+        assert!(sample.pids.is_empty());
+        assert_eq!(sample.dids.len(), 1);
+    }
+
+    #[test]
+    fn an_ecu_whose_first_bitmap_is_malformed_is_left_out_with_its_error() {
+        // The TCU's answer to 01 00 is cut short, and it would answer the PIDs too.
+        let mut car = Car::new(|id, request| {
+            if is_bitmap(request) {
+                return vec![
+                    reply(ENGINE, &[0x41, 0x00, 0x00, 0x18, 0x00, 0x00]),
+                    reply(TCU, &[0x41, 0x00, 0x18]),
+                ];
+            }
+            two_ecus(id, request)
+        });
+        let sample = poller(&[0x0C, 0x0D]).poll(&mut car, TIMING).unwrap();
+        assert!(sample.pids.contains_key(&ENGINE));
+        assert!(!sample.pids.contains_key(&TCU));
+        assert_eq!(
+            sample.bitmap_errors,
+            std::collections::BTreeMap::from([(
+                TCU,
+                undecodable(ReplyError::TooShort, &[0x41, 0x00, 0x18])
+            )])
+        );
+        // The TCU answered the bitmap, and was never asked to answer the PIDs.
+        assert!(!sample.out_of_step);
+    }
+
+    #[test]
+    fn a_chain_that_breaks_keeps_the_pids_before_the_break() {
+        // The engine says 01 20 is supported and never answers it.
+        let mut car = Car::new(|id, request| match request {
+            [0x01, 0x00] => vec![reply(ENGINE, &[0x41, 0x00, 0x00, 0x10, 0x00, 0x01])],
+            [0x01, 0x20] => Vec::new(),
+            _ => engine_only(id, request),
+        });
+        let sample = poller(&[0x0C, 0x21]).poll(&mut car, TIMING).unwrap();
+        assert_eq!(sample.pids[&ENGINE][0], (0x0C, quantity(1726.0, Unit::Rpm)));
+        assert_eq!(sample.unsupported_pids, [0x21]);
+        assert_eq!(
+            sample.bitmap_errors,
+            std::collections::BTreeMap::from([(ENGINE, ReadError::NoReply)])
+        );
+        assert!(sample.out_of_step);
+    }
+}
+
+mod out_of_step {
+    use super::*;
+
+    #[test]
     fn answered_polls_stay_in_step() {
-        let mut car = Car::new(engine_only);
+        let mut car = engine_car();
         let mut poller = poller(&[0x0C, 0x0D]);
         assert!(!poller.poll(&mut car, TIMING).unwrap().out_of_step);
         assert!(!poller.poll(&mut car, TIMING).unwrap().out_of_step);
     }
 
     #[test]
+    fn an_ecu_that_lists_none_of_the_pids_and_stays_silent_never_flags() {
+        // The TCU lists 0C and 0D only, so it is never asked for the engine's other PIDs, and
+        // its silence to them is the normal case.
+        let mut car = two_ecu_car();
+        let mut poller = poller(&[0x05, 0x0B, 0x04]);
+        for _ in 0..3 {
+            let sample = poller.poll(&mut car, TIMING).unwrap();
+            assert!(!sample.out_of_step);
+            assert!(!sample.pids.contains_key(&TCU));
+        }
+        assert_eq!(car.batches(), ["7DF 01 05 0B 04"].repeat(3));
+    }
+
+    #[test]
+    fn an_ecu_that_lists_a_pid_and_stays_silent_is_flagged_for_good() {
+        let mut poller = poller(&[0x0C, 0x0D]);
+        assert!(!poller.poll(&mut two_ecu_car(), TIMING).unwrap().out_of_step);
+        // The TCU lists 0C and 0D but stops answering.
+        let mut car = Car::new(|id, request| {
+            each_ecus_reply::two_ecus(id, request)
+                .into_iter()
+                .filter(|r| r.source == ENGINE)
+                .collect()
+        });
+        assert!(poller.poll(&mut car, TIMING).unwrap().out_of_step);
+        // Even when it answers again.
+        assert!(poller.poll(&mut two_ecu_car(), TIMING).unwrap().out_of_step);
+    }
+
+    #[test]
     fn a_pid_left_out_of_a_reply_that_answered_the_rest_is_not_flagged() {
-        let mut car = Car::new(|_, _| vec![reply(ENGINE, &[0x41, 0x0C, 0x1A, 0xF8])]);
+        let mut car = Car::new(|_, _| vec![reply(ENGINE, &[0x41, 0x0C, 0x1A, 0xF8])])
+            .listing(ENGINE, [0x0C, 0x0D]);
         let sample = poller(&[0x0C, 0x0D]).poll(&mut car, TIMING).unwrap();
         assert_eq!(sample.pids[&ENGINE][1], (0x0D, Err(ReadError::NoReply)));
         assert!(!sample.out_of_step);
     }
 
     #[test]
-    fn a_request_nobody_answers_puts_the_poller_out_of_step_for_good() {
+    fn a_bitmap_read_nobody_answers_is_flagged_and_asked_again() {
         let mut poller = poller(&[0x0C]);
         let mut silent = Car::new(|_, _| Vec::new());
         assert!(poller.poll(&mut silent, TIMING).unwrap().out_of_step);
-        let mut car = Car::new(engine_only);
+        let mut car = engine_car();
         let sample = poller.poll(&mut car, TIMING).unwrap();
         assert!(sample.pids.contains_key(&ENGINE));
         assert!(sample.out_of_step);
@@ -703,9 +956,17 @@ mod out_of_step {
 
     #[test]
     fn a_late_reply_taken_by_the_next_poll_is_flagged() {
-        // The first poll's reply comes in only after it gave up, so the second poll's identical
-        // request takes it as its answer. Nothing in the reply says so; the flag does.
-        let mut car = Car::new(|_, _| Vec::new());
+        // The first batch's reply comes in only after the poll gave up, so the second poll's
+        // identical request takes it as its answer. Nothing in the reply says so; the flag does.
+        let mut batches = 0;
+        let mut car = Car::new(move |id, request| {
+            batches += 1;
+            if batches == 1 {
+                return Vec::new();
+            }
+            engine_only(id, request)
+        })
+        .listing(ENGINE, [0x0D]);
         let mut poller = poller(&[0x0D]);
         assert!(poller.poll(&mut car, TIMING).unwrap().out_of_step);
         car.replies.push_back(reply(ENGINE, &[0x41, 0x0D, 0x10]));
@@ -714,38 +975,6 @@ mod out_of_step {
             sample.pids[&ENGINE],
             [(0x0D, quantity(16.0, Unit::KilometresPerHour))]
         );
-        assert!(sample.out_of_step);
-    }
-
-    #[test]
-    fn a_broadcast_ecu_that_answered_before_and_goes_silent_is_flagged() {
-        let mut poller = poller(&[0x0C]);
-        let mut both = Car::new(two_ecus);
-        let sample = poller.poll(&mut both, TIMING).unwrap();
-        assert_eq!(sample.pids.len(), 2);
-        assert!(!sample.out_of_step);
-        let mut engine = Car::new(|id, request| {
-            two_ecus(id, request)
-                .into_iter()
-                .filter(|r| r.source == ENGINE)
-                .collect()
-        });
-        assert!(poller.poll(&mut engine, TIMING).unwrap().out_of_step);
-    }
-
-    #[test]
-    fn an_ecu_asked_alone_that_stays_silent_is_flagged() {
-        let mut car = Car::new(|id, request| match id {
-            0x7DF if request == [0x01, 0x00] => vec![
-                reply(ENGINE, &[0x41, 0x00, 0x18, 0x00, 0x00, 0x00]),
-                reply(TCU, &[0x41, 0x00, 0x18, 0x00, 0x00, 0x00]),
-            ],
-            0x7E0 => ecu_answer(ENGINE, ENGINE_PIDS, request),
-            _ => Vec::new(),
-        });
-        car.overflow = true;
-        let sample = poller(&[0x0C]).poll(&mut car, TIMING).unwrap();
-        assert!(sample.pids.contains_key(&ENGINE));
         assert!(sample.out_of_step);
     }
 
@@ -771,7 +1000,7 @@ mod out_of_step {
 
     #[test]
     fn an_adapter_failure_leaves_the_next_sample_flagged() {
-        let mut car = Car::new(engine_only);
+        let mut car = engine_car();
         car.fail_after = Some(0);
         let mut poller = poller(&[0x0C]);
         poller.poll(&mut car, TIMING).unwrap_err();
@@ -890,14 +1119,15 @@ mod dids {
             0x7DF => engine_only(id, request),
             0x714 => vec![reply(0x77E, &[0x62, 0xF1, 0x90, b'W'])],
             _ => Vec::new(),
-        });
+        })
+        .listing(ENGINE, pids_of(ENGINE_PIDS));
         let dids = vec![DidPoll {
             module: instruments(),
             dids: vec![(0xF190, None)],
         }];
         let mut poller = Poller::new(&Policy::read_only(), &[0x0C], dids).unwrap();
         let sample = poller.poll(&mut car, TIMING).unwrap();
-        assert_eq!(car.sent, ["7DF 01 0C", "714 22 F1 90"]);
+        assert_eq!(car.sent, ["7DF 01 00", "7DF 01 0C", "714 22 F1 90"]);
         assert_eq!(sample.pids[&ENGINE].len(), 1);
         assert!(sample.dids[0].result.is_ok());
     }
@@ -1019,7 +1249,8 @@ mod props {
             let sent = payload.clone();
             let mut car = Car::new(move |id, _| {
                 if id == 0x7DF { vec![reply(ENGINE, &sent)] } else { Vec::new() }
-            });
+            })
+            .listing(ENGINE, POLLED);
             let sample = poller(&POLLED).poll(&mut car, TIMING).unwrap();
             let readings = &sample.pids[&ENGINE];
             prop_assert_eq!(readings.len(), POLLED.len());

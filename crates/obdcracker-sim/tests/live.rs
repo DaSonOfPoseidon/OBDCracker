@@ -143,8 +143,11 @@ fn the_values_change_from_one_poll_to_the_next() {
         );
         assert_eq!(sample.dids, vec![]);
     }
-    // One request a poll, however many PIDs and ECUs.
-    assert_eq!(sent(&bus), ["7DF 01 0C 0D 05"; 4]);
+    // The bitmaps once, then one request a poll, however many PIDs and ECUs.
+    let mut want = vec!["7DF 01 00"];
+    want.extend(["7DF 01 0C 0D 05"; 4]);
+    assert_eq!(sent(&bus), want);
+    assert!(samples.iter().all(|sample| !sample.out_of_step));
 }
 
 #[test]
@@ -169,7 +172,12 @@ fn seven_known_pids_are_two_requests_and_each_is_read() {
     let pids = [0x04, 0x05, 0x0B, 0x0D, 0x0F, 0x11, 0x0C];
     let mut poller = Poller::new(&Policy::read_only(), &pids, Vec::new()).unwrap();
     let sample = poller.poll(&mut bus, TIMING).unwrap();
-    assert_eq!(sent(&bus), ["7DF 01 04 05 0B 0D 0F 11", "7DF 01 0C"]);
+    assert_eq!(
+        sent(&bus),
+        ["7DF 01 00", "7DF 01 04 05 0B 0D 0F 11", "7DF 01 0C"]
+    );
+    // The engine lists no rpm, so it was never asked and its silence is no late reply.
+    assert!(!sample.out_of_step);
     let engine = &sample.pids[&ENGINE];
     assert_eq!(engine.iter().map(|(pid, _)| *pid).collect::<Vec<_>>(), pids);
     // Everything but the rpm, which the engine doesn't have in this fixture.
@@ -195,7 +203,14 @@ fn reads_a_modules_dids_with_each_poll() {
     let mut poller = Poller::new(&Policy::read_only(), &[0x0D], dids).unwrap();
     let sample = poller.poll(&mut bus, TIMING).unwrap();
     poller.poll(&mut bus, TIMING).unwrap();
-    assert_eq!(sent(&bus), ["7DF 01 0D", "7E0 22 F1 87 F1 89"].repeat(2));
+    let mut want = vec!["7DF 01 00".to_owned()];
+    want.extend(
+        ["7DF 01 0D", "7E0 22 F1 87 F1 89"]
+            .repeat(2)
+            .into_iter()
+            .map(str::to_owned),
+    );
+    assert_eq!(sent(&bus), want);
     assert_eq!(sample.dids.len(), 1);
     assert_eq!(sample.dids[0].module, engine);
     let data = sample.dids[0].result.as_ref().unwrap();
@@ -212,12 +227,13 @@ fn reads_a_modules_dids_with_each_poll() {
 #[test]
 fn a_cut_off_reply_costs_that_ecu_its_values_and_no_other() {
     let mut bus = bus();
+    let mut poller = Poller::new(&Policy::read_only(), &[0x0C, 0x0D], Vec::new()).unwrap();
+    poller.poll(&mut bus, TIMING).unwrap();
     // Cut to five bytes, the transmission's `41 0C 00 04 0D 00` ends with the second PID's ID and
     // none of its data.
     bus.ecu_mut("transmission")
         .unwrap()
         .set_fault(Some(Fault::Truncate(5)));
-    let mut poller = Poller::new(&Policy::read_only(), &[0x0C, 0x0D], Vec::new()).unwrap();
     let sample = poller.poll(&mut bus, TIMING).unwrap();
     let cut = [0x41, 0x0C, 0x00, 0x04, 0x0D];
     for (_, reading) in &sample.pids[&TRANSMISSION] {
@@ -246,4 +262,35 @@ fn a_silent_ecu_is_missing_from_the_sample_and_the_other_is_read() {
         sample.pids.keys().copied().collect::<Vec<_>>(),
         [TRANSMISSION]
     );
+}
+
+#[test]
+fn an_ecu_whose_bitmap_is_cut_off_is_left_out_with_its_error() {
+    let mut bus = bus();
+    // `41 00 .. .. .. ..` cut to five bytes is a bitmap short of its last byte.
+    bus.ecu_mut("transmission")
+        .unwrap()
+        .set_fault(Some(Fault::Truncate(5)));
+    let mut poller = Poller::new(&Policy::read_only(), &[0x0D], Vec::new()).unwrap();
+    let sample = poller.poll(&mut bus, TIMING).unwrap();
+    assert_eq!(sample.pids.keys().copied().collect::<Vec<_>>(), [ENGINE]);
+    assert!(matches!(
+        sample.bitmap_errors[&TRANSMISSION],
+        ReadError::Undecodable {
+            error: ReplyError::TooShort,
+            ..
+        }
+    ));
+    assert!(!sample.out_of_step);
+}
+
+#[test]
+fn a_pid_no_module_has_is_not_sent() {
+    let mut bus = bus();
+    // 0x10 (air flow) is in neither module.
+    let mut poller = Poller::new(&Policy::read_only(), &[0x0D, 0x10], Vec::new()).unwrap();
+    let sample = poller.poll(&mut bus, TIMING).unwrap();
+    assert_eq!(sent(&bus), ["7DF 01 00", "7DF 01 0D"]);
+    assert_eq!(sample.unsupported_pids, [0x10]);
+    assert_eq!(sample.pids[&ENGINE][1], (0x10, Err(ReadError::NoReply)));
 }

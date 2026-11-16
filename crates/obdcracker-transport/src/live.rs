@@ -14,11 +14,9 @@ use obdcracker_core::response::Error as ReplyError;
 use obdcracker_core::uds;
 use obdcracker_safety::{Approved, Policy, Protocol, Rejection, Target};
 
-use crate::fingerprint::{
-    FingerprintError, LongRead, ReadError, UdsModule, approve_ecu_list, ask, decoded, ecus_to_ask,
-};
+use crate::fingerprint::{FingerprintError, LongRead, ReadError, UdsModule, ask, decoded};
 use crate::read_dids::{DidsData, ReadDidsError, check_dids, split};
-use crate::scan::{PidReading, PidValue};
+use crate::scan::{PidReading, PidValue, decode_bitmap, supported_pids};
 use crate::{Error, Timing, Transport};
 
 /// The longest [`next_due`] waits after a poll started, so an interval can't overflow an
@@ -63,6 +61,9 @@ pub enum PollError {
         /// What is wrong with its list.
         error: ReadDidsError,
     },
+    /// No ECU that answered the supported-PID bitmaps lists any of the PIDs, and there are no
+    /// DIDs, so a poll would send nothing. The PIDs are the poller's.
+    NothingSupported(Vec<u8>),
     /// The policy refused a request, so nothing reached the bus.
     Rejected(Rejection),
     /// The adapter failed. What it was sent is in the audit log, and the poll's values are lost.
@@ -77,6 +78,10 @@ impl fmt::Display for PollError {
             Self::DuplicatePid(pid) => write!(f, "PID {pid:02X} is named twice"),
             Self::DuplicateModule(name) => write!(f, "module {name} is named twice"),
             Self::BadDids { module, error } => write!(f, "module {module}: {error}"),
+            Self::NothingSupported(pids) => {
+                f.write_str("no ECU lists any of the PIDs")?;
+                pids.iter().try_for_each(|pid| write!(f, " {pid:02X}"))
+            }
             Self::Rejected(rejection) => write!(f, "safety policy {rejection}"),
             Self::Transport(e) => e.fmt(f),
         }
@@ -111,15 +116,25 @@ pub struct Sample {
     pub pids: BTreeMap<u32, Vec<PidReading>>,
     /// What each module answered, in the order the [`DidPoll`]s were given.
     pub dids: Vec<DidSample>,
-    /// Whether a request of this poller got no reply, in this poll or an earlier one, or the
-    /// adapter failed mid-poll. A reply that was only late may then arrive during a later poll
-    /// that sends the same request, and be read as that poll's value: nothing in the reply tells
-    /// them apart, so no value in this sample can be trusted to be fresh. It stays set, as
-    /// [`crate::Left::out_of_step`] does: reconnect and build a new [`Poller`] to clear it. A
-    /// request none of whose PIDs or DIDs the module supports is never answered, so polling only
-    /// those keeps it set; a PID left out of a reply that answered the rest doesn't set it. An
-    /// ECU that stays silent to a broadcast is seen only once it has answered that request (or
-    /// `01 00`, where the adapter asks each ECU alone) before.
+    /// The PIDs polled that no emissions ECU lists in its supported-PID bitmaps, in the order
+    /// given. They are never sent. Empty until an ECU has answered the bitmaps.
+    pub unsupported_pids: Vec<u8>,
+    /// Each ECU whose supported-PID bitmaps couldn't be read: one whose first bitmap was
+    /// malformed or refused is left out of the poll, and one whose chain broke later keeps the
+    /// PIDs listed before the break and loses those after it ([`ReadError::NoReply`] if the next
+    /// bitmap it announced never came).
+    pub bitmap_errors: BTreeMap<u32, ReadError>,
+    /// Whether a request that should have been answered wasn't, in this poll or an earlier one:
+    /// an ECU that lists a PID of a PID request didn't answer it, a module gave no answer to its
+    /// DID request, the supported-PID bitmaps got no answer (or an announced next bitmap didn't
+    /// come), or the adapter failed mid-poll. A reply that was only late may then arrive during a
+    /// later poll that sends the same request, and be read as that poll's value: nothing in the
+    /// reply tells them apart, so no value in this sample can be trusted to be fresh. It stays
+    /// set, as [`crate::Left::out_of_step`] does: reconnect and build a new [`Poller`] to clear it.
+    ///
+    /// A PID request goes only to the ECUs that list one of its PIDs, and only those owe an
+    /// answer. An ECU that lists none and stays silent sets nothing, and neither does a PID left
+    /// out of a reply that answered the rest.
     pub out_of_step: bool,
 }
 
@@ -136,22 +151,30 @@ pub struct DidSample {
 ///
 /// PIDs this crate decodes ([`obd::is_known_pid`]) go up to six to a broadcast request (SAE
 /// J1979), in the order given. Any other PID gets a request of its own, since its length isn't
-/// known and it would swallow the PIDs after it. Where the transport can't take eight ECUs' long
-/// replies at once ([`Transport::broadcasts_can_overflow`]), each ECU that answers `01 00` is
-/// asked alone, in turn, as [`crate::fingerprint::fingerprint`] does for its long reads. That list
-/// is taken on the first poll that finds an ECU (a poll asks again until one answers), so an ECU
-/// that comes online after that is missed until a new `Poller`.
+/// known and it would swallow the PIDs after it.
+///
+/// The first poll that finds an ECU reads every ECU's supported-PID bitmaps (`01 00`, `01 20`, ...
+/// as far as each chains them; a poll asks again until one answers), as [`crate::scan::scan`]
+/// does. A request then goes only to the ECUs that list one of its PIDs, and a PID no ECU lists is
+/// never sent ([`Sample::unsupported_pids`]). Where the transport can't take eight ECUs' long
+/// replies at once ([`Transport::broadcasts_can_overflow`]), each of those ECUs is asked alone, in
+/// turn, as [`crate::fingerprint::fingerprint`] does for its long reads. An ECU that comes online
+/// after the bitmaps were read is missed until a new `Poller`.
 ///
 /// Every request is approved when the poller is built. A refusal is an error from
 /// [`Poller::new`], and nothing is sent.
 #[derive(Debug)]
 pub struct Poller {
+    // To approve the requests for the PIDs the bitmaps list, once they are read.
+    policy: Policy,
     pids: Vec<u8>,
     // Each request's PIDs, as indexes into `pids`: the known PIDs in groups of up to six, then
     // each unknown one alone.
     batches: Vec<Batch>,
-    ecu_list: Approved,
-    ecus: Vec<u32>,
+    // The mode 01 bitmap requests: PID 0x00, 0x20, ... 0xE0.
+    bitmaps: Vec<Approved>,
+    // What the ECUs list, once one has answered.
+    listed: Option<Listed>,
     modules: Vec<DidRequest>,
     out_of_step: bool,
 }
@@ -164,8 +187,49 @@ struct Batch {
     indexes: Vec<usize>,
     pids: Vec<u8>,
     request: LongRead,
-    // The reply IDs of the ECUs that have answered this request, in any poll.
-    answered_before: BTreeSet<u32>,
+}
+
+impl Batch {
+    // The requests for those of `pids` that are in `wanted`: the known PIDs in groups of up to
+    // six, then each unknown one alone. Each request's `indexes` are into `pids`.
+    fn approve_all(policy: &Policy, pids: &[u8], wanted: &[u8]) -> Result<Vec<Self>, PollError> {
+        let wanted = |index: &usize| wanted.contains(&pids[*index]);
+        let known: Vec<usize> = (0..pids.len())
+            .filter(|&index| obd::is_known_pid(pids[index]))
+            .filter(wanted)
+            .collect();
+        let unknown = (0..pids.len())
+            .filter(|&index| !obd::is_known_pid(pids[index]))
+            .filter(wanted);
+        let groups = known
+            .chunks(MAX_PIDS_PER_REQUEST)
+            .map(<[usize]>::to_vec)
+            .chain(unknown.map(|index| vec![index]));
+        let mut batches = Vec::new();
+        for indexes in groups {
+            let group: Vec<u8> = indexes.iter().map(|&index| pids[index]).collect();
+            let mut buf = [0; 7];
+            let Some(payload) = obd::current_data_multi(&group, &mut buf) else {
+                unreachable!("a group is 1 to {MAX_PIDS_PER_REQUEST} PIDs");
+            };
+            batches.push(Self {
+                indexes,
+                pids: group,
+                request: LongRead::approve(policy, payload)?,
+            });
+        }
+        Ok(batches)
+    }
+}
+
+// What the supported-PID bitmaps said.
+#[derive(Debug)]
+struct Listed {
+    // The PIDs each ECU lists, by reply CAN ID. An ECU whose first bitmap failed isn't here.
+    pids: BTreeMap<u32, BTreeSet<u8>>,
+    errors: BTreeMap<u32, ReadError>,
+    // The polled PIDs no ECU lists.
+    unsupported: Vec<u8>,
 }
 
 #[derive(Debug)]
@@ -207,32 +271,25 @@ impl Poller {
             }
             modules.push(DidRequest::approve(policy, poll)?);
         }
-        let known = (0..pids.len()).filter(|&index| obd::is_known_pid(pids[index]));
-        let known: Vec<usize> = known.collect();
-        let unknown = (0..pids.len()).filter(|&index| !obd::is_known_pid(pids[index]));
-        let groups = known
-            .chunks(MAX_PIDS_PER_REQUEST)
-            .map(<[usize]>::to_vec)
-            .chain(unknown.map(|index| vec![index]));
-        let mut batches = Vec::new();
-        for indexes in groups {
-            let group: Vec<u8> = indexes.iter().map(|&index| pids[index]).collect();
-            let mut buf = [0; 7];
-            let Some(payload) = obd::current_data_multi(&group, &mut buf) else {
-                unreachable!("a group is 1 to {MAX_PIDS_PER_REQUEST} PIDs");
-            };
-            batches.push(Batch {
-                indexes,
-                pids: group,
-                request: LongRead::approve(policy, payload)?,
-                answered_before: BTreeSet::new(),
-            });
-        }
+        let batches = Batch::approve_all(policy, pids, pids)?;
+        let bitmaps = (0..=u8::MAX)
+            .step_by(0x20)
+            .map(|pid| {
+                policy
+                    .approve(
+                        Protocol::Uds,
+                        Target::ObdFunctional,
+                        &obd::current_data(pid),
+                    )
+                    .map_err(PollError::Rejected)
+            })
+            .collect::<Result<_, _>>()?;
         Ok(Self {
+            policy: policy.clone(),
             pids: pids.to_vec(),
             batches,
-            ecu_list: approve_ecu_list(policy)?,
-            ecus: Vec::new(),
+            bitmaps,
+            listed: None,
             modules,
             out_of_step: false,
         })
@@ -240,13 +297,15 @@ impl Poller {
 
     /// Reads every PID and DID once.
     ///
-    /// The PIDs are read first, then each module's DIDs. A request nobody answers is an empty or
-    /// [`ReadError::NoReply`] entry in the [`Sample`], not an error: only an adapter failure is
-    /// one, and it loses the whole poll. Either leaves the poller [`Sample::out_of_step`].
+    /// The first poll with PIDs reads the supported-PID bitmaps. Then the PIDs are read, then each
+    /// module's DIDs. A request nobody answers is an empty or [`ReadError::NoReply`] entry in the
+    /// [`Sample`], not an error: only an adapter failure is one, and it loses the whole poll.
+    /// Either leaves the poller [`Sample::out_of_step`].
     ///
     /// # Errors
     ///
-    /// [`PollError::Transport`] when the adapter fails.
+    /// [`PollError::Transport`] when the adapter fails, and [`PollError::NothingSupported`] when
+    /// the bitmaps show that nothing would be sent.
     pub fn poll<T: Transport + ?Sized>(
         &mut self,
         transport: &mut T,
@@ -255,18 +314,27 @@ impl Poller {
         let started = Instant::now();
         let mut unanswered = false;
         let read = self.read_all(transport, timing, &mut unanswered);
-        self.out_of_step |= unanswered || read.is_err();
+        // An adapter failure may leave a reply in flight, as a silent request may.
+        self.out_of_step |= unanswered || matches!(read, Err(PollError::Transport(_)));
         let (pids, dids) = read?;
+        let (unsupported_pids, bitmap_errors) = self
+            .listed
+            .as_ref()
+            .map(|listed| (listed.unsupported.clone(), listed.errors.clone()))
+            .unwrap_or_default();
         Ok(Sample {
             started,
             finished: Instant::now(),
             pids,
             dids,
+            unsupported_pids,
+            bitmap_errors,
             out_of_step: self.out_of_step,
         })
     }
 
-    // The PIDs, then each module's DIDs. `unanswered` is set when a request got no reply.
+    // The PIDs, then each module's DIDs. `unanswered` is set when a request that should have been
+    // answered wasn't.
     fn read_all<T: Transport + ?Sized>(
         &mut self,
         transport: &mut T,
@@ -274,11 +342,24 @@ impl Poller {
         unanswered: &mut bool,
     ) -> Result<(PidReadings, Vec<DidSample>), PollError> {
         let mut pids = BTreeMap::new();
-        if !self.batches.is_empty() {
-            if self.ecus.is_empty() {
-                self.ecus = ecus_to_ask(transport, &self.ecu_list, timing)?;
+        if !self.pids.is_empty() {
+            if self.listed.is_none()
+                && let Some(listed) = self.list_pids(transport, timing, unanswered)?
+            {
+                // What no ECU lists is never asked for, so the requests are made again without
+                // it.
+                let wanted: Vec<u8> = (self.pids.iter().copied())
+                    .filter(|pid| !listed.unsupported.contains(pid))
+                    .collect();
+                self.batches = Batch::approve_all(&self.policy, &self.pids, &wanted)?;
+                self.listed = Some(listed);
             }
-            pids = self.read_pids(transport, timing, unanswered)?;
+            if let Some(listed) = &self.listed {
+                if listed.unsupported.len() == self.pids.len() && self.modules.is_empty() {
+                    return Err(PollError::NothingSupported(self.pids.clone()));
+                }
+                pids = self.read_pids(transport, timing, listed, unanswered)?;
+            }
         }
         let mut dids = Vec::with_capacity(self.modules.len());
         for module in &self.modules {
@@ -292,28 +373,85 @@ impl Poller {
         Ok((pids, dids))
     }
 
-    // Each ECU's readings, one per PID polled, in order.
-    fn read_pids<T: Transport + ?Sized>(
-        &mut self,
+    // What each ECU lists, from `01 00` and the bitmaps it chains. None while no ECU has
+    // answered, so the next poll asks again.
+    fn list_pids<T: Transport + ?Sized>(
+        &self,
         transport: &mut T,
         timing: Timing,
         unanswered: &mut bool,
-    ) -> Result<BTreeMap<u32, Vec<PidReading>>, PollError> {
-        let Self {
+    ) -> Result<Option<Listed>, PollError> {
+        let found = supported_pids(
+            transport,
+            |base| &self.bitmaps[usize::from(base / 0x20)],
+            None,
+            decode_bitmap,
+            timing,
+        )?;
+        if found.is_empty() {
+            *unanswered = true;
+            return Ok(None);
+        }
+        let mut pids = BTreeMap::new();
+        let mut errors = BTreeMap::new();
+        for (source, (listed, cut_short)) in found {
+            match listed {
+                Ok(list) => {
+                    pids.insert(source, list.into_iter().collect::<BTreeSet<u8>>());
+                }
+                Err(e) => {
+                    errors.insert(source, e);
+                }
+            }
+            if let Some((_, e)) = cut_short {
+                *unanswered |= e == ReadError::NoReply;
+                errors.insert(source, e);
+            }
+        }
+        let unsupported = self
+            .pids
+            .iter()
+            .copied()
+            .filter(|pid| !pids.values().any(|listed| listed.contains(pid)))
+            .collect();
+        Ok(Some(Listed {
             pids,
-            batches,
-            ecus,
-            ..
-        } = self;
+            errors,
+            unsupported,
+        }))
+    }
+
+    // Each ECU's readings, one per PID polled, in order. A request goes to the ECUs that list one
+    // of its PIDs, and each of them owes an answer.
+    fn read_pids<T: Transport + ?Sized>(
+        &self,
+        transport: &mut T,
+        timing: Timing,
+        listed: &Listed,
+        unanswered: &mut bool,
+    ) -> Result<PidReadings, PollError> {
         let mut slots: BTreeMap<u32, Vec<Option<Result<PidValue, ReadError>>>> = BTreeMap::new();
-        for batch in batches {
-            let replies = batch.request.read(transport, ecus, timing)?;
-            // An ECU answers a request once; a repeat isn't another answer.
+        for batch in &self.batches {
+            let owed: Vec<u32> = listed
+                .pids
+                .iter()
+                .filter(|(_, pids)| batch.pids.iter().any(|pid| pids.contains(pid)))
+                .map(|(&source, _)| source)
+                .collect();
+            if owed.is_empty() {
+                continue;
+            }
+            let replies = batch.request.read(transport, &owed, timing)?;
+            // An ECU answers a request once; a repeat isn't another answer. An ECU the bitmaps
+            // didn't list, or whose bitmap failed, is left out.
             let mut answered = BTreeSet::new();
-            for reply in replies.iter().filter(|r| answered.insert(r.source)) {
+            for reply in replies
+                .iter()
+                .filter(|r| listed.pids.contains_key(&r.source) && answered.insert(r.source))
+            {
                 let slot = slots
                     .entry(reply.source)
-                    .or_insert_with(|| vec![None; pids.len()]);
+                    .or_insert_with(|| vec![None; self.pids.len()]);
                 let values = decoded(&reply.payload, |payload| decode_batch(payload, &batch.pids));
                 for (&index, &pid) in batch.indexes.iter().zip(&batch.pids) {
                     slot[index] = Some(match &values {
@@ -325,19 +463,13 @@ impl Poller {
                     });
                 }
             }
-            // Each ECU in the list, and each that answered this request before, owes an answer.
-            // Broadcast to ECUs not known yet, nobody owes one but somebody should give one.
-            *unanswered |= answered.is_empty()
-                || ecus
-                    .iter()
-                    .chain(&batch.answered_before)
-                    .any(|ecu| !answered.contains(ecu));
-            batch.answered_before.extend(answered);
+            *unanswered |= owed.iter().any(|ecu| !answered.contains(ecu));
         }
         Ok(slots
             .into_iter()
             .map(|(source, slot)| {
-                let readings = pids
+                let readings = self
+                    .pids
                     .iter()
                     .zip(slot)
                     .map(|(&pid, reading)| (pid, reading.unwrap_or(Err(ReadError::NoReply))))

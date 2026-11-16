@@ -174,7 +174,9 @@ Each entry names the class, what to check, and where it bit us.
 - **A repeated request can take its own earlier late reply.** A poller sends the same `01 0D` every poll, so a reply
   that missed one poll's P2 matches the next poll's identical request, and nothing in it says it is old. A loop that
   repeats a request must remember that one went unanswered and say so on every later result (`Sample::out_of_step`,
-  PR #354, Codex); hiding the timeout as an empty result leaves the caller no way to know.
+  PR #354, Codex); hiding the timeout as an empty result leaves the caller no way to know. Say it only for silence
+  that is abnormal: an ECU that doesn't list a PID is silent to it every time, so ask only the ECUs whose bitmaps list
+  one of the request's PIDs, and let only those owe an answer, or the flag is set on the first poll and means nothing.
 - **A reply can't change what the request already fixed.** A TP2.0 channel setup asks to be answered on 0x300, but
   `decode_channel_setup` took any valid receive ID, so a reply giving 0x301 read as an open channel the policy then
   wouldn't close (#153). When the request names a value the reply repeats, check it equals the request's, not just
