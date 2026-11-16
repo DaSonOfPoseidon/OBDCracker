@@ -18,6 +18,7 @@ pub mod gateway;
 #[cfg(feature = "serde")]
 pub mod json;
 pub mod link;
+pub mod live;
 mod mock;
 /// The gs_usb and SocketCAN backends (M6) are its users. Crate-private, so no importer can put a
 /// frame on the bus:

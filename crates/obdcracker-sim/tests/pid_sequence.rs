@@ -171,11 +171,11 @@ fn refuses_what_a_fixture_would() {
 #[test]
 fn a_pid_the_decoder_does_not_know_takes_any_length() {
     let mut bus = bus();
-    // 0x12 (commanded secondary air status) isn't in the decoder's table.
+    // 0x1B is reserved in SAE J1979, so the decoder doesn't know its length.
     bus.ecu_mut("engine")
         .unwrap()
-        .set_pid_sequence(0x12, vec![vec![1], vec![2, 3]])
+        .set_pid_sequence(0x1B, vec![vec![1], vec![2, 3]])
         .unwrap();
-    assert_eq!(ask(&mut bus, &[0x12]), Some(vec![0x41, 0x12, 1]));
-    assert_eq!(ask(&mut bus, &[0x12]), Some(vec![0x41, 0x12, 2, 3]));
+    assert_eq!(ask(&mut bus, &[0x1B]), Some(vec![0x41, 0x1B, 1]));
+    assert_eq!(ask(&mut bus, &[0x1B]), Some(vec![0x41, 0x1B, 2, 3]));
 }

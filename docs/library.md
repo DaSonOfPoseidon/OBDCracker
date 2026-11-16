@@ -178,6 +178,58 @@ assert_eq!(serde_json::to_string(&scan)?, r#"{"ecus":[],"modules":[]}"#);
 # fn main() {}
 ```
 
+## Live data
+
+`transport::live::Poller` reads a fixed list of mode 01 PIDs, and DIDs from profile modules, again and again. Each
+`poll` returns one `Sample`: when it started and finished, each emissions ECU's decoded value for every PID (in the order
+you gave them), and each module's answer to its `22` request. It never sleeps: you do, and `next_due` says until when.
+
+```rust,no_run
+use std::time::{Duration, Instant};
+
+use obdcracker::safety::Policy;
+use obdcracker::transport::live::{Poller, next_due};
+use obdcracker::transport::{Timing, Transport};
+
+fn watch(adapter: &mut impl Transport) -> Result<(), Box<dyn std::error::Error>> {
+    // Engine speed, vehicle speed, coolant temperature and intake manifold pressure: one request a poll.
+    let mut poller = Poller::new(&Policy::read_only(), &[0x0C, 0x0D, 0x05, 0x0B], Vec::new())?;
+    let every = Duration::from_millis(500);
+    loop {
+        let sample = poller.poll(adapter, Timing::default())?;
+        for (ecu, readings) in &sample.pids {
+            for (pid, reading) in readings {
+                println!("{ecu:03X} {pid:02X} {reading:?}");
+            }
+        }
+        let due = next_due(sample.started, every, Instant::now());
+        std::thread::sleep(due.saturating_duration_since(Instant::now()));
+    }
+}
+```
+
+- **Requests.** `Poller::new` approves every request, so a refusal is an error from `new` and nothing is sent. PIDs this
+  crate decodes (`obd::is_known_pid`) go up to six to a broadcast request (SAE J1979), in the order given. Any other PID
+  is asked alone: its length isn't known, so its reply would swallow the PIDs after it. A supported-PID bitmap (0x00,
+  0x20, ...) or a PID named twice is refused. Where the adapter can't take eight ECUs' long replies at once, each ECU that
+  answers `01 00` is asked on its own request ID, as `fingerprint` does. That list is taken on the first poll that finds
+  an ECU, so one that comes online later is missed until you build a new poller.
+- **Replies are untrusted.** One ECU's reply must hold only PIDs that were asked for, each once, each with all its data,
+  and nothing after. Anything else (an extra or repeated PID, a cut-off value, a byte left over) is
+  `ReadError::Undecodable` for every PID of that request for that ECU, with the reply, and the other ECUs' values are
+  unaffected. A PID the ECU leaves out of an otherwise good reply is `ReadError::NoReply`, which is how an ECU says it
+  doesn't support it. An ECU that sent nothing has no entry.
+- **DIDs.** Each `DidPoll` is one module and its DIDs (at most `read_dids::MAX_DIDS`, none twice), with the data length
+  where the profile gives one. A module's DIDs are one `22` request, split as `read_dids` does, and come back as
+  `DidsData`: bytes, which you show as text or hex as the profile says. A module is named once per poller. An ELM327
+  sends a request over 7 bytes (4 or more DIDs) only once an earlier request has shown that it echoes each character,
+  which a poll's PID request does; a poller of DIDs alone must send a shorter request first.
+- **Timing.** `next_due(started, interval, now)` is `started + interval`, or `now` if that has passed, so a poll that
+  overran is followed by one at once and not by a backlog. An interval over an hour counts as an hour.
+
+For tests, a simulated car can give a PID a value that changes on each request (`Ecu::set_pid_sequence`,
+[fixtures](fixtures.md#ecuobd)).
+
 ## Comparing two reads
 
 `transport::diff` says what changed between two results you already have, such as a car's fingerprint before and after a
