@@ -30,6 +30,28 @@ impl DtcDetail {
         };
         answered(&self.snapshots) || self.extended_data.as_ref().is_some_and(answered)
     }
+
+    /// Whether the module said it was busy (NRC 0x21, "repeat request") to either read. That
+    /// isn't an answer: the module is still on the read, so it isn't sent another request.
+    #[must_use]
+    pub fn busy(&self) -> bool {
+        is_busy(&self.snapshots) || self.extended_data.as_ref().is_some_and(is_busy)
+    }
+}
+
+fn is_busy(value: &Result<RecordData, ReadError>) -> bool {
+    matches!(value, Err(ReadError::Reply(ReplyError::Negative(refusal)))
+        if refusal.nrc == Nrc::BusyRepeatRequest)
+}
+
+/// One DTC and what [`read_dtc_detail`] found for it.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DtcReading {
+    /// The DTC.
+    pub dtc: UdsDtc,
+    /// Its snapshot and extended data records.
+    pub detail: DtcDetail,
 }
 
 impl From<uds::DtcData<'_>> for RecordData {
@@ -103,9 +125,7 @@ pub fn read_dtc_detail<T: Transport + ?Sized>(
         });
     }
     // "Busy, repeat request" isn't an answer: the module is still on the first read.
-    if matches!(&snapshots, Err(ReadError::Reply(ReplyError::Negative(refusal)))
-        if refusal.nrc == Nrc::BusyRepeatRequest)
-    {
+    if is_busy(&snapshots) {
         return Ok(DtcDetail {
             snapshots,
             extended_data: None,

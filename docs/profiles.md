@@ -60,6 +60,7 @@ what the descriptor positions mean is Audi's, so a pattern would be a guess.
 | `protocol` | `uds` (ISO 14229 on ISO-TP), `kwp2000` (ISO 14230 on ISO-TP) or `tp20` (VW TP2.0 transport with KWP2000). Nothing reads a `kwp2000` module yet; a `tp20` module can be read through `tp20::ChannelSession` (#142), but scan doesn't read the profile's `tp20` modules yet (#170). The simulator only simulates `uds` modules from a fixture. |
 | `extended_address` | The sub-address byte for ISO-TP extended addressing, if the module uses it. |
 | `[[module.did]]` | The data identifiers the module can read beyond the standard ones. |
+| `[[module.dtc]]` | The manufacturer's names for some of the module's DTCs ([below](#dtc-names)). |
 
 ### `[[module.did]]`
 
@@ -70,6 +71,26 @@ what the descriptor positions mean is Audi's, so a pattern would be a guess.
 | `decode` | `text` (printable ASCII) or `hex` (raw bytes as hex). The standard identification DIDs (0xF180..=0xF19F) with an ISO 14229-1 text format (the VIN, and the part, software, hardware, system and ODX names) must be `text`: `standard_decode` gives the format, and a DID with no fixed format takes the profile's. |
 | `length` | The value's length in bytes, if the module always sends this many (not 0). It is fixed per ECU variant, not per DID, and lets several DIDs be read in one request, because a multi-DID reply doesn't say where each value ends. |
 | `session` | `default` (the default) or `extended` (`10 03`): the session the module reads it in. |
+
+### DTC names
+
+`[[module.dtc]]` names a UDS DTC of the module, so `scan` and `dtc` print the name next to its code:
+
+```toml
+[[module.dtc]]
+code = "0016A0"
+text = "What the manufacturer calls it"
+```
+
+| Field | Meaning |
+|---|---|
+| `code` | The DTC's three bytes, a string of six upper-case hex digits, as `scan` lists it. Not `000000` (padding) or `FFFFFF` (every group). No repeats within a module; another module may use the same code. |
+| `text` | What it means, on one line: not blank, no space at either end and no control character, since it is printed to a terminal. |
+
+The names are display data only. They add no request and no service, so they don't touch the safety policy
+(`Profile::narrow`), and a DTC without one prints as before. The text output shows the name in quotes after the code
+(`77A gateway DTC 0016A0 "name" failed (status 01)`); the JSON output doesn't carry it. The built-in A7 profile has
+none: there is no source for its codes' names that this project may copy.
 
 ### Discovery ranges
 

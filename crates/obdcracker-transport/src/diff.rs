@@ -1410,8 +1410,8 @@ fn scan_unique(scan: &Scan) -> Result<(), String> {
 /// What changed between two scans: each ECU's supported PIDs (not their values, which change on
 /// every run), mode 09 PIDs, name, stored, pending and permanent DTCs, MIL and readiness monitors,
 /// and each module's DIDs and DTCs. A read that one scan never made (a document from before the
-/// read existed) isn't compared. The freeze frame and the mode 06 monitor IDs aren't compared
-/// either: they change between runs.
+/// read existed) isn't compared. The freeze frame, the mode 06 monitor IDs and each module's DTC
+/// detail ([`ModuleScan::dtc_details`]) aren't compared either: they change between runs.
 ///
 /// # Errors
 ///

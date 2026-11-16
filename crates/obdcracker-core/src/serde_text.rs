@@ -4,11 +4,12 @@
 use core::fmt;
 
 use serde::de::{self, Visitor};
+use serde::ser::SerializeStruct;
 use serde::{Deserializer, Serialize, Serializer};
 
 use crate::obd::{Cvn, Dtc};
 use crate::response::Nrc;
-use crate::uds::{DtcFormat, DtcStatus, UdsDtc};
+use crate::uds::{DtcFormat, DtcRecord, DtcStatus, UdsDtc};
 
 struct Text<T> {
     expected: &'static str,
@@ -145,6 +146,27 @@ impl Serialize for DtcStatus {
 impl<'de> serde::Deserialize<'de> for DtcStatus {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         byte::deserialize(deserializer).map(Self)
+    }
+}
+
+// The names of a status's set flags, as a list.
+struct Flags(DtcStatus);
+
+impl Serialize for Flags {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.collect_seq(self.0.flags())
+    }
+}
+
+// The derived `Deserialize` ignores `flags`, which only repeats `status` for a reader that
+// doesn't decode its bits.
+impl Serialize for DtcRecord {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let mut record = serializer.serialize_struct("DtcRecord", 3)?;
+        record.serialize_field("dtc", &self.dtc)?;
+        record.serialize_field("status", &self.status)?;
+        record.serialize_field("flags", &Flags(self.status))?;
+        record.end()
     }
 }
 

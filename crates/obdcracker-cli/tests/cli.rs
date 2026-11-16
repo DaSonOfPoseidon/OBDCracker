@@ -974,6 +974,101 @@ fn dry_run_scan_sends_nothing() {
 }
 
 #[test]
+fn dry_run_scan_names_the_module_reads_and_the_dtc_detail_ones() {
+    let plain = obdcracker(&["--dry-run", "scan"]);
+    let plain = String::from_utf8_lossy(&plain.stdout);
+    assert!(plain.contains("19 01 AF and 19 02 AF"), "{plain}");
+    assert!(!plain.contains("19 04"), "{plain}");
+
+    let out = obdcracker(&["--dry-run", "scan", "--dtc-detail"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("dry run: nothing was sent"), "{stdout}");
+    assert!(
+        stdout.contains("19 04 <DTC> FF and 19 06 <DTC> FF for each DTC a module lists"),
+        "{stdout}"
+    );
+}
+
+#[test]
+fn sim_scan_dtc_detail_prints_what_was_read_under_each_dtc() {
+    // The sim's night vision module lists one DTC (#54) and supports only the by-status-mask
+    // report, so both detail reads are refused as not supported.
+    let log = temp_log("scan-dtc-detail");
+    let out = obdcracker(&[
+        "--sim",
+        "a7",
+        "--audit-log",
+        log.to_str().unwrap(),
+        "scan",
+        "--discover",
+        "--dtc-detail",
+    ]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let lines: Vec<&str> = stdout.lines().collect();
+    let dtc = lines
+        .iter()
+        .position(|l| *l == "791 night vision DTC 001017 failed, confirmed (status 09)")
+        .unwrap_or_else(|| panic!("{stdout}"));
+    let refused = "(service 0x19 refused: subfunction not supported (0x12))";
+    assert_eq!(
+        lines[dtc + 1..dtc + 3],
+        [
+            format!("791 night vision DTC 001017 snapshots {refused}"),
+            format!("791 night vision DTC 001017 extended data {refused}"),
+        ]
+    );
+    // Each listed DTC is asked for with both reads in turn, to the module that listed it (night
+    // vision's request ID is 727).
+    let audit = std::fs::read_to_string(&log).unwrap();
+    let detail: Vec<(&str, &str)> = audit
+        .lines()
+        .filter(|l| l.contains(r#""dir":"tx""#))
+        .filter_map(|l| {
+            let (_, rest) = l.split_once(r#""id":""#)?;
+            let (id, rest) = rest.split_once(r#"","payload":""#)?;
+            let (payload, _) = rest.split_once('"')?;
+            (payload.starts_with("19 04 ") || payload.starts_with("19 06 "))
+                .then_some((id, payload))
+        })
+        .collect();
+    for pair in detail.chunks(2) {
+        let [(id, snapshots), (same_id, extended)] = pair else {
+            panic!("{detail:?}");
+        };
+        assert_eq!(id, same_id);
+        assert_eq!(snapshots.replacen("19 04", "19 06", 1), *extended);
+    }
+    assert!(detail.contains(&("727", "19 04 00 10 17 FF")), "{detail:?}");
+}
+
+#[test]
+fn sim_scan_reads_no_dtc_detail_unless_asked() {
+    let log = temp_log("scan-no-dtc-detail");
+    let out = obdcracker(&[
+        "--sim",
+        "a7",
+        "--audit-log",
+        log.to_str().unwrap(),
+        "scan",
+        "--discover",
+    ]);
+    assert!(out.status.success());
+    let audit = std::fs::read_to_string(&log).unwrap();
+    assert!(!audit.contains(r#""payload":"19 04 "#), "{audit}");
+    assert!(!audit.contains(r#""payload":"19 06 "#), "{audit}");
+}
+
+#[test]
 fn sim_scan_discover_finds_the_modules_that_answer_then_scans_them() {
     let log = temp_log("discover");
     let out = obdcracker(&[
@@ -2901,6 +2996,55 @@ mod json {
         assert_eq!(
             document(&out, "read-dids")["read"]["error"],
             json!({"Reply": {"Negative": {"sid": "22", "nrc": "31"}}})
+        );
+    }
+
+    #[test]
+    fn scan_has_each_dtcs_flags_and_with_dtc_detail_what_was_read_for_it() {
+        let out = sim(
+            "json-scan-dtc-detail",
+            &["scan", "--discover", "--dtc-detail"],
+        );
+        assert!(out.status.success(), "{}", stderr(&out));
+        let result = document(&out, "scan");
+        let modules = result["modules"].as_array().unwrap();
+        let night_vision = modules
+            .iter()
+            .find(|module| module["name"] == "night vision")
+            .unwrap();
+        // The status says its flags by name too, for a reader that doesn't decode the bits.
+        assert_eq!(
+            night_vision["dtcs"],
+            json!({"value": [{
+                "dtc": "001017",
+                "status": "09",
+                "flags": ["failed", "confirmed"],
+            }]})
+        );
+        let refused = json!({"error": {"Reply": {"Negative": {"sid": "19", "nrc": "12"}}}});
+        assert_eq!(
+            night_vision["dtc_details"],
+            json!([{
+                "dtc": "001017",
+                "detail": {
+                    "snapshots": refused,
+                    "extended_data": refused,
+                    "out_of_step": false,
+                },
+            }])
+        );
+        // A module that lists no DTC has an empty list, and one asked for no detail has none.
+        let engine = modules.iter().find(|m| m["name"] == "engine").unwrap();
+        assert_eq!(engine["dtc_details"], json!([]));
+        let out = sim("json-scan-no-dtc-detail", &["scan"]);
+        assert!(out.status.success(), "{}", stderr(&out));
+        let result = document(&out, "scan");
+        assert!(
+            result["modules"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|module| module["dtc_details"] == Value::Null)
         );
     }
 

@@ -1346,3 +1346,58 @@ fn fixture_dids_may_name_the_gateway_lists_tables_on_its_module_only() {
 fn the_sim_does_not_pace_broadcasts() {
     assert!(!a7().broadcasts_can_overflow());
 }
+
+#[test]
+fn a_scan_reads_each_listed_dtcs_detail_from_the_sim() {
+    use obdcracker_transport::dtc::{DtcDetail, RecordData};
+    use obdcracker_transport::fingerprint::UdsModule;
+    use obdcracker_transport::scan::{ScanModule, ScanOptions, scan_with};
+
+    // Both DTCs have a fault bit the module supports, so scan lists both; the fixture holds no
+    // records for either.
+    let fixture = DTC_REPORTS.replace("dtc_reports = [0x02]", "dtc_reports = [0x02, 0x04, 0x06]");
+    let mut bus = SimBus::new(&Profile::builtin("a7").unwrap(), &fixture).unwrap();
+    let module = ScanModule {
+        module: UdsModule::obd_engine(),
+        extra_dids: vec![],
+    };
+    let mut options = ScanOptions::default();
+    options.dtc_detail = true;
+    let got = scan_with(
+        &mut bus,
+        &Policy::read_only(),
+        &[module],
+        Timing::default(),
+        &options,
+    )
+    .unwrap();
+    let details = got.modules[0].dtc_details.as_ref().unwrap();
+    let read: Vec<_> = details.iter().map(|r| (r.dtc.code(), &r.detail)).collect();
+    let none = |status| {
+        Ok(RecordData {
+            status: DtcStatus(status),
+            records: vec![],
+        })
+    };
+    assert_eq!(
+        read,
+        [
+            (
+                0x02_9900,
+                &DtcDetail {
+                    snapshots: none(0x08),
+                    extended_data: Some(none(0x08)),
+                    out_of_step: false,
+                }
+            ),
+            (
+                0x01_1300,
+                &DtcDetail {
+                    snapshots: none(0x01),
+                    extended_data: Some(none(0x01)),
+                    out_of_step: false,
+                }
+            ),
+        ]
+    );
+}

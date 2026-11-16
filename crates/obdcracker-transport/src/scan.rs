@@ -10,6 +10,7 @@ use obdcracker_core::response::{self, Error as ReplyError};
 use obdcracker_core::uds::{self, DiagnosticSession, DtcCount, DtcRecord, did};
 use obdcracker_safety::{Approved, Policy, Protocol, SupplyVoltage, Target};
 
+use crate::dtc::{DtcReading, read_dtc_detail};
 use crate::fingerprint::{
     DidValue, FingerprintError, LongRead, ReadError, UdsModule, ask, broadcast, decode_did_value,
     decoded, from,
@@ -38,6 +39,9 @@ pub const SCAN_DIDS: [u16; 14] = [
 /// The DTC status bits scan asks for (ISO 14229-1 D.2), without the "not tested" bits.
 /// See [`docs/scanning.md#dtcs`](https://github.com/DaSonOfPoseidon/OBDCracker/blob/main/docs/scanning.md#dtcs).
 pub const FAULT_MASK: u8 = 0xAF;
+
+// The record `ScanOptions::dtc_detail` asks for: every one the module stored.
+const DETAIL_RECORD: u8 = 0xFF;
 
 /// Why a scan couldn't be taken at all.
 pub type ScanError = FingerprintError;
@@ -77,6 +81,10 @@ pub struct ScanOptions {
     /// timings ([`ExtendedSession`]). `None`, the default, changes no module's session, and
     /// those DIDs are [`ReadError::NeedsExtendedSession`].
     pub extended: Option<S3>,
+    /// Read the snapshot and extended data records of each DTC a module lists
+    /// ([`ModuleScan::dtc_details`]), with [`read_dtc_detail`]. `false`, the default, sends no
+    /// request for them.
+    pub dtc_detail: bool,
 }
 
 /// How to show a DID's value.
@@ -231,6 +239,13 @@ pub struct ModuleScan {
     /// Only bits the module says it supports count.
     #[cfg_attr(feature = "serde", serde(with = "crate::json::outcome"))]
     pub dtcs: Result<Vec<DtcRecord>, ReadError>,
+    /// With [`ScanOptions::dtc_detail`] and a list in `dtcs`: what was read for each DTC in it,
+    /// in its order, each DTC once. Fewer than the list holds if the module said it was busy or
+    /// a read went unanswered ([`DtcDetail::busy`](crate::dtc::DtcDetail::busy), [`out_of_step`](crate::dtc::DtcDetail::out_of_step)): the last entry
+    /// is the one that stopped it, and the DTCs after it weren't asked. `None` otherwise.
+    /// See [`docs/scanning.md#dtc-detail`](https://github.com/DaSonOfPoseidon/OBDCracker/blob/main/docs/scanning.md#dtc-detail).
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub dtc_details: Option<Vec<DtcReading>>,
     /// Whether the module answered anything at all, a refusal included. It can be true when
     /// every value above is [`ReadError::NoReply`] ([`docs/scanning.md#did-batching`](https://github.com/DaSonOfPoseidon/OBDCracker/blob/main/docs/scanning.md#did-batching)).
     pub answered: bool,
@@ -266,6 +281,10 @@ pub fn scan<T: Transport + ?Sized>(
 /// requests are approved before anything is sent too, and the policy must know each such
 /// module's reply ID, or [`FingerprintError::Session`] is returned. A module that refuses the
 /// session or doesn't answer loses only those DIDs. See [`docs/scanning.md#when-a-session-fails`](https://github.com/DaSonOfPoseidon/OBDCracker/blob/main/docs/scanning.md#when-a-session-fails).
+///
+/// With [`ScanOptions::dtc_detail`], each module's last reads are the detail of the DTCs it
+/// listed. Those requests are approved by `policy` again as they're read, and a pair is approved
+/// up front for each module, so a policy that refuses them fails the scan before anything is sent.
 pub fn scan_with<T: Transport + ?Sized>(
     transport: &mut T,
     policy: &Policy,
@@ -476,6 +495,14 @@ fn module_requests(
         if enter.reply_id().is_none() {
             return Err(FingerprintError::Session(SessionError::UnknownReplyId));
         }
+    }
+    if options.dtc_detail {
+        // The DTCs aren't known yet, and what the policy approves doesn't depend on them: this
+        // refuses before anything is sent where a module's detail reads would be refused.
+        // `read_dtc_detail` approves each pair itself.
+        let probe = uds::UdsDtc::new(1);
+        approve(target, &uds::dtc_snapshots(probe, DETAIL_RECORD))?;
+        approve(target, &uds::dtc_extended_data(probe, DETAIL_RECORD))?;
     }
     Ok(ModuleRequests {
         order,
@@ -847,7 +874,7 @@ fn scan_module<T: Transport + ?Sized>(
     };
     let (mut dids, mut batch_answered) = read_dids(&mut direct, &requests.default)?;
     let dtc_count = direct.ask(&requests.count, uds::decode_dtc_count)?;
-    let dtcs = direct.ask(&requests.dtcs, |payload| {
+    let dtcs: Result<Vec<DtcRecord>, ReadError> = direct.ask(&requests.dtcs, |payload| {
         let (availability, records) = uds::decode_dtcs_by_status_mask(payload)?;
         Ok(records
             .filter(|record| record.status.0 & availability.0 & FAULT_MASK != 0)
@@ -895,6 +922,17 @@ fn scan_module<T: Transport + ?Sized>(
             }
         }
     }
+    // After the session reads, so a read that goes unanswered leaves nothing to read after it.
+    let dtc_details = match &dtcs {
+        Ok(listed) if options.dtc_detail => Some(read_dtc_details(
+            transport,
+            policy,
+            module,
+            listed.iter().map(|record| record.dtc),
+            timing,
+        )?),
+        _ => None,
+    };
     let answered = answered(&dids, batch_answered);
     // Each session's values were read apart: back to SCAN_DIDS, then the profile's.
     dids.sort_by_key(|(id, _)| requests.order.iter().position(|did| did == id));
@@ -904,8 +942,32 @@ fn scan_module<T: Transport + ?Sized>(
         dids,
         dtc_count,
         dtcs,
+        dtc_details,
         answered,
     })
+}
+
+// Each DTC's detail, in the order given and once each, until the module says it's busy or a read
+// goes unanswered: the module is then still on that read, or its late reply could pass for the
+// next one's, so it's sent nothing more.
+fn read_dtc_details<T: Transport + ?Sized>(
+    transport: &mut T,
+    policy: &Policy,
+    module: &UdsModule,
+    dtcs: impl Iterator<Item = uds::UdsDtc>,
+    timing: Timing,
+) -> Result<Vec<DtcReading>, ScanError> {
+    let mut readings: Vec<DtcReading> = Vec::new();
+    let mut seen = BTreeSet::new();
+    for dtc in dtcs.filter(|&dtc| seen.insert(dtc)) {
+        let detail = read_dtc_detail(transport, policy, module, dtc, DETAIL_RECORD, timing)?;
+        let stop = detail.out_of_step || detail.busy();
+        readings.push(DtcReading { dtc, detail });
+        if stop {
+            break;
+        }
+    }
+    Ok(readings)
 }
 
 // Reads each DID in `requests`, and whether any multi-DID read got an answer, which the values

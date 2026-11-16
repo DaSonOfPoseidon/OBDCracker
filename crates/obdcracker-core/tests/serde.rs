@@ -112,7 +112,19 @@ fn dtc_records_and_counts_round_trip() {
         dtc: UdsDtc::new(0x16A0),
         status: DtcStatus(0x2F),
     };
-    assert_eq!(round_trip(&record), r#"{"dtc":"0016A0","status":"2F"}"#);
+    // The flags are the status's bits by name, for a reader that doesn't decode them.
+    assert_eq!(
+        round_trip(&record),
+        r#"{"dtc":"0016A0","status":"2F","flags":["failed","failed this cycle","pending","confirmed","failed since clear"]}"#
+    );
+    let none = DtcRecord {
+        dtc: UdsDtc::new(0x16A0),
+        status: DtcStatus(0x00),
+    };
+    assert_eq!(
+        round_trip(&none),
+        r#"{"dtc":"0016A0","status":"00","flags":[]}"#
+    );
     let count = DtcCount {
         availability: DtcStatus(0xFF),
         format: DtcFormat::Iso14229,
@@ -135,6 +147,11 @@ fn unknown_fields_are_ignored() {
     let record: DtcRecord =
         serde_json::from_value(json!({"dtc": "0016A0", "status": "2F", "later": [1, 2]})).unwrap();
     assert_eq!(record.dtc, UdsDtc::new(0x16A0));
+    // A DTC's flags come from its status: what a document says about them is never read.
+    let record: DtcRecord =
+        serde_json::from_value(json!({"dtc": "0016A0", "status": "2F", "flags": ["lamp"]}))
+            .unwrap();
+    assert_eq!(record.status, DtcStatus(0x2F));
 }
 
 fn monitor_status(a: u8, b: u8, c: u8, d: u8) -> MonitorStatus {

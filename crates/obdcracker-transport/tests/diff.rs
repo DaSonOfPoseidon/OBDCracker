@@ -520,6 +520,7 @@ fn module_scan(name: &str, response_id: u32) -> ModuleScan {
             dtc: UdsDtc::new(0x16A0),
             status: DtcStatus(0x08),
         }]),
+        dtc_details: None,
         answered: true,
     }
 }
@@ -1649,4 +1650,21 @@ fn vins_that_repeat_an_ecu_are_refused() {
     let error = diff::diff_vins(&clean, &twice).unwrap_err();
     assert_eq!((error.input, error.entry.as_str()), (Input::New, "ECU 7E8"));
     assert!(diff::diff_vins(&twice, &clean).is_err());
+}
+
+#[test]
+fn a_modules_dtc_detail_is_not_compared() {
+    // Snapshots and extended data change between runs, like PID values do.
+    let old = scan(vec![], vec![module_scan("engine", 0x7E8)]);
+    let mut new = old.clone();
+    new.modules[0].dtc_details = Some(vec![obdcracker_transport::dtc::DtcReading {
+        dtc: UdsDtc::new(0x16A0),
+        detail: obdcracker_transport::dtc::DtcDetail {
+            snapshots: Err(ReadError::NoReply),
+            extended_data: None,
+            out_of_step: true,
+        },
+    }]);
+    assert_eq!(diff_scan(&old, &new), []);
+    assert_eq!(diff_scan(&new, &old), []);
 }
