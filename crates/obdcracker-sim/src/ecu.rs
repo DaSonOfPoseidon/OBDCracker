@@ -388,6 +388,7 @@ impl Obd {
                         reply.extend(value);
                     }
                 }
+                self.advance_sequences(pids);
             }
             (0x03, []) => dtc_list(&mut reply, &self.dtcs),
             (0x07, []) => dtc_list(&mut reply, self.pending_dtcs.as_ref()?),
@@ -426,15 +427,23 @@ impl Obd {
         (reply.len() > 1).then_some(reply)
     }
 
-    // A mode 01 PID's data for this request. A sequence moves on to its next value afterwards.
-    fn current_value(&mut self, pid: u8) -> Option<Vec<u8>> {
-        let Some(sequence) = self.sequences.get_mut(&pid) else {
+    // A mode 01 PID's data for this request. A sequence doesn't move on here, so a PID named
+    // twice in one request answers the same value twice.
+    fn current_value(&self, pid: u8) -> Option<Vec<u8>> {
+        let Some(sequence) = self.sequences.get(&pid) else {
             return self.pids.get(&pid).cloned();
         };
         let last = sequence.values.len() - 1;
-        let value = sequence.values[sequence.served.min(last)].clone();
-        sequence.served = sequence.served.saturating_add(1);
-        Some(value)
+        Some(sequence.values[sequence.served.min(last)].clone())
+    }
+
+    // Moves each sequence the request named on to its next value, once however often it was named.
+    fn advance_sequences(&mut self, pids: &[u8]) {
+        for (pid, sequence) in &mut self.sequences {
+            if pids.contains(pid) {
+                sequence.served = sequence.served.saturating_add(1);
+            }
+        }
     }
 
     // The 4 data bytes of a mode 01 bitmap PID (0x00, 0x20, …), if the module supports it:

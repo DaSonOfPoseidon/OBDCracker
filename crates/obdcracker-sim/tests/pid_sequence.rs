@@ -93,6 +93,20 @@ fn a_request_for_other_pids_does_not_advance_it_and_a_batch_does() {
 }
 
 #[test]
+fn a_pid_named_twice_in_one_request_advances_once() {
+    let mut bus = bus();
+    bus.ecu_mut("engine")
+        .unwrap()
+        .set_pid_sequence(0x0C, vec![vec![0, 1], vec![0, 2], vec![0, 3]])
+        .unwrap();
+    assert_eq!(
+        ask(&mut bus, &[0x0C, 0x0C]),
+        Some(vec![0x41, 0x0C, 0, 1, 0x0C, 0, 1])
+    );
+    assert_eq!(ask(&mut bus, &[0x0C]), Some(vec![0x41, 0x0C, 0, 2]));
+}
+
+#[test]
 fn the_pid_is_in_the_bitmap_and_replaces_a_fixed_value() {
     let mut bus = bus();
     let engine = bus.ecu_mut("engine").unwrap();
