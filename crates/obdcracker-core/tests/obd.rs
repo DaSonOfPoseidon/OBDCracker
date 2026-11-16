@@ -1,7 +1,9 @@
 //! OBD-II (SAE J1979) request building and reply decoding, from ISO 15765-4 CAN replies.
 
 mod current_data {
-    use obdcracker_core::obd::{Reading, Unit, Value, current_data, decode_current_data};
+    use obdcracker_core::obd::{
+        Reading, Unit, Value, current_data, current_data_multi, decode_current_data, is_known_pid,
+    };
     use obdcracker_core::response::{Error, NegativeResponse, Nrc};
 
     fn readings(reply: &[u8]) -> Vec<Reading<'_>> {
@@ -26,6 +28,57 @@ mod current_data {
     #[test]
     fn builds_the_request() {
         assert_eq!(current_data(0x0C), [0x01, 0x0C]);
+    }
+
+    #[test]
+    fn builds_a_request_for_one_to_six_pids() {
+        let mut buf = [0; 7];
+        assert_eq!(
+            current_data_multi(&[0x0C], &mut buf),
+            Some(&[0x01, 0x0C][..])
+        );
+        assert_eq!(
+            current_data_multi(&[0x0C, 0x0D, 0x05], &mut buf),
+            Some(&[0x01, 0x0C, 0x0D, 0x05][..])
+        );
+        // Six is the most SAE J1979 allows in one request.
+        assert_eq!(
+            current_data_multi(&[1, 2, 3, 4, 5, 6], &mut buf),
+            Some(&[0x01, 1, 2, 3, 4, 5, 6][..])
+        );
+    }
+
+    #[test]
+    fn builds_no_request_for_no_pids_or_more_than_six() {
+        let mut buf = [0; 7];
+        assert_eq!(current_data_multi(&[], &mut buf), None);
+        assert_eq!(current_data_multi(&[1, 2, 3, 4, 5, 6, 7], &mut buf), None);
+        assert_eq!(current_data_multi(&[0; 255], &mut buf), None);
+    }
+
+    #[test]
+    fn says_which_pids_it_decodes() {
+        for pid in [0x00, 0x04, 0x0B, 0x0C, 0x0D, 0x33, 0x63, 0xE0] {
+            assert!(is_known_pid(pid), "{pid:02X}");
+        }
+        // PID 0x01 (monitor status) has a decoder of its own, and 0x12 isn't in the table.
+        for pid in [0x01, 0x02, 0x03, 0x12, 0x64, 0xFF] {
+            assert!(!is_known_pid(pid), "{pid:02X}");
+        }
+    }
+
+    #[test]
+    fn decodes_intake_manifold_pressure() {
+        assert_eq!(quantity(&[0x41, 0x0B, 0x62]), (98.0, Unit::Kilopascals));
+        assert_eq!(quantity(&[0x41, 0x0B, 0x00]), (0.0, Unit::Kilopascals));
+        assert_eq!(quantity(&[0x41, 0x0B, 0xFF]), (255.0, Unit::Kilopascals));
+        // One data byte: none is short, and a second isn't part of it.
+        let mut truncated = decode_current_data(&[0x41, 0x0B]).unwrap();
+        assert!(matches!(truncated.next(), Some(Err(Error::TooShort))));
+        let readings: Vec<_> = decode_current_data(&[0x41, 0x0B, 0x62, 0x01])
+            .unwrap()
+            .collect();
+        assert!(matches!(readings[..], [Ok(_), Err(Error::TooShort)]));
     }
 
     #[test]

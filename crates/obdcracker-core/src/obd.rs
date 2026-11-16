@@ -35,6 +35,24 @@ pub fn current_data(pid: u8) -> [u8; 2] {
     [CURRENT_DATA, pid]
 }
 
+/// The most PIDs one mode 01 request may name (SAE J1979), which the safety policy also allows.
+pub const MAX_PIDS_PER_REQUEST: usize = 6;
+
+/// A mode 01 request for `pids`, written into `buf` and returned: `01` and each PID in order.
+///
+/// `None` for no PIDs, or for more than [`MAX_PIDS_PER_REQUEST`]. A PID named twice is written
+/// twice; the caller decides whether that is wanted.
+#[must_use]
+pub fn current_data_multi<'a>(pids: &[u8], buf: &'a mut [u8; 7]) -> Option<&'a [u8]> {
+    if pids.is_empty() || pids.len() > MAX_PIDS_PER_REQUEST {
+        return None;
+    }
+    let len = pids.len() + 1;
+    buf[0] = CURRENT_DATA;
+    buf[1..len].copy_from_slice(pids);
+    Some(&buf[..len])
+}
+
 /// The unit a decoded value is in.
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -163,6 +181,7 @@ fn decode_pid(pid: u8, data: &[u8]) -> Option<(usize, Value<'static>)> {
         }
         0x05 | 0x0F | 0x46 | 0x5C => (1, quantity(byte(0)? - 40.0, Unit::Celsius)),
         0x0C => (2, quantity(word()? / 4.0, Unit::Rpm)),
+        0x0B => (1, quantity(byte(0)?, Unit::Kilopascals)),
         0x0D => (1, quantity(byte(0)?, Unit::KilometresPerHour)),
         0x10 => (2, quantity(word()? / 100.0, Unit::GramsPerSecond)),
         0x1F => (2, quantity(word()?, Unit::Seconds)),
@@ -180,7 +199,10 @@ fn decode_pid(pid: u8, data: &[u8]) -> Option<(usize, Value<'static>)> {
     Some(decoded)
 }
 
-fn is_known(pid: u8) -> bool {
+/// Whether [`decode_current_data`] knows this PID's length and formula. Any other PID comes back
+/// as [`Value::Raw`] holding the rest of the reply, so it can't share a reply with another PID.
+#[must_use]
+pub fn is_known_pid(pid: u8) -> bool {
     decode_pid(pid, &[0; 4]).is_some()
 }
 
@@ -207,7 +229,7 @@ impl<'a> Iterator for Readings<'a> {
 
     fn next(&mut self) -> Option<Self::Item> {
         let (&pid, data) = self.rest.split_first()?;
-        if !is_known(pid) {
+        if !is_known_pid(pid) {
             self.rest = &[];
             // Every PID has at least one data byte
             if data.is_empty() {
@@ -288,7 +310,7 @@ pub fn decode_freeze_frame(
             _ => Err(Error::Malformed),
         };
     }
-    if !is_known(pid) {
+    if !is_known_pid(pid) {
         return if data.is_empty() {
             Err(Error::TooShort)
         } else {
