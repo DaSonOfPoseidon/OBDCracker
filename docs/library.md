@@ -224,6 +224,12 @@ fn watch(adapter: &mut impl Transport) -> Result<(), Box<dyn std::error::Error>>
   `DidsData`: bytes, which you show as text or hex as the profile says. A module is named once per poller. An ELM327
   sends a request over 7 bytes (4 or more DIDs) only once an earlier request has shown that it echoes each character,
   which a poll's PID request does; a poller of DIDs alone must send a shorter request first.
+- **Late replies.** A request nobody answers may only be answered late, and a reply gives no sign of which poll it
+  belongs to: the next poll's identical request takes it as a fresh value. So `Sample::out_of_step` is set once any
+  request got no reply (an ECU asked alone that stayed silent included) or the adapter failed mid-poll, and it stays
+  set: no value after that is known to be fresh. Reconnect and build a new `Poller` to clear it. A PID or DID the
+  module doesn't support is never answered, so polling one keeps the flag set: take the list from the module's
+  supported-PID bitmaps or its profile.
 - **Timing.** `next_due(started, interval, now)` is `started + interval`, or `now` if that has passed, so a poll that
   overran is followed by one at once and not by a backlog. An interval over an hour counts as an hour.
 

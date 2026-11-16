@@ -111,6 +111,13 @@ pub struct Sample {
     pub pids: BTreeMap<u32, Vec<PidReading>>,
     /// What each module answered, in the order the [`DidPoll`]s were given.
     pub dids: Vec<DidSample>,
+    /// Whether a request of this poller got no reply, in this poll or an earlier one, or the
+    /// adapter failed mid-poll. A reply that was only late may then arrive during a later poll
+    /// that sends the same request, and be read as that poll's value: nothing in the reply tells
+    /// them apart, so no value in this sample can be trusted to be fresh. It stays set, as
+    /// [`crate::Left::out_of_step`] does: reconnect and build a new [`Poller`] to clear it. A PID
+    /// or DID the module doesn't support is never answered, so polling one keeps it set.
+    pub out_of_step: bool,
 }
 
 /// One module's answer to a poll's `22` request.
@@ -143,7 +150,11 @@ pub struct Poller {
     ecu_list: Approved,
     ecus: Vec<u32>,
     modules: Vec<DidRequest>,
+    out_of_step: bool,
 }
+
+// Each emissions ECU's readings, by reply CAN ID.
+type PidReadings = BTreeMap<u32, Vec<PidReading>>;
 
 #[derive(Debug)]
 struct Batch {
@@ -217,6 +228,7 @@ impl Poller {
             ecu_list: approve_ecu_list(policy)?,
             ecus: Vec::new(),
             modules,
+            out_of_step: false,
         })
     }
 
@@ -224,7 +236,7 @@ impl Poller {
     ///
     /// The PIDs are read first, then each module's DIDs. A request nobody answers is an empty or
     /// [`ReadError::NoReply`] entry in the [`Sample`], not an error: only an adapter failure is
-    /// one, and it loses the whole poll.
+    /// one, and it loses the whole poll. Either leaves the poller [`Sample::out_of_step`].
     ///
     /// # Errors
     ///
@@ -235,23 +247,43 @@ impl Poller {
         timing: Timing,
     ) -> Result<Sample, PollError> {
         let started = Instant::now();
-        let mut pids = BTreeMap::new();
-        if !self.batches.is_empty() {
-            if self.ecus.is_empty() {
-                self.ecus = ecus_to_ask(transport, &self.ecu_list, timing)?;
-            }
-            pids = self.read_pids(transport, timing)?;
-        }
-        let mut dids = Vec::with_capacity(self.modules.len());
-        for module in &self.modules {
-            dids.push(module.read(transport, timing)?);
-        }
+        let mut unanswered = false;
+        let read = self.read_all(transport, timing, &mut unanswered);
+        self.out_of_step |= unanswered || read.is_err();
+        let (pids, dids) = read?;
         Ok(Sample {
             started,
             finished: Instant::now(),
             pids,
             dids,
+            out_of_step: self.out_of_step,
         })
+    }
+
+    // The PIDs, then each module's DIDs. `unanswered` is set when a request got no reply.
+    fn read_all<T: Transport + ?Sized>(
+        &mut self,
+        transport: &mut T,
+        timing: Timing,
+        unanswered: &mut bool,
+    ) -> Result<(PidReadings, Vec<DidSample>), PollError> {
+        let mut pids = BTreeMap::new();
+        if !self.batches.is_empty() {
+            if self.ecus.is_empty() {
+                self.ecus = ecus_to_ask(transport, &self.ecu_list, timing)?;
+            }
+            pids = self.read_pids(transport, timing, unanswered)?;
+        }
+        let mut dids = Vec::with_capacity(self.modules.len());
+        for module in &self.modules {
+            let sample = module.read(transport, timing)?;
+            *unanswered |= matches!(
+                sample.result,
+                Err(ReadError::NoReply | ReadError::StillPending)
+            );
+            dids.push(sample);
+        }
+        Ok((pids, dids))
     }
 
     // Each ECU's readings, one per PID polled, in order.
@@ -259,10 +291,17 @@ impl Poller {
         &self,
         transport: &mut T,
         timing: Timing,
+        unanswered: &mut bool,
     ) -> Result<BTreeMap<u32, Vec<PidReading>>, PollError> {
         let mut slots: BTreeMap<u32, Vec<Option<Result<PidValue, ReadError>>>> = BTreeMap::new();
         for batch in &self.batches {
             let replies = batch.request.read(transport, &self.ecus, timing)?;
+            // Asked alone, each ECU in the list owes an answer; broadcast, somebody does.
+            *unanswered |= replies.is_empty()
+                || self
+                    .ecus
+                    .iter()
+                    .any(|ecu| !replies.iter().any(|r| r.source == *ecu));
             // An ECU answers a request once; a repeat isn't another answer.
             let mut answered = BTreeSet::new();
             for reply in replies.iter().filter(|r| answered.insert(r.source)) {

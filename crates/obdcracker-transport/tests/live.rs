@@ -670,6 +670,91 @@ mod an_ecu_asked_alone {
     }
 }
 
+mod out_of_step {
+    use super::*;
+
+    #[test]
+    fn answered_polls_stay_in_step() {
+        let mut car = Car::new(engine_only);
+        let mut poller = poller(&[0x0C, 0x0D]);
+        assert!(!poller.poll(&mut car, TIMING).unwrap().out_of_step);
+        assert!(!poller.poll(&mut car, TIMING).unwrap().out_of_step);
+    }
+
+    #[test]
+    fn a_request_nobody_answers_puts_the_poller_out_of_step_for_good() {
+        let mut poller = poller(&[0x0C]);
+        let mut silent = Car::new(|_, _| Vec::new());
+        assert!(poller.poll(&mut silent, TIMING).unwrap().out_of_step);
+        let mut car = Car::new(engine_only);
+        let sample = poller.poll(&mut car, TIMING).unwrap();
+        assert!(sample.pids.contains_key(&ENGINE));
+        assert!(sample.out_of_step);
+    }
+
+    #[test]
+    fn a_late_reply_taken_by_the_next_poll_is_flagged() {
+        // The first poll's reply comes in only after it gave up, so the second poll's identical
+        // request takes it as its answer. Nothing in the reply says so; the flag does.
+        let mut car = Car::new(|_, _| Vec::new());
+        let mut poller = poller(&[0x0D]);
+        assert!(poller.poll(&mut car, TIMING).unwrap().out_of_step);
+        car.replies.push_back(reply(ENGINE, &[0x41, 0x0D, 0x10]));
+        let sample = poller.poll(&mut car, TIMING).unwrap();
+        assert_eq!(
+            sample.pids[&ENGINE],
+            [(0x0D, quantity(16.0, Unit::KilometresPerHour))]
+        );
+        assert!(sample.out_of_step);
+    }
+
+    #[test]
+    fn an_ecu_asked_alone_that_stays_silent_is_flagged() {
+        let mut car = Car::new(|id, request| match id {
+            0x7DF if request == [0x01, 0x00] => vec![
+                reply(ENGINE, &[0x41, 0x00, 0x18, 0x00, 0x00, 0x00]),
+                reply(TCU, &[0x41, 0x00, 0x18, 0x00, 0x00, 0x00]),
+            ],
+            0x7E0 => ecu_answer(ENGINE, ENGINE_PIDS, request),
+            _ => Vec::new(),
+        });
+        car.overflow = true;
+        let sample = poller(&[0x0C]).poll(&mut car, TIMING).unwrap();
+        assert!(sample.pids.contains_key(&ENGINE));
+        assert!(sample.out_of_step);
+    }
+
+    #[test]
+    fn a_module_that_does_not_answer_is_flagged_and_one_that_does_is_not() {
+        let modules = || {
+            vec![DidPoll {
+                module: UdsModule {
+                    name: "instruments".to_owned(),
+                    request_id: 0x714,
+                    response_id: 0x77E,
+                },
+                dids: vec![(0xF190, None)],
+            }]
+        };
+        let mut car = Car::new(|_, _| vec![reply(0x77E, &[0x62, 0xF1, 0x90, b'W'])]);
+        let mut answered = Poller::new(&Policy::read_only(), &[], modules()).unwrap();
+        assert!(!answered.poll(&mut car, TIMING).unwrap().out_of_step);
+        let mut car = Car::new(|_, _| Vec::new());
+        let mut silent = Poller::new(&Policy::read_only(), &[], modules()).unwrap();
+        assert!(silent.poll(&mut car, TIMING).unwrap().out_of_step);
+    }
+
+    #[test]
+    fn an_adapter_failure_leaves_the_next_sample_flagged() {
+        let mut car = Car::new(engine_only);
+        car.fail_after = Some(0);
+        let mut poller = poller(&[0x0C]);
+        poller.poll(&mut car, TIMING).unwrap_err();
+        car.fail_after = None;
+        assert!(poller.poll(&mut car, TIMING).unwrap().out_of_step);
+    }
+}
+
 mod dids {
     use super::*;
 
