@@ -176,7 +176,7 @@ fn seven_known_pids_are_two_requests_and_each_is_read() {
         sent(&bus),
         ["7DF 01 00", "7DF 01 04 05 0B 0D 0F 11", "7DF 01 0C"]
     );
-    // The engine lists no rpm, so it was never asked and its silence is no late reply.
+    // The engine lists no rpm, so it owed no answer to the request for it.
     assert!(!sample.out_of_step);
     let engine = &sample.pids[&ENGINE];
     assert_eq!(engine.iter().map(|(pid, _)| *pid).collect::<Vec<_>>(), pids);

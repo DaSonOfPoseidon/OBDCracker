@@ -215,8 +215,8 @@ fn watch(adapter: &mut impl Transport) -> Result<(), Box<dyn std::error::Error>>
   order given; any other PID is asked alone, since its length isn't known and its reply would swallow the PIDs after it.
   A PID no ECU lists is never sent: it is in `Sample::unsupported_pids`, and each ECU's entry for it is
   `ReadError::NoReply`. A list where no PID is listed, and no DID is polled, is `PollError::NothingSupported`. A
-  request goes only to the ECUs that list one of its PIDs; where the adapter can't take eight ECUs' long replies at once,
-  each of those is asked on its own request ID, as `fingerprint` does. An ECU that comes online after the bitmaps were
+  request is a broadcast, and only the ECUs that list one of its PIDs owe an answer to it; where the adapter can't take
+  eight ECUs' long replies at once, it goes to each of those on its own request ID instead, as `fingerprint` does. An ECU that comes online after the bitmaps were
   read is missed until you build a new poller. An ECU whose first bitmap is refused or malformed is left out of the
   poll, and one whose chain breaks keeps the PIDs listed before the break: both are in `Sample::bitmap_errors`.
 - **Replies are untrusted.** One ECU's reply must hold only PIDs that were asked for, each once, each with all its data,
@@ -233,8 +233,8 @@ fn watch(adapter: &mut impl Transport) -> Result<(), Box<dyn std::error::Error>>
   belongs to: the next poll's identical request takes it as a fresh value. So `Sample::out_of_step` is set, and stays
   set, once an ECU that lists a PID of a request doesn't answer it, a DID module gives no answer, the bitmaps get no
   answer or an announced next bitmap doesn't come, or the adapter fails mid-poll. No value after that is known to be
-  fresh: reconnect and build a new `Poller` to clear it. An ECU that lists none of a request's PIDs is not sent it and
-  owes no answer, so its silence is normal and sets nothing; neither does a PID left out of a reply that answered the
+  fresh: reconnect and build a new `Poller` to clear it. An ECU that lists none of a request's PIDs owes no answer
+  (a broadcast reaches it and it ignores it), so its silence is normal and sets nothing; neither does a PID left out of a reply that answered the
   rest.
 - **Timing.** `next_due(started, interval, now)` is `started + interval`, or `now` if that has passed, so a poll that
   overran is followed by one at once and not by a backlog. An interval over an hour counts as an hour.

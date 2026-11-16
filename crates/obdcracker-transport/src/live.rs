@@ -132,9 +132,9 @@ pub struct Sample {
     /// reply tells them apart, so no value in this sample can be trusted to be fresh. It stays
     /// set, as [`crate::Left::out_of_step`] does: reconnect and build a new [`Poller`] to clear it.
     ///
-    /// A PID request goes only to the ECUs that list one of its PIDs, and only those owe an
-    /// answer. An ECU that lists none and stays silent sets nothing, and neither does a PID left
-    /// out of a reply that answered the rest.
+    /// Only the ECUs that list one of a PID request's PIDs owe an answer to it. An ECU that lists
+    /// none and stays silent (a broadcast reaches it, and it ignores it) sets nothing, and
+    /// neither does a PID left out of a reply that answered the rest.
     pub out_of_step: bool,
 }
 
@@ -155,9 +155,10 @@ pub struct DidSample {
 ///
 /// The first poll that finds an ECU reads every ECU's supported-PID bitmaps (`01 00`, `01 20`, ...
 /// as far as each chains them; a poll asks again until one answers), as [`crate::scan::scan`]
-/// does. A request then goes only to the ECUs that list one of its PIDs, and a PID no ECU lists is
-/// never sent ([`Sample::unsupported_pids`]). Where the transport can't take eight ECUs' long
-/// replies at once ([`Transport::broadcasts_can_overflow`]), each of those ECUs is asked alone, in
+/// does. A PID no ECU lists is never asked for ([`Sample::unsupported_pids`]), and only the ECUs
+/// that list one of a request's PIDs owe an answer to it. A request is a broadcast; where the
+/// transport can't take eight ECUs' long replies at once
+/// ([`Transport::broadcasts_can_overflow`]), it goes instead to each of those ECUs alone, in
 /// turn, as [`crate::fingerprint::fingerprint`] does for its long reads. An ECU that comes online
 /// after the bitmaps were read is missed until a new `Poller`.
 ///

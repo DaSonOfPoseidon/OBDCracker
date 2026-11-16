@@ -870,7 +870,7 @@ mod the_bitmaps {
                 undecodable(ReplyError::TooShort, &[0x41, 0x00, 0x18])
             )])
         );
-        // The TCU answered the bitmap, and was never asked to answer the PIDs.
+        // The TCU answered the bitmap, and is left out, so it owes no answer to the PIDs.
         assert!(!sample.out_of_step);
     }
 
@@ -906,8 +906,8 @@ mod out_of_step {
 
     #[test]
     fn an_ecu_that_lists_none_of_the_pids_and_stays_silent_never_flags() {
-        // The TCU lists 0C and 0D only, so it is never asked for the engine's other PIDs, and
-        // its silence to them is the normal case.
+        // The TCU lists 0C and 0D only, so it owes no answer to the engine's other PIDs, and its
+        // silence to them is the normal case.
         let mut car = two_ecu_car();
         let mut poller = poller(&[0x05, 0x0B, 0x04]);
         for _ in 0..3 {
