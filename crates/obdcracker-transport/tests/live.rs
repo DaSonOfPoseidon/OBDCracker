@@ -682,6 +682,14 @@ mod out_of_step {
     }
 
     #[test]
+    fn a_pid_left_out_of_a_reply_that_answered_the_rest_is_not_flagged() {
+        let mut car = Car::new(|_, _| vec![reply(ENGINE, &[0x41, 0x0C, 0x1A, 0xF8])]);
+        let sample = poller(&[0x0C, 0x0D]).poll(&mut car, TIMING).unwrap();
+        assert_eq!(sample.pids[&ENGINE][1], (0x0D, Err(ReadError::NoReply)));
+        assert!(!sample.out_of_step);
+    }
+
+    #[test]
     fn a_request_nobody_answers_puts_the_poller_out_of_step_for_good() {
         let mut poller = poller(&[0x0C]);
         let mut silent = Car::new(|_, _| Vec::new());

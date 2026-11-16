@@ -115,8 +115,9 @@ pub struct Sample {
     /// adapter failed mid-poll. A reply that was only late may then arrive during a later poll
     /// that sends the same request, and be read as that poll's value: nothing in the reply tells
     /// them apart, so no value in this sample can be trusted to be fresh. It stays set, as
-    /// [`crate::Left::out_of_step`] does: reconnect and build a new [`Poller`] to clear it. A PID
-    /// or DID the module doesn't support is never answered, so polling one keeps it set.
+    /// [`crate::Left::out_of_step`] does: reconnect and build a new [`Poller`] to clear it. A
+    /// request none of whose PIDs or DIDs the module supports is never answered, so polling only
+    /// those keeps it set; a PID left out of a reply that answered the rest doesn't set it.
     pub out_of_step: bool,
 }
 
