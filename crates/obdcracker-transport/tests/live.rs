@@ -390,7 +390,7 @@ mod each_ecus_reply {
 
     const TCU_PIDS: &[(u8, &[u8])] = &[(0x0C, &[0x00, 0x04]), (0x0D, &[0x00])];
 
-    fn two_ecus(id: u32, request: &[u8]) -> Vec<Response> {
+    pub(super) fn two_ecus(id: u32, request: &[u8]) -> Vec<Response> {
         if id != 0x7DF {
             return Vec::new();
         }
@@ -671,6 +671,7 @@ mod an_ecu_asked_alone {
 }
 
 mod out_of_step {
+    use super::each_ecus_reply::two_ecus;
     use super::*;
 
     #[test]
@@ -714,6 +715,22 @@ mod out_of_step {
             [(0x0D, quantity(16.0, Unit::KilometresPerHour))]
         );
         assert!(sample.out_of_step);
+    }
+
+    #[test]
+    fn a_broadcast_ecu_that_answered_before_and_goes_silent_is_flagged() {
+        let mut poller = poller(&[0x0C]);
+        let mut both = Car::new(two_ecus);
+        let sample = poller.poll(&mut both, TIMING).unwrap();
+        assert_eq!(sample.pids.len(), 2);
+        assert!(!sample.out_of_step);
+        let mut engine = Car::new(|id, request| {
+            two_ecus(id, request)
+                .into_iter()
+                .filter(|r| r.source == ENGINE)
+                .collect()
+        });
+        assert!(poller.poll(&mut engine, TIMING).unwrap().out_of_step);
     }
 
     #[test]

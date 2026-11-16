@@ -117,7 +117,9 @@ pub struct Sample {
     /// them apart, so no value in this sample can be trusted to be fresh. It stays set, as
     /// [`crate::Left::out_of_step`] does: reconnect and build a new [`Poller`] to clear it. A
     /// request none of whose PIDs or DIDs the module supports is never answered, so polling only
-    /// those keeps it set; a PID left out of a reply that answered the rest doesn't set it.
+    /// those keeps it set; a PID left out of a reply that answered the rest doesn't set it. An
+    /// ECU that stays silent to a broadcast is seen only once it has answered that request (or
+    /// `01 00`, where the adapter asks each ECU alone) before.
     pub out_of_step: bool,
 }
 
@@ -162,6 +164,8 @@ struct Batch {
     indexes: Vec<usize>,
     pids: Vec<u8>,
     request: LongRead,
+    // The reply IDs of the ECUs that have answered this request, in any poll.
+    answered_before: BTreeSet<u32>,
 }
 
 #[derive(Debug)]
@@ -221,6 +225,7 @@ impl Poller {
                 indexes,
                 pids: group,
                 request: LongRead::approve(policy, payload)?,
+                answered_before: BTreeSet::new(),
             });
         }
         Ok(Self {
@@ -289,26 +294,26 @@ impl Poller {
 
     // Each ECU's readings, one per PID polled, in order.
     fn read_pids<T: Transport + ?Sized>(
-        &self,
+        &mut self,
         transport: &mut T,
         timing: Timing,
         unanswered: &mut bool,
     ) -> Result<BTreeMap<u32, Vec<PidReading>>, PollError> {
+        let Self {
+            pids,
+            batches,
+            ecus,
+            ..
+        } = self;
         let mut slots: BTreeMap<u32, Vec<Option<Result<PidValue, ReadError>>>> = BTreeMap::new();
-        for batch in &self.batches {
-            let replies = batch.request.read(transport, &self.ecus, timing)?;
-            // Asked alone, each ECU in the list owes an answer; broadcast, somebody does.
-            *unanswered |= replies.is_empty()
-                || self
-                    .ecus
-                    .iter()
-                    .any(|ecu| !replies.iter().any(|r| r.source == *ecu));
+        for batch in batches {
+            let replies = batch.request.read(transport, ecus, timing)?;
             // An ECU answers a request once; a repeat isn't another answer.
             let mut answered = BTreeSet::new();
             for reply in replies.iter().filter(|r| answered.insert(r.source)) {
                 let slot = slots
                     .entry(reply.source)
-                    .or_insert_with(|| vec![None; self.pids.len()]);
+                    .or_insert_with(|| vec![None; pids.len()]);
                 let values = decoded(&reply.payload, |payload| decode_batch(payload, &batch.pids));
                 for (&index, &pid) in batch.indexes.iter().zip(&batch.pids) {
                     slot[index] = Some(match &values {
@@ -320,12 +325,19 @@ impl Poller {
                     });
                 }
             }
+            // Each ECU in the list, and each that answered this request before, owes an answer.
+            // Broadcast to ECUs not known yet, nobody owes one but somebody should give one.
+            *unanswered |= answered.is_empty()
+                || ecus
+                    .iter()
+                    .chain(&batch.answered_before)
+                    .any(|ecu| !answered.contains(ecu));
+            batch.answered_before.extend(answered);
         }
         Ok(slots
             .into_iter()
             .map(|(source, slot)| {
-                let readings = self
-                    .pids
+                let readings = pids
                     .iter()
                     .zip(slot)
                     .map(|(&pid, reading)| (pid, reading.unwrap_or(Err(ReadError::NoReply))))

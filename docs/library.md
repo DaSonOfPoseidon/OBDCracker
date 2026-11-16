@@ -230,7 +230,8 @@ fn watch(adapter: &mut impl Transport) -> Result<(), Box<dyn std::error::Error>>
   set: no value after that is known to be fresh. Reconnect and build a new `Poller` to clear it. A request
   none of whose PIDs or DIDs the module supports is never answered, so polling only those keeps the flag set (a PID
   left out of a reply that answered the rest doesn't set it): take the list from the module's supported-PID bitmaps or
-  its profile.
+  its profile. Where requests are broadcast, an ECU that stays silent is noticed only once it has answered that request
+  before, so a first poll can't tell a silent ECU from one that isn't there.
 - **Timing.** `next_due(started, interval, now)` is `started + interval`, or `now` if that has passed, so a poll that
   overran is followed by one at once and not by a backlog. An interval over an hour counts as an hour.
 
