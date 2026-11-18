@@ -174,7 +174,7 @@ adapter mishearing a request it may already have sent), every command to the ada
 `AT SH 7E0`, with its answer), every status line that ended a request instead of a reply (`"dir":"status"`, such as
 `NO DATA`), every reply line the adapter printed after nothing read it any more (`"dir":"unread"`, such as a late
 reply), every driver setting that changes how a request is sent (`"dir":"setting"`, such as
-`"name":"segment-on-stn","value":"on"`, logged before the first request), and every reading of the supply voltage
+`"name":"stn-segmenting","value":"caf0"`, logged before the first request), and every reading of the supply voltage
 (`"dir":"voltage"` with `"millivolts"`, `null` when unknown, after the `ATRV` command that took it). It holds only what the adapter hears through its receive filter, not the
 whole bus. Requests and the flow control frames a backend sends while receiving are logged before they are sent, and the log
 records which link a session used.

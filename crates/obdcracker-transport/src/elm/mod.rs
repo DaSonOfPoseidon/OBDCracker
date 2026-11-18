@@ -6,7 +6,7 @@
 
 pub mod codec;
 
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
 use std::time::{Duration, Instant, SystemTime};
 
 use obdcracker_core::isotp::{
@@ -157,6 +157,31 @@ const SLOWEST_RATE: u32 = 9600 / 10;
 // From here an STN was seen to print a long reply with no `BUFFER FULL` (#49).
 const STN_UNPACED_RATE: u32 = 115_200 / 10;
 
+/// How an [`Elm`] on an STN adapter (an `OBDLink`) sends a request of 8 to 44 bytes
+/// ([`Elm::stn_segmenting`]). A plain ELM327 always writes the frames itself, and a request of 1
+/// to 7 bytes is always one frame.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum StnSegmenting {
+    /// The driver picks the method for each request (the default).
+    #[default]
+    Auto,
+    /// Always the STN's own `STPX`, which segments the request itself.
+    Stpx,
+    /// Always raw frames written with `AT CAF0`, as on a plain ELM327.
+    Caf0,
+}
+
+impl StnSegmenting {
+    // The value of the `stn-segmenting` setting event.
+    fn name(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Stpx => "stpx",
+            Self::Caf0 => "caf0",
+        }
+    }
+}
+
 /// An ELM327-compatible adapter on CAN (ISO 15765-4, 11-bit IDs, 500 kbit/s; 29-bit IDs when a
 /// request needs them).
 ///
@@ -216,9 +241,8 @@ pub struct Elm<L> {
     // Whether `AT CAF0` is on to send a request in segments, which `send` switches lazily
     // (docs/design/elm-caf0-segmenting.md, section 8).
     segmenting: bool,
-    // Whether a request over 7 bytes goes through the segmenting path on an STN too, which has
-    // `STPX` (`segment_on_stn`).
-    segment_on_stn: bool,
+    // How a request over 7 bytes is sent on an STN, which has `STPX` ([`Elm::stn_segmenting`]).
+    stn_segmenting: StnSegmenting,
     // Whether `AT R0` was written and no `OK` to `ATR1` has followed (section 7).
     responses_off: bool,
     // The byte the adapter pads with (PP 26), or `None` if `ATPPS` didn't list it.
@@ -240,6 +264,12 @@ pub struct Elm<L> {
     flow: Option<Flow>,
     // The `AT CRA` pattern in effect.
     filter: String,
+    // What the driver has added to an STN's flow control for `STPX` since it last reset or changed
+    // protocol (`set_up_flow_control`): the reply IDs it added filters for (with whether they are 29-bit),
+    // the request and reply IDs of the pairs, and whether the 8 default pairs are among them.
+    fc_filters: HashSet<(u32, bool)>,
+    fc_pairs: HashSet<(u32, u32)>,
+    fc_default_pairs: bool,
     // A request is out and the adapter hasn't printed its prompt yet.
     busy: bool,
     // The request in progress goes to one module whose reply ID is known (`Target::Physical`
@@ -415,7 +445,7 @@ impl<L: Link> Elm<L> {
             bits29: false,
             raw: false,
             segmenting: false,
-            segment_on_stn: false,
+            stn_segmenting: StnSegmenting::Auto,
             responses_off: false,
             filler: None,
             hold_until: None,
@@ -426,6 +456,9 @@ impl<L: Link> Elm<L> {
             patient: false,
             flow: None,
             filter: WIDE_FILTER.to_owned(),
+            fc_filters: HashSet::new(),
+            fc_pairs: HashSet::new(),
+            fc_default_pairs: false,
             busy: false,
             physical: false,
             answered: false,
@@ -567,6 +600,8 @@ impl<L: Link> Elm<L> {
 
     // ATZ, until the banner and then a prompt arrive.
     fn reset(&mut self) -> Result<(), Error> {
+        // `ATZ` gives the STN back its automatic flow control filters and pairs.
+        self.forget_flow_control_setup();
         for _ in 0..RESET_TRIES {
             self.splitter.clear();
             self.events.clear();
@@ -1404,6 +1439,9 @@ impl<L: Link> Elm<L> {
             self.header = None;
             self.flow = None;
             self.filter.clear();
+            // The STN may drop its filters and pairs with the protocol; adding them again twice
+            // costs only a little of its memory.
+            self.forget_flow_control_setup();
             self.bits29 = bits29;
             // Never automatic search (see `SETUP`).
             self.expect_ok(if bits29 { "ATSP7" } else { "ATSP6" })?;
@@ -1453,6 +1491,111 @@ impl<L: Link> Elm<L> {
             self.filter = filter;
         }
         Ok(())
+    }
+
+    // What must hold before anything is written for a request sent as `STPX`: the adapter has
+    // shown it echoes each character as it reads it, and the STN's flow control can be set up for
+    // the module, which needs its reply ID (`set_up_flow_control`) unless the STN's own reaches it.
+    fn check_stpx(&self, request: &Approved) -> Result<(), Error> {
+        let len = request.payload().len();
+        if self.early_echo != Some(true) {
+            return Err(Error::Adapter(format!(
+                "a {len}-byte request needs an adapter that echoes each character as it reads it \
+                 (such as an OBDLink), and this one hasn't shown it does; send a single-frame \
+                 request first"
+            )));
+        }
+        if stock_flow_control_fits(request) || request.reply_id().is_some() {
+            return Ok(());
+        }
+        let target = request.target();
+        Err(Error::Adapter(format!(
+            "a {len}-byte request to {} can't be sent as STPX: the module's reply ID is unknown, \
+             so the STN's flow control can't be set up for it (a profile lists it)",
+            can_id_text(target.can_id(), target.is_29_bit())
+        )))
+    }
+
+    fn forget_flow_control_setup(&mut self) {
+        self.fc_filters.clear();
+        self.fc_pairs.clear();
+        self.fc_default_pairs = false;
+    }
+
+    // Before an `STPX` request to a module the STN's own flow control doesn't reach, the STN is
+    // told the module's reply ID and request ID (docs/elm327.md#flow-control-for-stpx, OBDLink
+    // FRPM rev. F):
+    // - A flow control filter for the reply ID (`STFFCA`, section 8.10 p. 41). Without one, the
+    //   module's flow control isn't ISO 15765 to the STN (section 11.2 p. 57) and it prints
+    //   `FC RX TIMEOUT` (section 9.0 p. 53).
+    //   Filters are only added, never cleared, so none that was there stops passing.
+    // - For an 11-bit module, a flow control pair of the request and reply IDs (`STCFCPA`,
+    //   section 8.8 p. 38), so the STN's flow control for the module's replies goes to the
+    //   request ID (p. 58). The first pair turns off the automatic pairs (section 13 p. 60), and
+    //   a frame that matches no pair gets no flow control at all (p. 58), so the 8 pairs the
+    //   automatic ones are (`7E0, 7E8` to `7E7, 7EF`) are added with it: a broadcast or an
+    //   unpaced read of an engine ECU would otherwise lose its flow control.
+    // - For a 29-bit module a filter only. A 29-bit first frame always gets flow control to the
+    //   sender it names (p. 58), whatever the pairs, and a reply the automatic filter
+    //   `18DAF100, 1FFFFF00` passes (an ISO 15765-4 module's) needs none.
+    // Each command is checked like `AT CAF0`: its echo before the carriage return, and an answer
+    // that isn't `OK` fails closed, before any frame of the request goes out.
+    fn set_up_flow_control(&mut self, request: &Approved) -> Result<(), Error> {
+        if stock_flow_control_fits(request) {
+            return Ok(());
+        }
+        let Some(reply) = request.reply_id() else {
+            return Err(Error::Adapter(
+                "the module's reply ID is unknown, so the STN's flow control can't be set up for it"
+                    .into(),
+            ));
+        };
+        let target = request.target();
+        let id = target.can_id();
+        if target.is_29_bit() {
+            if reply & 0x1FFF_FF00 != 0x18DA_F100 && !self.fc_filters.contains(&(reply, true)) {
+                self.flow_control_command(&format!("STFFCA {reply:08X},1FFFFFFF"))?;
+                self.fc_filters.insert((reply, true));
+            }
+            return Ok(());
+        }
+        if reply & 0x7F8 != 0x7E8 && !self.fc_filters.contains(&(reply, false)) {
+            self.flow_control_command(&format!("STFFCA {reply:03X},7FF"))?;
+            self.fc_filters.insert((reply, false));
+        }
+        if !self.fc_pairs.contains(&(id, reply)) {
+            if !self.fc_default_pairs {
+                for n in 0..8 {
+                    let (tx, rx) = (0x7E0 + n, 0x7E8 + n);
+                    self.flow_control_command(&format!("STCFCPA {tx:03X},{rx:03X}"))?;
+                    self.fc_pairs.insert((tx, rx));
+                }
+                self.fc_default_pairs = true;
+            }
+            if !self.fc_pairs.contains(&(id, reply)) {
+                self.flow_control_command(&format!("STCFCPA {id:03X},{reply:03X}"))?;
+                self.fc_pairs.insert((id, reply));
+            }
+        }
+        Ok(())
+    }
+
+    // One of the commands of `set_up_flow_control`. `OUT OF MEMORY` is the adapter's answer when
+    // it can't hold another filter or pair (FRPM rev. F, section 8.10 p. 41), and it may fail
+    // requests after it too, so it ends the driver like any answer that isn't `OK`.
+    fn flow_control_command(&mut self, command: &str) -> Result<(), Error> {
+        let lines = self.guarded_answer(command)?;
+        if lines.iter().map(String::as_str).eq(["OK"]) {
+            return Ok(());
+        }
+        if lines.iter().map(String::as_str).eq(["OUT OF MEMORY"]) {
+            return Err(self.break_down(format!(
+                "the adapter has no room for {command}: it can't hold another flow control \
+                 filter or pair; send long requests with StnSegmenting::Caf0 (--elm-segmenting \
+                 caf0)"
+            )));
+        }
+        Err(self.break_down(self.refusal(command, &lines)))
     }
 }
 
@@ -1539,6 +1682,15 @@ fn hex_byte(text: &str) -> Option<u8> {
     }
 }
 
+// Whether the STN's own flow control reaches the module `request` is for: an OBD-II emissions ECU
+// at 7E0 to 7E7 that answers on its request ID + 8. The STN's flow control filter is `7E8, 7F8`
+// and it sends its flow control to RxID - 8 (OBDLink FRPM rev. F, section 11.2 p. 57 and section
+// 12 p. 58), so `STPX` to such a module needs no setup.
+fn stock_flow_control_fits(request: &Approved) -> bool {
+    matches!(request.target(), Target::Physical(id) if (0x7E0..=0x7E7).contains(&id)
+        && request.reply_id() == Some(id + 8))
+}
+
 // Whether `request` is a frame on an open TP2.0 channel that the module answers with more frames
 // after its ACK: a data frame (opcodes 0x0 to 0x3), or an ACK (0xB), which asks the module for the
 // next block of an answer that goes on. A channel test (`A3`), the parameters (`A0`) and the
@@ -1560,8 +1712,8 @@ impl<L: Link> Transport for Elm<L> {
         let long = !raw && payload.len() > single;
         // Longer requests go out as `STPX` on an STN (docs/elm327.md#multi-frame-requests), and
         // on any other adapter as raw frames written with `AT CAF0`
-        // (docs/design/elm-caf0-segmenting.md), which an STN takes too once `segment_on_stn` is on.
-        let stpx = long && self.stn.is_some() && !self.segment_on_stn;
+        // (docs/design/elm-caf0-segmenting.md), which an STN takes too if [`StnSegmenting`] says so.
+        let stpx = long && self.stn.is_some() && self.stn_uses_stpx(request);
         if payload.is_empty() || (raw && payload.len() > 8) || (!raw && payload.len() > STPX_MAX) {
             return Err(Error::Adapter(format!(
                 "a {}-byte request doesn't fit this driver's limit ({STPX_MAX} bytes where it \
@@ -1574,13 +1726,8 @@ impl<L: Link> Transport for Elm<L> {
         } else {
             None
         };
-        if stpx && self.early_echo != Some(true) {
-            return Err(Error::Adapter(format!(
-                "a {}-byte request needs an adapter that echoes each character as it reads it \
-                 (such as an OBDLink), and this one hasn't shown it does; send a single-frame \
-                 request first",
-                payload.len()
-            )));
+        if stpx {
+            self.check_stpx(request)?;
         }
         // A transfer that stopped part-way: the module drops what it got before anything else is
         // written (docs/design/elm-caf0-segmenting.md, section 7).
@@ -1627,6 +1774,9 @@ impl<L: Link> Transport for Elm<L> {
             self.sync_adaptive()?;
         }
         self.set_target(request)?;
+        if stpx {
+            self.set_up_flow_control(request)?;
+        }
         // A setting command's prompt may have been followed by a reset.
         self.check_idle()?;
         if let Some(segments) = segments {
@@ -1897,23 +2047,36 @@ impl<L: Link> Elm<L> {
         self.segment_transfer = self.segment_transfer.min(transfer);
     }
 
-    /// Sends a request of 8 to 44 bytes the way a plain ELM327 must, as raw frames written with
-    /// `AT CAF0` (with every check of
+    /// Chooses how an STN sends a request of 8 to 44 bytes: as `STPX`, which the STN segments
+    /// itself, or as raw frames written with `AT CAF0` (with every check of
     /// [`docs/design/elm-caf0-segmenting.md`](https://github.com/DaSonOfPoseidon/OBDCracker/blob/main/docs/design/elm-caf0-segmenting.md),
-    /// section 1), instead of as `STPX`, which an STN would use. It is off by default, and for
-    /// testing that path on the one adapter that has both: a plain ELM327 segments whether this
-    /// is set or not, and a request of 1 to 7 bytes goes as one frame either way.
+    /// section 1), as on a plain ELM327. See [`StnSegmenting`]. A plain ELM327 segments whatever
+    /// this is set to, and a request of 1 to 7 bytes goes as one frame either way.
     ///
-    /// Each call adds a [`LinkEvent::Setting`] named `segment-on-stn` ([`Transport::take_events`]),
-    /// whatever the adapter, so an audit log that opens after this call says how a request was
-    /// sent before the first one.
-    pub fn segment_on_stn(&mut self, on: bool) {
-        self.segment_on_stn = on;
+    /// Each call adds a [`LinkEvent::Setting`] named `stn-segmenting` ([`Transport::take_events`]),
+    /// whatever the adapter, with the value `auto`, `stpx` or `caf0`, so an audit log that opens
+    /// after this call says how a request was sent before the first one.
+    pub fn stn_segmenting(&mut self, mode: StnSegmenting) {
+        self.stn_segmenting = mode;
         self.note(LinkEvent::Setting {
             at: SystemTime::now(),
-            name: "segment-on-stn".to_owned(),
-            value: if on { "on" } else { "off" }.to_owned(),
+            name: "stn-segmenting".to_owned(),
+            value: mode.name().to_owned(),
         });
+    }
+
+    // Whether a request over 7 bytes goes as `STPX` on an STN (docs/elm327.md#multi-frame-requests).
+    // `Auto` keeps `STPX` for the modules the STN's own flow control reaches, and otherwise
+    // segments the request itself, unless that path can't run (`check_segmenting` refuses), where
+    // `STPX` with its flow control set up is the only way left.
+    fn stn_uses_stpx(&self, request: &Approved) -> bool {
+        match self.stn_segmenting {
+            StnSegmenting::Stpx => true,
+            StnSegmenting::Caf0 => false,
+            StnSegmenting::Auto => {
+                stock_flow_control_fits(request) || self.check_segmenting(request).is_err()
+            }
+        }
     }
 
     // Section 1: what must hold before anything is written for a request over 7 bytes on an

@@ -23,8 +23,8 @@ use obdcracker_safety::{ModuleIds, Policy, SupplyVoltage, VoltageCheck, VoltageT
 use obdcracker_sim::SimBus;
 use obdcracker_transport::discover::{self, DiscoverOptions};
 use obdcracker_transport::dtc::{self, DtcDetail, RecordData};
-use obdcracker_transport::elm::Elm;
 use obdcracker_transport::elm::codec::parse_voltage;
+use obdcracker_transport::elm::{Elm, StnSegmenting};
 use obdcracker_transport::fingerprint::{self, DidValue, Fingerprint, ReadError, UdsModule};
 use obdcracker_transport::gateway::{self, Compared, GatewayTables, ListedAs, Tried};
 use obdcracker_transport::gsusb::{self, BitrateCheck, BitrateSource, ConnectError, GsUsb};
@@ -80,10 +80,12 @@ struct Cli {
     #[arg(long, value_name = "HOST:PORT", group = "adapter")]
     tcp: Option<String>,
 
-    /// With an ELM327/STN adapter: how a request of 8 to 44 bytes is sent. `stpx` [default] lets
-    /// an STN (an `OBDLink`) segment it itself; `caf0` makes the driver write the frames, as it
-    /// does on a plain ELM327, so that path can be tried on an STN. A plain ELM327 always writes
-    /// the frames, and 1 to 7 bytes are always one frame. Recorded in the audit log
+    /// With an ELM327/STN adapter: how a request of 8 to 44 bytes is sent. Without this flag an
+    /// STN (an `OBDLink`) lets its own `STPX` segment the request to an emissions ECU (7E0 to
+    /// 7E7) and has the driver write the frames, as on a plain ELM327, to any other module.
+    /// `stpx` forces `STPX` for every module, after setting up the STN's flow control for the
+    /// module; `caf0` forces the driver's frames. A plain ELM327 always writes the frames, and 1
+    /// to 7 bytes are always one frame. Recorded in the audit log
     #[arg(long, value_enum, value_name = "METHOD",
           conflicts_with_all = ["dry_run", "sim", "gsusb", "socketcan"])]
     elm_segmenting: Option<ElmSegmenting>,
@@ -176,9 +178,9 @@ struct Cli {
 // How an STN sends a request over 7 bytes (`--elm-segmenting`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 enum ElmSegmenting {
-    // The STN's own `STPX`, the default
+    // The STN's own `STPX` for every module
     Stpx,
-    // The driver's raw frames written with `AT CAF0`, as on a plain ELM327
+    // The driver's raw frames written with `AT CAF0`, as on a plain ELM327, for every module
     Caf0,
 }
 
@@ -928,7 +930,10 @@ fn adapter<L: Link>(cli: &Cli, link: L) -> ExitCode {
     }
     // Before the audit log opens, so its first lines say how requests will be sent.
     if let Some(method) = cli.elm_segmenting {
-        elm.segment_on_stn(method == ElmSegmenting::Caf0);
+        elm.stn_segmenting(match method {
+            ElmSegmenting::Stpx => StnSegmenting::Stpx,
+            ElmSegmenting::Caf0 => StnSegmenting::Caf0,
+        });
     }
     run(cli, elm, kind.name(), Elm::<L>::timing(), true)
 }

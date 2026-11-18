@@ -17,7 +17,7 @@ use crate::{Error, LinkEvent, Response, Transport, hex};
 /// with the ID and the 8 data bytes as `"payload"`), reply lines nobody read before the
 /// next request (`"dir":"unread"`), status lines that ended a request, such as `NO DATA`
 /// (`"dir":"status"`), driver settings that change how a request is sent, such as
-/// [`Elm::segment_on_stn`](crate::elm::Elm::segment_on_stn) (`"dir":"setting"`, with `"name"` and
+/// [`Elm::stn_segmenting`](crate::elm::Elm::stn_segmenting) (`"dir":"setting"`, with `"name"` and
 /// `"value"`), how many events were lost (`"dir":"lost"`), and each reading of the supply voltage
 /// ([`Transport::supply_voltage`], `"dir":"voltage"` with `"millivolts"`, `null` when unknown).
 /// Each line's `ts_ms` is

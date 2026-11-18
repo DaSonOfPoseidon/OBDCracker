@@ -270,9 +270,9 @@ pub enum LinkEvent {
     Setting {
         /// When it was set.
         at: SystemTime,
-        /// The setting's name, such as `segment-on-stn`.
+        /// The setting's name, such as `stn-segmenting`.
         name: String,
-        /// What it was set to, such as `on`.
+        /// What it was set to, such as `caf0`.
         value: String,
     },
     /// How many events, or lines the adapter printed, were dropped because there was no room to

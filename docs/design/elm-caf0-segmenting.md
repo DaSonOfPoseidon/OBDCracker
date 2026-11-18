@@ -411,11 +411,15 @@ In `tests/elm.rs` against `fake_elm.rs`, which first has to learn the adapter's 
 
 ## 13. Forcing it on an STN (#308)
 
-Unit 3 (built in #308). An STN has `STPX`, so it takes the path above only when a **library option and a CLI flag** say
-so, both off by default: `Elm::segment_on_stn(true)` and `--elm-segmenting caf0` ([`usage.md`](../usage.md#sending-a-long-request-on-an-stn---elm-segmenting)).
-The flag's other value, `stpx`, is the default. With the option set, a request of 8 to 44 bytes on an STN goes through this note's path instead of `STPX`,
-with every check of section 1, and 1 to 7 bytes goes as today. The option is **recorded in the audit log before the
-first request of the session** as a `"dir":"setting"` line (`"name":"segment-on-stn"`, `"value":"on"`), so a log can say how
+Unit 3 (built in #308, default changed in #306). An STN has `STPX`, and which path a request of 8 to 44 bytes takes there is a
+**library option and a CLI flag**: `Elm::stn_segmenting(StnSegmenting)` and `--elm-segmenting stpx|caf0`
+([`usage.md`](../usage.md#sending-a-long-request-on-an-stn---elm-segmenting)). The default, `StnSegmenting::Auto`, sends
+`STPX` only to a module the STN's own flow control reaches (0x7E0 to 0x7E7, reply ID = request ID + 8), because `STPX` to
+any other module needs the STN's flow control filter and address pair set up first and has not run on the car; every
+other module's request goes through this note's path, with every check of section 1, and falls back to `STPX` only where
+this path can't run (no PP 26). `Caf0` forces this path for every module, `Stpx` forces `STPX`
+([`elm327.md`](../elm327.md#flow-control-for-stpx)), and 1 to 7 bytes goes as today. A flag or call is **recorded in the audit log before the
+first request of the session** as a `"dir":"setting"` line (`"name":"stn-segmenting"`, `"value":"caf0"`), so a log can say how
 a frame was sent (#304 goal 4 checks it). What an STN does
 differently (padding, the listen ending at the prompt, any `FC RX TIMEOUT`-like status in `CAF0`) is Open questions, 3.
 
