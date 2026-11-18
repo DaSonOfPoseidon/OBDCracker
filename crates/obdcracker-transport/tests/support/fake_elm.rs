@@ -152,6 +152,15 @@ pub struct FakeElm {
     /// so the STN prints `FC RX TIMEOUT` and its prompt, as the engine ECU of the A7 did (#215,
     /// #306).
     pub no_flow_control: bool,
+    /// How many flow control filters and address pairs the STN can hold (its automatic filters
+    /// count) before it answers `OUT OF MEMORY` (FRPM rev. F, section 8.10); `None` for as many
+    /// as a test needs.
+    pub fc_capacity: Option<usize>,
+    /// What the next flow control filter or pair command prints instead of `OK`, as an adapter
+    /// that says something else would.
+    pub fc_says: Option<String>,
+    // The request being answered was sent with `STPX`, so its first frame needs a flow control.
+    stpx_request: bool,
     /// A module that takes a request written as raw frames with `AT CAF0` and answers it
     /// ([`Module`]).
     pub module: Option<Module>,
@@ -215,6 +224,15 @@ pub struct Settings {
     /// Whether the STN parses batched commands (`STBC 1`, STN FRPM, sections 8.15 and 16.0): a
     /// line of elements separated by `|` runs from left to right, under one prompt.
     pub batching: bool,
+    /// The STN's flow control filters (`STFFCA`): pattern, mask and whether they are for 29-bit
+    /// IDs. A frame that passes the receive filter and none of these is not ISO 15765 to the STN,
+    /// so it neither sends flow control for it nor hears one (FRPM rev. F, section 11.2). Reset
+    /// holds the automatic ones for 11-bit and 29-bit IDs (`7E8, 7F8` and `18DAF100, 1FFFFF00`).
+    pub fc_filters: Vec<(u32, u32, bool)>,
+    /// The STN's flow control address pairs (`STCFCPA`): the ID it transmits flow control on, and
+    /// the ID of the frames it answers. Empty, an 11-bit frame gets its flow control on its ID
+    /// - 8; with any pair, only a frame that matches one does (FRPM rev. F, section 12).
+    pub fc_pairs: Vec<(u32, u32)>,
 }
 
 impl Settings {
@@ -268,6 +286,8 @@ impl Default for Settings {
             monitor_ack: false,
             responses: true,
             batching: false,
+            fc_filters: vec![(0x7E8, 0x7F8, false), (0x18DA_F100, 0x1FFF_FF00, true)],
+            fc_pairs: Vec::new(),
         }
     }
 }
@@ -327,6 +347,9 @@ impl FakeElm {
             mute: Vec::new(),
             empty_answers: false,
             no_flow_control: false,
+            fc_capacity: None,
+            fc_says: None,
+            stpx_request: false,
             module: None,
             ignores_caf0: false,
             takes_eight_bytes_in_caf1: false,
@@ -530,6 +553,8 @@ impl FakeElm {
                 "?"
             });
             self.prompt();
+        } else if line.starts_with("STFFC") || line.starts_with("STCFCP") {
+            self.flow_control_setup(&line);
         } else if let Some(params) = line.strip_prefix("STPX") {
             self.stpx(params);
         } else {
@@ -751,6 +776,90 @@ impl FakeElm {
             .map_or(0x00, |&(_, value)| value)
     }
 
+    // An STN's flow control commands (FRPM rev. F, sections 8.8 and 8.10): `STFFCA pattern,mask`
+    // and `STCFCPA txid,rxid` add a filter or an address pair (3-digit IDs for 11-bit CAN, 8-digit
+    // for 29-bit), `STFFCC` and `STCFCPC` clear them. A plain ELM327 doesn't know them.
+    fn flow_control_setup(&mut self, line: &str) {
+        let adding = line.starts_with("STFFCA") || line.starts_with("STCFCPA");
+        let params = line
+            .trim_start_matches("STFFCA")
+            .trim_start_matches("STCFCPA");
+        let ids = params.split_once(',').and_then(|(a, b)| {
+            let valid = |text: &str| {
+                matches!(text.len(), 3 | 8) && text.bytes().all(|b| b.is_ascii_hexdigit())
+            };
+            if !(valid(a) && valid(b) && a.len() == b.len()) {
+                return None;
+            }
+            let first = u32::from_str_radix(a, 16).ok()?;
+            let second = u32::from_str_radix(b, 16).ok()?;
+            Some((first, second, a.len() == 8))
+        });
+        let used = self.settings.fc_filters.len() + self.settings.fc_pairs.len();
+        let reply = if self.sti.is_none() {
+            "?"
+        } else if let Some(says) = self.fc_says.clone() {
+            // Nothing is added when the adapter says something else.
+            return self.print_and_prompt(&says);
+        } else if matches!(line, "STFFCC" | "STCFCPC") {
+            if line == "STFFCC" {
+                self.settings.fc_filters.clear();
+            } else {
+                self.settings.fc_pairs.clear();
+            }
+            "OK"
+        } else if !adding {
+            "?"
+        } else if let Some((first, second, bits29)) = ids {
+            if self.fc_capacity.is_some_and(|capacity| used >= capacity) {
+                "OUT OF MEMORY"
+            } else {
+                if line.starts_with("STFFCA") {
+                    self.settings.fc_filters.push((first, second, bits29));
+                } else {
+                    self.settings.fc_pairs.push((first, second));
+                }
+                "OK"
+            }
+        } else {
+            "?"
+        };
+        self.print_and_prompt(reply);
+    }
+
+    fn print_and_prompt(&mut self, text: &str) {
+        self.print(text);
+        self.prompt();
+    }
+
+    // The module that answers a request sent with `STPX` in several frames sends the flow control
+    // for its first frame from its reply ID. The STN hears it only if a flow control filter passes
+    // that ID, and prints `FC RX TIMEOUT` and its prompt if not (FRPM rev. F, section 11.2, #306):
+    // the first frame went out, and nothing more does.
+    fn flow_control_blocked(&mut self, answers: &[(u32, Vec<u8>)]) -> bool {
+        if !std::mem::take(&mut self.stpx_request) {
+            return false;
+        }
+        let Some(&(module, _)) = answers.first() else {
+            return false;
+        };
+        if self.fc_filter_passes(module, self.settings.bits29()) {
+            return false;
+        }
+        self.print("FC RX TIMEOUT");
+        self.prompt();
+        true
+    }
+
+    // Whether the STN treats a frame from `id` as ISO 15765: one of its flow control filters
+    // matches (FRPM rev. F, section 11.2).
+    fn fc_filter_passes(&self, id: u32, bits29: bool) -> bool {
+        self.settings
+            .fc_filters
+            .iter()
+            .any(|&(pattern, mask, wide)| wide == bits29 && id & mask == pattern & mask)
+    }
+
     // `STPX d:<hex>`, the only form the driver writes (STN FRPM, section 8.6): an STN sends up
     // to 2 KB, segmenting it itself. Anything else, or a plain ELM327, answers `?`.
     fn stpx(&mut self, params: &str) {
@@ -766,7 +875,11 @@ impl FakeElm {
                 self.print("FC RX TIMEOUT");
                 self.prompt();
             }
-            Some(bytes) if self.sti.is_some() => self.transmit(bytes),
+            Some(bytes) if self.sti.is_some() => {
+                self.stpx_request = bytes.len() > 7;
+                self.transmit(bytes);
+                self.stpx_request = false;
+            }
             _ => {
                 self.print("?");
                 self.prompt();
@@ -818,7 +931,11 @@ impl FakeElm {
         };
         // The receive filter hides frames from other IDs, and the adapter sends no flow control
         // for what it doesn't show.
-        let replies: Vec<_> = (self.responder)(header, &bytes)
+        let answers = (self.responder)(header, &bytes);
+        if self.flow_control_blocked(&answers) {
+            return;
+        }
+        let replies: Vec<_> = answers
             .into_iter()
             .filter(|(source, _)| self.settings.shows(*source))
             .collect();
@@ -1094,6 +1211,22 @@ impl FakeElm {
     // mode 0 to the OBD-II request ID for an OBD-II reply ID, mode 1 to `AT FC SH`, and mode 2
     // to the First Frame's own ID, unchanged.
     fn flow_control_to(&self, source: u32) -> u32 {
+        // With any address pair added, an STN's own flow control (`AT FC SM 0`) goes only to a
+        // frame that matches one of them, to that pair's ID (FRPM rev. F, section 12 p. 58).
+        // Mode 1 sends to `AT FC SH` whatever the pairs; the car sessions' multi-frame replies
+        // from 77A and the like arrived that way with no filter added.
+        if self.sti.is_some()
+            && !self.settings.bits29()
+            && self.settings.fc_mode == 0
+            && !self.settings.fc_pairs.is_empty()
+        {
+            return self
+                .settings
+                .fc_pairs
+                .iter()
+                .find(|&&(_, rx)| rx == source)
+                .map_or(0, |&(tx, _)| tx);
+        }
         match self.settings.fc_mode {
             0 if (0x7E8..=0x7EF).contains(&source) => source - 8,
             // The datasheet doesn't say; nothing a module would expect.

@@ -4588,13 +4588,13 @@ mod auto_segmenting {
 
     use super::*;
 
-    const ANSWER: [u8; 3] = [0x59, 0x02, 0xFF];
-    const FOUR_DIDS: [u8; 9] = [0x22, 0xF1, 0x87, 0xF1, 0x88, 0xF1, 0x89, 0xF1, 0x91];
+    pub(super) const ANSWER: [u8; 3] = [0x59, 0x02, 0xFF];
+    pub(super) const FOUR_DIDS: [u8; 9] = [0x22, 0xF1, 0x87, 0xF1, 0x88, 0xF1, 0x89, 0xF1, 0x91];
     // The line the fake records for the 4-DID read sent with `STPX`.
-    const STPX_LINE: &str = "STPXD:22F187F188F189F191";
+    pub(super) const STPX_LINE: &str = "STPXD:22F187F188F189F191";
 
     // The gateway's request, narrowed to its module so the policy knows the reply ID.
-    fn request_to(ids: ModuleIds) -> Approved {
+    pub(super) fn request_to(ids: ModuleIds) -> Approved {
         Policy::read_only()
             .narrowed_to(&[ids])
             .unwrap()
@@ -4604,7 +4604,7 @@ mod auto_segmenting {
 
     // An adapter with a module at `ids` that answers every request it gets whole; an STN unless
     // `plain`.
-    fn adapter(ids: ModuleIds, plain: bool) -> FakeElm {
+    pub(super) fn adapter(ids: ModuleIds, plain: bool) -> FakeElm {
         let mut adapter = FakeElm::new(Box::new(move |header, _| {
             if header == ids.request {
                 vec![(ids.reply, ANSWER.to_vec())]
@@ -4621,7 +4621,7 @@ mod auto_segmenting {
 
     // Connected, with `mode`, and past a first request, so the driver has seen the adapter echo
     // each character as it reads it.
-    fn warmed(adapter: FakeElm, mode: Option<StnSegmenting>) -> Elm<FakeLink> {
+    pub(super) fn warmed(adapter: FakeElm, mode: Option<StnSegmenting>) -> Elm<FakeLink> {
         let mut elm = connect(adapter);
         if let Some(mode) = mode {
             elm.stn_segmenting(mode);
@@ -4632,12 +4632,12 @@ mod auto_segmenting {
         elm
     }
 
-    fn frames_received(elm: &Elm<FakeLink>) -> usize {
+    pub(super) fn frames_received(elm: &Elm<FakeLink>) -> usize {
         elm.link().elm.module.as_ref().unwrap().frames.len()
     }
 
     // The commands the request caused.
-    fn commands_of(elm: &mut Elm<FakeLink>, request: &Approved) -> Vec<String> {
+    pub(super) fn commands_of(elm: &mut Elm<FakeLink>, request: &Approved) -> Vec<String> {
         let before = commands(elm).len();
         elm.send(request).unwrap();
         elm.recv(Duration::from_secs(1)).unwrap();
@@ -4776,6 +4776,585 @@ mod auto_segmenting {
             );
         }
         assert_eq!(StnSegmenting::default(), StnSegmenting::Auto);
+    }
+}
+
+// `STPX` to a module the STN's own flow control doesn't reach (#306): its flow control filter is
+// `7E8, 7F8` and its flow control goes to RxID - 8 (OBDLink FRPM rev. F, section 11.2 p. 57 and
+// section 12 p. 58), so before the first frame the driver adds the module's reply ID to the
+// filters and the pair of its request and reply IDs to the pairs. The first pair turns the
+// automatic pairs off (section 13 p. 60), so the 8 default ones are added with it.
+mod stpx_flow_control {
+    use obdcracker_safety::ModuleIds;
+    use obdcracker_transport::LinkEvent;
+
+    use super::auto_segmenting::{ANSWER, FOUR_DIDS, STPX_LINE, adapter, request_to, warmed};
+    use super::*;
+
+    const ENGINE: ModuleIds = ModuleIds {
+        request: 0x7E0,
+        reply: 0x7E8,
+    };
+    // The commands the driver writes for the default pairs, then the gateway's own.
+    const DEFAULT_PAIRS: [&str; 8] = [
+        "STCFCPA7E0,7E8",
+        "STCFCPA7E1,7E9",
+        "STCFCPA7E2,7EA",
+        "STCFCPA7E3,7EB",
+        "STCFCPA7E4,7EC",
+        "STCFCPA7E5,7ED",
+        "STCFCPA7E6,7EE",
+        "STCFCPA7E7,7EF",
+    ];
+
+    // An STN with a module at each of `modules`, each answering every request whole.
+    fn stn_with(modules: &[ModuleIds]) -> FakeElm {
+        let modules = modules.to_vec();
+        let mut adapter = FakeElm::new(Box::new(move |header, _| {
+            modules
+                .iter()
+                .find(|ids| ids.request == header)
+                .map(|ids| vec![(ids.reply, ANSWER.to_vec())])
+                .unwrap_or_default()
+        }));
+        adapter.sti = Some("STN1155 v5.6.19".into());
+        adapter
+    }
+
+    fn policy_for(modules: &[ModuleIds]) -> Policy {
+        Policy::read_only().narrowed_to(modules).unwrap()
+    }
+
+    fn request(policy: &Policy, ids: ModuleIds) -> Approved {
+        policy
+            .approve(Protocol::Uds, Target::Physical(ids.request), &FOUR_DIDS)
+            .unwrap()
+    }
+
+    // Sends `request` and reads its answer and whatever follows; the commands it caused.
+    fn exchange(elm: &mut Elm<FakeLink>, request: &Approved) -> (Response, Vec<String>) {
+        let before = commands(elm).len();
+        elm.send(request).unwrap();
+        let answer = elm.recv(Duration::from_secs(1)).unwrap();
+        while elm.recv(Duration::from_millis(100)).is_ok() {}
+        (answer, commands(elm)[before..].to_vec())
+    }
+
+    fn is_flow_control_setup(command: &str) -> bool {
+        command.starts_with("STFFC") || command.starts_with("STCFCP")
+    }
+
+    fn setup_of(sent: &[String]) -> Vec<&str> {
+        sent.iter()
+            .filter(|c| is_flow_control_setup(c))
+            .map(String::as_str)
+            .collect()
+    }
+
+    fn written(elm: &Elm<FakeLink>) -> Vec<u8> {
+        elm.link().written.clone()
+    }
+
+    fn contains(haystack: &[u8], needle: &[u8]) -> bool {
+        haystack.windows(needle.len()).any(|w| w == needle)
+    }
+
+    #[test]
+    fn a_module_outside_7e0_to_7e7_gets_its_filter_and_the_default_pairs_before_stpx() {
+        let mut elm = warmed(stn_with(&[GATEWAY]), Some(StnSegmenting::Stpx));
+        let (answer, sent) = exchange(&mut elm, &request_to(GATEWAY));
+        assert_eq!(answer, Response::new(0x77A, ANSWER.to_vec()));
+        let mut expected = vec!["STFFCA77A,7FF"];
+        expected.extend(DEFAULT_PAIRS);
+        expected.extend(["STCFCPA710,77A", STPX_LINE]);
+        assert_eq!(sent[sent.len() - expected.len()..], expected, "{sent:?}");
+        // Written as the FRPM writes them (sections 8.8 and 8.10), each echoed before its
+        // carriage return.
+        let bytes = written(&elm);
+        assert!(contains(&bytes, b"STFFCA 77A,7FF"));
+        assert!(contains(&bytes, b"STCFCPA 7E0,7E8"));
+        assert!(contains(&bytes, b"STCFCPA 710,77A"));
+        let settings = &elm.link().elm.settings;
+        assert!(settings.fc_filters.contains(&(0x77A, 0x7FF, false)));
+        assert_eq!(settings.fc_pairs.len(), 9);
+        assert_eq!(settings.fc_pairs[8], (0x710, 0x77A));
+    }
+
+    #[test]
+    fn a_second_request_to_the_same_module_writes_none_of_it_again() {
+        let mut elm = warmed(stn_with(&[GATEWAY]), Some(StnSegmenting::Stpx));
+        exchange(&mut elm, &request_to(GATEWAY));
+        let (answer, sent) = exchange(&mut elm, &request_to(GATEWAY));
+        assert_eq!(answer, Response::new(0x77A, ANSWER.to_vec()));
+        assert_eq!(setup_of(&sent), Vec::<&str>::new(), "{sent:?}");
+        assert!(sent.iter().any(|c| c == STPX_LINE), "{sent:?}");
+        let settings = &elm.link().elm.settings;
+        assert_eq!(settings.fc_filters.len(), 3);
+        assert_eq!(settings.fc_pairs.len(), 9);
+    }
+
+    #[test]
+    fn a_module_with_another_reply_id_adds_only_its_own_filter_and_pair() {
+        let policy = policy_for(&[GATEWAY, INSTRUMENTS]);
+        let mut elm = warmed(stn_with(&[GATEWAY, INSTRUMENTS]), Some(StnSegmenting::Stpx));
+        exchange(&mut elm, &request(&policy, GATEWAY));
+        let (answer, sent) = exchange(&mut elm, &request(&policy, INSTRUMENTS));
+        assert_eq!(answer, Response::new(0x77E, ANSWER.to_vec()));
+        assert_eq!(
+            setup_of(&sent),
+            ["STFFCA77E,7FF", "STCFCPA714,77E"],
+            "{sent:?}"
+        );
+        let settings = &elm.link().elm.settings;
+        assert_eq!(settings.fc_filters.len(), 4);
+        assert_eq!(settings.fc_pairs.len(), 10);
+    }
+
+    #[test]
+    fn the_stn_would_time_out_without_the_setup() {
+        // The fake models the filter: a module whose reply the filters don't pass never gets its
+        // first frame answered (`FC RX TIMEOUT`, FRPM rev. F, p. 53), so the other tests are not
+        // satisfied by a fake that ignores flow control.
+        let mut elm = warmed(stn_with(&[GATEWAY]), Some(StnSegmenting::Stpx));
+        exchange(&mut elm, &request_to(GATEWAY));
+        elm.link_mut().elm.settings.fc_filters.pop();
+        elm.send(&request_to(GATEWAY)).unwrap();
+        let err = elm.recv(Duration::from_secs(1)).unwrap_err();
+        assert!(err.to_string().contains("FC RX TIMEOUT"), "{err}");
+    }
+
+    #[test]
+    fn a_broadcast_reply_still_gets_its_flow_control_after_the_first_pair() {
+        // Once one pair is added the automatic ones are gone (FRPM section 13): a multi-frame
+        // reply from 7E8 or 7E9 gets none unless its pair is there, and the module stops after
+        // its first frame.
+        let mut stn = FakeElm::new(Box::new(|header, request| match (header, request) {
+            (0x710, _) => vec![(0x77A, ANSWER.to_vec())],
+            (0x7DF, [0x09, 0x02]) => vec![(0x7E8, VIN.to_vec()), (0x7E9, VIN.to_vec())],
+            (0x7E0, [0x09, 0x02]) => vec![(0x7E8, VIN.to_vec())],
+            _ => Vec::new(),
+        }));
+        stn.sti = Some("STN1155 v5.6.19".into());
+        let mut elm = warmed(stn, Some(StnSegmenting::Stpx));
+        exchange(&mut elm, &request_to(GATEWAY));
+        elm.send(&approve(Target::ObdFunctional, &[0x09, 0x02]))
+            .unwrap();
+        let mut sources = Vec::new();
+        while let Ok(reply) = elm.recv(Duration::from_secs(1)) {
+            assert_eq!(reply.payload, VIN, "{:x}", reply.source);
+            sources.push(reply.source);
+        }
+        sources.sort_unstable();
+        assert_eq!(sources, [0x7E8, 0x7E9]);
+        // And a read of one engine ECU (`ATFCSM0` too) after it.
+        elm.send(&approve(Target::Physical(0x7E0), &[0x09, 0x02]))
+            .unwrap();
+        assert_eq!(elm.recv(Duration::from_secs(1)).unwrap().payload, VIN);
+    }
+
+    #[test]
+    fn the_fake_stops_a_module_whose_pair_is_missing() {
+        // The same broadcast against the pair alone, which is what the driver wrote before it
+        // added the defaults: the fake gives the module no flow control, as the STN would not.
+        let mut stn = FakeElm::new(Box::new(|header, request| match (header, request) {
+            (0x7DF, [0x09, 0x02]) => vec![(0x7E8, VIN.to_vec())],
+            _ => Vec::new(),
+        }));
+        stn.sti = Some("STN1155 v5.6.19".into());
+        let mut elm = connect(stn);
+        elm.send(&approve(Target::ObdFunctional, &[0x09, 0x02]))
+            .unwrap();
+        assert_eq!(elm.recv(Duration::from_secs(1)).unwrap().payload, VIN);
+        elm.link_mut().elm.settings.fc_pairs.push((0x710, 0x77A));
+        elm.send(&approve(Target::ObdFunctional, &[0x09, 0x02]))
+            .unwrap();
+        assert!(elm.recv(Duration::from_secs(1)).is_err());
+    }
+
+    #[test]
+    fn a_module_at_7e0_to_7e7_with_the_usual_reply_needs_no_setup_even_when_forced() {
+        let mut elm = warmed(stn_with(&[ENGINE]), Some(StnSegmenting::Stpx));
+        let (answer, sent) = exchange(&mut elm, &request_to(ENGINE));
+        assert_eq!(answer, Response::new(0x7E8, ANSWER.to_vec()));
+        assert_eq!(setup_of(&sent), Vec::<&str>::new(), "{sent:?}");
+        assert!(sent.iter().any(|c| c == STPX_LINE), "{sent:?}");
+    }
+
+    #[test]
+    fn a_module_in_the_range_with_another_reply_gets_the_setup() {
+        let ids = ModuleIds {
+            request: 0x7E1,
+            reply: 0x7EF,
+        };
+        // The reply is inside the automatic filter (7E8 to 7EF), so only the pair is needed.
+        let mut elm = warmed(stn_with(&[ids]), Some(StnSegmenting::Stpx));
+        let (_, sent) = exchange(&mut elm, &request_to(ids));
+        let mut expected: Vec<&str> = DEFAULT_PAIRS.to_vec();
+        expected.push("STCFCPA7E1,7EF");
+        assert_eq!(setup_of(&sent), expected, "{sent:?}");
+    }
+
+    #[test]
+    fn auto_falls_back_to_stpx_with_the_setup_when_caf0_cannot_run() {
+        let mut stn = stn_with(&[GATEWAY]);
+        stn.pps = Some(vec!["09:00 F  24:00 F  25:00 F  29:FF F".to_owned()]);
+        let mut elm = warmed(stn, None);
+        let (answer, sent) = exchange(&mut elm, &request_to(GATEWAY));
+        assert_eq!(answer, Response::new(0x77A, ANSWER.to_vec()));
+        assert_eq!(setup_of(&sent)[0], "STFFCA77A,7FF", "{sent:?}");
+        assert!(sent.iter().any(|c| c == STPX_LINE), "{sent:?}");
+    }
+
+    #[test]
+    fn nothing_but_stpx_to_an_stn_writes_these_commands() {
+        // Not on the CAF0 path of an STN, not for a request of up to 7 bytes, not on a plain
+        // ELM327 (which has no STPX at all).
+        for (plain, mode, long) in [
+            (false, StnSegmenting::Caf0, true),
+            (false, StnSegmenting::Auto, true),
+            (false, StnSegmenting::Stpx, false),
+            (true, StnSegmenting::Stpx, true),
+            (true, StnSegmenting::Auto, true),
+            (true, StnSegmenting::Caf0, true),
+        ] {
+            let mut elm = warmed(adapter(GATEWAY, plain), Some(mode));
+            let before = commands(&elm).len();
+            let payload: &[u8] = if long { &FOUR_DIDS } else { &FOUR_DIDS[..3] };
+            let policy = policy_for(&[GATEWAY]);
+            elm.send(
+                &policy
+                    .approve(Protocol::Uds, Target::Physical(0x710), payload)
+                    .unwrap(),
+            )
+            .unwrap();
+            while elm.recv(Duration::from_millis(100)).is_ok() {}
+            let sent = commands(&elm)[before..].to_vec();
+            assert_eq!(
+                setup_of(&sent),
+                Vec::<&str>::new(),
+                "{plain} {mode:?} {long}: {sent:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_module_with_no_known_reply_id_fails_closed_before_anything_is_written() {
+        for mode in [StnSegmenting::Stpx, StnSegmenting::Auto] {
+            let mut elm = warmed(stn_with(&[GATEWAY]), Some(mode));
+            let before = written(&elm).len();
+            let sent = elm.link().elm.sent.len();
+            let unknown = approve(Target::Physical(0x710), &FOUR_DIDS);
+            let err = elm.send(&unknown).unwrap_err();
+            assert!(matches!(err, Error::Adapter(_)), "{mode:?}: {err}");
+            assert!(err.to_string().contains("reply ID"), "{mode:?}: {err}");
+            assert_eq!(written(&elm).len(), before, "{mode:?}");
+            assert_eq!(elm.link().elm.sent.len(), sent, "{mode:?}");
+            // Refused, not broken: the next request goes out.
+            elm.send(&approve(Target::Physical(0x7E0), &[0x09, 0x02]))
+                .unwrap();
+        }
+    }
+
+    #[test]
+    fn without_an_early_echo_nothing_is_written() {
+        let mut elm = connect(stn_with(&[GATEWAY]));
+        elm.stn_segmenting(StnSegmenting::Stpx);
+        let before = written(&elm).len();
+        let err = elm.send(&request_to(GATEWAY)).unwrap_err();
+        assert!(err.to_string().contains("echoes each character"), "{err}");
+        assert_eq!(written(&elm).len(), before);
+    }
+
+    // ---- an adapter that refuses, runs out of room or mishears ------------------------------
+
+    fn refused_at(stn: FakeElm) -> (Elm<FakeLink>, Error) {
+        let mut elm = warmed(stn, Some(StnSegmenting::Stpx));
+        let sent = elm.link().elm.sent.len();
+        let err = elm.send(&request_to(GATEWAY)).unwrap_err();
+        assert_eq!(elm.link().elm.sent.len(), sent, "a frame went out");
+        assert!(
+            !commands(&elm).iter().any(|c| c.starts_with("STPXD:")),
+            "STPX was written"
+        );
+        // The driver stopped: nothing more is written.
+        let before = written(&elm).len();
+        assert!(
+            elm.send(&approve(Target::Physical(0x7E0), &[0x09, 0x02]))
+                .is_err()
+        );
+        assert_eq!(written(&elm).len(), before);
+        (elm, err)
+    }
+
+    #[test]
+    fn out_of_memory_for_a_filter_says_so_and_sends_nothing() {
+        // The two automatic filters fill it.
+        let mut stn = stn_with(&[GATEWAY]);
+        stn.fc_capacity = Some(2);
+        let (_, err) = refused_at(stn);
+        let text = err.to_string();
+        assert!(text.contains("no room"), "{text}");
+        assert!(text.contains("caf0"), "{text}");
+        assert!(text.contains("STFFCA 77A,7FF"), "{text}");
+    }
+
+    #[test]
+    fn out_of_memory_for_a_pair_says_so_and_sends_nothing() {
+        let mut stn = stn_with(&[GATEWAY]);
+        stn.fc_capacity = Some(5);
+        let (elm, err) = refused_at(stn);
+        assert!(err.to_string().contains("no room"), "{err}");
+        // The filter went in, and 2 of the 8 default pairs, before the adapter ran out.
+        assert_eq!(elm.link().elm.settings.fc_pairs.len(), 2);
+    }
+
+    #[test]
+    fn the_audit_log_has_each_command_with_its_answer_and_no_stpx() {
+        let log = std::env::temp_dir().join(format!(
+            "obdcracker-transport-{}-stpx-flow-control.jsonl",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&log);
+        let mut stn = stn_with(&[GATEWAY]);
+        stn.fc_capacity = Some(2);
+        let mut audited =
+            Audited::open(&log, warmed(stn, Some(StnSegmenting::Stpx)), "fake").unwrap();
+        assert!(audited.send(&request_to(GATEWAY)).is_err());
+        let audit = std::fs::read_to_string(&log).unwrap();
+        let _ = std::fs::remove_file(&log);
+        let lines: Vec<serde_json::Value> = audit
+            .lines()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect();
+        let command = lines
+            .iter()
+            .find(|v| v["cmd"] == "STFFCA 77A,7FF")
+            .unwrap_or_else(|| panic!("{audit}"));
+        assert_eq!(command["answer"], "OUT OF MEMORY", "{audit}");
+        // The request is logged before it is sent, as for any request, and its STPX never is.
+        let tx = lines.iter().position(|v| v["dir"] == "tx").unwrap();
+        let cmd = lines
+            .iter()
+            .position(|v| v["cmd"] == "STFFCA 77A,7FF")
+            .unwrap();
+        assert!(tx < cmd, "{audit}");
+        assert!(!audit.contains("STPX"), "{audit}");
+    }
+
+    #[test]
+    fn the_commands_are_logged_before_the_request_that_needed_them_goes_out() {
+        let log = std::env::temp_dir().join(format!(
+            "obdcracker-transport-{}-stpx-flow-control-ok.jsonl",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&log);
+        let mut audited = Audited::open(
+            &log,
+            warmed(stn_with(&[GATEWAY]), Some(StnSegmenting::Stpx)),
+            "fake",
+        )
+        .unwrap();
+        audited.send(&request_to(GATEWAY)).unwrap();
+        while audited.recv(Duration::from_millis(200)).is_ok() {}
+        let audit = std::fs::read_to_string(&log).unwrap();
+        let _ = std::fs::remove_file(&log);
+        let story: Vec<(String, String)> = audit
+            .lines()
+            .map(|l| serde_json::from_str::<serde_json::Value>(l).unwrap())
+            .map(|v| {
+                (
+                    v["dir"].as_str().unwrap().to_owned(),
+                    v["cmd"].as_str().unwrap_or_default().to_owned(),
+                )
+            })
+            .collect();
+        let position = |dir: &str, cmd: &str| {
+            story
+                .iter()
+                .position(|(d, c)| d == dir && c == cmd)
+                .unwrap_or_else(|| panic!("{dir} {cmd}: {audit}"))
+        };
+        let filter = position("cmd", "STFFCA 77A,7FF");
+        let pair = position("cmd", "STCFCPA 710,77A");
+        assert!(filter < position("cmd", "STCFCPA 7E0,7E8"), "{audit}");
+        assert!(position("cmd", "STCFCPA 7E7,7EF") < pair, "{audit}");
+        // Every one is a `cmd` line with the adapter's answer.
+        assert!(
+            audit.contains(r#""cmd":"STCFCPA 710,77A","answer":"OK""#),
+            "{audit}"
+        );
+        let rx = story.iter().position(|(d, _)| d == "rx").unwrap();
+        assert!(pair < rx, "{audit}");
+    }
+
+    #[test]
+    fn an_answer_but_ok_fails_closed() {
+        for (says, expect) in [("?", "doesn't support"), ("NOPE", "failed")] {
+            let mut stn = stn_with(&[GATEWAY]);
+            stn.fc_says = Some(says.into());
+            let (_, err) = refused_at(stn);
+            assert!(err.to_string().contains(expect), "{says}: {err}");
+        }
+    }
+
+    #[test]
+    fn a_pair_the_adapter_does_not_know_fails_closed() {
+        for unknown in ["STFFCA77A,7FF", "STCFCPA7E3,7EB", "STCFCPA710,77A"] {
+            let mut stn = stn_with(&[GATEWAY]);
+            stn.unsupported.push(unknown.into());
+            let (_, err) = refused_at(stn);
+            assert!(
+                err.to_string().contains("doesn't support"),
+                "{unknown}: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_misheard_command_never_reaches_the_bus() {
+        // Every bit of every character of every command: the echo shows the flip before the
+        // carriage return, so the line is ended with `XX` and the adapter refuses it. A flip of
+        // a letter's case is the same command to the adapter.
+        for command in [
+            "STFFCA 77A,7FF",
+            "STCFCPA 7E0,7E8",
+            "STCFCPA 7E7,7EF",
+            "STCFCPA 710,77A",
+        ] {
+            for index in 0..command.len() {
+                for bit in 0..8 {
+                    let mut elm = warmed(stn_with(&[GATEWAY]), Some(StnSegmenting::Stpx));
+                    let sent = elm.link().elm.sent.len();
+                    let seen = commands(&elm).len();
+                    elm.link_mut().corrupt_write_of =
+                        Some((command.as_bytes().to_vec(), index, 1 << bit));
+                    let result = elm.send(&request_to(GATEWAY));
+                    assert!(elm.link().corrupt_write_of.is_none(), "{command}");
+                    if result.is_ok() {
+                        assert_eq!(bit, 5, "{command} {index}");
+                        assert!(command.as_bytes()[index].is_ascii_alphabetic());
+                        continue;
+                    }
+                    assert_eq!(elm.link().elm.sent.len(), sent, "{command} {index} {bit}");
+                    // What the adapter ran from the damaged line is no request.
+                    let ran = &commands(&elm)[seen..];
+                    assert!(
+                        ran.iter()
+                            .all(|c| !c.bytes().all(|b| b.is_ascii_hexdigit())),
+                        "{command} {index} {bit}: {ran:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_misheard_command_is_still_reported() {
+        let mut elm = warmed(stn_with(&[GATEWAY]), Some(StnSegmenting::Stpx));
+        elm.take_events();
+        elm.link_mut().corrupt_write_of = Some((b"STCFCPA 710,77A".to_vec(), 8, 0x01));
+        assert!(elm.send(&request_to(GATEWAY)).is_err());
+        let commands: Vec<String> = elm
+            .take_events()
+            .into_iter()
+            .filter_map(|e| match e {
+                LinkEvent::Command { command, .. } => Some(command),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            commands.iter().any(|c| c == "STCFCPA 710,77A"),
+            "{commands:?}"
+        );
+    }
+
+    // ---- when the adapter loses its tracking ------------------------------------------------
+
+    #[test]
+    fn a_protocol_change_forgets_what_was_added_and_writes_it_again() {
+        // A switch between 11-bit and 29-bit CAN (`ATSP`) is where the driver forgets its header,
+        // flow control and receive filter, and so these.
+        let policy = Policy::read_only().narrowed_to(&[GATEWAY]).unwrap();
+        let wide = Policy::read_only().narrowed_to(&[VAG29]).unwrap();
+        let mut stn = FakeElm::new(Box::new(|header, _| match header {
+            0x710 => vec![(0x77A, ANSWER.to_vec())],
+            0x17FC_0076 => vec![(0x17FE_0076, ANSWER.to_vec())],
+            _ => Vec::new(),
+        }));
+        stn.sti = Some("STN1155 v5.6.19".into());
+        let mut elm = warmed(stn, Some(StnSegmenting::Stpx));
+        let (_, sent) = exchange(&mut elm, &request(&policy, GATEWAY));
+        assert_eq!(setup_of(&sent).len(), 10, "{sent:?}");
+        let (_, sent) = exchange(
+            &mut elm,
+            &wide
+                .approve(
+                    Protocol::Uds,
+                    Target::Physical29(VAG29.request),
+                    &[0x22, 0xF1, 0x87],
+                )
+                .unwrap(),
+        );
+        assert!(sent.iter().any(|c| c == "ATSP7"), "{sent:?}");
+        let (answer, sent) = exchange(&mut elm, &request(&policy, GATEWAY));
+        assert_eq!(answer, Response::new(0x77A, ANSWER.to_vec()));
+        assert_eq!(setup_of(&sent).len(), 10, "{sent:?}");
+    }
+
+    #[test]
+    fn a_29_bit_module_gets_a_filter_but_no_pair() {
+        // Its flow control goes to the sender of each first frame, whatever the pairs (section 12
+        // p. 58), so only the reply ID the automatic 29-bit filter does not pass is added.
+        let wide = Policy::read_only().narrowed_to(&[VAG29]).unwrap();
+        let mut stn = FakeElm::new(Box::new(|header, _| match header {
+            0x17FC_0076 => vec![(0x17FE_0076, ANSWER.to_vec())],
+            _ => Vec::new(),
+        }));
+        stn.sti = Some("STN1155 v5.6.19".into());
+        let mut elm = warmed(stn, Some(StnSegmenting::Stpx));
+        let long = wide
+            .approve(Protocol::Uds, Target::Physical29(VAG29.request), &FOUR_DIDS)
+            .unwrap();
+        let (answer, sent) = exchange(&mut elm, &long);
+        assert_eq!(answer, Response::new(0x17FE_0076, ANSWER.to_vec()));
+        assert_eq!(setup_of(&sent), ["STFFCA17FE0076,1FFFFFFF"], "{sent:?}");
+        assert_eq!(elm.link().elm.settings.fc_pairs, Vec::<(u32, u32)>::new());
+        let (_, sent) = exchange(&mut elm, &long);
+        assert_eq!(setup_of(&sent), Vec::<&str>::new(), "{sent:?}");
+    }
+
+    #[test]
+    fn an_iso_29_bit_module_needs_no_setup() {
+        // Its reply, 18DAF110, is in the automatic filter `18DAF100, 1FFFFF00`.
+        let mut stn = FakeElm::new(Box::new(|header, _| match header {
+            0x18DA_10F1 => vec![(0x18DA_F110, ANSWER.to_vec())],
+            _ => Vec::new(),
+        }));
+        stn.sti = Some("STN1155 v5.6.19".into());
+        let mut elm = warmed(stn, Some(StnSegmenting::Stpx));
+        let long = approve(Target::Physical29(0x18DA_10F1), &FOUR_DIDS);
+        let (answer, sent) = exchange(&mut elm, &long);
+        assert_eq!(answer, Response::new(0x18DA_F110, ANSWER.to_vec()));
+        assert_eq!(setup_of(&sent), Vec::<&str>::new(), "{sent:?}");
+    }
+
+    #[test]
+    fn the_setup_is_never_cleared_while_running() {
+        let policy = policy_for(&[GATEWAY, INSTRUMENTS]);
+        let mut elm = warmed(stn_with(&[GATEWAY, INSTRUMENTS]), Some(StnSegmenting::Stpx));
+        exchange(&mut elm, &request(&policy, GATEWAY));
+        exchange(&mut elm, &request(&policy, INSTRUMENTS));
+        assert!(
+            !commands(&elm)
+                .iter()
+                .any(|c| c == "STFFCC" || c == "STCFCPC"),
+            "{:?}",
+            commands(&elm)
+        );
+        // The automatic filters are still there, beside the two added.
+        let filters = &elm.link().elm.settings.fc_filters;
+        assert!(filters.contains(&(0x7E8, 0x7F8, false)));
+        assert!(filters.contains(&(0x18DA_F100, 0x1FFF_FF00, true)));
     }
 }
 

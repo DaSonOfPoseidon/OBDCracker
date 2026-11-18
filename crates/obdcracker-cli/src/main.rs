@@ -83,8 +83,9 @@ struct Cli {
     /// With an ELM327/STN adapter: how a request of 8 to 44 bytes is sent. Without this flag an
     /// STN (an `OBDLink`) lets its own `STPX` segment the request to an emissions ECU (7E0 to
     /// 7E7) and has the driver write the frames, as on a plain ELM327, to any other module.
-    /// `stpx` forces `STPX` for every module; `caf0` forces the driver's frames. A plain ELM327
-    /// always writes the frames, and 1 to 7 bytes are always one frame. Recorded in the audit log
+    /// `stpx` forces `STPX` for every module, after setting up the STN's flow control for the
+    /// module; `caf0` forces the driver's frames. A plain ELM327 always writes the frames, and 1
+    /// to 7 bytes are always one frame. Recorded in the audit log
     #[arg(long, value_enum, value_name = "METHOD",
           conflicts_with_all = ["dry_run", "sim", "gsusb", "socketcan"])]
     elm_segmenting: Option<ElmSegmenting>,
