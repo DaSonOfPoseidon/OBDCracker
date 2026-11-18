@@ -1538,6 +1538,31 @@ fn module_did_lengths(cli: &Cli, name: &str) -> Vec<(u16, usize)> {
         .unwrap_or_default()
 }
 
+// How the profile's module says to show each DID that gives a format.
+fn module_did_formats(cli: &Cli, name: &str) -> Vec<(u16, DidFormat)> {
+    cli.profile
+        .as_ref()
+        .or(cli.sim.as_ref())
+        .and_then(|profile| Profile::builtin(profile).ok())
+        .and_then(|profile| {
+            let module = profile.module(name)?;
+            Some(
+                module
+                    .dids
+                    .iter()
+                    .map(|did| {
+                        let format = match did.decode {
+                            Decode::Text => DidFormat::Text,
+                            Decode::Hex => DidFormat::Hex,
+                        };
+                        (did.id, format)
+                    })
+                    .collect(),
+            )
+        })
+        .unwrap_or_default()
+}
+
 // An ELM327 sends a request over 7 bytes in segments only once it has shown that it echoes each
 // character as it reads it, and its first request shows that. So a request that long follows a
 // read of its first DID alone: a single frame, the same module, the same policy. Only a definite
@@ -1648,7 +1673,8 @@ fn run_read_dids<T: Transport>(
     match read {
         Ok(found) => {
             if !cli.json {
-                print_dids_data(id, module_name, dids, &found);
+                let formats = module_did_formats(cli, name);
+                print_dids_data(id, module_name, dids, &formats, &found);
             }
             ExitCode::SUCCESS
         }
@@ -1671,13 +1697,21 @@ fn did_list(dids: &[u16]) -> String {
         .join(" ")
 }
 
-// Each DID in request order: its bytes if it could be split, or that the reply left it out. Then
+// Each DID in request order: its value, shown as `scan` shows it, if it could be split, or that the reply left it out. Then
 // the DIDs the bytes of the rest hold, as the module sent them.
-fn print_dids_data(id: u32, name: &str, dids: &[u16], found: &DidsData) {
+fn print_dids_data(
+    id: u32,
+    name: &str,
+    dids: &[u16],
+    formats: &[(u16, DidFormat)],
+    found: &DidsData,
+) {
     let mut unsplit = Vec::new();
     for &did in dids {
         if let Some((_, data)) = found.split.iter().find(|(split, _)| *split == did) {
-            println!("{id:03X} {name} {did:04X} [{}]", hex(data));
+            let profile = formats.iter().find(|(f, _)| *f == did).map(|&(_, f)| f);
+            let value = DidValue::from_data_as(did, DidFormat::of(did, profile), data);
+            println!("{id:03X} {name} {did:04X} {}", did_value(&value));
         } else if found.left_out.contains(&did) {
             println!("{id:03X} {name} {did:04X} (not in the reply)");
         } else {
@@ -1850,13 +1884,19 @@ fn print_sweep_found(module: &UdsModule, found: &sweep::Sweep) {
     );
 }
 
+// Bracketed hex for bytes, so binary data can't pass for text that looks like hex.
+fn did_value(value: &DidValue) -> String {
+    match value {
+        DidValue::Text(text) => text.clone(),
+        bytes @ DidValue::Bytes(_) => format!("[{bytes}]"),
+        DidValue::NotSet => "(not set)".to_owned(),
+    }
+}
+
 fn print_dids(id: u32, name: &str, dids: &[(u16, Result<DidValue, ReadError>)]) {
     for (did, value) in dids {
         match value {
-            Ok(DidValue::Text(text)) => println!("{id:03X} {name} {did:04X} {text}"),
-            // Bracketed, so binary data can't pass for text that looks like hex.
-            Ok(bytes @ DidValue::Bytes(_)) => println!("{id:03X} {name} {did:04X} [{bytes}]"),
-            Ok(DidValue::NotSet) => println!("{id:03X} {name} {did:04X} (not set)"),
+            Ok(value) => println!("{id:03X} {name} {did:04X} {}", did_value(value)),
             Err(e) => println!("{id:03X} {name} {did:04X} ({e})"),
         }
     }

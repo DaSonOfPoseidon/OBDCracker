@@ -1950,9 +1950,14 @@ mod read_dids {
     // What the transmission answers `22 F187 F189 F190 F191` with.
     fn four_dids_reply() -> Vec<u8> {
         let mut reply = vec![0x62];
-        for (did, len) in [(0xF187u16, 11), (0xF189, 4), (0xF190, 17), (0xF191, 11)] {
+        for (did, len, fill) in [
+            (0xF187u16, 11, 0x41),
+            (0xF189, 4, 0x01),
+            (0xF190, 17, 0x41),
+            (0xF191, 11, 0x41),
+        ] {
             reply.extend(did.to_be_bytes());
-            reply.extend(data(0x41, len));
+            reply.extend(data(fill, len));
         }
         reply
     }
@@ -2034,12 +2039,12 @@ mod read_dids {
         assert_eq!(
             stdout,
             format!(
-                "7E9 transmission F187 [{}]\n7E9 transmission F189 [{}]\n\
-                 7E9 transmission F190 [{}]\n7E9 transmission F191 [{}]\n",
-                hex("41", 11),
-                hex("41", 4),
-                hex("41", 17),
-                hex("41", 11)
+                "7E9 transmission F187 {}\n7E9 transmission F189 [{}]\n\
+                 7E9 transmission F190 {}\n7E9 transmission F191 {}\n",
+                "A".repeat(11),
+                hex("01", 4),
+                "A".repeat(17),
+                "A".repeat(11)
             )
         );
         let story = audit_story(&log);
@@ -2169,10 +2174,10 @@ mod read_dids {
         assert_eq!(
             stdout.lines().collect::<Vec<_>>(),
             [
-                format!("7E9 transmission F187 [{}]", hex("41", 11)),
+                format!("7E9 transmission F187 {}", "A".repeat(11)),
                 "7E9 transmission F188 (not in the reply)".to_owned(),
-                format!("7E9 transmission F189 [{}]", hex("42", 4)),
-                format!("7E9 transmission F191 [{}]", hex("43", 11)),
+                format!("7E9 transmission F189 {}", "B".repeat(4)),
+                format!("7E9 transmission F191 {}", "C".repeat(11)),
             ]
         );
     }
@@ -2224,9 +2229,9 @@ mod read_dids {
         );
         let lines: Vec<&str> = stdout.lines().collect();
         assert_eq!(lines.len(), 3, "{stdout}");
-        assert!(lines[0].starts_with("7E9 transmission F187 ["), "{stdout}");
+        assert_eq!(lines[0], "7E9 transmission F187 4G0927158Q");
         assert_eq!(lines[1], "7E9 transmission F1FF (not in the reply)");
-        assert!(lines[2].starts_with("7E9 transmission F189 ["), "{stdout}");
+        assert_eq!(lines[2], "7E9 transmission F189 1008");
     }
 
     #[test]
@@ -2250,7 +2255,7 @@ mod read_dids {
         assert_eq!(lines.len(), 2, "{stdout}");
         assert_eq!(
             lines[0],
-            format!("7E9 transmission F187 [{}]", hex("41", 11))
+            format!("7E9 transmission F187 {}", "A".repeat(11))
         );
         assert!(
             lines[1].starts_with("7E9 transmission F188 F189 F191 not split"),
@@ -2262,6 +2267,42 @@ mod read_dids {
             hex("43", 11)
         );
         assert!(lines[1].ends_with(&rest), "{stdout}");
+    }
+
+    #[test]
+    fn a_did_is_shown_by_its_format_not_by_whether_its_bytes_print() {
+        // F190 must be a VIN, and the profile gives F18B (a date) as hex, so printable bytes in
+        // either stay bytes. A placeholder VIN says it isn't set.
+        let request = vec![0x22, 0xF1, 0x87, 0xF1, 0x90, 0xF1, 0x8B];
+        for (vin, shown) in [
+            (data(0x61, 17), format!("[{}]", hex("61", 17))),
+            (data(b'-', 17), "(not set)".to_owned()),
+            (
+                b"WAUZZZ4G6EN123456".to_vec(),
+                "WAUZZZ4G6EN123456".to_owned(),
+            ),
+        ] {
+            let mut reply = vec![0x62, 0xF1, 0x87];
+            reply.extend(data(0x41, 11));
+            reply.extend([0xF1, 0x90]);
+            reply.extend(&vin);
+            reply.extend([0xF1, 0x8B, 0x32, 0x30, 0x31, 0x34]);
+            let addr = wifi_elm(with_transmission(request.clone(), reply));
+            let log = temp_log("read-dids-formats");
+            let out = read_dids(addr, &log, &[], "F187,F190,F18B");
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            assert!(out.status.success(), "{stderr}");
+            assert_eq!(
+                String::from_utf8_lossy(&out.stdout)
+                    .lines()
+                    .collect::<Vec<_>>(),
+                [
+                    format!("7E9 transmission F187 {}", "A".repeat(11)),
+                    format!("7E9 transmission F190 {shown}"),
+                    "7E9 transmission F18B [32 30 31 34]".to_owned(),
+                ]
+            );
+        }
     }
 
     #[test]
@@ -2294,7 +2335,7 @@ mod read_dids {
         assert_eq!(story.iter().filter(|s| s.starts_with("tx ")).count(), 1);
         assert_eq!(
             String::from_utf8_lossy(&out.stdout),
-            format!("7E9 transmission F187 [{}]\n", hex("41", 11))
+            format!("7E9 transmission F187 {}\n", "A".repeat(11))
         );
     }
 

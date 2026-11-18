@@ -96,6 +96,47 @@ pub enum DidFormat {
     Hex,
 }
 
+impl DidFormat {
+    /// How scan shows DID `id`: text if ISO 14229-1 makes it text ([`did::is_text`]), else the
+    /// format its profile entry gives, else text for the other [`SCAN_DIDS`] and bytes for a DID
+    /// that is in neither.
+    #[must_use]
+    pub fn of(id: u16, profile: Option<Self>) -> Self {
+        if did::is_text(id) {
+            return Self::Text;
+        }
+        profile.unwrap_or(if SCAN_DIDS.contains(&id) {
+            Self::Text
+        } else {
+            Self::Hex
+        })
+    }
+}
+
+impl DidValue {
+    /// A DID's data shown as `format` says, like a scan: [`DidFormat::Hex`] is always
+    /// [`Bytes`](Self::Bytes). [`DidFormat::Text`] is [`from_data`](Self::from_data), except for
+    /// the VIN (F190), which is [`NotSet`](Self::NotSet) for a placeholder and
+    /// [`Bytes`](Self::Bytes) unless it is a VIN ([`obd::check_vin`]).
+    #[must_use]
+    pub fn from_data_as(id: u16, format: DidFormat, data: &[u8]) -> Self {
+        match format {
+            DidFormat::Hex => Self::Bytes(data.to_vec()),
+            DidFormat::Text if id == did::VIN => {
+                if obd::is_vin_placeholder(data) {
+                    Self::NotSet
+                } else {
+                    obd::check_vin(data).map_or_else(
+                        |_| Self::Bytes(data.to_vec()),
+                        |vin| Self::Text(vin.to_owned()),
+                    )
+                }
+            }
+            DidFormat::Text => Self::from_data(data),
+        }
+    }
+}
+
 /// Everything a scan read.
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Debug, Clone, PartialEq)]
