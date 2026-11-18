@@ -136,7 +136,7 @@ mod read_data_by_identifier {
 
 mod read_dtc_information {
     use obdcracker_core::obd::Dtc;
-    use obdcracker_core::response::Error;
+    use obdcracker_core::response::{Error, NegativeResponse, Nrc};
     use obdcracker_core::uds::{
         DtcCount, DtcData, DtcFormat, DtcRecord, DtcStatus, J2012Dtc, UdsDtc, decode_dtc_count,
         decode_dtc_extended_data, decode_dtc_snapshots, decode_dtcs_by_status_mask,
@@ -331,9 +331,46 @@ mod read_dtc_information {
                 count: 3
             })
         );
+    }
+
+    // The 2014 A7's airbag answers `19 01 AF` with `59 01 00 00`, 4 bytes where ISO 14229-1 needs
+    // 6. No count is guessed from a short reply, but the error says it is the shape that's off.
+    #[test]
+    fn a_short_dtc_count_is_non_standard_not_malformed() {
+        let short = Err(Error::NonStandardLength { expected: 6 });
+        for reply in [
+            &[0x59, 0x01][..],
+            &[0x59, 0x01, 0x00],
+            &[0x59, 0x01, 0x00, 0x00],
+            &[0x59, 0x01, 0xFF, 0x01, 0x00],
+        ] {
+            assert_eq!(decode_dtc_count(reply), short, "{reply:02X?}");
+        }
+        // Only a short reply is non-standard: extra bytes, another subfunction, another service and
+        // a reply with no subfunction at all are what they were.
         assert_eq!(
-            decode_dtc_count(&[0x59, 0x01, 0xFF, 0x01, 0x00]),
+            decode_dtc_count(&[0x59, 0x01, 0xFF, 0x01, 0x00, 0x03, 0x00]),
             Err(Error::Malformed)
+        );
+        assert_eq!(
+            decode_dtc_count(&[0x59, 0x02, 0x00, 0x00]),
+            Err(Error::Malformed)
+        );
+        assert_eq!(
+            decode_dtc_count(&[0x6F, 0x01, 0x00, 0x00]),
+            Err(Error::WrongService(0x6F))
+        );
+        assert_eq!(decode_dtc_count(&[0x59]), Err(Error::TooShort));
+        assert_eq!(
+            decode_dtc_count(&[0x7F, 0x19, 0x12]),
+            Err(Error::Negative(NegativeResponse {
+                sid: 0x19,
+                nrc: Nrc::SubFunctionNotSupported
+            }))
+        );
+        assert_eq!(
+            Error::NonStandardLength { expected: 6 }.to_string(),
+            "non-standard reply, ISO 14229 expects 6 bytes"
         );
     }
 

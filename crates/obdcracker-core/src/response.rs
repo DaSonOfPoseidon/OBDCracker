@@ -122,6 +122,12 @@ pub enum Error {
     TooShort,
     /// The reply's content doesn't match its format.
     Malformed,
+    /// The reply is shorter than the length ISO 14229-1 gives its format, as some modules'
+    /// are. Nothing is read from it, since which byte is missing can't be known.
+    NonStandardLength {
+        /// The length in bytes the standard gives the whole reply, service ID included.
+        expected: usize,
+    },
 }
 
 impl fmt::Display for Error {
@@ -131,6 +137,9 @@ impl fmt::Display for Error {
             Self::WrongService(sid) => write!(f, "reply is for another service (0x{sid:02X})"),
             Self::TooShort => f.write_str("reply is too short"),
             Self::Malformed => f.write_str("reply is malformed"),
+            Self::NonStandardLength { expected } => {
+                write!(f, "non-standard reply, ISO 14229 expects {expected} bytes")
+            }
         }
     }
 }
