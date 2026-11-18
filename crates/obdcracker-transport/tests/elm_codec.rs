@@ -125,9 +125,8 @@ mod frames {
         assert_eq!(f.data().len(), 8);
         assert!(!frame("7E8 01").is_29_bit());
         for line in [
-            // More than 29 bits, or an 11-bit value in a 29-bit header.
+            // More than 29 bits.
             "20 00 00 00 01",
-            "00 00 07 E8 01",
             // A header and no data, or too much.
             "18 DA F1 10",
             "18 DA F1 10 01 02 03 04 05 06 07 08 09",
@@ -137,6 +136,23 @@ mod frames {
         ] {
             assert!(matches!(parse_line(line), Line::Text(_)), "{line}");
         }
+    }
+
+    // The header's width is the number of digits printed, not the value's: a monitor on the
+    // 29-bit ID 0x00000123 prints it as four bytes (#104).
+    #[test]
+    fn a_29_bit_header_with_a_small_value_is_still_29_bit() {
+        for (line, id) in [
+            ("00 00 01 23 01", 0x123),
+            ("00 00 07 E8 01", 0x7E8),
+            ("00 00 00 00 01", 0),
+        ] {
+            let f = frame(line);
+            assert_eq!(f.id(), id, "{line}");
+            assert!(f.is_29_bit(), "{line}");
+            assert_eq!(f.data(), [0x01]);
+        }
+        assert!(!frame("123 01").is_29_bit());
     }
 
     #[test]

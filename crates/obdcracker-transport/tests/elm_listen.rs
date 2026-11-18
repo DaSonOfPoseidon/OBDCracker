@@ -456,6 +456,26 @@ mod afterwards {
         assert!(log.contains(&"ATCRA7E8".to_owned()), "{log:?}");
     }
 
+    // A 29-bit ID with an 11-bit value prints as four header bytes, and is still not the 11-bit
+    // ID (#104).
+    #[test]
+    fn a_29_bit_filter_hears_ids_whose_value_fits_in_11_bits() {
+        let frames = vec![
+            (5 * MS, 0x123, vec![0x01, 0x02]),
+            (10 * MS, 0x7E8, vec![0x03]),
+        ];
+        let mut elm = connect(bus(true, frames));
+        let (end, heard) = listen_for(&mut elm, "00000123", Duration::from_millis(100));
+        assert_eq!(end, Ok(ListenEnd::Deadline));
+        let heard: Vec<_> = heard.iter().map(|f| (f.id, f.extended)).collect();
+        assert_eq!(heard, [(0x123, true)]);
+        let mut elm = connect(bus(true, vec![(5 * MS, 0x123, vec![0x01])]));
+        let (end, heard) = listen_for(&mut elm, "000001XX", Duration::from_millis(100));
+        assert_eq!(end, Ok(ListenEnd::Deadline));
+        assert_eq!(heard.len(), 1);
+        assert!(heard[0].extended);
+    }
+
     #[test]
     fn a_listen_after_a_request_still_running_waits_for_it() {
         let mut elm = connect(bus(true, traffic()));
@@ -535,6 +555,24 @@ mod audited {
         assert!(time("cmd", "STM") <= time("dir", "heard"));
         // Nothing the log calls a request.
         assert!(!log.contains(r#""dir":"tx""#), "{log}");
+        std::fs::remove_file(&path).unwrap();
+    }
+
+    #[test]
+    fn a_29_bit_id_with_a_small_value_is_logged_in_8_digits() {
+        let path = std::env::temp_dir().join(format!(
+            "obdcracker-elm-listen-wide-{}.jsonl",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&path);
+        let frames = vec![(5 * MS, 0x123, vec![0x01])];
+        let mut elm = Audited::open(&path, connect(bus(true, frames)), "usb-serial").unwrap();
+        let (end, heard) = listen_for(&mut elm, "00000123", Duration::from_millis(100));
+        assert_eq!(end, Ok(ListenEnd::Deadline));
+        assert_eq!(heard.len(), 1);
+        drop(elm);
+        let log = std::fs::read_to_string(&path).unwrap();
+        assert!(log.contains(r#""dir":"heard","id":"00000123""#), "{log}");
         std::fs::remove_file(&path).unwrap();
     }
 

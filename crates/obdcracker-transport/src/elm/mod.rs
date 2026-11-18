@@ -1667,8 +1667,8 @@ fn can_id_command(command: &str, id: u32) -> String {
 }
 
 // A 3-digit pattern shows only 11-bit frames, an 8-digit one only 29-bit frames.
-fn filter_shows(pattern: &str, id: u32) -> bool {
-    let id = can_id_text(id, pattern.len() == 8);
+fn filter_shows(pattern: &str, id: u32, bits29: bool) -> bool {
+    let id = can_id_text(id, bits29);
     id.len() == pattern.len()
         && pattern
             .bytes()
@@ -2710,10 +2710,10 @@ impl<L: Link> Elm<L> {
             }
             // The adapter lost the filter, and may be sending flow control for frames it
             // shouldn't see.
-            Line::Frame(frame) if !filter_shows(&self.filter, frame.id()) => {
+            Line::Frame(frame) if !filter_shows(&self.filter, frame.id(), frame.is_29_bit()) => {
                 Err(self.break_down(format!(
-                    "a frame from {:03X} got past the receive filter: {text}",
-                    frame.id()
+                    "a frame from {} got past the receive filter: {text}",
+                    can_id_text(frame.id(), frame.is_29_bit())
                 )))
             }
             // Such as a banner after a reset.

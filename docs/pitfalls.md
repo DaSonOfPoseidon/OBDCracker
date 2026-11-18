@@ -277,6 +277,10 @@ Each entry names the class, what to check, and where it bit us.
   driver's "unexpected output" diagnosis became a misleading receive-filter one (#146). When a parser accepts more,
   check what used to fall through to the other branches, and check the result against the state the driver set
   (here the ID width).
+- **An ID's width is how it was printed, not its value.** The codec read `00 00 01 23` as "not a frame" because a
+  29-bit ID under `0x800` would pass for an 11-bit one, so a monitor filter such as `00000123` failed the whole
+  listen on its first frame (#104, Codex). Carry the width next to the ID (`CanFrame::is_29_bit`), compare it to the
+  state the driver set, and write it back at that width (the audit log's `heard` line, the CLI's output).
 - **Check which chip version a command needs.** `AT CRA` with `X` digits is ELM327 v2.0+; most adapters say v1.4b
   or v1.5. Look it up in the datasheet's version history before relying on a command (M3 branch).
 - **One flipped bit on a serial line can turn a command into a bus frame.** An ELM327 sends any line of hex digits to
