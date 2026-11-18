@@ -23,8 +23,8 @@ use obdcracker_safety::{ModuleIds, Policy, SupplyVoltage, VoltageCheck, VoltageT
 use obdcracker_sim::SimBus;
 use obdcracker_transport::discover::{self, DiscoverOptions};
 use obdcracker_transport::dtc::{self, DtcDetail, RecordData};
-use obdcracker_transport::elm::Elm;
 use obdcracker_transport::elm::codec::parse_voltage;
+use obdcracker_transport::elm::{Elm, StnSegmenting};
 use obdcracker_transport::fingerprint::{self, DidValue, Fingerprint, ReadError, UdsModule};
 use obdcracker_transport::gateway::{self, Compared, GatewayTables, ListedAs, Tried};
 use obdcracker_transport::gsusb::{self, BitrateCheck, BitrateSource, ConnectError, GsUsb};
@@ -928,7 +928,10 @@ fn adapter<L: Link>(cli: &Cli, link: L) -> ExitCode {
     }
     // Before the audit log opens, so its first lines say how requests will be sent.
     if let Some(method) = cli.elm_segmenting {
-        elm.segment_on_stn(method == ElmSegmenting::Caf0);
+        elm.stn_segmenting(match method {
+            ElmSegmenting::Stpx => StnSegmenting::Stpx,
+            ElmSegmenting::Caf0 => StnSegmenting::Caf0,
+        });
     }
     run(cli, elm, kind.name(), Elm::<L>::timing(), true)
 }

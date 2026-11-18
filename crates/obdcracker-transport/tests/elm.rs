@@ -6,7 +6,7 @@ use std::io;
 use std::time::{Duration, Instant};
 
 use obdcracker_safety::{Approved, ModuleIds, Policy, Protocol, Target};
-use obdcracker_transport::elm::{ADAPTER_TIMEOUT, Elm};
+use obdcracker_transport::elm::{ADAPTER_TIMEOUT, Elm, StnSegmenting};
 use obdcracker_transport::link::{Driver, Link, LinkKind};
 use obdcracker_transport::{Audited, Error, Expect, Response, Transport, exchange, hex};
 use support::fake_elm::{BANNER, FakeElm, FakeLink, frames};
@@ -4364,11 +4364,11 @@ mod forced_caf0 {
         adapter
     }
 
-    // Connected, with the option as `forced` says, and past a first request, so the driver has
+    // Connected, with the mode as `mode` says, and past a first request, so the driver has
     // seen the adapter echo each character as it reads it.
-    fn warmed(adapter: FakeElm, forced: bool) -> Elm<FakeLink> {
+    fn warmed(adapter: FakeElm, mode: StnSegmenting) -> Elm<FakeLink> {
         let mut elm = connect(adapter);
-        elm.segment_on_stn(forced);
+        elm.stn_segmenting(mode);
         elm.send(&approve(Target::Physical(0x7E0), &[0x09, 0x02]))
             .unwrap();
         while elm.recv(Duration::from_secs(1)).is_ok() {}
@@ -4401,7 +4401,7 @@ mod forced_caf0 {
 
     #[test]
     fn an_stn_sends_a_long_request_as_stpx_unless_told_to_segment_it() {
-        let mut elm = warmed(adapter(true), false);
+        let mut elm = warmed(adapter(true), StnSegmenting::Auto);
         let before = commands(&elm).len();
         let answer = exchange_one(&mut elm, &approve(Target::Physical(REQUEST_ID), &FOUR_DIDS));
         assert_eq!(answer, Response::new(REPLY_ID, ANSWER.to_vec()));
@@ -4413,7 +4413,7 @@ mod forced_caf0 {
 
     #[test]
     fn an_stn_told_to_segment_sends_the_same_request_as_caf0_frames() {
-        let mut elm = warmed(adapter(true), true);
+        let mut elm = warmed(adapter(true), StnSegmenting::Caf0);
         let before = commands(&elm).len();
         let answer = exchange_one(&mut elm, &approve(Target::Physical(REQUEST_ID), &FOUR_DIDS));
         assert_eq!(answer, Response::new(REPLY_ID, ANSWER.to_vec()));
@@ -4435,7 +4435,7 @@ mod forced_caf0 {
 
     #[test]
     fn a_request_of_7_bytes_or_less_stays_one_frame_when_forced() {
-        let mut elm = warmed(adapter(true), true);
+        let mut elm = warmed(adapter(true), StnSegmenting::Caf0);
         let before = commands(&elm).len();
         elm.send(&request(7)).unwrap();
         assert_eq!(elm.link().elm.sent.last(), Some(&(REQUEST_ID, read_of(7))));
@@ -4450,7 +4450,7 @@ mod forced_caf0 {
 
     #[test]
     fn the_longest_request_goes_in_segments_and_one_byte_more_is_refused() {
-        let mut elm = warmed(adapter(true), true);
+        let mut elm = warmed(adapter(true), StnSegmenting::Caf0);
         let answer = exchange_one(&mut elm, &request(44));
         assert_eq!(answer, Response::new(REPLY_ID, ANSWER.to_vec()));
         assert_eq!(frames_received(&elm).len(), 7);
@@ -4467,7 +4467,7 @@ mod forced_caf0 {
         let mut no_pp26 = adapter(true);
         no_pp26.pps = Some(vec!["09:00 F  24:00 F  25:00 F  29:FF F".to_owned()]);
         let mut cold = connect(adapter(true));
-        cold.segment_on_stn(true);
+        cold.stn_segmenting(StnSegmenting::Caf0);
         let cases: Vec<(&str, Elm<FakeLink>, Approved, &str)> = vec![
             (
                 "no early echo seen yet",
@@ -4477,11 +4477,16 @@ mod forced_caf0 {
             ),
             (
                 "a module whose reply ID isn't known",
-                warmed(adapter(true), true),
+                warmed(adapter(true), StnSegmenting::Caf0),
                 approve(Target::Physical(0x710), &read_of(9)),
                 "no one module's flow control",
             ),
-            ("PP 26 missing", warmed(no_pp26, true), request(9), "PP 26"),
+            (
+                "PP 26 missing",
+                warmed(no_pp26, StnSegmenting::Caf0),
+                request(9),
+                "PP 26",
+            ),
         ];
         for (what, mut elm, refused, says) in cases {
             let written = elm.link().written.len();
@@ -4494,9 +4499,9 @@ mod forced_caf0 {
 
     #[test]
     fn turning_the_option_off_goes_back_to_stpx_after_caf1() {
-        let mut elm = warmed(adapter(true), true);
+        let mut elm = warmed(adapter(true), StnSegmenting::Caf0);
         exchange_one(&mut elm, &request(9));
-        elm.segment_on_stn(false);
+        elm.stn_segmenting(StnSegmenting::Auto);
         let before = commands(&elm).len();
         exchange_one(&mut elm, &approve(Target::Physical(REQUEST_ID), &FOUR_DIDS));
         let sent = since(&elm, before);
@@ -4507,10 +4512,10 @@ mod forced_caf0 {
 
     #[test]
     fn a_plain_elm327_segments_whether_or_not_the_option_is_set() {
-        for forced in [false, true] {
-            let mut elm = warmed(adapter(false), forced);
+        for mode in [StnSegmenting::Auto, StnSegmenting::Caf0] {
+            let mut elm = warmed(adapter(false), mode);
             exchange_one(&mut elm, &approve(Target::Physical(REQUEST_ID), &FOUR_DIDS));
-            assert_eq!(frames_received(&elm).len(), 2, "forced {forced}");
+            assert_eq!(frames_received(&elm).len(), 2, "{mode:?}");
         }
     }
 
@@ -4531,12 +4536,12 @@ mod forced_caf0 {
         for stn in [true, false] {
             let mut elm = connect(adapter(stn));
             elm.take_events();
-            elm.segment_on_stn(true);
+            elm.stn_segmenting(StnSegmenting::Caf0);
             let events = elm.take_events();
-            assert_eq!(settings(&events), [("segment-on-stn", "on")], "stn {stn}");
-            elm.segment_on_stn(false);
+            assert_eq!(settings(&events), [("stn-segmenting", "caf0")], "stn {stn}");
+            elm.stn_segmenting(StnSegmenting::Auto);
             let events = elm.take_events();
-            assert_eq!(settings(&events), [("segment-on-stn", "off")], "stn {stn}");
+            assert_eq!(settings(&events), [("stn-segmenting", "auto")], "stn {stn}");
         }
     }
 
@@ -4549,7 +4554,7 @@ mod forced_caf0 {
         let _ = std::fs::remove_file(&log);
         {
             let mut elm = connect(adapter(true));
-            elm.segment_on_stn(true);
+            elm.stn_segmenting(StnSegmenting::Caf0);
             let mut audited = Audited::open(&log, elm, "fake").unwrap();
             audited
                 .send(&approve(Target::Physical(0x7E0), &[0x09, 0x02]))
@@ -4568,8 +4573,8 @@ mod forced_caf0 {
             .expect("a setting line");
         let tx = lines.iter().position(|v| v["dir"] == "tx").unwrap();
         assert!(setting < tx, "{lines:?}");
-        assert_eq!(lines[setting]["name"], "segment-on-stn");
-        assert_eq!(lines[setting]["value"], "on");
+        assert_eq!(lines[setting]["name"], "stn-segmenting");
+        assert_eq!(lines[setting]["value"], "caf0");
         assert_eq!(lines.iter().filter(|v| v["dir"] == "setting").count(), 1);
     }
 }

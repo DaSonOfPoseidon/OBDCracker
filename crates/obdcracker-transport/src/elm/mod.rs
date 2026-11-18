@@ -157,6 +157,31 @@ const SLOWEST_RATE: u32 = 9600 / 10;
 // From here an STN was seen to print a long reply with no `BUFFER FULL` (#49).
 const STN_UNPACED_RATE: u32 = 115_200 / 10;
 
+/// How an [`Elm`] on an STN adapter (an `OBDLink`) sends a request of 8 to 44 bytes
+/// ([`Elm::stn_segmenting`]). A plain ELM327 always writes the frames itself, and a request of 1
+/// to 7 bytes is always one frame.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum StnSegmenting {
+    /// The driver picks the method for each request (the default).
+    #[default]
+    Auto,
+    /// Always the STN's own `STPX`, which segments the request itself.
+    Stpx,
+    /// Always raw frames written with `AT CAF0`, as on a plain ELM327.
+    Caf0,
+}
+
+impl StnSegmenting {
+    // The value of the `stn-segmenting` setting event.
+    fn name(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Stpx => "stpx",
+            Self::Caf0 => "caf0",
+        }
+    }
+}
+
 /// An ELM327-compatible adapter on CAN (ISO 15765-4, 11-bit IDs, 500 kbit/s; 29-bit IDs when a
 /// request needs them).
 ///
@@ -216,9 +241,8 @@ pub struct Elm<L> {
     // Whether `AT CAF0` is on to send a request in segments, which `send` switches lazily
     // (docs/design/elm-caf0-segmenting.md, section 8).
     segmenting: bool,
-    // Whether a request over 7 bytes goes through the segmenting path on an STN too, which has
-    // `STPX` (`segment_on_stn`).
-    segment_on_stn: bool,
+    // How a request over 7 bytes is sent on an STN, which has `STPX` ([`Elm::stn_segmenting`]).
+    stn_segmenting: StnSegmenting,
     // Whether `AT R0` was written and no `OK` to `ATR1` has followed (section 7).
     responses_off: bool,
     // The byte the adapter pads with (PP 26), or `None` if `ATPPS` didn't list it.
@@ -415,7 +439,7 @@ impl<L: Link> Elm<L> {
             bits29: false,
             raw: false,
             segmenting: false,
-            segment_on_stn: false,
+            stn_segmenting: StnSegmenting::Auto,
             responses_off: false,
             filler: None,
             hold_until: None,
@@ -1560,8 +1584,8 @@ impl<L: Link> Transport for Elm<L> {
         let long = !raw && payload.len() > single;
         // Longer requests go out as `STPX` on an STN (docs/elm327.md#multi-frame-requests), and
         // on any other adapter as raw frames written with `AT CAF0`
-        // (docs/design/elm-caf0-segmenting.md), which an STN takes too once `segment_on_stn` is on.
-        let stpx = long && self.stn.is_some() && !self.segment_on_stn;
+        // (docs/design/elm-caf0-segmenting.md), which an STN takes too if [`StnSegmenting`] says so.
+        let stpx = long && self.stn.is_some() && self.stn_uses_stpx();
         if payload.is_empty() || (raw && payload.len() > 8) || (!raw && payload.len() > STPX_MAX) {
             return Err(Error::Adapter(format!(
                 "a {}-byte request doesn't fit this driver's limit ({STPX_MAX} bytes where it \
@@ -1897,23 +1921,30 @@ impl<L: Link> Elm<L> {
         self.segment_transfer = self.segment_transfer.min(transfer);
     }
 
-    /// Sends a request of 8 to 44 bytes the way a plain ELM327 must, as raw frames written with
-    /// `AT CAF0` (with every check of
+    /// Chooses how an STN sends a request of 8 to 44 bytes: as `STPX`, which the STN segments
+    /// itself, or as raw frames written with `AT CAF0` (with every check of
     /// [`docs/design/elm-caf0-segmenting.md`](https://github.com/DaSonOfPoseidon/OBDCracker/blob/main/docs/design/elm-caf0-segmenting.md),
-    /// section 1), instead of as `STPX`, which an STN would use. It is off by default, and for
-    /// testing that path on the one adapter that has both: a plain ELM327 segments whether this
-    /// is set or not, and a request of 1 to 7 bytes goes as one frame either way.
+    /// section 1), as on a plain ELM327. See [`StnSegmenting`]. A plain ELM327 segments whatever
+    /// this is set to, and a request of 1 to 7 bytes goes as one frame either way.
     ///
-    /// Each call adds a [`LinkEvent::Setting`] named `segment-on-stn` ([`Transport::take_events`]),
-    /// whatever the adapter, so an audit log that opens after this call says how a request was
-    /// sent before the first one.
-    pub fn segment_on_stn(&mut self, on: bool) {
-        self.segment_on_stn = on;
+    /// Each call adds a [`LinkEvent::Setting`] named `stn-segmenting` ([`Transport::take_events`]),
+    /// whatever the adapter, with the value `auto`, `stpx` or `caf0`, so an audit log that opens
+    /// after this call says how a request was sent before the first one.
+    pub fn stn_segmenting(&mut self, mode: StnSegmenting) {
+        self.stn_segmenting = mode;
         self.note(LinkEvent::Setting {
             at: SystemTime::now(),
-            name: "segment-on-stn".to_owned(),
-            value: if on { "on" } else { "off" }.to_owned(),
+            name: "stn-segmenting".to_owned(),
+            value: mode.name().to_owned(),
         });
+    }
+
+    // Whether a request over 7 bytes goes as `STPX` on an STN.
+    fn stn_uses_stpx(&self) -> bool {
+        match self.stn_segmenting {
+            StnSegmenting::Stpx | StnSegmenting::Auto => true,
+            StnSegmenting::Caf0 => false,
+        }
     }
 
     // Section 1: what must hold before anything is written for a request over 7 bytes on an

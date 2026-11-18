@@ -37,8 +37,8 @@ segments it itself, and as raw frames the driver writes with `AT CAF0` on a plai
 ([how](elm327.md#multi-frame-requests-on-a-plain-elm327)). `--elm-segmenting caf0` makes an STN take the second path
 too, so it can be tried on the one adapter that has both ([design](design/elm-caf0-segmenting.md#13-forcing-it-on-an-stn-308)).
 `--elm-segmenting stpx` is the default. Every check of that path applies, and a request of 1 to 7 bytes is one frame
-either way. The audit log records the choice before the first request (`"dir":"setting"`, `"name":"segment-on-stn"`,
-`"value":"on"` for `caf0`, `"off"` for an explicit `stpx`; nothing without the flag). The option is for ELM327/STN
+either way. The audit log records the choice before the first request (`"dir":"setting"`, `"name":"stn-segmenting"`,
+`"value":"caf0"` or `"stpx"`; nothing without the flag). The option is for ELM327/STN
 adapters: it is refused with `--gsusb`, `--socketcan`, `--sim` and `--dry-run`, and by `adapter` and `update`, with
 status 2.
 

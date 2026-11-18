@@ -2098,7 +2098,7 @@ mod read_dids {
                 String::from_utf8_lossy(&out.stderr)
             );
             let story = audit_story(&log);
-            let setting = position(&story, "setting segment-on-stn");
+            let setting = position(&story, "setting stn-segmenting");
             // Before the first request, whichever it is.
             let first = story.iter().position(|s| s.starts_with("tx ")).unwrap();
             assert!(setting < first, "{method}: {story:?}");
@@ -2109,7 +2109,7 @@ mod read_dids {
 
     #[test]
     fn the_log_records_how_it_was_set() {
-        for (method, value) in [("caf0", "on"), ("stpx", "off")] {
+        for (method, value) in [("caf0", "caf0"), ("stpx", "stpx")] {
             let log = temp_log("read-dids-setting-value");
             let out = read_dids(
                 adapter(true, four_dids_reply()),
@@ -2119,7 +2119,7 @@ mod read_dids {
             );
             assert!(out.status.success());
             let audit = std::fs::read_to_string(&log).unwrap();
-            let line = format!(r#""dir":"setting","name":"segment-on-stn","value":"{value}""#);
+            let line = format!(r#""dir":"setting","name":"stn-segmenting","value":"{value}""#);
             assert!(
                 audit.lines().any(|l| l.contains(&line)),
                 "{method}: {audit}"

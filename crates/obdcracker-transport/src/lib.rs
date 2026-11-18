@@ -270,7 +270,7 @@ pub enum LinkEvent {
     Setting {
         /// When it was set.
         at: SystemTime,
-        /// The setting's name, such as `segment-on-stn`.
+        /// The setting's name, such as `stn-segmenting`.
         name: String,
         /// What it was set to, such as `on`.
         value: String,
