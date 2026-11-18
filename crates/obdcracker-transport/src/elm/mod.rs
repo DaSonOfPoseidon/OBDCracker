@@ -1563,6 +1563,15 @@ fn hex_byte(text: &str) -> Option<u8> {
     }
 }
 
+// Whether the STN's own flow control reaches the module `request` is for: an OBD-II emissions ECU
+// at 7E0 to 7E7 that answers on its request ID + 8. The STN's flow control filter is `7E8, 7F8`
+// and it sends its flow control to RxID - 8 (OBDLink FRPM rev. F, section 11.2 p. 57 and section
+// 12 p. 58), so `STPX` to such a module needs no setup.
+fn stock_flow_control_fits(request: &Approved) -> bool {
+    matches!(request.target(), Target::Physical(id) if (0x7E0..=0x7E7).contains(&id)
+        && request.reply_id() == Some(id + 8))
+}
+
 // Whether `request` is a frame on an open TP2.0 channel that the module answers with more frames
 // after its ACK: a data frame (opcodes 0x0 to 0x3), or an ACK (0xB), which asks the module for the
 // next block of an answer that goes on. A channel test (`A3`), the parameters (`A0`) and the
@@ -1585,7 +1594,7 @@ impl<L: Link> Transport for Elm<L> {
         // Longer requests go out as `STPX` on an STN (docs/elm327.md#multi-frame-requests), and
         // on any other adapter as raw frames written with `AT CAF0`
         // (docs/design/elm-caf0-segmenting.md), which an STN takes too if [`StnSegmenting`] says so.
-        let stpx = long && self.stn.is_some() && self.stn_uses_stpx();
+        let stpx = long && self.stn.is_some() && self.stn_uses_stpx(request);
         if payload.is_empty() || (raw && payload.len() > 8) || (!raw && payload.len() > STPX_MAX) {
             return Err(Error::Adapter(format!(
                 "a {}-byte request doesn't fit this driver's limit ({STPX_MAX} bytes where it \
@@ -1939,11 +1948,17 @@ impl<L: Link> Elm<L> {
         });
     }
 
-    // Whether a request over 7 bytes goes as `STPX` on an STN.
-    fn stn_uses_stpx(&self) -> bool {
+    // Whether a request over 7 bytes goes as `STPX` on an STN (docs/elm327.md#multi-frame-requests).
+    // `Auto` keeps `STPX` for the modules the STN's own flow control reaches, and otherwise
+    // segments the request itself, unless that path can't run (`check_segmenting` refuses), where
+    // `STPX` with its flow control set up is the only way left.
+    fn stn_uses_stpx(&self, request: &Approved) -> bool {
         match self.stn_segmenting {
-            StnSegmenting::Stpx | StnSegmenting::Auto => true,
+            StnSegmenting::Stpx => true,
             StnSegmenting::Caf0 => false,
+            StnSegmenting::Auto => {
+                stock_flow_control_fits(request) || self.check_segmenting(request).is_err()
+            }
         }
     }
 

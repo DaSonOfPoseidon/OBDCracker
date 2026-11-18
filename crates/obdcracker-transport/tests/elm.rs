@@ -4579,6 +4579,206 @@ mod forced_caf0 {
     }
 }
 
+// `StnSegmenting::Auto`, the default: an STN sends a long request as `STPX` only to the modules
+// its own flow control already reaches (7E0 to 7E7, replies 7E8 to 7EF), and as `AT CAF0` frames
+// to any other (docs/elm327.md#multi-frame-requests, #306).
+mod auto_segmenting {
+    use obdcracker_safety::ModuleIds;
+    use support::fake_elm::Module;
+
+    use super::*;
+
+    const ANSWER: [u8; 3] = [0x59, 0x02, 0xFF];
+    const FOUR_DIDS: [u8; 9] = [0x22, 0xF1, 0x87, 0xF1, 0x88, 0xF1, 0x89, 0xF1, 0x91];
+    // The line the fake records for the 4-DID read sent with `STPX`.
+    const STPX_LINE: &str = "STPXD:22F187F188F189F191";
+
+    // The gateway's request, narrowed to its module so the policy knows the reply ID.
+    fn request_to(ids: ModuleIds) -> Approved {
+        Policy::read_only()
+            .narrowed_to(&[ids])
+            .unwrap()
+            .approve(Protocol::Uds, Target::Physical(ids.request), &FOUR_DIDS)
+            .unwrap()
+    }
+
+    // An adapter with a module at `ids` that answers every request it gets whole; an STN unless
+    // `plain`.
+    fn adapter(ids: ModuleIds, plain: bool) -> FakeElm {
+        let mut adapter = FakeElm::new(Box::new(move |header, _| {
+            if header == ids.request {
+                vec![(ids.reply, ANSWER.to_vec())]
+            } else {
+                Vec::new()
+            }
+        }))
+        .with_module(Module::new(ids.request, ids.reply));
+        if !plain {
+            adapter.sti = Some("STN1155 v5.6.19".into());
+        }
+        adapter
+    }
+
+    // Connected, with `mode`, and past a first request, so the driver has seen the adapter echo
+    // each character as it reads it.
+    fn warmed(adapter: FakeElm, mode: Option<StnSegmenting>) -> Elm<FakeLink> {
+        let mut elm = connect(adapter);
+        if let Some(mode) = mode {
+            elm.stn_segmenting(mode);
+        }
+        elm.send(&approve(Target::Physical(0x7E0), &[0x09, 0x02]))
+            .unwrap();
+        while elm.recv(Duration::from_secs(1)).is_ok() {}
+        elm
+    }
+
+    fn frames_received(elm: &Elm<FakeLink>) -> usize {
+        elm.link().elm.module.as_ref().unwrap().frames.len()
+    }
+
+    // The commands the request caused.
+    fn commands_of(elm: &mut Elm<FakeLink>, request: &Approved) -> Vec<String> {
+        let before = commands(elm).len();
+        elm.send(request).unwrap();
+        elm.recv(Duration::from_secs(1)).unwrap();
+        while elm.recv(Duration::from_millis(100)).is_ok() {}
+        commands(elm)[before..].to_vec()
+    }
+
+    #[test]
+    fn a_module_outside_7e0_to_7e7_gets_caf0_frames() {
+        for ids in [GATEWAY, INSTRUMENTS] {
+            let mut elm = warmed(adapter(ids, false), None);
+            let sent = commands_of(&mut elm, &request_to(ids));
+            assert!(sent.iter().any(|c| c == "ATCAF0"), "{sent:?}");
+            assert!(!sent.iter().any(|c| c.starts_with("STPX")), "{sent:?}");
+            assert_eq!(frames_received(&elm), 2, "{ids:?}");
+        }
+    }
+
+    #[test]
+    fn a_module_at_7e0_to_7e7_gets_stpx() {
+        for request in [0x7E0, 0x7E1, 0x7E7] {
+            let ids = ModuleIds {
+                request,
+                reply: request + 8,
+            };
+            let mut elm = warmed(adapter(ids, false), None);
+            let sent = commands_of(&mut elm, &request_to(ids));
+            assert!(sent.iter().any(|c| c == STPX_LINE), "{sent:?}");
+            assert!(!sent.iter().any(|c| c.starts_with("ATCAF")), "{sent:?}");
+            assert_eq!(frames_received(&elm), 0, "{ids:?}");
+        }
+    }
+
+    #[test]
+    fn a_module_in_the_range_with_a_reply_off_the_pattern_gets_caf0_frames() {
+        // Its reply isn't request + 8, so the STN's own flow control (TxID = RxID - 8) would
+        // answer the wrong ID.
+        let ids = ModuleIds {
+            request: 0x7E1,
+            reply: 0x7EF,
+        };
+        let mut elm = warmed(adapter(ids, false), None);
+        let sent = commands_of(&mut elm, &request_to(ids));
+        assert!(sent.iter().any(|c| c == "ATCAF0"), "{sent:?}");
+        assert!(!sent.iter().any(|c| c.starts_with("STPX")), "{sent:?}");
+    }
+
+    #[test]
+    fn auto_goes_back_and_forth_between_the_two_paths() {
+        let mut elm = warmed(adapter(GATEWAY, false), None);
+        let engine = ModuleIds {
+            request: 0x7E0,
+            reply: 0x7E8,
+        };
+        elm.link_mut().elm.module = Some(Module::new(GATEWAY.request, GATEWAY.reply));
+        let sent = commands_of(&mut elm, &request_to(GATEWAY));
+        assert!(sent.iter().any(|c| c == "ATCAF0"), "{sent:?}");
+        // The engine answers too, for the STPX that follows.
+        let before = commands(&elm).len();
+        let narrowed = Policy::read_only().narrowed_to(&[engine, GATEWAY]).unwrap();
+        elm.send(
+            &narrowed
+                .approve(Protocol::Uds, Target::Physical(0x7E0), &FOUR_DIDS)
+                .unwrap(),
+        )
+        .unwrap();
+        let sent = commands(&elm)[before..].to_vec();
+        let caf1 = sent.iter().position(|c| c == "ATCAF1").expect("ATCAF1");
+        let stpx = sent.iter().position(|c| c == STPX_LINE).expect("STPX");
+        assert!(caf1 < stpx, "{sent:?}");
+    }
+
+    #[test]
+    fn stpx_forces_it_for_every_module_and_caf0_forces_frames_for_every_module() {
+        let mut elm = warmed(adapter(GATEWAY, false), Some(StnSegmenting::Stpx));
+        elm.send(&request_to(GATEWAY)).unwrap();
+        assert!(commands(&elm).iter().any(|c| c == STPX_LINE));
+        assert!(!commands(&elm).iter().any(|c| c == "ATCAF0"));
+
+        let ids = ModuleIds {
+            request: 0x7E1,
+            reply: 0x7E9,
+        };
+        let mut elm = warmed(adapter(ids, false), Some(StnSegmenting::Caf0));
+        elm.send(&request_to(ids)).unwrap();
+        assert!(commands(&elm).iter().any(|c| c == "ATCAF0"));
+        assert!(!commands(&elm).iter().any(|c| c.starts_with("STPX")));
+    }
+
+    #[test]
+    fn auto_uses_stpx_when_caf0_cannot_run() {
+        // No PP 26 in the summary: the padding of frames written by the driver is unknown.
+        let mut no_pp26 = adapter(GATEWAY, false);
+        no_pp26.pps = Some(vec!["09:00 F  24:00 F  25:00 F  29:FF F".to_owned()]);
+        let mut elm = warmed(no_pp26, None);
+        let sent = commands_of(&mut elm, &request_to(GATEWAY));
+        assert!(sent.iter().any(|c| c == STPX_LINE), "{sent:?}");
+        assert!(!sent.iter().any(|c| c.starts_with("ATCAF")), "{sent:?}");
+    }
+
+    #[test]
+    fn auto_refuses_before_writing_when_no_early_echo_has_been_seen() {
+        let mut elm = connect(adapter(GATEWAY, false));
+        let written = elm.link().written.len();
+        let err = elm.send(&request_to(GATEWAY)).unwrap_err();
+        assert!(err.to_string().contains("echoes each character"), "{err}");
+        assert_eq!(elm.link().written.len(), written);
+    }
+
+    #[test]
+    fn the_default_for_a_plain_elm327_is_still_caf0() {
+        let mut elm = warmed(adapter(GATEWAY, true), None);
+        let sent = commands_of(&mut elm, &request_to(GATEWAY));
+        assert!(sent.iter().any(|c| c == "ATCAF0"), "{sent:?}");
+        assert!(!sent.iter().any(|c| c.starts_with("ST")), "{sent:?}");
+    }
+
+    #[test]
+    fn the_mode_is_an_event_with_its_name() {
+        for (mode, name) in [
+            (StnSegmenting::Auto, "auto"),
+            (StnSegmenting::Stpx, "stpx"),
+            (StnSegmenting::Caf0, "caf0"),
+        ] {
+            let mut elm = connect(adapter(GATEWAY, false));
+            elm.take_events();
+            elm.stn_segmenting(mode);
+            let events = elm.take_events();
+            assert!(
+                matches!(
+                    events.as_slice(),
+                    [obdcracker_transport::LinkEvent::Setting { name: n, value, .. }]
+                        if n == "stn-segmenting" && value == name
+                ),
+                "{events:?}"
+            );
+        }
+        assert_eq!(StnSegmenting::default(), StnSegmenting::Auto);
+    }
+}
+
 mod response_pending {
     use super::*;
 
