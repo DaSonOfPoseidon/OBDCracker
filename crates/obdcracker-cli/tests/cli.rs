@@ -3679,9 +3679,9 @@ mod live {
         assert_eq!(found.len(), 3, "{}", stdout(&out));
         // The module of the first `--did` is read first, each module's DIDs in the order given.
         // F18B isn't in the simulated car, which leaves it out of the reply.
-        let want = "7E8 0C 0 rpm | 7E9 0C 0 rpm | 7E9 transmission F187 4G0927158Q | \
-                    7E9 transmission F189 1008 | 7E9 transmission F18B (not in the reply) | \
-                    7E8 engine F190 WAU2MBFC6EN093415";
+        let want = "7E8 0C 0 rpm | 7E9 0C 0 rpm | 7E9 transmission F187 \"4G0927158Q\" | \
+                    7E9 transmission F189 \"1008\" | 7E9 transmission F18B (not in the reply) | \
+                    7E8 engine F190 \"WAU2MBFC6EN093415\"";
         for (_, values) in &found {
             assert_eq!(values, want);
         }
@@ -3692,12 +3692,15 @@ mod live {
         let ms = found[0].0;
         assert_eq!(
             rows[2],
-            format!("{ms},\"7E9\",\"F187\",\"4G0927158Q\",\"\"")
+            format!("{ms},\"7E9\",\"F187\",\"\"\"4G0927158Q\"\"\",\"\"")
         );
-        assert_eq!(rows[3], format!("{ms},\"7E9\",\"F189\",\"1008\",\"\""));
+        assert_eq!(
+            rows[3],
+            format!("{ms},\"7E9\",\"F189\",\"\"\"1008\"\"\",\"\"")
+        );
         assert_eq!(
             rows[4],
-            format!("{ms},\"7E8\",\"F190\",\"WAU2MBFC6EN093415\",\"\"")
+            format!("{ms},\"7E8\",\"F190\",\"\"\"WAU2MBFC6EN093415\"\"\",\"\"")
         );
     }
 
@@ -4138,8 +4141,8 @@ mod live {
             assert_eq!(
                 values,
                 format!(
-                    "7E9 transmission F187 {a} | 7E9 transmission F189 AAAA | \
-                     7E9 transmission F190 {} | 7E9 transmission F191 {a}",
+                    "7E9 transmission F187 \"{a}\" | 7E9 transmission F189 \"AAAA\" | \
+                     7E9 transmission F190 \"{}\" | 7E9 transmission F191 \"{a}\"",
                     "A".repeat(17)
                 )
             );

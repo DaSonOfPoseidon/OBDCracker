@@ -138,7 +138,9 @@ Each entry names the class, what to check, and where it bit us.
   sweep of over 256 DIDs), so `live`, which polls until Ctrl-C, was first "short": on a low battery it warned that
   "this command is short, so it goes on" and then drained the battery for hours with nothing watching it. A new command
   that loops, or takes a duration, goes through `long_command` and `voltage_watch`, with an end that is checked (the
-  duration over 5 minutes, or none), and a test that a low battery refuses it and a drop stops it (#97).
+  duration over 5 minutes, or none), and a test that a low battery refuses it and a drop stops it (#97). A guard that
+  runs only after each poll can't fire during the sleep between polls, so at `--interval 1h` it ran once an hour: bound
+  every wait by the guard's own deadline (`wait_until`, #97, Codex).
 - **Keep limits per source, too.** One shared `max_pending` counter let one stuck ECU throw away every other ECU's
   answer to a broadcast. Count per ECU, and drop only the one that goes over (PR #9).
 - **Keep timers per source.** Each pending ECU gets its own P2*. One global "latest deadline" lets a late ECU in:

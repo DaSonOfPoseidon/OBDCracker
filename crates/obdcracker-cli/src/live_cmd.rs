@@ -207,7 +207,9 @@ fn pid_lines(sample: &Sample) -> Vec<Line> {
 type TextDids = BTreeMap<String, BTreeSet<u16>>;
 
 // A DID's data for the table and the CSV: text where the DID is text and the data is printable
-// text, else the bytes in brackets, so binary data can't pass for text that looks like hex.
+// text, in quotes with its quotes and backslashes escaped, else the bytes in brackets. Text with
+// no delimiter of its own could read as the bytes `[FF]` (or as `(not set)`), and two different
+// values must never print the same.
 fn shown(did: u16, data: &[u8], texts: &BTreeSet<u16>) -> String {
     let text = if did == uds::did::VIN {
         if obd::is_vin_placeholder(data) {
@@ -219,7 +221,7 @@ fn shown(did: u16, data: &[u8], texts: &BTreeSet<u16>) -> String {
     } else {
         None
     };
-    text.map_or_else(|| format!("[{}]", hex(data)), str::to_owned)
+    text.map_or_else(|| format!("[{}]", hex(data)), |text| format!("{text:?}"))
 }
 
 fn did_list(dids: &[u16]) -> String {
@@ -492,6 +494,8 @@ const LONGEST_BETWEEN_VOLTAGE_CHECKS: Duration = Duration::from_secs(30);
 // Reads the supply voltage again now and then during a long run, as the sweep does.
 struct SupplyWatch {
     watch: VoltageWatch,
+    // The longest between two readings.
+    longest: Duration,
     polls: u32,
     last: Instant,
 }
@@ -500,24 +504,56 @@ impl SupplyWatch {
     fn new(watch: VoltageWatch) -> Self {
         Self {
             watch,
+            longest: LONGEST_BETWEEN_VOLTAGE_CHECKS,
             polls: 0,
             last: Instant::now(),
         }
     }
 
-    // The voltage if it is too low. One that is unknown, or couldn't be read, doesn't stop the run:
-    // an adapter that can't measure it would never finish one.
-    fn too_low<T: Transport>(&mut self, transport: &mut T) -> Option<SupplyVoltage> {
+    fn polled(&mut self) {
         self.polls += 1;
-        if self.polls < POLLS_BETWEEN_VOLTAGE_CHECKS
-            && self.last.elapsed() < LONGEST_BETWEEN_VOLTAGE_CHECKS
-        {
+    }
+
+    // When a reading is due at the latest, so that a long wait for the next poll can be cut short.
+    fn deadline(&self) -> Instant {
+        self.last + self.longest
+    }
+
+    // The voltage if a reading is due and it is too low. One that is unknown, or couldn't be read,
+    // doesn't stop the run: an adapter that can't measure it would never finish one.
+    fn too_low<T: Transport>(&mut self, transport: &mut T) -> Option<SupplyVoltage> {
+        if self.polls < POLLS_BETWEEN_VOLTAGE_CHECKS && self.last.elapsed() < self.longest {
             return None;
         }
         self.polls = 0;
         self.last = Instant::now();
         let supply = transport.supply_voltage().ok()?;
         (self.watch.thresholds.check(supply) == VoltageCheck::TooLow).then_some(supply)
+    }
+}
+
+// Waits until `due`, reading the voltage when `supply` says one is due, also in the middle of a long
+// wait, and before the poll that follows it. The voltage if it was too low, which ends the wait.
+fn wait_until<T: Transport>(
+    transport: &mut T,
+    due: Instant,
+    supply: &mut Option<SupplyWatch>,
+) -> Option<SupplyVoltage> {
+    if let Some(watch) = supply {
+        watch.polled();
+    }
+    loop {
+        if let Some(low) = supply.as_mut().and_then(|watch| watch.too_low(transport)) {
+            return Some(low);
+        }
+        let now = Instant::now();
+        if now >= due {
+            return None;
+        }
+        let wake = supply
+            .as_ref()
+            .map_or(due, |watch| due.min(watch.deadline()));
+        std::thread::sleep(wake.saturating_duration_since(now));
     }
 }
 
@@ -728,7 +764,7 @@ fn poll_until_done<T: Transport>(
             eprintln!("done: {samples} samples");
             return ExitCode::SUCCESS;
         }
-        if let Some(low) = supply.as_mut().and_then(|watch| watch.too_low(transport)) {
+        if let Some(low) = wait_until(transport, due, &mut supply) {
             eprintln!(
                 "stopped: the supply voltage fell to {low}, below {}: with the engine off, going on \
                  can flatten the battery. The rows already written are kept. Charge it or run the \
@@ -740,7 +776,6 @@ fn poll_until_done<T: Transport>(
             );
             return ExitCode::FAILURE;
         }
-        std::thread::sleep(due.saturating_duration_since(now));
     }
 }
 
@@ -748,6 +783,64 @@ fn poll_until_done<T: Transport>(
 mod tests {
     use super::*;
     use obdcracker_transport::fingerprint::UdsModule;
+
+    // A simulated car whose battery is `millivolts`.
+    fn car(millivolts: u32) -> obdcracker_sim::SimBus {
+        let mut car = obdcracker_sim::SimBus::builtin("a7").unwrap();
+        car.set_supply_voltage(SupplyVoltage::Known { millivolts });
+        car
+    }
+
+    fn watch(longest: Duration) -> SupplyWatch {
+        let mut watch = SupplyWatch::new(VoltageWatch::default());
+        watch.longest = longest;
+        watch
+    }
+
+    #[test]
+    fn a_long_wait_is_cut_short_to_read_the_battery() {
+        // The next poll is an hour away; the reading is due in 20 ms, and the battery is low.
+        let mut supply = Some(watch(Duration::from_millis(20)));
+        let started = Instant::now();
+        let low = wait_until(
+            &mut car(11_000),
+            started + Duration::from_secs(3600),
+            &mut supply,
+        );
+        assert_eq!(low, Some(SupplyVoltage::Known { millivolts: 11_000 }));
+        assert!(started.elapsed() < Duration::from_secs(10));
+    }
+
+    #[test]
+    fn a_wait_with_a_good_battery_lasts_until_the_poll_is_due() {
+        let mut supply = Some(watch(Duration::from_millis(10)));
+        let due = Instant::now() + Duration::from_millis(100);
+        assert_eq!(wait_until(&mut car(12_600), due, &mut supply), None);
+        assert!(Instant::now() >= due);
+        // Without a watch it is only a wait.
+        let due = Instant::now() + Duration::from_millis(30);
+        assert_eq!(wait_until(&mut car(11_000), due, &mut None), None);
+        assert!(Instant::now() >= due);
+    }
+
+    #[test]
+    fn a_reading_is_also_due_after_fifty_polls_and_an_unknown_voltage_never_stops() {
+        let mut supply = Some(watch(Duration::from_secs(3600)));
+        let mut low = car(11_000);
+        // 49 waits that are already over read nothing; the 50th does.
+        for _ in 0..49 {
+            assert_eq!(wait_until(&mut low, Instant::now(), &mut supply), None);
+        }
+        assert_eq!(
+            wait_until(&mut low, Instant::now(), &mut supply),
+            Some(SupplyVoltage::Known { millivolts: 11_000 })
+        );
+        let mut unknown = car(11_000);
+        unknown.set_supply_voltage(SupplyVoltage::Unknown);
+        let mut supply = Some(watch(Duration::from_millis(1)));
+        std::thread::sleep(Duration::from_millis(5));
+        assert_eq!(wait_until(&mut unknown, Instant::now(), &mut supply), None);
+    }
 
     #[test]
     fn a_pid_is_two_hex_digits() {
@@ -926,9 +1019,9 @@ mod tests {
         // The standard makes F187 text, whatever the profile says.
         assert_eq!(
             shown(0xF187, b"4G0927158Q ", &BTreeSet::new()),
-            "4G0927158Q"
+            "\"4G0927158Q\""
         );
-        assert_eq!(shown(0xF1A3, b"X14", &texts), "X14");
+        assert_eq!(shown(0xF1A3, b"X14", &texts), "\"X14\"");
         // Binary data, an empty (all padding) value, and a DID the profile doesn't call text.
         assert_eq!(shown(0xF187, &[0x00, 0xFF], &texts), "[00 FF]");
         assert_eq!(shown(0xF187, b"   ", &texts), "[20 20 20]");
@@ -936,10 +1029,22 @@ mod tests {
         // The VIN is a VIN, the placeholder, or bytes: not any printable text.
         assert_eq!(
             shown(0xF190, b"WAU2MBFC6EN093415", &texts),
-            "WAU2MBFC6EN093415"
+            "\"WAU2MBFC6EN093415\""
         );
         assert_eq!(shown(0xF190, b"-----------------", &texts), "(not set)");
         assert_eq!(shown(0xF190, b"abc", &texts), "[61 62 63]");
+    }
+
+    #[test]
+    fn text_that_looks_like_bytes_or_a_placeholder_prints_differently_from_them() {
+        let texts = BTreeSet::from([0xF188]);
+        // The text `[FF]` and the byte FF, the text `(not set)` and a VIN that is none.
+        assert_eq!(shown(0xF188, b"[FF]", &texts), "\"[FF]\"");
+        assert_eq!(shown(0xF188, &[0xFF], &texts), "[FF]");
+        assert_eq!(shown(0xF188, b"(not set)", &texts), "\"(not set)\"");
+        assert_eq!(shown(0xF190, b"-----------------", &texts), "(not set)");
+        // A quote and a backslash are escaped, so the text can't end its own quotes early.
+        assert_eq!(shown(0xF188, b"a\"b\\", &texts), "\"a\\\"b\\\\\"");
     }
 
     #[test]

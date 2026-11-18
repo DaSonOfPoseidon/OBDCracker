@@ -507,7 +507,7 @@ run of them to catch up (`next_due` in the library), so a slow adapter polls as 
 The time column shows when each poll really started.
 
 **What it shows.** Each sample is the PIDs each ECU answered (`7E8 0C 812.5 rpm`) and then each module's DIDs
-(`7E9 transmission F187 4G0927158Q`). On a terminal the table is drawn again in place, under a `sample 12 at 2950 ms`
+(`7E9 transmission F187 "4G0927158Q"`). On a terminal the table is drawn again in place, under a `sample 12 at 2950 ms`
 heading; on Windows, or when stdout isn't a terminal, each sample is one line instead, `2950 ms | 7E8 0C 812.5 rpm |
 7E8 0D 0 km/h | ...`, so a pipe or a file works with a line-by-line tool. Notes and warnings go to stderr.
 
@@ -519,8 +519,9 @@ heading; on Windows, or when stdout isn't a terminal, each sample is one line in
 - **A reply that can't be read** is shown as `7E8 0C malformed (...)` (or `(service 0x01 refused: ...)`) and gets no CSV row.
   A module's refusal of its DID request is one line for the module: `7E9 transmission F187 F189 (service 0x22 refused:
   ...)`.
-- **A DID** is shown as text where it is text (the standard's identification DIDs and the profile's `decode = "text"`) and
-  the data is printable, else as `[bytes]` in hex. The VIN (F190) is a VIN, `(not set)` or bytes. A DID the module left out
+- **A DID** is shown as text, in quotes (a quote or backslash in it is escaped), where it is text (the standard's
+  identification DIDs and the profile's `decode = "text"`) and the data is printable, else as `[bytes]` in hex, so the
+  text `[FF]` (`"[FF]"`) and the byte FF (`[FF]`) can't be mistaken for each other. The VIN (F190) is a VIN, `(not set)` or bytes. A DID the module left out
   of its reply is `(not in the reply)`, and the ones after a DID the profile gives no length for are shown whole, as
   [`read-dids`](#read-dids) does, with neither a CSV row.
 - **Through an ELM327,** a poll of only DIDs, with 4 or more for a module (a request of over 7 bytes), first reads that
@@ -555,7 +556,7 @@ alone), and says what the rest of a live run does. It takes no `--csv`, since no
 elapsed_ms,ecu,pid_or_did,value,unit
 0,"7E8","0C",812.5,"rpm"
 0,"7E8","0D",0,"km/h"
-0,"7E9","F187","4G0927158Q",""
+0,"7E9","F187","""4G0927158Q""",""
 250,"7E8","0C",830,"rpm"
 ```
 
@@ -563,8 +564,9 @@ One row for each value of each sample, in the long form that is easy to diff and
 start of the command to the start of the sample's poll, the same for every row of a sample. `ecu` is the reply CAN ID as
 three hex digits (a DID's is its module's). `pid_or_did` is two hex digits for a PID and four for a DID. `value` is a
 number for a PID the library decodes, written as it is, and everything else (a PID it doesn't decode, as `[bytes]`; a
-DID, as text or `[bytes]`) is text. `unit` is the PID's unit, or empty. **Every field that isn't a plain number is quoted,
-with any quote inside it doubled**, so a comma or a quote in a DID's text can't move a column.
+DID, as text or `[bytes]`) is text. A DID's text is quoted inside the field, as in the table (`"""4G0927158Q"""` once the
+field is quoted), so the text `[FF]` and the byte FF differ. `unit` is the PID's unit, or empty. **Every field that isn't a
+plain number is quoted, with any quote inside it doubled**, so a comma or a quote in a DID's text can't move a column.
 
 A value that couldn't be read gets no row, so a gap in a PID's rows is a failure or an ECU that doesn't have it; the table
 and stderr say which. A file that already has data must start with this header, or the command refuses it (status 1) and
