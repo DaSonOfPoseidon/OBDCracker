@@ -8,7 +8,12 @@ use proptest::prelude::*;
 // Whatever a line parses as, a frame is always a valid classic CAN frame.
 fn check(line: &Line) -> Result<(), TestCaseError> {
     if let Line::Frame(frame) = line {
-        prop_assert!(frame.id() <= 0x7FF);
+        let most = if frame.is_29_bit() {
+            0x1FFF_FFFF
+        } else {
+            0x7FF
+        };
+        prop_assert!(frame.id() <= most);
         prop_assert!((1..=8).contains(&frame.data().len()));
     }
     Ok(())
@@ -71,7 +76,7 @@ proptest! {
 proptest! {
     #[test]
     fn every_printed_29_bit_frame_round_trips(
-        id in 0x800u32..=0x1FFF_FFFF,
+        id in 0u32..=0x1FFF_FFFF,
         data in prop::collection::vec(any::<u8>(), 1..=8),
     ) {
         let line = format!("{} {}", hex(&id.to_be_bytes()), hex(&data));

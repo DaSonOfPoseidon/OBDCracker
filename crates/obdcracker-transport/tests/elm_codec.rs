@@ -2,7 +2,7 @@
 //! Examples follow the ELM327 datasheet (ELM327DS v2.0), with headers and spaces on.
 
 use obdcracker_transport::elm::codec::{
-    CanFrame, Event, Line, LineSplitter, MAX_LINE, Status, parse_line,
+    CanFrame, Event, Line, LineSplitter, MAX_LINE, Status, parse_line, parse_remote,
 };
 
 fn split(chunks: &[&[u8]]) -> Vec<Event> {
@@ -125,9 +125,8 @@ mod frames {
         assert_eq!(f.data().len(), 8);
         assert!(!frame("7E8 01").is_29_bit());
         for line in [
-            // More than 29 bits, or an 11-bit value in a 29-bit header.
+            // More than 29 bits.
             "20 00 00 00 01",
-            "00 00 07 E8 01",
             // A header and no data, or too much.
             "18 DA F1 10",
             "18 DA F1 10 01 02 03 04 05 06 07 08 09",
@@ -137,6 +136,47 @@ mod frames {
         ] {
             assert!(matches!(parse_line(line), Line::Text(_)), "{line}");
         }
+    }
+
+    // The header's width is the number of digits printed, not the value's: a monitor on the
+    // 29-bit ID 0x00000123 prints it as four bytes (#104).
+    #[test]
+    fn a_29_bit_header_with_a_small_value_is_still_29_bit() {
+        for (line, id) in [
+            ("00 00 01 23 01", 0x123),
+            ("00 00 07 E8 01", 0x7E8),
+            ("00 00 00 00 01", 0),
+        ] {
+            let f = frame(line);
+            assert_eq!(f.id(), id, "{line}");
+            assert!(f.is_29_bit(), "{line}");
+            assert_eq!(f.data(), [0x01]);
+        }
+        assert!(!frame("123 01").is_29_bit());
+    }
+
+    // `RTR` replaces the data of a remote request when headers are on (datasheet p. 45). A
+    // request's answer never has one, so `parse_line` leaves it as text.
+    #[test]
+    fn a_remote_frame_is_its_id_and_rtr() {
+        assert_eq!(parse_remote("123 RTR"), Some((0x123, false)));
+        assert_eq!(parse_remote("123 RTR "), Some((0x123, false)));
+        assert_eq!(parse_remote("00 00 01 23 RTR"), Some((0x123, true)));
+        assert_eq!(parse_remote("18 DA F1 10 RTR"), Some((0x18DA_F110, true)));
+        for line in [
+            "RTR",
+            "123",
+            "123 rtr",
+            "123 RTR 01",
+            "123 01 RTR",
+            "800 RTR",
+            "7E RTR",
+            "20 00 00 00 RTR",
+            "18 DA F1 RTR",
+        ] {
+            assert_eq!(parse_remote(line), None, "{line}");
+        }
+        assert_eq!(parse_line("123 RTR"), Line::Text("123 RTR".to_owned()));
     }
 
     #[test]

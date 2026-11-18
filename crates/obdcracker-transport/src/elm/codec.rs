@@ -4,6 +4,8 @@
 //! The formats follow the ELM327 datasheet (ELM327DS v2.0) with headers and spaces on, as
 //! [`super::Elm`] sets them. See [`docs/elm327.md#output-format`](https://github.com/DaSonOfPoseidon/OBDCracker/blob/main/docs/elm327.md#output-format).
 
+use std::iter::Peekable;
+
 /// The longest line kept, in bytes. A frame line with headers and spaces on is 27 characters
 /// (35 with a 29-bit ID), and one marked `<DATA ERROR` is under 50; anything longer isn't from
 /// a working adapter.
@@ -90,10 +92,13 @@ impl LineSplitter {
     }
 }
 
-/// One CAN frame as the adapter printed it: an 11-bit ID and 1 to 8 data bytes.
+/// One CAN frame as the adapter printed it: an 11-bit or 29-bit ID and 1 to 8 data bytes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CanFrame {
     id: u32,
+    // From how many digits the adapter printed for the ID, not from its value: the 29-bit ID
+    // 0x00000123 is not the 11-bit ID 0x123.
+    wide: bool,
     data: [u8; 8],
     len: usize,
 }
@@ -108,7 +113,7 @@ impl CanFrame {
     /// Whether the adapter printed a 29-bit header (four bytes) for the frame.
     #[must_use]
     pub fn is_29_bit(&self) -> bool {
-        self.id > 0x7FF
+        self.wide
     }
 
     /// The frame's data bytes, PCI byte first.
@@ -265,32 +270,51 @@ fn parse_status(line: &str) -> Option<Status> {
 
 // "7E8 06 41 00 BE 3F A8 13": a 3-digit ID and 1 to 8 bytes, each separated by one space. A
 // 29-bit ID is printed as four bytes instead, "18 DA F1 10 03 62 F1 87", its first at most 0x1F.
+// The number of digits decides the width, so "00 00 01 23 01" is the 29-bit ID 0x123.
 // ELM327s print a space after the last byte too, so one trailing space is allowed.
 fn parse_frame(line: &str) -> Option<CanFrame> {
     let line = line.strip_suffix(' ').unwrap_or(line);
     let mut tokens = line.split(' ').peekable();
-    let first = *tokens.peek()?;
-    let id = if first.len() == 3 && first.bytes().all(|b| b.is_ascii_hexdigit()) {
-        tokens.next();
-        u32::from_str_radix(first, 16)
-            .ok()
-            .filter(|&id| id <= 0x7FF)?
-    } else {
-        let mut header = [0; 4];
-        for byte in &mut header {
-            *byte = hex_byte(tokens.next()?)?;
-        }
-        let id = u32::from_be_bytes(header);
-        // A 29-bit ID with an 11-bit value would read as an 11-bit frame's.
-        (0x800..=0x1FFF_FFFF).contains(&id).then_some(id)?
-    };
+    let (id, wide) = parse_id(&mut tokens)?;
     let mut data = [0; 8];
     let mut len = 0;
     for token in tokens {
         *data.get_mut(len)? = hex_byte(token)?;
         len += 1;
     }
-    (len > 0).then_some(CanFrame { id, data, len })
+    (len > 0).then_some(CanFrame {
+        id,
+        wide,
+        data,
+        len,
+    })
+}
+
+// The ID that starts a frame line, and whether it was printed as a 29-bit header.
+fn parse_id<'a>(tokens: &mut Peekable<impl Iterator<Item = &'a str>>) -> Option<(u32, bool)> {
+    let first = *tokens.peek()?;
+    if first.len() == 3 && first.bytes().all(|b| b.is_ascii_hexdigit()) {
+        tokens.next();
+        let id = u32::from_str_radix(first, 16).ok()?;
+        return (id <= 0x7FF).then_some((id, false));
+    }
+    let mut header = [0; 4];
+    for byte in &mut header {
+        *byte = hex_byte(tokens.next()?)?;
+    }
+    let id = u32::from_be_bytes(header);
+    (id <= 0x1FFF_FFFF).then_some((id, true))
+}
+
+/// A remote frame, which an adapter with headers on prints as the ID and `RTR` where the data
+/// would be (`7E8 RTR`, `18 DA F1 10 RTR`): the ID, and whether it is a 29-bit one. `None` for
+/// any other line. [`parse_line`] leaves it as text, since no reply to a request is one.
+#[must_use]
+pub fn parse_remote(line: &str) -> Option<(u32, bool)> {
+    let line = line.strip_suffix(' ').unwrap_or(line);
+    let mut tokens = line.split(' ').peekable();
+    let id = parse_id(&mut tokens)?;
+    (tokens.next() == Some("RTR") && tokens.next().is_none()).then_some(id)
 }
 
 /// The millivolts in an `ATRV` answer: one or two digits, up to three decimals after a point, and

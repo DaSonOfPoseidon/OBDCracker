@@ -54,7 +54,7 @@ pub(crate) fn parse_module_did(text: &str) -> Result<(String, u16), String> {
 }
 
 // A whole number and a unit: `250ms`, `60s`, `2m`, `1h`. A bare number could be either.
-fn parse_span(text: &str) -> Result<Duration, String> {
+pub(crate) fn parse_span(text: &str) -> Result<Duration, String> {
     let split = text
         .find(|c: char| !c.is_ascii_digit())
         .unwrap_or(text.len());

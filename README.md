@@ -24,6 +24,7 @@ manufacturer diagnostics are added as vehicle profiles. The development testbed 
 - **`sweep`:** find the DIDs a module answers that no profile lists yet
 - **`read-dids`:** read several DIDs from one module in a single request (UDS `22`), such as the four identification DIDs
 - **`live`:** poll mode 01 PIDs and profile DIDs again and again into a table and a CSV file, such as engine speed, vehicle speed and coolant temperature while the car runs
+- **`monitor`:** listen to the bus and print each CAN frame heard, with the adapter in silent monitoring so nothing is sent (an ELM327 or STN adapter; `gs_usb` and SocketCAN later)
 - **`--json` and `diff`:** every command can print one JSON document, and `diff` shows what changed between two of them: calibration IDs, CVNs, part numbers, modules, DTCs
 - **`--dry-run` and `--sim`:** see the exact frames before sending, or run against a simulated car
 - **Audit log** of every frame and adapter command in a real diagnostic session
