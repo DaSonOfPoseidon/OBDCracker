@@ -144,9 +144,10 @@ struct Cli {
           conflicts_with_all = ["serial", "tcp", "dry_run", "gsusb", "socketcan"])]
     sim_voltage_drop: Option<(usize, u32)>,
 
-    /// Go on with a long command (a sweep of over 256 DIDs, `scan --discover --wide`) although the
-    /// adapter reports a battery voltage below 11.8 V, and don't stop it if the voltage drops
-    /// further. The voltage is still read, logged and warned about
+    /// Go on with a long command (a sweep of over 256 DIDs, `scan --discover --wide`, a `live` run
+    /// with no --duration or over 5 minutes) although the adapter reports a battery voltage below
+    /// 11.8 V, and don't stop it if the voltage drops further. The voltage is still read, logged
+    /// and warned about
     #[arg(long)]
     force_low_voltage: bool,
 
@@ -1023,6 +1024,8 @@ fn run<T: Transport>(cli: &Cli, transport: T, link: &str, timing: Timing, elm: b
 
 // A sweep of more DIDs than this, or a wide discovery, runs long enough to flatten a battery.
 const LONG_SWEEP_DIDS: u32 = 256;
+// So does a `live` run with no end, or one that lasts longer than this.
+const LONG_LIVE: Duration = Duration::from_secs(300);
 
 // What the command is called if it is long, for the refusal that names it.
 fn long_command(cli: &Cli) -> Option<String> {
@@ -1039,6 +1042,9 @@ fn long_command(cli: &Cli) -> Option<String> {
             wide: true,
             ..
         } => Some("scan --discover --wide".to_owned()),
+        Command::Live { duration, .. } if duration.is_none_or(|duration| duration > LONG_LIVE) => {
+            Some("a live run with no --duration or over 5 minutes".to_owned())
+        }
         _ => None,
     }
 }

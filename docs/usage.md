@@ -103,13 +103,13 @@ off:
 | not reported (`gs_usb`, SocketCAN, a clone that prints `?`) | a note that the battery isn't checked; the command goes on |
 
 A voltage equal to a threshold is on its good side: exactly 12.2 V prints nothing, and exactly 11.8 V is only a
-warning. A **long command** is a `sweep` of more than 256 DIDs (exactly 256 is short) or `scan --discover --wide`.
-`live` is a short command, whatever its `--duration`: it gets the warning, is never refused, and doesn't stop when the
-voltage drops, so run it with the engine on or watch the battery.
+warning. A **long command** is a `sweep` of more than 256 DIDs (exactly 256 is short), `scan --discover --wide`, or a
+`live` run with no `--duration` or one over 5 minutes (exactly 5 minutes is short).
 
-While a long command runs, the voltage is read again every 50 requests, and a reading under 11.8 V stops it: `sweep`
-and the discovery passes print what they found and exit with status 1, `sweep` also says where to go on from (and
-leaves the extended session first, if it was in one). A reading that is unknown, or fails, doesn't stop it.
+While a long command runs, the voltage is read again every 50 requests (`live`: every 50 polls or 30 s, whichever comes
+first), and a reading under 11.8 V stops it: `sweep` and the discovery passes print what they found and exit with
+status 1, `sweep` also says where to go on from (and leaves the extended session first, if it was in one), and `live`
+keeps the rows it has written. A reading that is unknown, or fails, doesn't stop it.
 
 `--force-low-voltage` skips both the refusal and the stop. The voltage is still read, logged and warned about.
 Some adapters without voltage sensing always print `0.0V`, which is read as a voltage of 0: use the flag with those.
@@ -527,6 +527,11 @@ heading; on Windows, or when stdout isn't a terminal, each sample is one line in
   module's first DID alone, as `read-dids` does, since a plain ELM327 sends a long request only once an earlier one has
   shown that it echoes each character. If that read gets no answer, the command stops (status 1) before the long request. A
   poll with PIDs sends the supported-PID bitmaps first, so it needs no such read.
+
+**It stops, with status 1, when the battery drops.** A `live` run with no `--duration`, or one over 5 minutes, is a [long
+command](#battery-voltage): it is refused on a battery under 11.8 V, and the voltage is read again every 50 polls or 30
+s, whichever comes first (each reading is in the audit log). A reading under 11.8 V stops the run with `stopped: the
+supply voltage fell to ...`. `--force-low-voltage` skips both. A shorter run only gets the warning.
 
 **It stops, with status 1, when a request goes unanswered.** A reply that only missed one poll's wait can arrive during the
 next poll, which sends the same request, and be read as that poll's value. Nothing in it tells them apart, so no value after

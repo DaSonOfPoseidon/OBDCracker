@@ -3564,8 +3564,20 @@ mod live {
     // `live` on the simulated A7 with the audit log and, if `csv` is given, the CSV file, then
     // `args`.
     fn sim(name: &str, csv: Option<&PathBuf>, args: &[&str]) -> (Output, PathBuf) {
+        sim_with(name, csv, &[], args)
+    }
+
+    // The same with `flags`, which go before the command.
+    fn sim_with(
+        name: &str,
+        csv: Option<&PathBuf>,
+        flags: &[&str],
+        args: &[&str],
+    ) -> (Output, PathBuf) {
         let log = temp_log(name);
-        let mut all = vec!["--sim", "a7", "--audit-log", log.to_str().unwrap(), "live"];
+        let mut all = vec!["--sim", "a7", "--audit-log", log.to_str().unwrap()];
+        all.extend(flags);
+        all.push("live");
         all.extend(args);
         if let Some(csv) = csv {
             all.extend(["--csv", csv.to_str().unwrap()]);
@@ -3687,6 +3699,95 @@ mod live {
             rows[4],
             format!("{ms},\"7E8\",\"F190\",\"WAU2MBFC6EN093415\",\"\"")
         );
+    }
+
+    #[test]
+    fn a_run_with_no_end_is_long_and_is_refused_on_a_low_battery() {
+        // No --duration, or one over 5 minutes, runs long enough to flatten a battery.
+        for duration in [None, Some("301s"), Some("1h")] {
+            let mut args = vec!["--pid", "0C"];
+            args.extend(duration.iter().flat_map(|d| ["--duration", d]));
+            let (out, log) = sim_with("live-low-refused", None, &["--sim-voltage", "11.5"], &args);
+            assert_eq!(out.status.code(), Some(1), "{duration:?}: {}", stderr(&out));
+            let err = stderr(&out);
+            assert!(
+                err.contains("refused: the supply voltage is 11.5 V")
+                    && err.contains("a live run with no --duration or over 5 minutes")
+                    && err.contains("--force-low-voltage"),
+                "{err}"
+            );
+            assert_eq!(stdout(&out), "");
+            let audit = std::fs::read_to_string(&log).unwrap();
+            assert!(!audit.contains(r#""dir":"tx""#), "{audit}");
+        }
+        // A short one only gets the warning.
+        let (out, _) = sim_with(
+            "live-low-short",
+            None,
+            &["--sim-voltage", "11.5"],
+            &["--pid", "0C", "--duration", "300s", "--interval", "1h"],
+        );
+        assert!(out.status.success(), "{}", stderr(&out));
+        assert!(
+            stderr(&out).contains("this command is short, so it goes on"),
+            "{}",
+            stderr(&out)
+        );
+    }
+
+    #[test]
+    fn a_long_run_stops_when_the_battery_drops_and_keeps_its_rows() {
+        let csv = temp_csv("live-drop");
+        // The battery drops after 20 requests, which the run's first polls have sent by the time
+        // it looks again, after 50 polls.
+        let (out, log) = sim_with(
+            "live-drop",
+            Some(&csv),
+            &["--sim-voltage-drop", "20:11.0"],
+            &["--pid", "0C", "--interval", "50ms"],
+        );
+        assert_eq!(out.status.code(), Some(1), "{}", stderr(&out));
+        let err = stderr(&out);
+        assert!(
+            err.contains("stopped: the supply voltage fell to 11 V, below 11.8 V")
+                && err.contains("--force-low-voltage"),
+            "{err}"
+        );
+        let polls = stdout(&out).lines().count();
+        assert_eq!(polls, 50, "{}", stdout(&out));
+        let text = std::fs::read_to_string(&csv).unwrap();
+        assert_eq!(text.lines().count(), 1 + 2 * polls, "{text}");
+        // Read at the start and once more, which the log shows.
+        let audit = std::fs::read_to_string(&log).unwrap();
+        assert_eq!(audit.matches(r#""dir":"voltage""#).count(), 2, "{audit}");
+    }
+
+    #[test]
+    fn a_forced_run_goes_on_whatever_the_battery_does() {
+        use std::process::Stdio;
+        use std::time::Instant;
+        let csv = temp_csv("live-forced");
+        let log = temp_log("live-forced");
+        let mut child = Command::new(env!("CARGO_BIN_EXE_obdcracker"))
+            .env("OBDCRACKER_TEST_PORTS", "")
+            .args(["--sim", "a7", "--audit-log", log.to_str().unwrap()])
+            .args(["--force-low-voltage", "--sim-voltage-drop", "20:11.0"])
+            .args(["live", "--pid", "0C", "--interval", "50ms"])
+            .args(["--csv", csv.to_str().unwrap()])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        // Past the 50th poll, where an unforced run would have stopped.
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while std::fs::read_to_string(&csv).map_or(0, |text| text.lines().count()) < 1 + 2 * 60 {
+            assert!(Instant::now() < deadline, "stopped early");
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        let still_running = child.try_wait().unwrap().is_none();
+        child.kill().unwrap();
+        child.wait().unwrap();
+        assert!(still_running);
     }
 
     #[test]

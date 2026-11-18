@@ -11,11 +11,12 @@ use std::time::{Duration, Instant};
 use obdcracker_core::obd;
 use obdcracker_core::uds;
 use obdcracker_profile::{Decode, Profile};
-use obdcracker_safety::Policy;
+use obdcracker_safety::{Policy, SupplyVoltage, VoltageCheck, VoltageThresholds};
 use obdcracker_transport::fingerprint::ReadError;
 use obdcracker_transport::live::{DidPoll, DidSample, LONGEST_INTERVAL, PollError, Poller, Sample};
 use obdcracker_transport::read_dids::DidsData;
 use obdcracker_transport::scan::PidValue;
+use obdcracker_transport::voltage::VoltageWatch;
 use obdcracker_transport::{Timing, Transport, hex};
 
 use crate::{Cli, Command, SINGLE_FRAME_DIDS};
@@ -483,6 +484,43 @@ impl Told {
     }
 }
 
+// A run that is long (`crate::long_command`) reads the battery again after this many polls, or this
+// long, whichever comes first: the polls alone would be hours apart at a long interval.
+const POLLS_BETWEEN_VOLTAGE_CHECKS: u32 = 50;
+const LONGEST_BETWEEN_VOLTAGE_CHECKS: Duration = Duration::from_secs(30);
+
+// Reads the supply voltage again now and then during a long run, as the sweep does.
+struct SupplyWatch {
+    watch: VoltageWatch,
+    polls: u32,
+    last: Instant,
+}
+
+impl SupplyWatch {
+    fn new(watch: VoltageWatch) -> Self {
+        Self {
+            watch,
+            polls: 0,
+            last: Instant::now(),
+        }
+    }
+
+    // The voltage if it is too low. One that is unknown, or couldn't be read, doesn't stop the run:
+    // an adapter that can't measure it would never finish one.
+    fn too_low<T: Transport>(&mut self, transport: &mut T) -> Option<SupplyVoltage> {
+        self.polls += 1;
+        if self.polls < POLLS_BETWEEN_VOLTAGE_CHECKS
+            && self.last.elapsed() < LONGEST_BETWEEN_VOLTAGE_CHECKS
+        {
+            return None;
+        }
+        self.polls = 0;
+        self.last = Instant::now();
+        let supply = transport.supply_voltage().ok()?;
+        (self.watch.thresholds.check(supply) == VoltageCheck::TooLow).then_some(supply)
+    }
+}
+
 const OUT_OF_STEP: &str = "stopped: a request went unanswered, so a late reply could be taken for \
      a later poll's value, and no value after it can be trusted. Check the ignition and the \
      adapter, then run the command again; the rows already written are kept";
@@ -547,16 +585,14 @@ pub(crate) fn run<T: Transport>(
     if let Err(code) = warm_up(elm, transport, timing, &policy, pid, &polls, cli) {
         return code;
     }
-    poll_until_done(
-        transport,
-        timing,
-        &mut poller,
-        &polls,
-        &texts,
-        *interval,
-        *duration,
-        csv.as_mut(),
-    )
+    let plan = Plan {
+        polls: &polls,
+        texts: &texts,
+        interval: *interval,
+        duration: *duration,
+        watch: crate::voltage_watch(cli),
+    };
+    poll_until_done(transport, timing, &mut poller, &plan, csv.as_mut())
 }
 
 // A poll with only DIDs sends nothing before its first `22` request, and an ELM327 sends one over
@@ -618,17 +654,31 @@ fn dry_run<T: Transport>(transport: &mut T, timing: Timing, poller: &mut Poller)
     ExitCode::SUCCESS
 }
 
-#[allow(clippy::too_many_arguments)]
+// What a run polls and shows, and when it ends.
+struct Plan<'a> {
+    polls: &'a [DidPoll],
+    texts: &'a TextDids,
+    interval: Duration,
+    duration: Option<Duration>,
+    // Only a long run is watched.
+    watch: Option<VoltageWatch>,
+}
+
 fn poll_until_done<T: Transport>(
     transport: &mut T,
     timing: Timing,
     poller: &mut Poller,
-    polls: &[DidPoll],
-    texts: &TextDids,
-    interval: Duration,
-    duration: Option<Duration>,
+    plan: &Plan,
     mut csv: Option<&mut CsvFile>,
 ) -> ExitCode {
+    let Plan {
+        polls,
+        texts,
+        interval,
+        duration,
+        watch,
+    } = *plan;
+    let mut supply = watch.map(SupplyWatch::new);
     let started = Instant::now();
     // A duration too long for the clock never ends.
     let end = duration.and_then(|duration| started.checked_add(duration));
@@ -677,6 +727,18 @@ fn poll_until_done<T: Transport>(
         if end.is_some_and(|end| due >= end) {
             eprintln!("done: {samples} samples");
             return ExitCode::SUCCESS;
+        }
+        if let Some(low) = supply.as_mut().and_then(|watch| watch.too_low(transport)) {
+            eprintln!(
+                "stopped: the supply voltage fell to {low}, below {}: with the engine off, going on \
+                 can flatten the battery. The rows already written are kept. Charge it or run the \
+                 engine and run the command again, or give --force-low-voltage to go on without \
+                 this check",
+                SupplyVoltage::Known {
+                    millivolts: VoltageThresholds::DEFAULT.refuse_mv
+                }
+            );
+            return ExitCode::FAILURE;
         }
         std::thread::sleep(due.saturating_duration_since(now));
     }
