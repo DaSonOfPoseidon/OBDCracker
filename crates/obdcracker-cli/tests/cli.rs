@@ -508,6 +508,8 @@ fn wifi_elm(mut elm: FakeElm) -> SocketAddr {
                 Ok(n) => elm.write(&buf[..n]),
                 Err(_) => {}
             }
+            // Frames that reached the adapter since the last pass (a monitor hears them).
+            elm.poll();
             let out = elm.read(usize::MAX);
             if !out.is_empty() && stream.write_all(&out).is_err() {
                 return;
@@ -4322,5 +4324,171 @@ mod live {
             stderr(&out)
         );
         assert_eq!(stdout(&out), "");
+    }
+}
+
+mod monitor {
+    use super::*;
+
+    // An adapter on a bus where other nodes acknowledge, with these frames on it once it
+    // monitors.
+    fn adapter(stn: bool) -> SocketAddr {
+        let ms = Duration::from_millis;
+        let mut elm = FakeElm::silent().with_traffic(vec![
+            (ms(5), 0x7E8, vec![0x03, 0x41, 0x0C, 0x1A]),
+            (ms(10), 0x6F1, vec![0x02, 0x10, 0x03]),
+            (ms(15), 0x7E9, vec![0x10, 0x14, 0x62, 0xF1, 0x87]),
+        ]);
+        elm.two_node_bus = false;
+        if stn {
+            elm.sti = Some("STN2232 v5.12.4".into());
+        }
+        wifi_elm(elm)
+    }
+
+    fn stdout(out: &Output) -> String {
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    }
+
+    fn stderr(out: &Output) -> String {
+        String::from_utf8_lossy(&out.stderr).into_owned()
+    }
+
+    fn audit(log: &std::path::Path) -> Vec<serde_json::Value> {
+        std::fs::read_to_string(log)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect()
+    }
+
+    #[test]
+    fn prints_each_frame_heard_and_logs_them_without_sending_a_request() {
+        for stn in [true, false] {
+            let log = temp_log(&format!("monitor-{stn}"));
+            let addr = adapter(stn).to_string();
+            let out = obdcracker(&[
+                "--tcp",
+                &addr,
+                "--audit-log",
+                log.to_str().unwrap(),
+                "monitor",
+                "--filter",
+                "7ex",
+                "--duration",
+                "400ms",
+            ]);
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            assert!(out.status.success(), "{stderr}");
+            let stdout = String::from_utf8(out.stdout).unwrap();
+            let lines: Vec<Vec<&str>> = stdout
+                .lines()
+                .map(|l| l.split_whitespace().collect())
+                .collect();
+            assert_eq!(lines.len(), 2, "{stdout}");
+            assert_eq!(lines[0][1..], ["7E8", "03", "41", "0C", "1A"], "{stdout}");
+            assert_eq!(lines[1][1..], ["7E9", "10", "14", "62", "F1", "87"]);
+            assert!(lines[0][0].parse::<u64>().unwrap() >= 4, "{stdout}");
+            assert!(stderr.contains("heard 2 frame(s)"), "{stderr}");
+            assert!(stderr.contains("battery"), "{stderr}");
+
+            let entries = audit(&log);
+            let heard: Vec<_> = entries.iter().filter(|e| e["dir"] == "heard").collect();
+            assert_eq!(heard.len(), 2);
+            assert_eq!(heard[0]["id"], "7E8");
+            assert_eq!(heard[0]["payload"], "03 41 0C 1A");
+            // Nothing the log calls a request, and the silent setting came first of the
+            // monitor's commands.
+            assert!(entries.iter().all(|e| e["dir"] != "tx"), "{entries:?}");
+            let commands: Vec<_> = entries
+                .iter()
+                .filter(|e| e["dir"] == "cmd")
+                .map(|e| e["cmd"].as_str().unwrap())
+                .collect();
+            let silent = if stn { "STCMM0" } else { "ATCSM1" };
+            let monitor = if stn { "STM" } else { "ATMA" };
+            let at = |name: &str| commands.iter().rposition(|c| *c == name).unwrap();
+            assert!(commands.iter().position(|c| *c == silent).unwrap() < at("ATCRA7EX"));
+            assert!(at("ATCRA7EX") < at(monitor), "{commands:?}");
+        }
+    }
+
+    #[test]
+    fn a_dry_run_names_the_adapter_commands_and_opens_no_adapter() {
+        let out = obdcracker(&["--dry-run", "monitor", "--filter", "18DAF1XX"]);
+        let stdout = stdout(&out);
+        assert!(out.status.success(), "{}", stderr(&out));
+        assert!(stdout.contains("dry run: nothing was sent"), "{stdout}");
+        assert!(stdout.contains("STCMM0, ATSP7"), "{stdout}");
+        assert!(stdout.contains("ATCSM1, ATSP7"), "{stdout}");
+        assert!(
+            stdout.contains("ATCRA18DAF1XX, STM, then X to stop"),
+            "{stdout}"
+        );
+    }
+
+    #[test]
+    fn other_backends_and_options_are_refused_before_anything_is_opened() {
+        for (args, said) in [
+            (vec!["--gsusb", "monitor"], "#42"),
+            (vec!["--socketcan", "can0", "monitor"], "#42"),
+            (vec!["--sim", "a7", "monitor"], "--sim has none"),
+            (vec!["--json", "monitor"], "--json"),
+            (
+                vec![
+                    "--tcp",
+                    "127.0.0.1:1",
+                    "--elm-segmenting",
+                    "caf0",
+                    "monitor",
+                ],
+                "--elm-segmenting",
+            ),
+        ] {
+            let out = obdcracker(&args);
+            assert_eq!(out.status.code(), Some(2), "{args:?}: {}", stderr(&out));
+            assert!(stderr(&out).contains(said), "{args:?}: {}", stderr(&out));
+            assert_eq!(stdout(&out), "");
+        }
+    }
+
+    #[test]
+    fn a_bad_filter_or_duration_is_refused_before_anything_is_opened() {
+        for (args, said) in [
+            (vec!["--filter", "7E"], "isn't a filter"),
+            (vec!["--filter", "8XX"], "11-bit"),
+            (vec!["--filter", "7XG"], "hex digits"),
+            (vec!["--duration", "0s"], "no time"),
+            (vec!["--duration", "0"], "isn't a time"),
+            (vec!["--duration", "6m"], "over 300 s"),
+            (vec!["--duration", "301s"], "over 300 s"),
+            (vec!["--duration", "1h"], "over 300 s"),
+        ] {
+            let mut all = vec!["--tcp", "127.0.0.1:1", "monitor"];
+            all.extend(&args);
+            let out = obdcracker(&all);
+            assert_eq!(out.status.code(), Some(2), "{args:?}: {}", stderr(&out));
+            assert!(stderr(&out).contains(said), "{args:?}: {}", stderr(&out));
+        }
+    }
+
+    #[test]
+    fn the_longest_duration_and_the_shortest_are_taken() {
+        for duration in ["300s", "5m", "1ms"] {
+            let out = obdcracker(&["--dry-run", "monitor", "--duration", duration]);
+            assert!(out.status.success(), "{duration}: {}", stderr(&out));
+        }
+    }
+
+    #[test]
+    fn an_adapter_that_cannot_be_silent_fails_the_command_with_nothing_heard() {
+        // A plain adapter that refuses the silent setting, as a clone without `AT CSM` does.
+        let mut elm = FakeElm::silent();
+        elm.unsupported.push("ATCSM1".into());
+        let addr = wifi_elm(elm).to_string();
+        let out = obdcracker(&["--tcp", &addr, "monitor", "--duration", "100ms"]);
+        assert!(!out.status.success());
+        assert_eq!(stdout(&out), "");
+        assert!(stderr(&out).contains("ATCSM1"), "{}", stderr(&out));
     }
 }

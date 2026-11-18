@@ -145,6 +145,31 @@ mod order {
     }
 
     #[test]
+    fn the_commands_a_dry_run_names_are_the_ones_a_listen_writes() {
+        for (stn, pattern) in [
+            (false, "7E8"),
+            (true, "7E8"),
+            (false, "18DAF1XX"),
+            (true, "18DAF1XX"),
+        ] {
+            let mut elm = connect(bus(stn, Vec::new()));
+            let before = commands(&elm).len();
+            listen_for(&mut elm, pattern, MS).0.unwrap();
+            // Adaptive timing follows the mode switches on an STN that isn't paced.
+            let written: Vec<_> = commands(&elm)[before..]
+                .iter()
+                .filter(|c| !c.starts_with("ATAT"))
+                .cloned()
+                .collect();
+            let named: Vec<_> = obdcracker_transport::elm::listen_commands(stn, &filter(pattern))
+                .into_iter()
+                .filter(|c| c != "X")
+                .collect();
+            assert_eq!(written, named, "{stn} {pattern}");
+        }
+    }
+
+    #[test]
     fn the_first_command_of_a_connection_is_the_silent_setting() {
         // A fresh process has not shown that the adapter echoes each character; the silent
         // setting is what shows it, with nothing on the bus.

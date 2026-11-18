@@ -3,7 +3,10 @@
 use std::time::{Duration, Instant};
 
 use super::codec::{Event, Line, Status};
-use super::{Elm, LONGEST_WAIT, RAW_ON};
+use super::{
+    Elm, INTERRUPT, LONGEST_WAIT, MONITOR_ACK_ELM, MONITOR_ACK_STN, MONITOR_ELM, MONITOR_STN,
+    RAW_OFF, RAW_ON,
+};
 use crate::link::Link;
 use crate::{Error, Heard, Listen, ListenEnd, ListenFilter, OnFrame};
 
@@ -171,4 +174,30 @@ impl<L: Link> Elm<L> {
         restored?;
         Ok(end)
     }
+}
+
+/// The adapter commands a [`Listen::listen`] writes on a connection that has not been used yet,
+/// in order, for an STN (`stn`) or a plain ELM327: the silent setting, the modes that print
+/// frames whole, the width and filter, the monitor, then the commands that put the modes back
+/// once the monitor has been stopped with `X` (written once, between the two). A connection
+/// that has already set some of them skips those, and an STN on a fast link also gets
+/// `AT AT0`/`AT AT1` around the modes. None reaches the bus.
+#[must_use]
+pub fn listen_commands(stn: bool, filter: &ListenFilter) -> Vec<String> {
+    let (silent, monitor) = if stn {
+        (MONITOR_ACK_STN[1], MONITOR_STN)
+    } else {
+        (MONITOR_ACK_ELM[1], MONITOR_ELM)
+    };
+    let mut commands = vec![silent.to_owned()];
+    if filter.is_29_bit() {
+        commands.push("ATSP7".to_owned());
+    }
+    commands.extend(RAW_ON.map(str::to_owned));
+    commands.push(format!("ATCRA{filter}"));
+    commands.push(monitor.to_owned());
+    commands.push(String::from_utf8_lossy(INTERRUPT).into_owned());
+    commands.extend(RAW_OFF.map(str::to_owned));
+    commands.push(silent.to_owned());
+    commands
 }

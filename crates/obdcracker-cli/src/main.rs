@@ -3,6 +3,7 @@
 mod diff;
 mod json;
 mod live_cmd;
+mod monitor_cmd;
 mod obd_modes;
 mod update;
 mod vin_cmd;
@@ -36,7 +37,9 @@ use obdcracker_transport::scan::{
 use obdcracker_transport::sweep::{self, SweepOptions};
 use obdcracker_transport::tp20::{self, Answer, ChannelSession, Disconnect};
 use obdcracker_transport::voltage::VoltageWatch;
-use obdcracker_transport::{Audited, DryRun, S3, Timing, Transport, hex, log_events, log_failure};
+use obdcracker_transport::{
+    Audited, DryRun, ListenFilter, S3, Timing, Transport, hex, log_events, log_failure,
+};
 
 const DEFAULT_BAUD: u32 = 115_200;
 // ISO 15765-4 allows 250 or 500 kbit/s; nearly every car's OBD port is on 500.
@@ -303,6 +306,24 @@ enum Command {
         #[arg(long, value_name = "FILE")]
         csv: Option<PathBuf>,
     },
+    /// Listen to the bus and print each CAN frame heard, such as `--filter 7EX --duration 30s`:
+    /// the milliseconds since the start, the CAN ID and the data. Sends nothing: the adapter is
+    /// put in silent monitoring first (it refuses to listen if it can't), and every frame heard
+    /// goes in the audit log. It acknowledges nothing on the bus either, so it hears only what
+    /// other nodes acknowledge: a module's reply to a tester that isn't there is not heard. Needs
+    /// an ELM327/STN adapter that echoes each character (such as an `OBDLink`)
+    Monitor {
+        /// Which CAN IDs to show, as an ELM327 `AT CRA` pattern: 3 characters for 11-bit IDs or 8
+        /// for 29-bit ones, each a hex digit or X for any digit, such as 7EX (the emissions ECUs'
+        /// replies) or 18DAF1XX. Narrow it on a busy bus: the adapter drops frames it can't print
+        /// as fast as they come (BUFFER FULL) and the monitor then fails
+        #[arg(long, default_value = "7XX", value_name = "PATTERN")]
+        filter: ListenFilter,
+        /// How long to listen, such as 500ms, 30s or 5m: 1ms to 5m
+        #[arg(long, default_value = monitor_cmd::DEFAULT_DURATION, value_name = "TIME",
+              value_parser = monitor_cmd::parse_duration)]
+        duration: Duration,
+    },
     /// Read one DTC's snapshot records and extended data records from a module (UDS 0x19 04
     /// and 06). Reads only. Needs a profile (--profile or --sim) that lists the module
     Dtc {
@@ -476,6 +497,11 @@ fn main() -> ExitCode {
     if let Command::Diff { old, new } = &cli.command {
         let audit_log_given = matches.value_source("audit_log") == Some(ValueSource::CommandLine);
         return diff::run(&cli, audit_log_given, old, new);
+    }
+    if let Command::Monitor { .. } = cli.command
+        && let Some(code) = monitor_cmd::before_opening(&cli)
+    {
+        return code;
     }
     if let Some(port) = &cli.serial {
         open_serial(&cli, port)
@@ -928,6 +954,9 @@ fn adapter<L: Link>(cli: &Cli, link: L) -> ExitCode {
             }
         };
     }
+    if let Command::Monitor { .. } = cli.command {
+        return monitor_cmd::run(cli, elm, kind.name());
+    }
     // Before the audit log opens, so its first lines say how requests will be sent.
     if let Some(method) = cli.elm_segmenting {
         elm.stn_segmenting(match method {
@@ -1022,6 +1051,7 @@ fn run<T: Transport>(cli: &Cli, transport: T, link: &str, timing: Timing, elm: b
         | Command::Dtc { .. }
         | Command::ReadDids { .. }
         | Command::Live { .. }
+        | Command::Monitor { .. }
         | Command::Update { .. }
         | Command::Diff { .. } => unreachable!(),
     }

@@ -6,6 +6,7 @@
 
 pub mod codec;
 mod listen;
+pub use listen::listen_commands;
 
 use std::collections::{HashSet, VecDeque};
 use std::time::{Duration, Instant, SystemTime};
