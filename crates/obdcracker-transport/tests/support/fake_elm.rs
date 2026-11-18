@@ -361,6 +361,15 @@ impl FakeElm {
         Self::new(Box::new(|_, _| Vec::new()))
     }
 
+    /// Frames other nodes put on the bus, each `Duration` after the adapter next starts
+    /// monitoring (`STM` or `ATMA`): the traffic a listen-only monitor hears. Nothing here is
+    /// a reply to the adapter. Frames the receive filter hides are skipped as on the real one.
+    #[must_use]
+    pub fn with_traffic(mut self, frames: Vec<(Duration, u32, Vec<u8>)>) -> Self {
+        self.held.extend(frames);
+        self
+    }
+
     pub fn write(&mut self, bytes: &[u8]) {
         self.poll();
         for &byte in bytes {
@@ -1696,9 +1705,14 @@ impl Link for FakeLink {
         if let Some((at, _)) = self.scheduled.front() {
             let now = std::time::Instant::now();
             if *at <= now {
-                let (_, bytes) = self.scheduled.pop_front().unwrap();
-                buf[..bytes.len()].copy_from_slice(&bytes);
-                return Ok(bytes.len());
+                let (at, mut bytes) = self.scheduled.pop_front().unwrap();
+                // What doesn't fit stays due for the next read.
+                let n = buf.len().min(bytes.len());
+                buf[..n].copy_from_slice(&bytes[..n]);
+                if n < bytes.len() {
+                    self.scheduled.push_front((at, bytes.split_off(n)));
+                }
+                return Ok(n);
             }
             if !self.elm.has_output() {
                 std::thread::sleep((*at - now).min(timeout));

@@ -18,6 +18,7 @@ pub mod gateway;
 #[cfg(feature = "serde")]
 pub mod json;
 pub mod link;
+mod listen;
 pub mod live;
 mod mock;
 /// The gs_usb and SocketCAN backends (M6) are its users. Crate-private, so no importer can put a
@@ -45,6 +46,7 @@ pub mod voltage;
 pub use audit::{Audited, log_events, log_failure};
 pub use dry_run::DryRun;
 pub use exchange::{Expect, Timing, exchange};
+pub use listen::{Heard, InvalidFilter, Listen, ListenEnd, ListenFilter, OnFrame};
 pub use mock::Mock;
 #[cfg(feature = "gsusb")]
 pub use raw::gsusb;

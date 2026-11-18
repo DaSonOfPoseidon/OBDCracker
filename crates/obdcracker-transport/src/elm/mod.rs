@@ -5,6 +5,7 @@
 //! writes an empty line. See [`docs/elm327.md`](https://github.com/DaSonOfPoseidon/OBDCracker/blob/main/docs/elm327.md) for the adapter's behaviour and why.
 
 pub mod codec;
+mod listen;
 
 use std::collections::{HashSet, VecDeque};
 use std::time::{Duration, Instant, SystemTime};
@@ -775,6 +776,13 @@ impl<L: Link> Elm<L> {
                  an OBDLink), and this one hasn't shown it does; send an ISO-TP request first"
             )));
         }
+        self.checked_answer(command)
+    }
+
+    // `guarded_answer` without insisting that the adapter has shown it echoes characters: the
+    // echo is checked before the carriage return all the same, and checking it is what shows
+    // whether the adapter does (`check_early_echo`).
+    fn checked_answer(&mut self, command: &str) -> Result<Vec<String>, Error> {
         self.ready()?;
         self.check_idle()?;
         let at = SystemTime::now();
@@ -792,6 +800,22 @@ impl<L: Link> Elm<L> {
         });
         answered?;
         Ok(lines)
+    }
+
+    // Raw frames for VW TP2.0 on or off, with the monitor's acknowledgement to match
+    // (docs/elm327.md#vw-tp20-channel-frames).
+    fn switch_raw(&mut self, raw: bool) -> Result<(), Error> {
+        for command in if raw { RAW_ON } else { RAW_OFF } {
+            self.guarded_command(command)?;
+        }
+        self.guarded_command(self.monitor_ack_command(raw))?;
+        if raw {
+            self.start_batching()?;
+        } else {
+            self.stop_batching()?;
+        }
+        self.raw = raw;
+        self.sync_adaptive()
     }
 
     // Raw mode has started on an STN: asks it to batch commands. Only an exact `OK` counts; any
@@ -949,6 +973,9 @@ impl<L: Link> Elm<L> {
                  says it's {}, but many clones claim a version they don't implement",
                 self.banner
             )
+        } else if command == MONITOR_ACK_ELM[1] || command == MONITOR_ACK_STN[1] {
+            // A listen isn't started: its monitor might be a node on the bus.
+            "; without it the adapter's monitor may not stay silent on the bus".to_owned()
         } else if MONITOR_ACK_ELM.contains(&command) || MONITOR_ACK_STN.contains(&command) {
             // Raw mode isn't entered: its monitor couldn't hear a module's answer.
             "; without it the adapter's monitor wouldn't acknowledge a module's frames, and the \
@@ -1430,22 +1457,29 @@ impl<L: Link> Elm<L> {
         }
     }
 
+    // Puts the adapter on 11-bit or 29-bit CAN if it isn't, forgetting what depended on the old
+    // protocol.
+    fn set_width(&mut self, bits29: bool) -> Result<(), Error> {
+        if self.bits29 == bits29 {
+            return Ok(());
+        }
+        // Forgotten first: a command that fails may still have taken effect.
+        self.header = None;
+        self.flow = None;
+        self.filter.clear();
+        // The STN may drop its filters and pairs with the protocol; adding them again twice
+        // costs only a little of its memory.
+        self.forget_flow_control_setup();
+        self.bits29 = bits29;
+        // Never automatic search (see `SETUP`).
+        self.expect_ok(if bits29 { "ATSP7" } else { "ATSP6" })
+    }
+
     fn set_target(&mut self, request: &Approved) -> Result<(), Error> {
         let target = request.target();
         let id = target.can_id();
         let bits29 = target.is_29_bit();
-        if self.bits29 != bits29 {
-            // Forgotten first: a command that fails may still have taken effect.
-            self.header = None;
-            self.flow = None;
-            self.filter.clear();
-            // The STN may drop its filters and pairs with the protocol; adding them again twice
-            // costs only a little of its memory.
-            self.forget_flow_control_setup();
-            self.bits29 = bits29;
-            // Never automatic search (see `SETUP`).
-            self.expect_ok(if bits29 { "ATSP7" } else { "ATSP6" })?;
-        }
+        self.set_width(bits29)?;
         if self.header != Some(id) {
             if bits29 {
                 // Each keeps two non-hex letters, so no flipped bit makes a bus request.
@@ -1756,17 +1790,7 @@ impl<L: Link> Transport for Elm<L> {
             self.sync_adaptive()?;
         }
         if self.raw != raw {
-            for command in if raw { RAW_ON } else { RAW_OFF } {
-                self.guarded_command(command)?;
-            }
-            self.guarded_command(self.monitor_ack_command(raw))?;
-            if raw {
-                self.start_batching()?;
-            } else {
-                self.stop_batching()?;
-            }
-            self.raw = raw;
-            self.sync_adaptive()?;
+            self.switch_raw(raw)?;
         }
         if segments.is_some() && !self.segmenting {
             self.guarded_command("ATCAF0")?;

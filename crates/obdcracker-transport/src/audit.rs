@@ -6,7 +6,9 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use obdcracker_safety::{Approved, ApprovedFlowControl, SupplyVoltage};
 
-use crate::{Error, LinkEvent, Response, Transport, hex};
+use crate::{
+    Error, Heard, LinkEvent, Listen, ListenEnd, ListenFilter, OnFrame, Response, Transport, hex,
+};
 
 /// Wraps a transport and appends every request, and every reply the transport returns, to a JSON
 /// Lines file. Requests are logged before they are sent, so a send that crashes the program is
@@ -19,7 +21,9 @@ use crate::{Error, LinkEvent, Response, Transport, hex};
 /// (`"dir":"status"`), driver settings that change how a request is sent, such as
 /// [`Elm::stn_segmenting`](crate::elm::Elm::stn_segmenting) (`"dir":"setting"`, with `"name"` and
 /// `"value"`), how many events were lost (`"dir":"lost"`), and each reading of the supply voltage
-/// ([`Transport::supply_voltage`], `"dir":"voltage"` with `"millivolts"`, `null` when unknown).
+/// ([`Transport::supply_voltage`], `"dir":"voltage"` with `"millivolts"`, `null` when unknown), and
+/// each frame heard in a listen ([`Listen::listen`], `"dir":"heard"` with the ID, 3 or 8 digits, and the
+/// data as `"payload"`).
 /// Each line's `ts_ms` is
 /// when it happened (for a reply line, when the driver read it from the link), so an event can
 /// be logged after a later request. When dropped, it has the transport read what's left of the
@@ -131,6 +135,20 @@ fn frame_fields(dir: &str, id: u32, payload: &[u8]) -> String {
     )
 }
 
+// A frame heard while listening. Its ID is written at the width it has, so `123` and `00000123`
+// are not the same entry.
+fn heard_fields(heard: &Heard) -> String {
+    let id = if heard.extended {
+        format!("{:08X}", heard.id)
+    } else {
+        format!("{:03X}", heard.id)
+    };
+    format!(
+        r#""dir":"heard","id":"{id}","payload":"{}""#,
+        hex(&heard.data)
+    )
+}
+
 fn write_line(log: &mut File, link: &str, at: SystemTime, fields: &str) -> Result<(), Error> {
     let ts_ms = at.duration_since(UNIX_EPOCH).map_or(0, |t| t.as_millis());
     writeln!(log, r#"{{"ts_ms":{ts_ms},{fields},"link":"{link}"}}"#)
@@ -219,6 +237,28 @@ impl<T: Transport> Transport for Audited<T> {
         let logged = self.record_events();
         settled.map_err(|e| self.record_error("settle", None, e))?;
         logged
+    }
+}
+
+impl<T: Transport + Listen> Listen for Audited<T> {
+    // Each frame is logged (`"dir":"heard"`) before the callback sees it, so a log that can't take
+    // it stops the listen. The adapter commands the listen sent follow, with their own times.
+    fn listen(
+        &mut self,
+        filter: &ListenFilter,
+        wait: Duration,
+        on_frame: OnFrame<'_>,
+    ) -> Result<ListenEnd, Error> {
+        self.settled = false;
+        let (log, link) = (&mut self.log, &self.link);
+        let ended = self.inner.listen(filter, wait, &mut |heard| {
+            write_line(log, link, SystemTime::now(), &heard_fields(heard))?;
+            on_frame(heard)
+        });
+        let logged = self.record_events();
+        let end = ended.map_err(|e| self.record_error("listen", None, e))?;
+        logged?;
+        Ok(end)
     }
 }
 
