@@ -254,9 +254,9 @@ STBC1                             <OK        batching on (FRPM 8.15); only an ex
   carriage return's write) is reported as "the request may have been sent". A failure in the digits themselves still
   says "the request wasn't sent". The driver is broken either way, and `ChannelSession` returns the error without
   resending the approved frame.
-- **After the carriage return** the driver is monitoring and has logged the `STM` as a command, as for a monitor it
-  starts itself: once the digits were written and echoed right, before `|STM` was written (a head that failed leaves no
-  `STM` entry). The adapter prints the frame's own replies, then, with the pipe in front, the monitor's frames, and no prompt
+- **After the carriage return** the driver is monitoring and has logged the monitor as the command `|STM` (a
+  plain `STM` stays `STM`), once the digits were written and echoed right, before `|STM` was written (a head that
+  failed leaves no entry). The adapter prints the frame's own replies, then, with the pipe in front, the monitor's frames, and no prompt
   until the driver stops it. The pipe is accepted once, as a prefix of the first line after the frame's reply, or alone on a
   line, only while a batched line is in progress; after a second line without it, or anywhere else, a `|` is
   unexpected output (a monitor that printed no pipe doesn't leave one to be taken later). The manual's examples put it
@@ -288,7 +288,7 @@ smaller wins, and the design should be reopened before building either.
   and a transport still takes only `&Approved`. The suffix is a constant, so a caller can't put anything after the
   frame, and only a data frame or an ACK on a channel gets it.
 - **The frame's bytes don't change**, and the audit log still logs the request (its payload) before it is sent. The
-  `STM` it starts is logged as a command when the line is written, as `start_monitor` does now, the `STBC` probe and
+  `STM` it starts is logged as the command `|STM` when the line is written (`start_monitor`'s plain `STM` stays `STM`), the `STBC` probe and
   its answer are logged as commands, and every frame the monitor prints is logged like any reply.
 - **Every bit-flip is covered by the echo check, with one more case than before.** The digits are echoed and compared
   before `|STM` is written, and `|STM` before the carriage return; a mismatch ends the line with `XX\r`

@@ -1644,12 +1644,14 @@ impl<L: Link> Transport for Elm<L> {
         };
         // The `STM` is noted before its bytes are written, as `start_monitor` does, and however
         // that write ends: a misheard `STM` may still have run. A head that failed first means
-        // it was never written, so it isn't noted.
+        // it was never written, so it isn't noted. It is noted as `|STM`, so the log tells it
+        // from the plain `STM` the driver writes on a line of its own (only a batched line has
+        // a tail for the callback to run before).
         let sent_at =
             self.write_line(&line, if batched { head_len } else { line.len() }, |elm| {
                 elm.note(LinkEvent::Command {
                     at: SystemTime::now(),
-                    command: MONITOR_STN.to_owned(),
+                    command: format!("{BATCH_PIPE}{MONITOR_STN}"),
                     answer: Vec::new(),
                 });
             })?;
