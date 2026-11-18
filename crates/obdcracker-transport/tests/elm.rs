@@ -1510,8 +1510,9 @@ mod requests {
         // The probe and each batched `STM` are in the log as commands, before anything else the
         // frame did.
         let logged = logged_commands(&mut elm);
-        let stm = logged.iter().filter(|(c, _)| c == "STM").count();
+        let stm = logged.iter().filter(|(c, _)| c == "|STM").count();
         assert_eq!(stm, 3, "{logged:?}");
+        assert!(!logged.iter().any(|(c, _)| c == "STM"), "{logged:?}");
         assert!(logged.contains(&("STBC1".to_owned(), vec!["OK".to_owned()])));
         assert!(logged.contains(&("STBC0".to_owned(), vec!["OK".to_owned()])));
     }
@@ -1769,6 +1770,17 @@ mod requests {
         assert_eq!(elm.link().elm.lost_frames, []);
         let written = batching_commands(&elm);
         assert_eq!(written[written.len() - 2..], ["1000021A9B|STM", "STM"]);
+        // The log tells the two apart: the batched line's monitor, then the driver's own.
+        let monitors: Vec<String> = logged_commands(&mut elm)
+            .into_iter()
+            .map(|(command, _)| command)
+            .filter(|command| command.contains("STM"))
+            .collect();
+        assert_eq!(
+            monitors[monitors.len() - 2..],
+            ["|STM", "STM"],
+            "{monitors:?}"
+        );
     }
 
     #[test]
@@ -1927,7 +1939,7 @@ mod requests {
         elm.link_mut().kill_after_writes = Some(1);
         assert!(elm.send(&frame).is_err());
         let logged = logged_commands(&mut elm);
-        assert_eq!(logged, [("STM".to_owned(), Vec::new())]);
+        assert_eq!(logged, [("|STM".to_owned(), Vec::new())]);
         // The probe: echoed, and never answered.
         let mut car = batching_stn(Duration::from_secs(60));
         car.mute = vec!["STBC1".to_owned()];
