@@ -50,7 +50,8 @@ Each entry names the class, what to check, and where it bit us.
   DID with *no* fixed format (F18B's BCD date) must take the profile's format, and every reader of a text DID must
   apply the same check as the others. Scan forced F18B to text and read F190 with the plain text decoder, so a
   printable date showed as a string and `62 F1 90 61 62 63` as the VIN `abc` (#50, #51). Keep the list in one place
-  (`uds::did::is_text`, `obd::check_vin`).
+  (`uds::did::is_text`, `obd::check_vin`). `read-dids` made the same mistake by showing any printable bytes as text;
+  it now goes through `DidFormat::of` and `DidValue::from_data_as` too (#355).
 - **Cross-check related sources, both ways.** Fixture vs profile: every DID is standard or in the profile, values
   match the profile's `decode`, and OBD-II data only sits on OBD-II ID pairs (0x7E0..=0x7E7 → +8). And profile vs
   fixture: every DID the car answered (it has a length) is in the fixture, or the sim refuses what the car didn't.

@@ -129,6 +129,20 @@ pub enum DidValue {
     NotSet,
 }
 
+impl DidValue {
+    /// A DID's data as `scan` shows it: [`Text`](Self::Text) when [`uds::decode_text`] accepts it
+    /// (padding is dropped, so data that is only padding is empty text), otherwise
+    /// [`Bytes`](Self::Bytes). It never gives [`NotSet`](Self::NotSet), which only a VIN check
+    /// finds.
+    #[must_use]
+    pub fn from_data(data: &[u8]) -> Self {
+        match uds::decode_text(data) {
+            Ok(text) => Self::Text(text.to_owned()),
+            Err(_) => Self::Bytes(data.to_vec()),
+        }
+    }
+}
+
 impl fmt::Display for DidValue {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -501,10 +515,7 @@ pub(crate) fn ecus_to_ask<T: Transport + ?Sized>(
 }
 
 pub(crate) fn decode_did_value(payload: &[u8], did: u16) -> Result<DidValue, response::Error> {
-    uds::decode_did(payload, did).map(|data| match uds::decode_text(data) {
-        Ok(text) => DidValue::Text(text.to_owned()),
-        Err(_) => DidValue::Bytes(data.to_vec()),
-    })
+    uds::decode_did(payload, did).map(DidValue::from_data)
 }
 
 // One module's decoded answer to `request`, or NoReply. Only an adapter failure is an error.

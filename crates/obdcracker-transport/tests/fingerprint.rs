@@ -554,3 +554,66 @@ fn a_vin_check_reports_an_adapter_failure() {
         )))
     );
 }
+
+#[test]
+fn did_data_is_text_when_it_is_printable_and_bytes_when_it_is_not() {
+    // The A7 transmission's F187, with its trailing space.
+    let session = [
+        0x34, 0x47, 0x30, 0x39, 0x30, 0x37, 0x34, 0x30, 0x31, 0x4E, 0x20,
+    ];
+    assert_eq!(
+        DidValue::from_data(&session),
+        DidValue::Text("4G0907401N".into())
+    );
+    assert_eq!(
+        DidValue::from_data(&[0x20, 0x13, 0x11]),
+        DidValue::Bytes(vec![0x20, 0x13, 0x11])
+    );
+    // One byte, and nothing but padding (an unset value is empty text, as in `scan`).
+    assert_eq!(DidValue::from_data(b"A"), DidValue::Text("A".into()));
+    assert_eq!(
+        DidValue::from_data(&[0x20, 0x00]),
+        DidValue::Text(String::new())
+    );
+    assert_eq!(DidValue::from_data(&[0x80]), DidValue::Bytes(vec![0x80]));
+}
+
+#[test]
+fn a_dids_format_decides_how_its_data_is_shown() {
+    use obdcracker_transport::scan::DidFormat;
+
+    // A VIN is checked as one, whatever is printable: a placeholder is not set, anything else
+    // that isn't a VIN is bytes.
+    assert_eq!(
+        DidValue::from_data_as(0xF190, DidFormat::Text, b"WAUZZZ4G6EN123456"),
+        DidValue::Text("WAUZZZ4G6EN123456".into())
+    );
+    assert_eq!(
+        DidValue::from_data_as(0xF190, DidFormat::Text, &[b'-'; 17]),
+        DidValue::NotSet
+    );
+    assert_eq!(
+        DidValue::from_data_as(0xF190, DidFormat::Text, b"abc"),
+        DidValue::Bytes(b"abc".to_vec())
+    );
+    // Hex is bytes even when printable, as for a profile's coding value.
+    assert_eq!(
+        DidValue::from_data_as(0xF18B, DidFormat::Hex, b"2014"),
+        DidValue::Bytes(b"2014".to_vec())
+    );
+    assert_eq!(
+        DidValue::from_data_as(0xF187, DidFormat::Text, b"4G0907401N "),
+        DidValue::Text("4G0907401N".into())
+    );
+
+    // ISO 14229-1 text DIDs stay text whatever a profile says; the other scan DIDs are text
+    // unless the profile says hex; a DID scan doesn't read and the profile doesn't list is bytes.
+    assert_eq!(DidFormat::of(0xF187, Some(DidFormat::Hex)), DidFormat::Text);
+    assert_eq!(DidFormat::of(0xF18B, Some(DidFormat::Hex)), DidFormat::Hex);
+    assert_eq!(DidFormat::of(0xF18B, None), DidFormat::Text);
+    assert_eq!(DidFormat::of(0x1234, None), DidFormat::Hex);
+    assert_eq!(
+        DidFormat::of(0x1234, Some(DidFormat::Text)),
+        DidFormat::Text
+    );
+}
