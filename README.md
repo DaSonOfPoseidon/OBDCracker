@@ -23,6 +23,7 @@ manufacturer diagnostics are added as vehicle profiles. The development testbed 
 - **`scan`:** live data, DTCs and identification from the profile's modules, plus any that `--discover` finds
 - **`sweep`:** find the DIDs a module answers that no profile lists yet
 - **`read-dids`:** read several DIDs from one module in a single request (UDS `22`), such as the four identification DIDs
+- **`live`:** poll mode 01 PIDs and profile DIDs again and again into a table and a CSV file, such as engine speed, vehicle speed and coolant temperature while the car runs
 - **`--json` and `diff`:** every command can print one JSON document, and `diff` shows what changed between two of them: calibration IDs, CVNs, part numbers, modules, DTCs
 - **`--dry-run` and `--sim`:** see the exact frames before sending, or run against a simulated car
 - **Audit log** of every frame and adapter command in a real diagnostic session
@@ -97,7 +98,7 @@ The same policy applies to importers: there is no raw-frame escape hatch. See [U
 | | |
 |---|---|
 | [Install](docs/install.md) | One-command install on Windows, macOS and Linux |
-| [Using the CLI](docs/usage.md) | `adapter`, `ports`, `vin`, `fingerprint`, `scan`, `sweep`, `dtc`, `read-dids`, `diff`, `update` and their options |
+| [Using the CLI](docs/usage.md) | `adapter`, `ports`, `vin`, `fingerprint`, `scan`, `sweep`, `dtc`, `read-dids`, `live`, `diff`, `update` and their options |
 | [Library](docs/library.md) | Importing the `obdcracker` crate |
 | [Safety model](docs/safety.md) | The policy, tiers, backups, dry runs and the audit log |
 | [Adapters](docs/adapters.md) | Supported adapter drivers and links |
