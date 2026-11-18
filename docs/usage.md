@@ -1,8 +1,8 @@
 # Using the CLI
 
 Plug the adapter into the car and turn the ignition on. `vin`, `fingerprint`, `scan`, `sweep`, `dtc`, `read-dids` and `live` send requests only
-through the [safety policy](safety.md), and with a real adapter they append to an audit log. `ports`, `adapter`,
-`update` and `diff` send nothing to the car. `ports`, `update` and `diff` write no audit log; `adapter` writes one only if connecting to
+through the [safety policy](safety.md), and with a real adapter they append to an audit log. `ports`, `adapter`, `monitor`,
+`update` and `diff` send nothing to the car (`monitor` writes an audit log too, of the frames it heard). `ports`, `update` and `diff` write no audit log; `adapter` writes one only if connecting to
 the adapter fails, recording what it sent the adapter and heard back.
 
 ## Connecting
@@ -588,6 +588,46 @@ requests out. On the simulated A7, with two ECUs answering the PID request, a po
 reply each, about 270 bytes: at 4 Hz that is 1.1 KB a second, about 4 MB an hour. An ELM327 logs its own lines too (the
 frames it was written and read), so expect more. A long drive's log is big; point `--audit-log` somewhere with room, or
 rotate it between runs.
+
+## `monitor`
+
+```sh
+obdcracker --serial /dev/ttyUSB0 monitor --filter 7EX --duration 30s
+obdcracker --dry-run monitor --filter 18DAF1XX   # the adapter commands it would write
+```
+
+Listens to the bus through an ELM327 or STN adapter and prints each CAN frame it hears, `<milliseconds since the start>
+<CAN ID> <data>`, one to a line (`     412 7E8 03 41 0C 1A`). It **sends nothing**: no request, no frame. It writes only
+commands to the adapter, and the first is the one that makes the monitor silent on the bus (`STCMM 0` on an STN,
+`AT CSM 1` otherwise), which must answer `OK` or the command stops before it listens. The order, and why, are in
+[the ELM327 notes](elm327.md#listen-only-monitor). Every frame heard goes in the audit log as `"dir":"heard"`, with the
+adapter commands around it, and no `"dir":"tx"` entry is ever written.
+
+| Option | |
+|---|---|
+| `--filter 7EX` | Which CAN IDs to show, as an ELM327 `AT CRA` pattern: 3 characters for 11-bit IDs or 8 for 29-bit ones, each a hex digit or `X` for any digit, upper- or lower-case. A first digit above 7 (3 characters) or 1 (8 characters) is refused, since no ID has it. Default `7XX`, every diagnostic ID. A 29-bit pattern switches the adapter to 29-bit CAN for the listen, as `scan --discover-29bit` does. Narrowing by data bytes (`AT CF`, `AT CM`, the STN's own filters) isn't offered |
+| `--duration 30s` | How long to listen: `500ms`, `30s`, `5m`, a whole number and a unit, 1 ms to 5 minutes. Not 0. Default 30 s |
+
+- **The bus must have other nodes.** The monitor acknowledges nothing, and a CAN frame needs one node to acknowledge it.
+  Behind the gateway of a car with only this adapter and one module on that bus, the module repeats a frame nobody
+  acknowledges and the adapter says `CAN ERROR`: `monitor` then fails with that, printing no repeat as a frame. It is a
+  tap for a bus other nodes talk on, such as the gateway with the engine and transmission modules, not for hearing a
+  module answer a tester that isn't there ([why](elm327.md#listen-only-monitor)).
+- **It fails** (status 1) if the adapter can't be silent, if the adapter prints `BUFFER FULL` (frames were lost: narrow
+  `--filter` or use a faster baud rate), says `CAN ERROR` or another failure, stops monitoring by itself, or prints
+  something that isn't a frame. A frame the adapter couldn't read (`<DATA ERROR`) is logged and the listen goes on. The
+  frames heard before a failure stay printed and logged.
+- **Ctrl-C** ends the process at once. The adapter is left monitoring until it is next reset, which the next connection
+  does; the frames already printed are in the audit log.
+- **Short on purpose.** A monitor holds the adapter awake and can't read the battery while it runs (any command stops
+  it), so `--duration` stops at 5 minutes and the [battery guard](#battery-voltage) reads the voltage once before the
+  run, as for other short commands: it warns on a low battery and doesn't refuse. Run it again for longer.
+- **Not with** `--json` (it prints text), `--sim` (no bus), `--elm-segmenting` (no request), or `--gsusb`/`--socketcan`:
+  those adapters' listen-only mode isn't wired to `monitor` yet (#42), and the program says so. Status 2 for each.
+- **`--dry-run`** opens no adapter and prints the adapter commands for an STN and for another ELM327, in order, with the
+  `X` that stops the monitor. A connection that has already set some of them skips those; an unpaced STN adds `AT AT0`
+  and `AT AT1` around the modes.
+- A Wi-Fi adapter gets the usual warning about the battery and anyone in range.
 
 ## `diff`
 

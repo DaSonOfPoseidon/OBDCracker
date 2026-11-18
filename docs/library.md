@@ -90,6 +90,37 @@ for reply in read_vin(&mut interface, &Policy::read_only(), Timing::default())? 
 # fn main() {}
 ```
 
+## Listening to the bus
+
+`transport::Listen` is a transport that can listen to the bus and put nothing on it. `Elm` implements it (an ELM327 or
+STN adapter that echoes each character, such as an OBDLink), and `Audited` forwards it, logging each frame heard
+(`"dir":"heard"`) before your callback sees it. No request is approved or sent, because no frame goes out: it
+writes only adapter commands, the first of which makes the adapter's monitor silent on the bus (it refuses to listen if
+the adapter won't). The callback can stop the listen, or fail it by returning an error. The silent monitor hears only
+frames other nodes acknowledge ([details](elm327.md#listen-only-monitor)); the `gs_usb` and SocketCAN backends don't
+implement `Listen` yet (#42).
+
+```rust,no_run
+use std::error::Error;
+use std::ops::ControlFlow;
+use std::time::Duration;
+
+use obdcracker::transport::elm::Elm;
+use obdcracker::transport::link::TcpLink;
+use obdcracker::transport::{Audited, Listen, ListenFilter};
+
+fn main() -> Result<(), Box<dyn Error>> {
+    let elm = Elm::connect(TcpLink::connect("192.168.0.10:35000", Duration::from_secs(5))?)?;
+    let mut elm = Audited::open("session.audit.jsonl".as_ref(), elm, "tcp")?;
+    let filter: ListenFilter = "7EX".parse()?; // the emissions ECUs' replies
+    elm.listen(&filter, Duration::from_secs(30), &mut |heard| {
+        println!("{:>6} {:03X} {:02X?}", heard.elapsed.as_millis(), heard.id, heard.data);
+        Ok(ControlFlow::Continue(()))
+    })?;
+    Ok(())
+}
+```
+
 ## The policy applies to you too
 
 Every transport takes only `Approved` requests, and there is no raw-frame escape hatch, so no program built on these

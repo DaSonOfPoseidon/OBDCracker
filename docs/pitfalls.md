@@ -398,8 +398,11 @@ Each entry names the class, what to check, and where it bit us.
   module's unacknowledged: the module sent `300 10 00 03 7F 1A 11` 31 times and the adapter said `CAN ERROR`, with
   the answer never read (car session 9, #301). Silent on the bus is for a bus other nodes already acknowledge on;
   anything that listens to a module it talks to must acknowledge, and a setting the adapter refuses is a failure,
-  not a reason to listen silently. Check it for any new listen-only or monitor feature (#104, `gsusb` listen-only
-  on the OBD port), and model it in the fake as two nodes, or its tests pass on a bus no car has.
+  not a reason to listen silently. Check it for any new listen-only or monitor feature (`gsusb` listen-only
+  on the OBD port), and model it in the fake as two nodes, or its tests pass on a bus no car has. The other
+  side of the same rule is the listen-only monitor (#104): it is silent on purpose, so it asks for the silent
+  setting first and fails closed if the adapter won't take it, and on a bus where it is the only other node it
+  reports `CAN ERROR` instead of returning the repeats as frames (`docs/elm327.md#listen-only-monitor`).
 - **Check that a fix changes what the logs show.** Discovery's "waiting longer" recheck turned adaptive timing off,
   but an STN always waits its whole timeout for a first reply, so in #86 the recheck waited the same 1.09 s per
   silent ID as the first pass (#87). Read the datasheet for what a setting changes, and compare the real audit log's
