@@ -3256,6 +3256,7 @@ mod vin_check {
             vec!["sweep", "--module", "engine", "--range", "0600-0601"],
             vec!["read-dids", "--module", "engine", "--did", "F190"],
             vec!["dtc", "--module", "engine", "--code", "0016A0"],
+            vec!["live", "--pid", "0C", "--duration", "1s"],
         ]
     }
 
@@ -3536,5 +3537,643 @@ mod vin_check {
         // Without a profile there is nothing to plan.
         let out = obdcracker(&["--dry-run", "fingerprint"]);
         assert!(!String::from_utf8_lossy(&out.stdout).contains("09 02"));
+    }
+}
+
+// ---- live -----------------------------------------------------------------------------------
+
+mod live {
+    use super::*;
+    use fake_elm::Module;
+
+    fn temp_csv(name: &str) -> PathBuf {
+        let path =
+            std::env::temp_dir().join(format!("obdcracker-{}-{name}.csv", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        path
+    }
+
+    fn stderr(out: &Output) -> String {
+        String::from_utf8_lossy(&out.stderr).into_owned()
+    }
+
+    fn stdout(out: &Output) -> String {
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    }
+
+    // `live` on the simulated A7 with the audit log and, if `csv` is given, the CSV file, then
+    // `args`.
+    fn sim(name: &str, csv: Option<&PathBuf>, args: &[&str]) -> (Output, PathBuf) {
+        let log = temp_log(name);
+        let mut all = vec!["--sim", "a7", "--audit-log", log.to_str().unwrap(), "live"];
+        all.extend(args);
+        if let Some(csv) = csv {
+            all.extend(["--csv", csv.to_str().unwrap()]);
+        }
+        (obdcracker(&all), log)
+    }
+
+    // Three polls: at 0, 100 and 200 ms, the next due at 300, past the end. It would take a
+    // stall of 150 ms in the right place to lose one.
+    const THREE: [&str; 4] = ["--interval", "100ms", "--duration", "250ms"];
+
+    const BOTH_ECUS: &str = "7E8 0C 0 rpm | 7E8 0D 0 km/h | 7E8 05 63 °C | 7E9 0C 0 rpm | \
+                             7E9 0D 0 km/h | 7E9 05 63 °C";
+
+    // The milliseconds and the rest of each line, `250 ms | 7E8 0C 0 rpm | ...`.
+    fn samples(out: &Output) -> Vec<(u64, String)> {
+        stdout(out)
+            .lines()
+            .map(|line| {
+                let (elapsed, rest) = line.split_once(" ms | ").unwrap();
+                (elapsed.parse().unwrap(), rest.to_owned())
+            })
+            .collect()
+    }
+
+    #[test]
+    fn polls_the_pids_on_the_simulated_car_and_writes_a_line_and_csv_rows_a_sample() {
+        let csv = temp_csv("live-pids");
+        let mut args = vec!["--pid", "0C,0D,05,0B"];
+        args.extend(THREE);
+        let (out, log) = sim("live-pids", Some(&csv), &args);
+        assert!(out.status.success(), "{}", stderr(&out));
+        let found = samples(&out);
+        assert_eq!(found.len(), 3, "{}", stdout(&out));
+        for (_, values) in &found {
+            assert_eq!(values, BOTH_ECUS);
+        }
+        // Each poll starts an interval after the one before it.
+        let times: Vec<u64> = found.iter().map(|(ms, _)| *ms).collect();
+        assert!(times[0] < 50, "{times:?}");
+        for (index, ms) in times.iter().enumerate() {
+            let due = index as u64 * 100;
+            assert!((due..due + 50).contains(ms), "{times:?}");
+        }
+        // The A7 has no intake manifold pressure: said once, not polled and not shown.
+        let err = stderr(&out);
+        assert_eq!(
+            err.matches("note: no ECU lists PID 0B: it is not polled\n")
+                .count(),
+            1,
+            "{err}"
+        );
+        assert!(err.contains("done: 3 samples"), "{err}");
+        let sent: Vec<String> = std::fs::read_to_string(&log)
+            .unwrap()
+            .lines()
+            .filter(|line| line.contains(r#""dir":"tx""#))
+            .map(|line| {
+                let v: serde_json::Value = serde_json::from_str(line).unwrap();
+                v["payload"].as_str().unwrap().to_owned()
+            })
+            .collect();
+        assert_eq!(sent.iter().filter(|p| *p == "01 0C 0D 05").count(), 3);
+        assert!(sent.iter().all(|p| !p.contains("0B")), "{sent:?}");
+        // The CSV has the header and one row for each value, the elapsed time of its sample
+        // first.
+        let text = std::fs::read_to_string(&csv).unwrap();
+        let mut rows = text.lines();
+        assert_eq!(rows.next(), Some("elapsed_ms,ecu,pid_or_did,value,unit"));
+        let rows: Vec<&str> = rows.collect();
+        assert_eq!(rows.len(), 18, "{text}");
+        for (index, chunk) in rows.chunks(6).enumerate() {
+            let ms = times[index];
+            let want = [
+                format!("{ms},\"7E8\",\"0C\",0,\"rpm\""),
+                format!("{ms},\"7E8\",\"0D\",0,\"km/h\""),
+                format!("{ms},\"7E8\",\"05\",63,\"°C\""),
+                format!("{ms},\"7E9\",\"0C\",0,\"rpm\""),
+                format!("{ms},\"7E9\",\"0D\",0,\"km/h\""),
+                format!("{ms},\"7E9\",\"05\",63,\"°C\""),
+            ];
+            assert_eq!(chunk, want);
+        }
+    }
+
+    #[test]
+    fn polls_dids_with_the_profiles_lengths_and_shows_text_as_text() {
+        let csv = temp_csv("live-dids");
+        let mut args = vec![
+            "--pid",
+            "0C",
+            "--did",
+            "transmission:F187,transmission:F189,engine:F190,transmission:F18B",
+        ];
+        args.extend(THREE);
+        let (out, _) = sim("live-dids", Some(&csv), &args);
+        assert!(out.status.success(), "{}", stderr(&out));
+        let found = samples(&out);
+        assert_eq!(found.len(), 3, "{}", stdout(&out));
+        // The module of the first `--did` is read first, each module's DIDs in the order given.
+        // F18B isn't in the simulated car, which leaves it out of the reply.
+        let want = "7E8 0C 0 rpm | 7E9 0C 0 rpm | 7E9 transmission F187 4G0927158Q | \
+                    7E9 transmission F189 1008 | 7E9 transmission F18B (not in the reply) | \
+                    7E8 engine F190 WAU2MBFC6EN093415";
+        for (_, values) in &found {
+            assert_eq!(values, want);
+        }
+        let text = std::fs::read_to_string(&csv).unwrap();
+        let rows: Vec<&str> = text.lines().skip(1).collect();
+        // Two PIDs and three DIDs: nothing for the DID that wasn't there.
+        assert_eq!(rows.len(), 15, "{text}");
+        let ms = found[0].0;
+        assert_eq!(
+            rows[2],
+            format!("{ms},\"7E9\",\"F187\",\"4G0927158Q\",\"\"")
+        );
+        assert_eq!(rows[3], format!("{ms},\"7E9\",\"F189\",\"1008\",\"\""));
+        assert_eq!(
+            rows[4],
+            format!("{ms},\"7E8\",\"F190\",\"WAU2MBFC6EN093415\",\"\"")
+        );
+    }
+
+    #[test]
+    fn a_poll_of_only_dids_sends_no_bitmap_request() {
+        let mut args = vec!["--did", "transmission:F187"];
+        args.extend(THREE);
+        let (out, log) = sim("live-only-dids", None, &args);
+        assert!(out.status.success(), "{}", stderr(&out));
+        assert_eq!(samples(&out).len(), 3);
+        let audit = std::fs::read_to_string(&log).unwrap();
+        assert!(!audit.contains(r#""payload":"01 00""#), "{audit}");
+        assert_eq!(audit.matches(r#""payload":"22 F1 87""#).count(), 3);
+    }
+
+    #[test]
+    fn nothing_listed_by_any_ecu_is_nothing_to_poll() {
+        let (out, _) = sim("live-nothing", None, &["--pid", "0B"]);
+        assert_eq!(out.status.code(), Some(1), "{}", stderr(&out));
+        assert!(
+            stderr(&out).contains("no ECU lists any of the PIDs 0B, so there is nothing to poll")
+        );
+        assert_eq!(stdout(&out), "");
+    }
+
+    #[test]
+    fn the_audit_log_grows_about_270_bytes_a_poll_of_two_ecus() {
+        let mut args = vec!["--pid", "0C,0D,05,0B"];
+        args.extend(THREE);
+        let (out, log) = sim("live-audit-size", None, &args);
+        assert!(out.status.success(), "{}", stderr(&out));
+        let polls = samples(&out).len();
+        assert!(polls >= 2, "{polls}");
+        // From the first PID request on, each poll is that request and a reply from each ECU.
+        let audit = std::fs::read_to_string(&log).unwrap();
+        let first = audit.find(r#""payload":"01 0C 0D 05""#).unwrap();
+        let line_start = audit[..first].rfind('\n').map_or(0, |at| at + 1);
+        let per_poll = (audit.len() - line_start) / polls;
+        assert!((250..=300).contains(&per_poll), "{per_poll} bytes a poll");
+        // At 4 Hz, 3600 s an hour.
+        assert!(per_poll * 4 * 3600 < 4_500_000);
+    }
+
+    #[test]
+    fn the_csv_is_appended_to_and_its_header_written_once() {
+        let csv = temp_csv("live-append");
+        for _ in 0..2 {
+            let (out, _) = sim(
+                "live-append",
+                Some(&csv),
+                &["--pid", "0C", "--interval", "50ms", "--duration", "10ms"],
+            );
+            assert!(out.status.success(), "{}", stderr(&out));
+        }
+        let text = std::fs::read_to_string(&csv).unwrap();
+        let lines: Vec<&str> = text.lines().collect();
+        // One poll of two ECUs, twice.
+        assert_eq!(lines.len(), 5, "{text}");
+        assert_eq!(
+            lines
+                .iter()
+                .filter(|l| **l == "elapsed_ms,ecu,pid_or_did,value,unit")
+                .count(),
+            1
+        );
+        // A file that stopped mid-row gets its row ended first.
+        std::fs::write(
+            &csv,
+            "elapsed_ms,ecu,pid_or_did,value,unit\n0,\"7E8\",\"0C\"",
+        )
+        .unwrap();
+        let (out, _) = sim(
+            "live-append",
+            Some(&csv),
+            &["--pid", "0C", "--interval", "50ms", "--duration", "10ms"],
+        );
+        assert!(out.status.success(), "{}", stderr(&out));
+        let text = std::fs::read_to_string(&csv).unwrap();
+        assert_eq!(text.lines().count(), 4, "{text}");
+        assert!(text.contains("\"0C\"\n"));
+    }
+
+    #[test]
+    fn a_file_that_isnt_a_live_csv_is_refused_and_left_alone() {
+        let csv = temp_csv("live-foreign");
+        std::fs::write(&csv, "a,b,c\n1,2,3\n").unwrap();
+        let (out, _) = sim("live-foreign", Some(&csv), &["--pid", "0C"]);
+        assert_eq!(out.status.code(), Some(1), "{}", stderr(&out));
+        assert!(
+            stderr(&out).contains("isn't a live CSV"),
+            "{}",
+            stderr(&out)
+        );
+        assert_eq!(std::fs::read_to_string(&csv).unwrap(), "a,b,c\n1,2,3\n");
+        assert_eq!(stdout(&out), "");
+        // And one that can't be opened.
+        let missing = std::env::temp_dir()
+            .join("obdcracker-no-such-directory")
+            .join("live.csv");
+        let (out, _) = sim("live-foreign", Some(&missing), &["--pid", "0C"]);
+        assert_eq!(out.status.code(), Some(1), "{}", stderr(&out));
+        assert!(stderr(&out).contains("can't open"), "{}", stderr(&out));
+    }
+
+    #[test]
+    fn what_a_ctrl_c_leaves_in_the_csv_is_whole_samples() {
+        use std::process::Stdio;
+        use std::time::Instant;
+        let csv = temp_csv("live-kill");
+        let log = temp_log("live-kill");
+        let mut child = Command::new(env!("CARGO_BIN_EXE_obdcracker"))
+            .env("OBDCRACKER_TEST_PORTS", "")
+            .args(["--sim", "a7", "--audit-log", log.to_str().unwrap()])
+            .args(["live", "--pid", "0C", "--interval", "50ms"])
+            .args(["--csv", csv.to_str().unwrap()])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        // Header, then two rows a sample.
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while std::fs::read_to_string(&csv).map_or(0, |text| text.lines().count()) < 7 {
+            assert!(Instant::now() < deadline, "no samples in 20 s");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        child.kill().unwrap();
+        child.wait().unwrap();
+        let text = std::fs::read_to_string(&csv).unwrap();
+        assert!(text.ends_with('\n'), "{text:?}");
+        let rows: Vec<&str> = text.lines().skip(1).collect();
+        assert_eq!(rows.len() % 2, 0, "{text}");
+        assert!(rows.iter().all(|row| row.split(',').count() == 5), "{text}");
+    }
+
+    #[test]
+    fn a_dry_run_shows_one_poll_and_the_pid_requests() {
+        let log = temp_log("live-dry");
+        let out = obdcracker(&[
+            "--dry-run",
+            "--profile",
+            "a7",
+            "--audit-log",
+            log.to_str().unwrap(),
+            "live",
+            "--pid",
+            "0C,0D,05,0B,0F,10,11",
+            "--did",
+            "transmission:F187,transmission:F189",
+        ]);
+        assert!(out.status.success(), "{}", stderr(&out));
+        let text = stdout(&out);
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(
+            lines[..6],
+            [
+                "7DF 02 09 02",
+                "dry run: the car's VIN wasn't compared with the a7 profile",
+                "7DF 02 01 00",
+                "7E1 05 22 F1 87 F1 89",
+                // Known PIDs six to a request, in the order given: the broadcast is 7 bytes.
+                "7DF 07 01 0C 0D 05 0B 0F 10",
+                "7DF 02 01 11",
+            ]
+        );
+        assert!(lines[6].starts_with("dry run: nothing was sent"), "{text}");
+        assert!(stderr(&out).is_empty(), "{}", stderr(&out));
+    }
+
+    #[test]
+    fn a_dry_run_takes_no_csv_file_and_leaves_none() {
+        let csv = temp_csv("live-dry-csv");
+        let log = temp_log("live-dry-csv");
+        let out = obdcracker(&[
+            "--dry-run",
+            "--audit-log",
+            log.to_str().unwrap(),
+            "live",
+            "--pid",
+            "0C",
+            "--csv",
+            csv.to_str().unwrap(),
+        ]);
+        assert_eq!(out.status.code(), Some(2));
+        assert!(stderr(&out).contains("--csv"), "{}", stderr(&out));
+        assert!(!csv.exists());
+    }
+
+    #[test]
+    fn json_is_refused() {
+        let out = obdcracker(&["--sim", "a7", "--json", "live", "--pid", "0C"]);
+        assert_eq!(out.status.code(), Some(2));
+        assert_eq!(stdout(&out), "");
+        assert!(stderr(&out).contains("--json"), "{}", stderr(&out));
+    }
+
+    #[test]
+    fn bad_arguments_are_refused_before_anything_is_sent() {
+        let cases: [(&[&str], &str); 17] = [
+            (&[], "required arguments"),
+            (&["--interval", "100ms"], "required arguments"),
+            (&["--pid", ""], "isn't a PID"),
+            (&["--pid", "0C,"], "isn't a PID"),
+            (&["--pid", "C"], "isn't a PID"),
+            (&["--pid", "+C"], "isn't a PID"),
+            (&["--pid", "0G"], "isn't a PID"),
+            (&["--pid", "0C,0c"], "PID 0C is named twice"),
+            (&["--pid", "00"], "PID 00 is a supported-PID bitmap"),
+            (&["--pid", "0C", "--interval", "49ms"], "below 50 ms"),
+            (&["--pid", "0C", "--interval", "2h"], "over 3600 s"),
+            (&["--pid", "0C", "--interval", "250"], "isn't a time"),
+            (&["--pid", "0C", "--duration", "0s"], "no time"),
+            (&["--pid", "0C", "--duration", "1.5s"], "isn't a time"),
+            (&["--did", "F187"], "isn't MODULE:DID"),
+            (&["--did", "engine:F18"], "isn't a DID"),
+            (&["--did", "engine:F187,engine:F187"], "named twice"),
+        ];
+        for (args, want) in cases {
+            let log = temp_log("live-bad");
+            let mut all = vec!["--sim", "a7", "--audit-log", log.to_str().unwrap(), "live"];
+            all.extend(args);
+            let out = obdcracker(&all);
+            assert_eq!(out.status.code(), Some(2), "{args:?}: {}", stderr(&out));
+            assert!(stderr(&out).contains(want), "{args:?}: {}", stderr(&out));
+            assert_eq!(stdout(&out), "", "{args:?}");
+            // Nothing but the battery check, which the audit log has before anything else.
+            let audit = std::fs::read_to_string(&log).unwrap_or_default();
+            assert!(!audit.contains(r#""dir":"tx""#), "{args:?}: {audit}");
+        }
+    }
+
+    #[test]
+    fn dids_need_a_profile_that_lists_the_module() {
+        let log = temp_log("live-no-profile");
+        let out = obdcracker(&[
+            "--dry-run",
+            "--audit-log",
+            log.to_str().unwrap(),
+            "live",
+            "--did",
+            "transmission:F187",
+        ]);
+        assert_eq!(out.status.code(), Some(2));
+        assert!(
+            stderr(&out).contains("live needs a profile that lists the module"),
+            "{}",
+            stderr(&out)
+        );
+        let (out, _) = sim("live-no-module", None, &["--did", "nope:F187"]);
+        assert_eq!(out.status.code(), Some(2));
+        assert!(
+            stderr(&out).contains("has no module named \"nope\""),
+            "{}",
+            stderr(&out)
+        );
+        // 22 DIDs are too many for one request.
+        let many: Vec<String> = (0..22).map(|n| format!("engine:F1{n:02X}")).collect();
+        let (out, _) = sim("live-many", None, &["--did", &many.join(",")]);
+        assert_eq!(out.status.code(), Some(2));
+        assert!(stderr(&out).contains("too many"), "{}", stderr(&out));
+    }
+
+    // ---- over a plain ELM327 ----------------------------------------------------------------
+
+    const KNOWN: &str = "F187,F189,F190,F191";
+    const FOUR: [u8; 9] = [0x22, 0xF1, 0x87, 0xF1, 0x89, 0xF1, 0x90, 0xF1, 0x91];
+
+    fn four_dids_reply() -> Vec<u8> {
+        let mut reply = vec![0x62];
+        for (did, len) in [(0xF187u16, 11), (0xF189, 4), (0xF190, 17), (0xF191, 11)] {
+            reply.extend(did.to_be_bytes());
+            reply.extend(vec![0x41; len]);
+        }
+        reply
+    }
+
+    // A transmission at 7E1/7E9 that answers `22 F187` (what the first poll's warm-up sends) with
+    // `warm_up` (nothing if empty) and `FOUR` with the four DIDs' data; an engine that gives the
+    // A7's VIN to the check against `--profile`.
+    fn transmission(warm_up: Vec<u8>) -> SocketAddr {
+        wifi_elm(
+            FakeElm::new(Box::new(move |header, request| match (header, request) {
+                (0x7E1, [0x22, 0xF1, 0x87]) if !warm_up.is_empty() => {
+                    vec![(0x7E9, warm_up.clone())]
+                }
+                (0x7E1, request) if request == FOUR => vec![(0x7E9, four_dids_reply())],
+                _ => a7_vin_check(header, request).unwrap_or_default(),
+            }))
+            .with_module(Module::new(0x7E1, 0x7E9)),
+        )
+    }
+
+    fn warm_up_reply() -> Vec<u8> {
+        let mut reply = vec![0x62, 0xF1, 0x87];
+        reply.extend([0x41; 11]);
+        reply
+    }
+
+    fn over_tcp(addr: SocketAddr, log: &std::path::Path, args: &[&str]) -> Output {
+        let addr = addr.to_string();
+        let mut all = vec!["--tcp", &addr, "--profile", "a7"];
+        all.extend(["--audit-log", log.to_str().unwrap(), "live"]);
+        all.extend(args);
+        obdcracker(&all)
+    }
+
+    // What each line of the audit log sent, without the check of the VIN against the profile.
+    fn sent(log: &std::path::Path) -> Vec<String> {
+        std::fs::read_to_string(log)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+            .filter(|v| v["dir"] == "tx")
+            .map(|v| v["payload"].as_str().unwrap().to_owned())
+            .filter(|payload| payload != "01 00" && payload != "09 02")
+            .collect()
+    }
+
+    #[test]
+    fn a_plain_elm327_gets_a_one_did_read_before_a_poll_of_only_long_requests() {
+        let log = temp_log("live-elm");
+        let out = over_tcp(
+            transmission(warm_up_reply()),
+            &log,
+            &[
+                "--did",
+                &KNOWN
+                    .split(',')
+                    .map(|d| format!("transmission:{d}"))
+                    .collect::<Vec<_>>()
+                    .join(","),
+                "--interval",
+                "50ms",
+                "--duration",
+                "120ms",
+            ],
+        );
+        assert!(out.status.success(), "{}", stderr(&out));
+        // The Wi-Fi warning is printed for every command that uses the adapter.
+        assert!(
+            stderr(&out).contains("warning: a Wi-Fi adapter"),
+            "{}",
+            stderr(&out)
+        );
+        let a = "A".repeat(11);
+        let found = stdout(&out);
+        assert!(!found.is_empty(), "{}", stderr(&out));
+        for line in found.lines() {
+            let (_, values) = line.split_once(" ms | ").unwrap();
+            assert_eq!(
+                values,
+                format!(
+                    "7E9 transmission F187 {a} | 7E9 transmission F189 AAAA | \
+                     7E9 transmission F190 {} | 7E9 transmission F191 {a}",
+                    "A".repeat(17)
+                )
+            );
+        }
+        let story = sent(&log);
+        let request = "22 F1 87 F1 89 F1 90 F1 91".to_owned();
+        assert_eq!(story[0], "22 F1 87", "{story:?}");
+        assert_eq!(story.iter().filter(|p| **p == "22 F1 87").count(), 1);
+        assert_eq!(
+            story.iter().filter(|p| **p == request).count(),
+            found.lines().count()
+        );
+    }
+
+    #[test]
+    fn a_warm_up_nobody_answers_stops_the_poll_before_the_long_request() {
+        let log = temp_log("live-elm-silent");
+        let dids: Vec<String> = KNOWN
+            .split(',')
+            .map(|d| format!("transmission:{d}"))
+            .collect();
+        let out = over_tcp(transmission(Vec::new()), &log, &["--did", &dids.join(",")]);
+        assert_eq!(out.status.code(), Some(1), "{}", stderr(&out));
+        assert!(stderr(&out).contains("wasn't sent"), "{}", stderr(&out));
+        assert_eq!(stdout(&out), "");
+        assert_eq!(sent(&log), ["22 F1 87"]);
+    }
+
+    // Engine at 7E8 and a transmission at 7E9 that list PID 0C in their bitmaps.
+    fn engine_that_answers(first: usize) -> SocketAddr {
+        let mut asked = 0;
+        wifi_elm(FakeElm::new(Box::new(move |header, request| {
+            match (header, request) {
+                (0x7DF, [0x01, 0x00]) => vec![
+                    (0x7E8, vec![0x41, 0x00, 0x00, 0x10, 0x00, 0x00]),
+                    // Its list is refused.
+                    (0x7E9, vec![0x7F, 0x01, 0x12]),
+                ],
+                // A plain ELM327 asks each ECU that lists the PID by its own request ID.
+                (0x7DF | 0x7E0, [0x01, 0x0C]) => {
+                    asked += 1;
+                    if asked <= first {
+                        vec![(0x7E8, vec![0x41, 0x0C, 0x0F, 0xA0])]
+                    } else {
+                        Vec::new()
+                    }
+                }
+                _ => a7_vin_check(header, request).unwrap_or_default(),
+            }
+        })))
+    }
+
+    #[test]
+    fn an_ecu_whose_pid_list_couldnt_be_read_is_said_once_and_the_others_go_on() {
+        let log = temp_log("live-elm-bitmap");
+        let out = over_tcp(
+            engine_that_answers(usize::MAX),
+            &log,
+            &["--pid", "0C", "--interval", "50ms", "--duration", "120ms"],
+        );
+        assert!(out.status.success(), "{}", stderr(&out));
+        let err = stderr(&out);
+        assert_eq!(
+            err.matches("warning: 7E9's list of supported PIDs couldn't be read in full")
+                .count(),
+            1,
+            "{err}"
+        );
+        for line in stdout(&out).lines() {
+            assert!(line.ends_with(" ms | 7E8 0C 1000 rpm"), "{line}");
+        }
+    }
+
+    #[test]
+    fn a_request_nobody_answers_stops_the_run_and_keeps_the_rows_already_written() {
+        let log = temp_log("live-elm-out-of-step");
+        let csv = temp_csv("live-elm-out-of-step");
+        let out = over_tcp(
+            engine_that_answers(1),
+            &log,
+            &[
+                "--pid",
+                "0C",
+                "--interval",
+                "50ms",
+                "--duration",
+                "20s",
+                "--csv",
+                csv.to_str().unwrap(),
+            ],
+        );
+        assert_eq!(out.status.code(), Some(1), "{}", stderr(&out));
+        assert!(
+            stderr(&out).contains("stopped: a request went unanswered"),
+            "{}",
+            stderr(&out)
+        );
+        // The first sample is shown and written; the second, which can't be trusted, isn't.
+        let found = stdout(&out);
+        assert_eq!(found.lines().count(), 1, "{found}");
+        assert!(
+            found.trim_end().ends_with(" ms | 7E8 0C 1000 rpm"),
+            "{found}"
+        );
+        let text = std::fs::read_to_string(&csv).unwrap();
+        assert_eq!(text.lines().count(), 2, "{text}");
+        assert!(
+            text.lines()
+                .nth(1)
+                .unwrap()
+                .ends_with(",\"7E8\",\"0C\",1000,\"rpm\"")
+        );
+    }
+
+    #[test]
+    fn a_car_that_answers_nothing_stops_the_run_at_the_first_poll() {
+        let log = temp_log("live-elm-silent-car");
+        // Only the check of the VIN is answered: the first `01 00` is its, the next the poll's.
+        let mut bitmaps = 0;
+        let addr = wifi_adapter_answering(move |header, request| {
+            if (header, request) == (0x7DF, &[0x01, 0x00][..]) {
+                bitmaps += 1;
+                if bitmaps > 1 {
+                    return Vec::new();
+                }
+            }
+            a7_vin_check(header, request).unwrap_or_default()
+        });
+        let out = over_tcp(addr, &log, &["--pid", "0C"]);
+        assert_eq!(out.status.code(), Some(1), "{}", stderr(&out));
+        assert!(
+            stderr(&out).contains("stopped: a request went unanswered"),
+            "{}",
+            stderr(&out)
+        );
+        assert_eq!(stdout(&out), "");
     }
 }

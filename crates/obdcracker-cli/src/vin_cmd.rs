@@ -154,6 +154,7 @@ fn reads_the_car(command: &Command) -> bool {
             | Command::Sweep { .. }
             | Command::Dtc { .. }
             | Command::ReadDids { .. }
+            | Command::Live { .. }
     )
 }
 
