@@ -1526,8 +1526,9 @@ impl<L: Link> Elm<L> {
     // told the module's reply ID and request ID (docs/elm327.md#flow-control-for-stpx, OBDLink
     // FRPM rev. F):
     // - A flow control filter for the reply ID (`STFFCA`, section 8.10 p. 41). Without one, the
-    //   module's flow control isn't ISO 15765 to the STN and it prints `FC RX TIMEOUT` (p. 57,
-    //   p. 53). Filters are only added, never cleared, so none that was there stops passing.
+    //   module's flow control isn't ISO 15765 to the STN (section 11.2 p. 57) and it prints
+    //   `FC RX TIMEOUT` (section 9.0 p. 53).
+    //   Filters are only added, never cleared, so none that was there stops passing.
     // - For an 11-bit module, a flow control pair of the request and reply IDs (`STCFCPA`,
     //   section 8.8 p. 38), so the STN's flow control for the module's replies goes to the
     //   request ID (p. 58). The first pair turns off the automatic pairs (section 13 p. 60), and

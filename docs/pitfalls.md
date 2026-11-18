@@ -468,6 +468,16 @@ Each entry names the class, what to check, and where it bit us.
   datasheet feature that does it and turn each off, and make the fake adapter do what the real one does by default
   (PR #149).
 
+- **Adapter-side ISO-TP state is global: adding one custom flow control pair on an STN turns off its automatic pairs for
+  every other module (FRPM rev. F, section 13 p. 60).** Setting up flow control for one target (`STFFCA`, `STCFCPA`, for
+  the gateway's 710/77A, #306) changed what every later request got: once a pair exists, a first frame whose RxID
+  matches no pair gets no flow control at all (section 12 p. 58), so a broadcast `09 02` or an unpaced read of an engine
+  ECU would have lost its flow control after the first `STPX` to the gateway. A setup that adds to an adapter's shared
+  tables must keep what the others rely on (the 8 default pairs go in with the first custom one), only add (never
+  `STFFCC`/`STCFCPC` while running), track what it added so each goes in once and forget it where the adapter's state may
+  have gone (reset, protocol change), and be tested with a request to *another* module after it. The fake models the
+  tables (`Settings::fc_filters`, `fc_pairs`), so a test fails when the defaults are left out.
+
 - **A feature gated on state an earlier request sets never works as a process's only request.** Sending over 7 bytes
   needs the adapter to have shown it echoes each character (`early_echo`), which only a first request shows, and
   every driver test started from a `warmed` connection that had sent one. The CLI's `read-dids`, a fresh process

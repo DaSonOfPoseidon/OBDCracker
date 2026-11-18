@@ -23,7 +23,7 @@
 
 ## Design notes
 
-- [ELM327 requests over 7 bytes with `AT CAF0`](design/elm-caf0-segmenting.md): approved and built (#214); forcing it on an STN is #308
+- [ELM327 requests over 7 bytes with `AT CAF0`](design/elm-caf0-segmenting.md): approved and built (#214); an STN takes it for modules outside 0x7E0 to 0x7E7 by default (#308, #306)
 - [Hearing a TP2.0 answer after the ACK on an STN](design/tp20-stn-listen.md): batched `<frame>|STM` on an STN, built (#333), run on the car in session 12 (#334), with some checks left for session 13 (#359)
 
 ## Contributing

@@ -32,13 +32,17 @@ every port.
 obdcracker --elm-segmenting caf0 --profile a7 read-dids --module transmission --did F187,F188,F189,F191
 ```
 
-A request of 8 to 44 bytes (a `22` read of 4 or more DIDs) goes out as `STPX` on an STN chip such as an OBDLink, which
-segments it itself, and as raw frames the driver writes with `AT CAF0` on a plain ELM327
-([how](elm327.md#multi-frame-requests-on-a-plain-elm327)). `--elm-segmenting caf0` makes an STN take the second path
-too, so it can be tried on the one adapter that has both ([design](design/elm-caf0-segmenting.md#13-forcing-it-on-an-stn-308)).
-`--elm-segmenting stpx` is the default. Every check of that path applies, and a request of 1 to 7 bytes is one frame
-either way. The audit log records the choice before the first request (`"dir":"setting"`, `"name":"stn-segmenting"`,
-`"value":"caf0"` or `"stpx"`; nothing without the flag). The option is for ELM327/STN
+A request of 8 to 44 bytes (a `22` read of 4 or more DIDs) goes out as raw frames the driver writes with `AT CAF0` on a
+plain ELM327 ([how](elm327.md#multi-frame-requests-on-a-plain-elm327)), and on an STN chip such as an OBDLink, which
+has `STPX` and segments a request itself, as `STPX` to an emissions ECU (0x7E0 to 0x7E7) and as `AT CAF0` frames to any
+other module, such as the A7's gateway at 710 (#306). That is the default without the flag, and it is the choice that
+needs no setup of the STN's flow control. `--elm-segmenting caf0` makes an STN take the frame path for every module
+too, and `--elm-segmenting stpx` makes it send `STPX` to every module: the driver first adds the module's reply ID to
+the STN's flow control filters and the pair of its IDs to its flow control pairs, with the 8 default pairs
+([how](elm327.md#flow-control-for-stpx)), which has not run on the car yet ([design](design/elm-caf0-segmenting.md#13-forcing-it-on-an-stn-308)).
+Every check of the frame path applies to it, and a request of 1 to 7 bytes is one frame either way. The audit log records the choice
+before the first request (`"dir":"setting"`, `"name":"stn-segmenting"`, `"value":"caf0"` or `"stpx"`; nothing without
+the flag). The option is for ELM327/STN
 adapters: it is refused with `--gsusb`, `--socketcan`, `--sim` and `--dry-run`, and by `adapter` and `update`, with
 status 2.
 
