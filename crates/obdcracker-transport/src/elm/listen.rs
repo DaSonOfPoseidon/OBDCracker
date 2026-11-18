@@ -2,10 +2,10 @@
 
 use std::time::{Duration, Instant};
 
-use super::codec::{Event, Line, Status};
+use super::codec::{Event, Line, Status, parse_remote};
 use super::{
     Elm, INTERRUPT, LONGEST_WAIT, MONITOR_ACK_ELM, MONITOR_ACK_STN, MONITOR_ELM, MONITOR_STN,
-    RAW_OFF, RAW_ON,
+    RAW_OFF, RAW_ON, filter_shows,
 };
 use crate::link::Link;
 use crate::{Error, Heard, Listen, ListenEnd, ListenFilter, OnFrame};
@@ -116,6 +116,7 @@ impl<L: Link> Elm<L> {
                 Event::Overlong => {
                     return Err(self.break_down("the adapter printed an overlong line".into()));
                 }
+                Event::Line(text) if self.remote_frame(&text)? => {}
                 Event::Line(text) => match self.reply_line(&text)? {
                     // The command's echo.
                     None => {}
@@ -155,6 +156,30 @@ impl<L: Link> Elm<L> {
                 return Ok(ListenEnd::Deadline);
             }
         }
+    }
+
+    // A remote frame (`123 RTR`) is bus traffic like any other, but it has no data to hand the
+    // callback: it is kept for the audit log and the listen goes on. It passes the checks a
+    // frame does, and is nothing to a request's answer (`parse_line` leaves it as text).
+    fn remote_frame(&mut self, text: &str) -> Result<bool, Error> {
+        // The monitor command's echo comes first, and `reply_line` checks it.
+        if self.echo.is_some() {
+            return Ok(false);
+        }
+        let Some((id, wide)) = parse_remote(text) else {
+            return Ok(false);
+        };
+        if wide != self.bits29 {
+            return Err(self.break_down(format!(
+                "unexpected output from the adapter: {text} (not {} frame)",
+                if self.bits29 { "a 29-bit" } else { "an 11-bit" }
+            )));
+        }
+        if !filter_shows(&self.filter, id, wide) {
+            return Err(self.break_down(format!("a frame got past the receive filter: {text}")));
+        }
+        self.hear(text);
+        Ok(true)
     }
 
     // Stops the monitor and puts the driver back as `send` expects it, however the listen ended.

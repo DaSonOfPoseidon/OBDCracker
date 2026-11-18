@@ -1127,9 +1127,16 @@ impl FakeElm {
         );
     }
 
-    // How a frame is printed after a request or while monitoring.
+    // How a frame is printed after a request or while monitoring. A frame with no data (a remote
+    // request) prints `RTR` where its data would be, when headers are on (datasheet p. 45).
     fn frame_line(&self, source: u32, frame: &[u8]) -> String {
-        if self.settings.headers && self.settings.bits29() {
+        if self.settings.headers && frame.is_empty() {
+            if self.settings.bits29() {
+                format!("{} RTR", hex(&source.to_be_bytes()))
+            } else {
+                format!("{source:03X} RTR")
+            }
+        } else if self.settings.headers && self.settings.bits29() {
             format!("{} {}", hex(&source.to_be_bytes()), hex(frame))
         } else if self.settings.headers {
             format!("{source:03X} {}", hex(frame))

@@ -476,6 +476,26 @@ mod afterwards {
         assert!(heard[0].extended);
     }
 
+    // Remote requests are bus traffic like any other (datasheet p. 45): skipped, and the listen
+    // goes on.
+    #[test]
+    fn a_remote_frame_is_skipped_and_the_listen_goes_on() {
+        for (pattern, id) in [("7XX", 0x723), ("00000123", 0x123)] {
+            let frames = vec![
+                (5 * MS, id, vec![0x01]),
+                (10 * MS, id, Vec::new()),
+                (15 * MS, id, vec![0x02]),
+            ];
+            let mut elm = connect(bus(true, frames));
+            let (end, heard) = listen_for(&mut elm, pattern, Duration::from_millis(100));
+            assert_eq!(end, Ok(ListenEnd::Deadline), "{pattern}");
+            let data: Vec<_> = heard.iter().map(|f| f.data.clone()).collect();
+            assert_eq!(data, [vec![0x01], vec![0x02]], "{pattern}");
+            // The driver is as after any listen.
+            read_vin(&mut elm);
+        }
+    }
+
     #[test]
     fn a_listen_after_a_request_still_running_waits_for_it() {
         let mut elm = connect(bus(true, traffic()));

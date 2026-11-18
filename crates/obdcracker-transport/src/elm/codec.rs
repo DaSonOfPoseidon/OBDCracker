@@ -4,6 +4,8 @@
 //! The formats follow the ELM327 datasheet (ELM327DS v2.0) with headers and spaces on, as
 //! [`super::Elm`] sets them. See [`docs/elm327.md#output-format`](https://github.com/DaSonOfPoseidon/OBDCracker/blob/main/docs/elm327.md#output-format).
 
+use std::iter::Peekable;
+
 /// The longest line kept, in bytes. A frame line with headers and spaces on is 27 characters
 /// (35 with a 29-bit ID), and one marked `<DATA ERROR` is under 50; anything longer isn't from
 /// a working adapter.
@@ -273,23 +275,7 @@ fn parse_status(line: &str) -> Option<Status> {
 fn parse_frame(line: &str) -> Option<CanFrame> {
     let line = line.strip_suffix(' ').unwrap_or(line);
     let mut tokens = line.split(' ').peekable();
-    let first = *tokens.peek()?;
-    let (id, wide) = if first.len() == 3 && first.bytes().all(|b| b.is_ascii_hexdigit()) {
-        tokens.next();
-        (
-            u32::from_str_radix(first, 16)
-                .ok()
-                .filter(|&id| id <= 0x7FF)?,
-            false,
-        )
-    } else {
-        let mut header = [0; 4];
-        for byte in &mut header {
-            *byte = hex_byte(tokens.next()?)?;
-        }
-        let id = u32::from_be_bytes(header);
-        (id <= 0x1FFF_FFFF).then_some((id, true))?
-    };
+    let (id, wide) = parse_id(&mut tokens)?;
     let mut data = [0; 8];
     let mut len = 0;
     for token in tokens {
@@ -302,6 +288,33 @@ fn parse_frame(line: &str) -> Option<CanFrame> {
         data,
         len,
     })
+}
+
+// The ID that starts a frame line, and whether it was printed as a 29-bit header.
+fn parse_id<'a>(tokens: &mut Peekable<impl Iterator<Item = &'a str>>) -> Option<(u32, bool)> {
+    let first = *tokens.peek()?;
+    if first.len() == 3 && first.bytes().all(|b| b.is_ascii_hexdigit()) {
+        tokens.next();
+        let id = u32::from_str_radix(first, 16).ok()?;
+        return (id <= 0x7FF).then_some((id, false));
+    }
+    let mut header = [0; 4];
+    for byte in &mut header {
+        *byte = hex_byte(tokens.next()?)?;
+    }
+    let id = u32::from_be_bytes(header);
+    (id <= 0x1FFF_FFFF).then_some((id, true))
+}
+
+/// A remote frame, which an adapter with headers on prints as the ID and `RTR` where the data
+/// would be (`7E8 RTR`, `18 DA F1 10 RTR`): the ID, and whether it is a 29-bit one. `None` for
+/// any other line. [`parse_line`] leaves it as text, since no reply to a request is one.
+#[must_use]
+pub fn parse_remote(line: &str) -> Option<(u32, bool)> {
+    let line = line.strip_suffix(' ').unwrap_or(line);
+    let mut tokens = line.split(' ').peekable();
+    let id = parse_id(&mut tokens)?;
+    (tokens.next() == Some("RTR") && tokens.next().is_none()).then_some(id)
 }
 
 /// The millivolts in an `ATRV` answer: one or two digits, up to three decimals after a point, and
