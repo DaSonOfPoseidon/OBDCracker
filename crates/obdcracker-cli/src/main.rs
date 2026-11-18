@@ -2,6 +2,7 @@
 
 mod diff;
 mod json;
+mod live_cmd;
 mod obd_modes;
 mod update;
 mod vin_cmd;
@@ -124,8 +125,8 @@ struct Cli {
     sim: Option<String>,
 
     /// The vehicle profile that gives module addresses [default: the --sim profile, else the
-    /// OBD-II engine and transmission IDs]. Before `fingerprint`, `scan`, `sweep`, `read-dids`
-    /// and `dtc`, the car's VIN is read and checked against the profile (see
+    /// OBD-II engine and transmission IDs]. Before `fingerprint`, `scan`, `sweep`, `read-dids`,
+    /// `dtc` and `live`, the car's VIN is read and checked against the profile (see
     /// --ignore-vin-mismatch)
     #[arg(long, value_name = "PROFILE",
           value_parser = PossibleValuesParser::new(Profile::BUILTIN))]
@@ -143,16 +144,17 @@ struct Cli {
           conflicts_with_all = ["serial", "tcp", "dry_run", "gsusb", "socketcan"])]
     sim_voltage_drop: Option<(usize, u32)>,
 
-    /// Go on with a long command (a sweep of over 256 DIDs, `scan --discover --wide`) although the
-    /// adapter reports a battery voltage below 11.8 V, and don't stop it if the voltage drops
-    /// further. The voltage is still read, logged and warned about
+    /// Go on with a long command (a sweep of over 256 DIDs, `scan --discover --wide`, a `live` run
+    /// with no --duration or over 5 minutes) although the adapter reports a battery voltage below
+    /// 11.8 V, and don't stop it if the voltage drops further. The voltage is still read, logged
+    /// and warned about
     #[arg(long)]
     force_low_voltage: bool,
 
     /// Go on although the car's VIN isn't the one --profile fits, or couldn't be read. Before
-    /// `fingerprint`, `scan`, `sweep`, `read-dids` and `dtc`, a given --profile makes the tool
-    /// read the VIN (mode 09 PID 02) and stop when it doesn't match, when no ECU gives one, or
-    /// when ECUs give different ones. The mismatch is still printed, as a warning
+    /// `fingerprint`, `scan`, `sweep`, `read-dids`, `dtc` and `live`, a given --profile makes the
+    /// tool read the VIN (mode 09 PID 02) and stop when it doesn't match, when no ECU gives one,
+    /// or when ECUs give different ones. The mismatch is still printed, as a warning
     #[arg(long, requires = "profile")]
     ignore_vin_mismatch: bool,
 
@@ -269,6 +271,35 @@ enum Command {
         /// repeats
         #[arg(long, value_delimiter = ',', required = true, value_parser = parse_did)]
         did: Vec<u16>,
+    },
+    /// Read mode 01 PIDs and profile DIDs again and again, such as `--pid 0C,0D,05,0B --interval
+    /// 250ms --duration 60s --csv drive.csv`. Shows a table that is drawn again in place on a
+    /// terminal (one line a sample otherwise) and appends one CSV row for each value
+    /// (`elapsed_ms,ecu,pid_or_did,value,unit`). Reads only. `--did` needs a profile (--profile or
+    /// --sim) that lists the module. Stops when --duration is over, or at Ctrl-C, which keeps the
+    /// rows already written. Every request goes in the audit log
+    #[command(group(ArgGroup::new("what").args(["pid", "did"]).required(true).multiple(true)))]
+    Live {
+        /// The mode 01 PIDs, as two hex digits each, comma-separated, such as 0C,0D,05,0B. A PID
+        /// no ECU lists is said once and not asked for
+        #[arg(long, value_delimiter = ',', value_parser = live_cmd::parse_pid)]
+        pid: Vec<u8>,
+        /// The DIDs, each as MODULE:DID with the module's name in the profile and four hex digits,
+        /// comma-separated, such as transmission:F187,transmission:F189. One request a module
+        /// each poll, 1 to 21 DIDs a module, no repeats
+        #[arg(long, value_delimiter = ',', value_parser = live_cmd::parse_module_did)]
+        did: Vec<(String, u16)>,
+        /// How long between the start of one poll and the next, such as 250ms or 2s: 50ms to 1h.
+        /// A poll that takes longer is followed by the next at once
+        #[arg(long, default_value = "250ms", value_name = "TIME",
+              value_parser = live_cmd::parse_interval)]
+        interval: Duration,
+        /// Stop after this long, such as 60s, 5m or 1h [default: go on until Ctrl-C]
+        #[arg(long, value_name = "TIME", value_parser = live_cmd::parse_duration)]
+        duration: Option<Duration>,
+        /// Append the values to this CSV file, which gets a header line if it is new or empty
+        #[arg(long, value_name = "FILE")]
+        csv: Option<PathBuf>,
     },
     /// Read one DTC's snapshot records and extended data records from a module (UDS 0x19 04
     /// and 06). Reads only. Needs a profile (--profile or --sim) that lists the module
@@ -972,6 +1003,9 @@ fn run<T: Transport>(cli: &Cli, transport: T, link: &str, timing: Timing, elm: b
     if let Command::ReadDids { module, did } = &cli.command {
         return run_read_dids(cli, &mut transport, timing, module, did, elm);
     }
+    if let Command::Live { .. } = cli.command {
+        return live_cmd::run(cli, &mut transport, timing, elm);
+    }
     match cli.command {
         Command::Vin => run_vin(cli, &mut transport, timing),
         // Handled before any transport is opened, or above.
@@ -982,6 +1016,7 @@ fn run<T: Transport>(cli: &Cli, transport: T, link: &str, timing: Timing, elm: b
         | Command::Sweep { .. }
         | Command::Dtc { .. }
         | Command::ReadDids { .. }
+        | Command::Live { .. }
         | Command::Update { .. }
         | Command::Diff { .. } => unreachable!(),
     }
@@ -989,6 +1024,8 @@ fn run<T: Transport>(cli: &Cli, transport: T, link: &str, timing: Timing, elm: b
 
 // A sweep of more DIDs than this, or a wide discovery, runs long enough to flatten a battery.
 const LONG_SWEEP_DIDS: u32 = 256;
+// So does a `live` run with no end, or one that lasts longer than this.
+const LONG_LIVE: Duration = Duration::from_secs(300);
 
 // What the command is called if it is long, for the refusal that names it.
 fn long_command(cli: &Cli) -> Option<String> {
@@ -1005,6 +1042,9 @@ fn long_command(cli: &Cli) -> Option<String> {
             wide: true,
             ..
         } => Some("scan --discover --wide".to_owned()),
+        Command::Live { duration, .. } if duration.is_none_or(|duration| duration > LONG_LIVE) => {
+            Some("a live run with no --duration or over 5 minutes".to_owned())
+        }
         _ => None,
     }
 }
@@ -1498,6 +1538,39 @@ fn module_did_lengths(cli: &Cli, name: &str) -> Vec<(u16, usize)> {
         .unwrap_or_default()
 }
 
+// An ELM327 sends a request over 7 bytes in segments only once it has shown that it echoes each
+// character as it reads it, and its first request shows that. So a request that long follows a
+// read of its first DID alone: a single frame, the same module, the same policy. Only a definite
+// answer lets the long request go: after silence, the module's late answer could be taken for the
+// long request's. No other backend needs it, so it sends nothing extra.
+fn elm_warm_up<T: Transport>(
+    transport: &mut T,
+    policy: &Policy,
+    module: &UdsModule,
+    dids: &[u16],
+    length_of: impl Fn(u16) -> Option<usize>,
+    timing: Timing,
+) -> Result<(), ExitCode> {
+    match read_dids::read_dids(transport, policy, module, &dids[..1], length_of, timing) {
+        Ok(Err(e @ (ReadError::NoReply | ReadError::StillPending))) => {
+            eprintln!(
+                "{} didn't answer the first read of {:04X} ({e}), so the request of {} DIDs \
+                 wasn't sent: its late answer could be taken for that request's. Connect \
+                 again and retry",
+                module.name,
+                dids[0],
+                dids.len()
+            );
+            Err(ExitCode::FAILURE)
+        }
+        Ok(_) => Ok(()),
+        Err(e) => {
+            eprintln!("{e}");
+            Err(ExitCode::FAILURE)
+        }
+    }
+}
+
 fn run_read_dids<T: Transport>(
     cli: &Cli,
     transport: &mut T,
@@ -1528,30 +1601,12 @@ fn run_read_dids<T: Transport>(
             .find(|&&(known, _)| known == did)
             .map(|&(_, length)| length)
     };
-    // An ELM327 sends a request over 7 bytes in segments only once it has shown that it echoes
-    // each character as it reads it, and its first request shows that. So a request that long
-    // follows a read of its first DID alone: a single frame, the same module, the same policy.
-    // Only a definite answer lets the long request go: after silence, the module's late answer
-    // could be taken for the long request's. No other backend needs it, so it sends nothing extra.
-    if elm && dids.len() > SINGLE_FRAME_DIDS && !cli.dry_run {
-        match read_dids::read_dids(transport, &policy, &module, &dids[..1], length_of, timing) {
-            Ok(Err(e @ (ReadError::NoReply | ReadError::StillPending))) => {
-                eprintln!(
-                    "{} didn't answer the first read of {:04X} ({e}), so the request of {} DIDs \
-                     wasn't sent: its late answer could be taken for that request's. Connect \
-                     again and retry",
-                    module.name,
-                    dids[0],
-                    dids.len()
-                );
-                return ExitCode::FAILURE;
-            }
-            Ok(_) => {}
-            Err(e) => {
-                eprintln!("{e}");
-                return ExitCode::FAILURE;
-            }
-        }
+    if elm
+        && dids.len() > SINGLE_FRAME_DIDS
+        && !cli.dry_run
+        && let Err(code) = elm_warm_up(transport, &policy, &module, dids, length_of, timing)
+    {
+        return code;
     }
     let read = match read_dids::read_dids(transport, &policy, &module, dids, length_of, timing) {
         Ok(read) => read,

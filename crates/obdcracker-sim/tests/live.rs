@@ -189,6 +189,38 @@ fn seven_known_pids_are_two_requests_and_each_is_read() {
 }
 
 #[test]
+fn the_pid_requests_are_the_broadcasts_a_poll_sends_once_every_pid_is_listed() {
+    // Seven known PIDs go six to a request, and an unknown one (0x13, which this crate doesn't
+    // decode) alone. Nothing is sent to find them out.
+    let pids = [0x04, 0x05, 0x0B, 0x0D, 0x0F, 0x11, 0x0C, 0x13];
+    let poller = Poller::new(&Policy::read_only(), &pids, Vec::new()).unwrap();
+    let requests: Vec<String> = poller
+        .pid_requests()
+        .map(|request| {
+            format!(
+                "{:03X} {}",
+                request.target().can_id(),
+                hex(request.payload())
+            )
+        })
+        .collect();
+    assert_eq!(
+        requests,
+        ["7DF 01 04 05 0B 0D 0F 11", "7DF 01 0C", "7DF 01 13"]
+    );
+    let only_dids = Poller::new(
+        &Policy::read_only(),
+        &[],
+        vec![DidPoll {
+            module: UdsModule::obd_engine(),
+            dids: vec![(0xF187, None)],
+        }],
+    )
+    .unwrap();
+    assert_eq!(only_dids.pid_requests().count(), 0);
+}
+
+#[test]
 fn reads_a_modules_dids_with_each_poll() {
     let mut bus = bus();
     let engine = UdsModule {

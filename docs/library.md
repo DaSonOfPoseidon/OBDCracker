@@ -219,6 +219,8 @@ fn watch(adapter: &mut impl Transport) -> Result<(), Box<dyn std::error::Error>>
   eight ECUs' long replies at once, it goes to each of those on its own request ID instead, as `fingerprint` does. An ECU that comes online after the bitmaps were
   read is missed until you build a new poller. An ECU whose first bitmap is refused or malformed is left out of the
   poll, and one whose chain breaks keeps the PIDs listed before the break: both are in `Sample::bitmap_errors`.
+  `Poller::pid_requests` lists the broadcast PID requests without sending anything, which is what the CLI's
+  `live --dry-run` prints.
 - **Replies are untrusted.** One ECU's reply must hold only PIDs that were asked for, each once, each with all its data,
   and nothing after. Anything else (an extra or repeated PID, a cut-off value, a byte left over) is
   `ReadError::Undecodable` for every PID of that request for that ECU, with the reply, and the other ECUs' values are

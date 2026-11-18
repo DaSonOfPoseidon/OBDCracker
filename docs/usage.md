@@ -1,6 +1,6 @@
 # Using the CLI
 
-Plug the adapter into the car and turn the ignition on. `vin`, `fingerprint`, `scan`, `sweep`, `dtc` and `read-dids` send requests only
+Plug the adapter into the car and turn the ignition on. `vin`, `fingerprint`, `scan`, `sweep`, `dtc`, `read-dids` and `live` send requests only
 through the [safety policy](safety.md), and with a real adapter they append to an audit log. `ports`, `adapter`,
 `update` and `diff` send nothing to the car. `ports`, `update` and `diff` write no audit log; `adapter` writes one only if connecting to
 the adapter fails, recording what it sent the adapter and heard back.
@@ -82,15 +82,15 @@ connect, so the CLI warns about it, and the audit log records which link a sessi
 
 Two options, each with its own list of commands:
 
-- `--dry-run` works with `vin`, `fingerprint`, `scan`, `sweep`, `dtc`, `read-dids` and `update`. The car commands print the frames
+- `--dry-run` works with `vin`, `fingerprint`, `scan`, `sweep`, `dtc`, `read-dids`, `live` and `update`. The car commands print the frames
   they would send and open no adapter; `update` makes the same lookups and prints the command it would run, and installs
   nothing. `adapter` and `diff` refuse it, and `ports` ignores it.
-- `--sim a7` works with `vin`, `fingerprint`, `scan`, `sweep`, `dtc` and `read-dids`, and runs the command against a simulated A7.
+- `--sim a7` works with `vin`, `fingerprint`, `scan`, `sweep`, `dtc`, `read-dids` and `live`, and runs the command against a simulated A7.
   `adapter`, `update` and `diff` refuse it with status 2, and `ports` ignores it.
 
 ## Battery voltage
 
-Before `vin`, `fingerprint`, `scan`, `sweep`, `dtc` and `read-dids` send anything, the CLI asks the adapter what voltage
+Before `vin`, `fingerprint`, `scan`, `sweep`, `dtc`, `read-dids` and `live` send anything, the CLI asks the adapter what voltage
 it sees (`ATRV`) and writes the reading to the audit log (`"dir":"voltage"`; an ELM327 or STN also logs the `ATRV`
 command and its answer). A dry run has no car and reads nothing; `adapter` just shows the voltage. With the engine
 off:
@@ -103,11 +103,13 @@ off:
 | not reported (`gs_usb`, SocketCAN, a clone that prints `?`) | a note that the battery isn't checked; the command goes on |
 
 A voltage equal to a threshold is on its good side: exactly 12.2 V prints nothing, and exactly 11.8 V is only a
-warning. A **long command** is a `sweep` of more than 256 DIDs (exactly 256 is short) or `scan --discover --wide`.
+warning. A **long command** is a `sweep` of more than 256 DIDs (exactly 256 is short), `scan --discover --wide`, or a
+`live` run with no `--duration` or one over 5 minutes (exactly 5 minutes is short).
 
-While a long command runs, the voltage is read again every 50 requests, and a reading under 11.8 V stops it: `sweep`
-and the discovery passes print what they found and exit with status 1, `sweep` also says where to go on from (and
-leaves the extended session first, if it was in one). A reading that is unknown, or fails, doesn't stop it.
+While a long command runs, the voltage is read again every 50 requests (`live`: every 50 polls or 30 s, whichever comes
+first), and a reading under 11.8 V stops it: `sweep` and the discovery passes print what they found and exit with
+status 1, `sweep` also says where to go on from (and leaves the extended session first, if it was in one), and `live`
+keeps the rows it has written. A reading that is unknown, or fails, doesn't stop it.
 
 `--force-low-voltage` skips both the refusal and the stop. The voltage is still read, logged and warned about.
 Some adapters without voltage sensing always print `0.0V`, which is read as a voltage of 0: use the flag with those.
@@ -164,7 +166,7 @@ printed to stderr but isn't a failure if another ECU gave a VIN. A malformed VIN
 
 ### Checking the car against `--profile`
 
-With `--profile`, `fingerprint`, `scan`, `sweep`, `read-dids` and `dtc` first read the car's VIN (the same `09 02`
+With `--profile`, `fingerprint`, `scan`, `sweep`, `read-dids`, `dtc` and `live` first read the car's VIN (the same `09 02`
 request as `vin`, after the battery check and after the command's own arguments have been checked) and compare it with
 the profile's `[vin]` table. Only an explicit `--profile` is checked: `--sim` already is the car its profile describes,
 and without a profile there is nothing to compare with. `vin` itself is not checked.
@@ -481,6 +483,104 @@ command would refuse is refused before that first read. If the first read gets n
 prints the frames of the whole request only, and `--elm-segmenting caf0` chooses how an STN sends it
 ([above](#sending-a-long-request-on-an-stn---elm-segmenting)).
 
+## `live`
+
+```sh
+obdcracker --sim a7 live --pid 0C,0D,05,0B --interval 250ms --duration 60s --csv drive.csv
+obdcracker --profile a7 live --pid 0C --did transmission:F187,transmission:F189   # PIDs and profile DIDs together
+```
+
+Reads mode 01 PIDs, and DIDs from profile modules, again and again: a poll every `--interval`, for `--duration` or until
+Ctrl-C. It reads only, through the [safety policy](safety.md), and is the CLI's face of the library's
+[`Poller`](library.md#live-data). At least one of `--pid` and `--did` is needed.
+
+| Option | |
+|---|---|
+| `--pid 0C,0D,05,0B` | The PIDs, two hex digits each. A supported-PID bitmap (`00`, `20`, ...) or a repeat is refused (status 2) |
+| `--did engine:F190,transmission:F187` | `MODULE:DID`: the module's name in the profile and four hex digits. Needs `--profile` or `--sim`, and a plain UDS module. One request a module each poll, in the order each module is first named; 1 to 21 DIDs a module, no repeats |
+| `--interval 250ms` | The time from the start of one poll to the start of the next: `250ms`, `2s`, `5m` or `1h`, a whole number and a unit. At least 50 ms, at most 1 h. Default 250 ms |
+| `--duration 60s` | Stop after this long. Not 0. Default: go on until Ctrl-C. The first poll is always taken, and another only if it is due before the duration is over |
+| `--csv drive.csv` | Append the values to this file ([below](#the-csv)) |
+
+**Timing.** Polls don't pile up. A poll that takes longer than the interval is followed by the next one at once, not by a
+run of them to catch up (`next_due` in the library), so a slow adapter polls as fast as it can instead of falling behind.
+The time column shows when each poll really started.
+
+**What it shows.** Each sample is the PIDs each ECU answered (`7E8 0C 812.5 rpm`) and then each module's DIDs
+(`7E9 transmission F187 "4G0927158Q"`). On a terminal the table is drawn again in place, under a `sample 12 at 2950 ms`
+heading; on Windows, or when stdout isn't a terminal, each sample is one line instead, `2950 ms | 7E8 0C 812.5 rpm |
+7E8 0D 0 km/h | ...`, so a pipe or a file works with a line-by-line tool. Notes and warnings go to stderr.
+
+- **A PID an ECU doesn't have** gets no line. A PID that **no** ECU lists in its supported-PID bitmaps is said once
+  (`note: no ECU lists PID 0B: it is not polled`) and never asked for. If none of the PIDs is listed and there are no
+  DIDs, the command says so and exits 1.
+- **An ECU whose list of supported PIDs couldn't be read** (or only in part) is said once as a warning, and the PIDs it
+  didn't list aren't polled from it.
+- **A reply that can't be read** is shown as `7E8 0C malformed (...)` (or `(service 0x01 refused: ...)`) and gets no CSV row.
+  A module's refusal of its DID request is one line for the module: `7E9 transmission F187 F189 (service 0x22 refused:
+  ...)`.
+- **A DID** is shown as text, in quotes (a quote or backslash in it is escaped), where it is text (the standard's
+  identification DIDs and the profile's `decode = "text"`) and the data is printable, else as `[bytes]` in hex, so the
+  text `[FF]` (`"[FF]"`) and the byte FF (`[FF]`) can't be mistaken for each other. The VIN (F190) is a VIN, `(not set)` or bytes. A DID the module left out
+  of its reply is `(not in the reply)`, and the ones after a DID the profile gives no length for are shown whole, as
+  [`read-dids`](#read-dids) does, with neither a CSV row.
+- **Through an ELM327,** a poll of only DIDs, with 4 or more for a module (a request of over 7 bytes), first reads that
+  module's first DID alone, as `read-dids` does, since a plain ELM327 sends a long request only once an earlier one has
+  shown that it echoes each character. If that read gets no answer, the command stops (status 1) before the long request. A
+  poll with PIDs sends the supported-PID bitmaps first, so it needs no such read.
+
+**It stops, with status 1, when the battery drops.** A `live` run with no `--duration`, or one over 5 minutes, is a [long
+command](#battery-voltage): it is refused on a battery under 11.8 V, and the voltage is read again every 50 polls or 30
+s, whichever comes first (each reading is in the audit log). A reading under 11.8 V stops the run with `stopped: the
+supply voltage fell to ...`. `--force-low-voltage` skips both. A shorter run only gets the warning.
+
+**It stops, with status 1, when a request goes unanswered.** A reply that only missed one poll's wait can arrive during the
+next poll, which sends the same request, and be read as that poll's value. Nothing in it tells them apart, so no value after
+the silence can be trusted: the first sample with a request an ECU should have answered but didn't (an ECU that lists a PID
+and is silent, a module that doesn't answer its DID request, no ECU answering the bitmaps) isn't shown or
+written, and the command stops with `stopped: a request went unanswered`. The rows already written stay in the CSV, with
+no marker row in it: run the command again to continue. An ECU that doesn't list a PID is silent to it every time and
+doesn't count. Also status 1: the adapter fails, the policy refuses a request, or the CSV file can't be opened or
+written. Status 2: a bad command line, as for the other commands, and `--json`, which `live` refuses since its table has no
+JSON document.
+
+**`--dry-run`** polls once through the dry run: it prints the frames of the bitmap request (`01 00`) and of each module's DID
+request, then the PID requests a poll sends once the bitmaps are read (up to six known PIDs a request, any other PID
+alone), and says what the rest of a live run does. It takes no `--csv`, since nothing is written.
+
+### The CSV
+
+`--csv FILE` appends to `FILE`, writing the header first if the file is new or empty:
+
+```
+elapsed_ms,ecu,pid_or_did,value,unit
+0,"7E8","0C",812.5,"rpm"
+0,"7E8","0D",0,"km/h"
+0,"7E9","F187","""4G0927158Q""",""
+250,"7E8","0C",830,"rpm"
+```
+
+One row for each value of each sample, in the long form that is easy to diff and to plot. `elapsed_ms` is the time from the
+start of the command to the start of the sample's poll, the same for every row of a sample. `ecu` is the reply CAN ID as
+three hex digits (a DID's is its module's). `pid_or_did` is two hex digits for a PID and four for a DID. `value` is a
+number for a PID the library decodes, written as it is, and everything else (a PID it doesn't decode, as `[bytes]`; a
+DID, as text or `[bytes]`) is text. A DID's text is quoted inside the field, as in the table (`"""4G0927158Q"""` once the
+field is quoted), so the text `[FF]` and the byte FF differ. `unit` is the PID's unit, or empty. **Every field that isn't a
+plain number is quoted, with any quote inside it doubled**, so a comma or a quote in a DID's text can't move a column.
+
+A value that couldn't be read gets no row, so a gap in a PID's rows is a failure or an ECU that doesn't have it; the table
+and stderr say which. A file that already has data must start with this header, or the command refuses it (status 1) and
+leaves it alone; a last row cut off without its line break is ended first. Each sample's rows are written to the file in one
+write, so what Ctrl-C leaves is whole samples.
+
+### The audit log
+
+Every request goes in the [audit log](safety.md#audit-log), however long it runs, and there is no way to leave
+requests out. On the simulated A7, with two ECUs answering the PID request, a poll is three lines, one request and a
+reply each, about 270 bytes: at 4 Hz that is 1.1 KB a second, about 4 MB an hour. An ELM327 logs its own lines too (the
+frames it was written and read), so expect more. A long drive's log is big; point `--audit-log` somewhere with room, or
+rotate it between runs.
+
 ## `diff`
 
 ```sh
@@ -545,8 +645,8 @@ obdcracker --sim a7 --json vin
 ```
 
 `--json` goes before the command, like the other flags. It works with `vin`, `fingerprint`, `scan`, `sweep`,
-`read-dids`, `dtc`, `adapter` and `ports`, and prints the changes [`diff`](#diff) finds. It is refused with `--dry-run`
-and `update` (status 2). stdout holds only the document, and the exit status is the one the text output would give. The fields and their forms are in
+`read-dids`, `dtc`, `adapter` and `ports`, and prints the changes [`diff`](#diff) finds. It is refused with `--dry-run`,
+`live` and `update` (status 2). stdout holds only the document, and the exit status is the one the text output would give. The fields and their forms are in
 [JSON output](json.md).
 
 ## `update`

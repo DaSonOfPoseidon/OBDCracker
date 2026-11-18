@@ -134,6 +134,13 @@ Each entry names the class, what to check, and where it bit us.
   transport that never stops sending proves it (PR #9: an ECU repeating its VIN reply hung `exchange` forever). A
   loop that skips input it doesn't use, such as another module's frames, must still check its deadline: the TP2.0
   session's first draft only checked it inside `recv`, so a flood from another ID never ended (#142).
+- **A command that can run without end isn't a short one.** The battery guard calls a command long by its size (a
+  sweep of over 256 DIDs), so `live`, which polls until Ctrl-C, was first "short": on a low battery it warned that
+  "this command is short, so it goes on" and then drained the battery for hours with nothing watching it. A new command
+  that loops, or takes a duration, goes through `long_command` and `voltage_watch`, with an end that is checked (the
+  duration over 5 minutes, or none), and a test that a low battery refuses it and a drop stops it (#97). A guard that
+  runs only after each poll can't fire during the sleep between polls, so at `--interval 1h` it ran once an hour: bound
+  every wait by the guard's own deadline (`wait_until`, #97, Codex).
 - **Keep limits per source, too.** One shared `max_pending` counter let one stuck ECU throw away every other ECU's
   answer to a broadcast. Count per ECU, and drop only the one that goes over (PR #9).
 - **Keep timers per source.** Each pending ECU gets its own P2*. One global "latest deadline" lets a late ECU in:

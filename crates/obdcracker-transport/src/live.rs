@@ -296,6 +296,17 @@ impl Poller {
         })
     }
 
+    /// The mode 01 requests for the PIDs, as broadcasts: the ones a poll sends once the
+    /// supported-PID bitmaps are read, for the PIDs they list. Before that every PID is in them,
+    /// which is what a dry run shows, since nothing answers it. Where the transport can't take
+    /// eight ECUs' long replies at once ([`Transport::broadcasts_can_overflow`]) a poll sends
+    /// each to the listing ECUs alone instead. Nothing is sent here.
+    pub fn pid_requests(&self) -> impl Iterator<Item = &Approved> {
+        self.batches
+            .iter()
+            .map(|batch| batch.request.broadcast_request())
+    }
+
     /// Reads every PID and DID once.
     ///
     /// The first poll with PIDs reads the supported-PID bitmaps. Then the PIDs are read, then each

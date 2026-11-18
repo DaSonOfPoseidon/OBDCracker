@@ -570,6 +570,11 @@ impl LongRead {
         })
     }
 
+    // The request as a broadcast, which is what `read` sends unless the transport can overflow.
+    pub(crate) fn broadcast_request(&self) -> &Approved {
+        &self.broadcast
+    }
+
     // The request's replies. `ecus` are the reply IDs of the ECUs known to answer.
     //
     // It is broadcast unless the transport can overflow on that, `ecus` isn't empty, and each ECU

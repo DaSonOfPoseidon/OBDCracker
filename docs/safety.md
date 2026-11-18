@@ -146,11 +146,12 @@ What the tools do with it today (the CLI's rules are in [usage](usage.md#battery
 
 - Before any command that talks to the car, the CLI reads the voltage through the audited transport, so the reading
   is in the audit log, and warns when it is low or can't be read.
-- Long commands (a sweep of over 256 DIDs, `scan --discover --wide`) are refused below 11.8 V unless
-  `--force-low-voltage` is given, and while they run the voltage is read again every 50 requests. A reading below
-  11.8 V stops the run with what it found; a sweep leaves its extended session as it ends any other way. These are the
-  library's `VoltageWatch` on `SweepOptions` and `DiscoverOptions`, so a program that imports the crates can use the
-  same guard. An `Unknown` reading, or one that couldn't be taken, doesn't stop a run: an adapter that can't measure
+- Long commands (a sweep of over 256 DIDs, `scan --discover --wide`, a `live` run with no `--duration` or one over 5
+  minutes) are refused below 11.8 V unless `--force-low-voltage` is given, and while they run the voltage is read again
+  every 50 requests (`live`: every 50 polls or 30 s). A reading below 11.8 V stops the run with what it found; a sweep
+  leaves its extended session as it ends any other way. The sweep's and the discovery's are the library's
+  `VoltageWatch` on `SweepOptions` and `DiscoverOptions`, so a program that imports the crates can use the same guard;
+  `live` reads `Transport::supply_voltage` itself, since a `Poller` never sleeps and its caller owns the loop. An `Unknown` reading, or one that couldn't be taken, doesn't stop a run: an adapter that can't measure
   would otherwise never finish one.
 - The re-check never runs inside a VW TP2.0 channel or an ELM327's monitor: an AT command there would stop the
   adapter listening and could make the module drop the channel (#227, #228). The driver reports `Unknown` there and
