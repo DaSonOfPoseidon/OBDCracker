@@ -558,11 +558,23 @@ fn dtc_reply(reply: &[u8], sub: u8) -> Result<&[u8], Error> {
     Ok(rest)
 }
 
-/// Decodes the reply to [`dtc_count_by_status_mask`].
+// The length of a count report: the service ID, the echoed subfunction, the status availability,
+// the format and the 2-byte count.
+const DTC_COUNT_REPLY_LEN: usize = 6;
+
+/// Decodes the reply to [`dtc_count_by_status_mask`]. A reply shorter than ISO 14229-1's 6 bytes,
+/// such as the 2014 A7's airbag's `59 01 00 00`, is [`Error::NonStandardLength`], and no count is
+/// guessed from it. One with bytes to spare is [`Error::Malformed`].
 pub fn decode_dtc_count(reply: &[u8]) -> Result<DtcCount, Error> {
     let rest = dtc_reply(reply, REPORT_NUMBER_BY_STATUS_MASK)?;
     let [availability, format, high, low] = *rest else {
-        return Err(Error::Malformed);
+        return Err(if reply.len() < DTC_COUNT_REPLY_LEN {
+            Error::NonStandardLength {
+                expected: DTC_COUNT_REPLY_LEN,
+            }
+        } else {
+            Error::Malformed
+        });
     };
     Ok(DtcCount {
         availability: DtcStatus(availability),

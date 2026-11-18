@@ -104,6 +104,10 @@ fn reply_errors_use_hex_bytes() {
     );
     assert_eq!(round_trip(&Error::TooShort), r#""TooShort""#);
     assert_eq!(round_trip(&Error::Malformed), r#""Malformed""#);
+    assert_eq!(
+        round_trip(&Error::NonStandardLength { expected: 6 }),
+        r#"{"NonStandardLength":{"expected":6}}"#
+    );
 }
 
 #[test]

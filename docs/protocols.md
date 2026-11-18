@@ -54,7 +54,10 @@ ECU replies are untrusted input and a lenient parser can misread them.
 - ISO-TP padding sits outside the payload length. A UDS reply with bytes after its last DID or record is malformed, and
   a partial record is malformed; a whole all-zero record is a record (DTC `000000`), and telling it from a real code is
   left to the caller (#36 covers tolerating non-compliant ECUs).
-- A reply with a fixed length (such as the DTC count of `19 01`) with an extra byte is malformed.
+- A reply with a fixed length (such as the DTC count of `19 01`) with an extra byte is malformed. One that is too
+  short is malformed too, except the DTC count: the 2014 A7's airbag answers `19 01 AF` with `59 01 00 00`, 4 bytes
+  where ISO 14229-1 needs 6, so a short count is named `non-standard reply, ISO 14229 expects 6 bytes`. No count is read
+  from it, because which byte is missing can't be known; the DTC list is read as usual (#356).
 - A negative response is exactly `7F <service> <code>`; bytes after the code are malformed.
 - Duplicate DTCs in a reply are both kept: avoiding duplicates is the module's job.
 

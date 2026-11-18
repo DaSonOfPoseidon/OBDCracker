@@ -114,6 +114,20 @@ proptest! {
         }
     }
 
+    // A short count is named as such only when it is a positive `59 01` reply shorter than the
+    // 6 bytes ISO 14229-1 gives it; nothing else may be called non-standard.
+    #[test]
+    fn a_dtc_count_is_non_standard_only_when_short(reply in any_reply()) {
+        let short = reply.starts_with(&[0x59, 0x01]) && reply.len() < 6;
+        prop_assert_eq!(
+            uds::decode_dtc_count(&reply)
+                == Err(response::Error::NonStandardLength { expected: 6 }),
+            short,
+            "{:02X?}",
+            reply
+        );
+    }
+
     #[test]
     fn dtc_detail_decoders_take_exactly_what_follows_the_echo(
         reply in any_reply(),

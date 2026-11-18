@@ -528,9 +528,10 @@ mod uds_read_dtc_information {
             b"\x59\x01\xFB\x01",
             b"\x59\x01\xFB\x01\x12",
         ] {
+            // Too short to hold a count: named as a non-standard length, not as garbage.
             assert_eq!(
                 decode_dtc_count(short),
-                Err(Error::Malformed),
+                Err(Error::NonStandardLength { expected: 6 }),
                 "{short:02X?}"
             );
         }

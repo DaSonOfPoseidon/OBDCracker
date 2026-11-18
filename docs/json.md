@@ -100,7 +100,9 @@ An object with both, or neither, is refused.
 | `{"CountMismatch": {"calids": 2, "cvns": 1}}` | the CVNs don't pair with the calibration IDs |
 
 A reply error is `{"Negative": {"sid": "22", "nrc": "31"}}` (a refusal of service `22` with NRC `31`),
-`{"WrongService": "7F"}`, `"TooShort"` or `"Malformed"`.
+`{"WrongService": "7F"}`, `"TooShort"`, `"Malformed"` or `{"NonStandardLength": {"expected": 6}}` (a reply shorter than
+ISO 14229-1 gives its format, which only the UDS DTC count reply says so far; `expected` is the standard's length in
+bytes).
 
 ## Results
 
