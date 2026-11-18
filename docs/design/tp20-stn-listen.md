@@ -1,7 +1,7 @@
 # Design: hearing a TP2.0 answer that starts right after the module's ACK on an STN
 
-Status: **method approved for building (#333), built, not yet run on the car.** The research and the failing replay
-of car session 11 came first; the fix is in the same PR. Section 5 is what the car still has to confirm (#334).
+Status: **method approved for building (#333), built, and run on the car in session 12 (#334).** The research and the failing replay
+of car session 11 came first; the fix is in the same PR. Section 5 is what session 12 confirmed and what is still open for session 13 (#359).
 
 On an OBDLink (STN2232) a TP2.0 module ACKs the tester's data frame and starts its multi-frame answer a few
 milliseconds later. The STN ends its listen with its prompt after the ACK, the driver then writes `STM`, and the
@@ -16,9 +16,9 @@ frame, in all three passes.
    (`<frame digits>|STM`, OBDLink Batched Commands, `STBC 1`), so the STN starts monitoring itself when the frame's
    listen ends, with no round trip to the host in between. `STBC 1` is probed when raw mode starts and only an exact
    `OK` counts.
-2. **A fallback order (section 3)** if session 12 shows the batch doesn't work on the car's firmware.
+2. **A fallback order (section 3)** if the car's firmware doesn't take the batch. Session 12 (#334) found that the OBDLink EX's does.
 3. **What isn't changed:** the frame's bytes, the policy and audit path, and a plain ELM327's byte stream (section 4).
-4. **What session 12 (#334) must check** before the fix is called done (section 5).
+4. **What session 12 (#334) checked, and what session 13 (#359) still checks** (section 5).
 
 Decisions in this note that aren't forced by a source, so they're yours to change: preferring the batch over `ATR0`
 (section 2, d and e), rejecting a TP2.0-level recovery (section 2, g), and leaving the batching switched on for the
@@ -306,10 +306,13 @@ smaller wins, and the design should be reopened before building either.
 - **ECU replies are still untrusted.** The sequence check, the frame limit and the ID filter are unchanged: the fix
   puts frames in front of the session, it doesn't loosen what the session does with them.
 
-## 5. What session 12 (#334) must check
+## 5. What session 12 (#334) checked, and what is still open
 
-1. **Does the OBDLink EX (STN2232 v5.12.4) have `STBC`?** `STBC 1` answers `OK`, and `STBC 0` puts it back. If it answers
-   `?`, record the firmware ID (`STI`) and stop: the fallback applies (the driver already does what it did before).
+Session 12 ran on the OBDLink EX (STN2232 v5.12.4). Items 1 and 5 are confirmed. The other items aren't in session 12's
+recorded results, so they stay open for session 13 (#359), whose goal 5 checks the batched monitor entries.
+
+1. **Confirmed: does the OBDLink EX have `STBC`?** Yes: `STBC 1` answered `OK`, so the `?` fallback in section 3 isn't
+   needed on this firmware. `STBC 0` putting it back (item 8) is still open.
 2. **Is a raw `CAF0` frame a valid batch element?** A batched channel frame on an open channel, first with a harmless
    one (a channel test is never batched by the driver, so use a data frame `10 89`), then with each read: the audit log
    shows the frame, the `STM` and every frame the module sent, with timestamps. The module has to ACK the frame
@@ -320,10 +323,8 @@ smaller wins, and the design should be reopened before building either.
 4. **What does `X` do to a batch?** Send the next frame while the module's ACK is still pending (a slow module, or the
    `A3` right after a data frame): does the adapter print `STOPPED` and its prompt with no monitor (what the fake models), or
    does it go on to `STM` (the driver then fails closed after 2 s)?
-5. **How fast does the STN go from its listen to `STM`?** The time from the module's ACK to its first data frame and to
-   the frames after it, which the session 11 log couldn't give. `22 F1 87` on 52 and on 20 read whole (`62 F1 87` and
-   11 bytes on 52), in all three passes, with no framing error and nothing in `lost`. If a frame is still missing, this
-   is the number that says how far the STN's own switch is from instant.
+5. **Confirmed: how fast the STN goes from its listen to `STM`.** About 80 ms from the module's ACK to its first data
+   frame. `22 F1 87` on 52 and on 20 read whole (`62 F1 87` and 11 bytes on 52), in all three passes, with no framing error.
 6. **No `CAN ERROR`, no repeated frame:** the monitor still acknowledges (`STCMM 1`, #301).
 7. **A module that never answers:** one timeout, the monitor still up, no frame written.
 8. **Raw mode ends with `STBC 0` and `OK`**, and the next ISO-TP request is read as before.

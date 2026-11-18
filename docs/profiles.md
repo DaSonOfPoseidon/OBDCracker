@@ -144,7 +144,7 @@ On the A7 only six modules' addresses are confirmed by this list, each slot's re
 `03`, acc `13`, acc 2 `8B`, sensor cluster `3B`, steering `44`, image processing `8E`). The airbag `15`, climate `08`,
 parking brake `53`, headlight range `55`, tire pressure `65`, camera `6C` and rear lid `6D` are each the module's own
 claim: the list has the address but no request ID for its slot, so each was matched by the name the module gave at its
-CAN ID (#231). Car session 12 (#334) checks them against each module's F197 and F19E, and they may be wrong. The head-up
+CAN ID (#231). Car session 12 (#334) read each module's F197 and F19E at that CAN ID, and they match the module the profile names. The head-up
 display's `82` comes from an Audi bulletin.
 
 ## Narrowing the policy
