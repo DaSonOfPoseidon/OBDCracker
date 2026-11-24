@@ -32,3 +32,12 @@ miss pitfall-compare-before-incrementing crates/obdcracker-transport/src/exchang
 miss pitfall-compare-before-incrementing crates/obdcracker-transport/src/exchange.rs // pending += 1; if pending > max
 miss pitfall-compare-before-incrementing crates/obdcracker-transport/src/exchange.rs let msg = "pending += 1; if pending > max";
 miss pitfall-compare-before-incrementing crates/obdcracker-transport/tests/exchange.rs pending += 1; if pending > max {
+
+# pitfall-dtc-mask-ff: a request with status mask 0xFF returns untested codes too; tests quote it on purpose.
+hit pitfall-dtc-mask-ff crates/obdcracker-transport/src/uds.rs let req = [0x19, 0x02, 0xFF];
+hit pitfall-dtc-mask-ff crates/obdcracker-transport/src/uds.rs let req = vec![0x19,0x02,0xff];
+hit pitfall-dtc-mask-ff crates/obdcracker-transport/src/elm/mod.rs const ALL: &str = "19 02 FF";
+miss pitfall-dtc-mask-ff crates/obdcracker-transport/src/uds.rs let req = [0x19, 0x02, FAULT_MASK];
+miss pitfall-dtc-mask-ff crates/obdcracker-transport/src/uds.rs // [0x19, 0x02, 0xFF] returns every code, untested ones too
+miss pitfall-dtc-mask-ff crates/obdcracker-transport/src/uds.rs let note = "send 19 02 FF to read all";
+miss pitfall-dtc-mask-ff crates/obdcracker-safety/tests/policy.rs &[0x19, 0x02, 0xFF],

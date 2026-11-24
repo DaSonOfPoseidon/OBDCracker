@@ -58,3 +58,12 @@ ban pitfall-compare-before-incrementing warn *.rs,!*/tests/*,!tests/* '[[:alnum:
 # pitfall: A repeated request can take its own earlier late reply. -> none: Matching a late reply needs the request history; no literal signature.
 # pitfall: A reply can't change what the request already fixed. -> none: Needs the request in scope to compare; no single-line signature.
 # pitfall: A count inside a reply must be backed by the bytes after it. -> none: Counts and loops look like correct code; the check is data flow.
+# pitfall: Match a reply to its request by what it echoes -> none: echo checks need the request in scope; no single-line signature.
+# pitfall: A deadline on the far side of the bus needs a margin for the trip, and the earliest safe time. -> none: timing margins are data flow across calls; no single-line signature.
+# pitfall: A host timestamp is not when the other side acted, and a bound must hold in the dangerous direction only. -> none: which clock a bound uses is data flow, not one line.
+# pitfall: Use the limits the other side declares. -> none: honouring a declared limit is data flow across requests.
+# pitfall: Keep cleanup armed until it has worked. -> none: disarm-before-send order is data flow, not one line.
+# pitfall: The suppress-positive-response bit (bit 7) is not echoed. -> none: correct code masks bit 7 too (response.rs:254); no line shows the bug.
+# pitfall: No answer isn't no effect. -> none: undo after a timeout is data flow across calls, not one line.
+ban pitfall-dtc-mask-ff warn *.rs,!*/tests/*,!tests/* '(^|[^[:alnum:]_])(0x19[^[:alnum:]_]+0x02[^[:alnum:]_]+0x[fF][fF]([^[:alnum:]_]|$)|"19 02 FF")' unless '^[[:space:]]*//' -- A mask of 0xFF returns every code, untested ones too: request FAULT_MASK (0xAF) and filter the reply by it.
+# pitfall: A DTC status mask of 0xFF isn't "every stored fault". -> pitfall-dtc-mask-ff
