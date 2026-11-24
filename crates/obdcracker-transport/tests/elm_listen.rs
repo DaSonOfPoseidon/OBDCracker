@@ -298,6 +298,33 @@ mod refusals {
         assert_eq!(heard, []);
     }
 
+    // A remote frame has no data, but it is still a frame on the bus: its width and its ID are
+    // checked as a frame's are (#377).
+    #[test]
+    fn a_remote_frame_of_the_wrong_width_or_outside_the_filter_fails_the_listen() {
+        for (pattern, remote, why) in [
+            ("7XX", "18 DA F1 10 RTR\r", "unexpected output"),
+            ("00000123", "123 RTR\r", "unexpected output"),
+            ("7XX", "6F1 RTR\r", "receive filter"),
+            ("00000123", "00 00 01 24 RTR\r", "receive filter"),
+        ] {
+            let mut elm = connect(bus(true, Vec::new()));
+            elm.link_mut()
+                .scheduled
+                .push_back((Instant::now() + 80 * MS, remote.as_bytes().to_vec()));
+            let (end, heard) = listen_for(&mut elm, pattern, Duration::from_secs(2));
+            let err = end.unwrap_err();
+            assert!(err.to_string().contains(why), "{pattern} {remote}: {err}");
+            assert_eq!(heard, []);
+            let writes = elm.link().writes.len();
+            assert!(
+                elm.send(&approve(Target::ObdFunctional, &[0x09, 0x02]))
+                    .is_err()
+            );
+            assert_eq!(elm.link().writes.len(), writes);
+        }
+    }
+
     #[test]
     fn an_error_frame_is_reported_in_the_log_and_the_listen_goes_on() {
         let mut elm = connect(bus(true, traffic()));
@@ -386,6 +413,95 @@ mod ending {
         assert_eq!(count, 2);
         assert!(started.elapsed() < Duration::from_secs(10));
         assert_eq!(elm.link().elm.interrupted, 1);
+    }
+
+    // Queues what the monitor prints after the frame that stops the listen: with it, in the
+    // same read (so the drain before `X` meets it), or after `X` and before `STOPPED`.
+    fn stop_with(elm: &mut Elm<FakeLink>, first: &str, remote: &str, after_x: bool) {
+        let mut text = first.to_owned();
+        text.push('\r');
+        if after_x {
+            elm.link_mut().elm.before_stopped.push(remote.to_owned());
+        } else {
+            text.push_str(remote);
+            text.push('\r');
+        }
+        elm.link_mut()
+            .scheduled
+            .push_back((Instant::now() + 80 * MS, text.into_bytes()));
+    }
+
+    // The monitor keeps printing until it reads `X`, so a remote frame can be waiting when the
+    // callback stops the listen, or arrive between `X` and `STOPPED` (#378). It is heard like the
+    // listen's other frames and logged, not a reply that fails the driver.
+    #[test]
+    fn a_remote_frame_after_the_frame_that_stops_the_listen_is_heard_and_logged() {
+        for after_x in [false, true] {
+            for (pattern, data, remote) in [
+                ("7XX", "7E8 03 41 0C 1A", "7E8 RTR"),
+                ("00000123", "00 00 01 23 01", "00 00 01 23 RTR"),
+            ] {
+                let what = format!("{pattern}, after X: {after_x}");
+                let mut elm = connect(bus(true, Vec::new()));
+                stop_with(&mut elm, data, remote, after_x);
+                let mut count = 0;
+                let end = elm.listen(&filter(pattern), Duration::from_secs(30), &mut |_| {
+                    count += 1;
+                    Ok(ControlFlow::Break(()))
+                });
+                assert_eq!(end, Ok(ListenEnd::Stopped), "{what}");
+                assert_eq!(count, 1, "{what}");
+                assert_eq!(elm.link().elm.interrupted, 1, "{what}");
+                let logged: Vec<_> = elm
+                    .take_events()
+                    .into_iter()
+                    .filter_map(|e| match e {
+                        obdcracker_transport::LinkEvent::Unread { line, .. } => Some(line),
+                        _ => None,
+                    })
+                    .collect();
+                assert_eq!(logged, [remote], "{what}");
+                // Back at its prompt: the next request is sent and answered.
+                let sent = elm.link().elm.sent.len();
+                read_vin(&mut elm);
+                assert_eq!(elm.link().elm.sent.len(), sent + 1, "{what}");
+            }
+        }
+    }
+
+    // The same checks as in the listen's main loop: a remote frame of the wrong width, or one the
+    // receive filter hides, is still output that can't be trusted (#377).
+    #[test]
+    fn a_remote_frame_that_fails_its_checks_while_stopping_fails_the_driver_closed() {
+        for after_x in [false, true] {
+            for (pattern, remote, why) in [
+                ("7XX", "18 DA F1 10 RTR", "unexpected output"),
+                ("00000123", "123 RTR", "unexpected output"),
+                ("7XX", "6F1 RTR", "receive filter"),
+                ("00000123", "00 00 01 24 RTR", "receive filter"),
+            ] {
+                let what = format!("{pattern} {remote}, after X: {after_x}");
+                let first = if pattern.len() == 8 {
+                    "00 00 01 23 01"
+                } else {
+                    "7E8 03 41 0C 1A"
+                };
+                let mut elm = connect(bus(true, Vec::new()));
+                stop_with(&mut elm, first, remote, after_x);
+                let end = elm.listen(&filter(pattern), Duration::from_secs(30), &mut |_| {
+                    Ok(ControlFlow::Break(()))
+                });
+                let err = end.unwrap_err();
+                assert!(err.to_string().contains(why), "{what}: {err}");
+                let writes = elm.link().writes.len();
+                assert!(
+                    elm.send(&approve(Target::ObdFunctional, &[0x09, 0x02]))
+                        .is_err(),
+                    "{what}"
+                );
+                assert_eq!(elm.link().writes.len(), writes, "{what}");
+            }
+        }
     }
 
     #[test]
@@ -575,6 +691,24 @@ mod audited {
         assert!(time("cmd", "STM") <= time("dir", "heard"));
         // Nothing the log calls a request.
         assert!(!log.contains(r#""dir":"tx""#), "{log}");
+        std::fs::remove_file(&path).unwrap();
+    }
+
+    #[test]
+    fn a_remote_frame_is_in_the_log() {
+        let path = std::env::temp_dir().join(format!(
+            "obdcracker-elm-listen-rtr-{}.jsonl",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&path);
+        let frames = vec![(5 * MS, 0x723, vec![0x01]), (10 * MS, 0x723, Vec::new())];
+        let mut elm = Audited::open(&path, connect(bus(true, frames)), "usb-serial").unwrap();
+        let (end, heard) = listen_for(&mut elm, "7XX", Duration::from_millis(100));
+        assert_eq!(end, Ok(ListenEnd::Deadline));
+        assert_eq!(heard.len(), 1);
+        drop(elm);
+        let log = std::fs::read_to_string(&path).unwrap();
+        assert!(log.contains("723 RTR"), "{log}");
         std::fs::remove_file(&path).unwrap();
     }
 

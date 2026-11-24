@@ -152,8 +152,9 @@ pub type OnFrame<'a> = &'a mut dyn FnMut(&Heard) -> Result<ControlFlow<()>, Erro
 /// frames is a node on the bus. The only things it may write are commands to the adapter itself.
 /// Nothing about a listen is approved by the policy because nothing in it reaches the bus.
 ///
-/// A listen that has returned leaves the transport as it was found: the next request is sent
-/// exactly as it would have been before.
+/// A listen that has returned leaves the transport ready for the next request, which is sent as
+/// it would have been before. The adapter's receive filter, and the CAN width after a 29-bit
+/// filter, may differ from what they were: a request sets its own.
 pub trait Listen: Transport {
     /// Listens for frames the `filter` shows for up to `wait`, handing each to `on_frame` in the
     /// order heard, and returns why it ended.

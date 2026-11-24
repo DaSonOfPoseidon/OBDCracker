@@ -161,7 +161,7 @@ impl<L: Link> Elm<L> {
     // A remote frame (`123 RTR`) is bus traffic like any other, but it has no data to hand the
     // callback: it is kept for the audit log and the listen goes on. It passes the checks a
     // frame does, and is nothing to a request's answer (`parse_line` leaves it as text).
-    fn remote_frame(&mut self, text: &str) -> Result<bool, Error> {
+    pub(super) fn remote_frame(&mut self, text: &str) -> Result<bool, Error> {
         // The monitor command's echo comes first, and `reply_line` checks it.
         if self.echo.is_some() {
             return Ok(false);
@@ -188,7 +188,7 @@ impl<L: Link> Elm<L> {
         if self.broken.is_some() {
             return outcome;
         }
-        let stopped = self.interrupt();
+        let stopped = self.stop(true);
         let restored = if self.broken.is_none() && self.raw {
             self.switch_raw(false)
         } else {

@@ -1136,6 +1136,13 @@ impl<L: Link> Elm<L> {
     // Stops the adapter listening for more of the last request's replies, or monitoring. Lines it
     // printed until then that nobody read are reported as unread.
     fn interrupt(&mut self) -> Result<(), Error> {
+        self.stop(false)
+    }
+
+    // `interrupt`, and for a listen (`Listen::listen`) also: a remote frame the monitor printed
+    // before it read the stop is bus traffic like the rest of the listen's (`remote_frame`), not
+    // a reply line that fails the driver closed.
+    fn stop(&mut self, listening: bool) -> Result<(), Error> {
         // It may have finished already, its prompt read or waiting on the link: then there's
         // nothing to stop.
         let deadline = Instant::now() + IDLE_CHECK;
@@ -1161,6 +1168,7 @@ impl<L: Link> Elm<L> {
                 Event::Overlong => {
                     return Err(self.break_down("the adapter printed an overlong line".into()));
                 }
+                Event::Line(text) if listening && self.remote_frame(&text)? => {}
                 Event::Line(text) => {
                     if self.reply_line(&text)?.is_some() {
                         self.unread(text);
@@ -1172,7 +1180,7 @@ impl<L: Link> Elm<L> {
         let mut answer = Vec::new();
         let interrupted = self
             .write(INTERRUPT)
-            .and_then(|()| self.read_interrupted(&mut answer));
+            .and_then(|()| self.read_interrupted(listening, &mut answer));
         self.note(LinkEvent::Command {
             at,
             command: String::from_utf8_lossy(INTERRUPT).into_owned(),
@@ -1216,7 +1224,11 @@ impl<L: Link> Elm<L> {
 
     // Reads up to the prompt after `INTERRUPT`, noting the lines read on the way; returns
     // whether the adapter said it stopped (`STOPPED`), or had already finished.
-    fn read_interrupted(&mut self, answer: &mut Vec<String>) -> Result<bool, Error> {
+    fn read_interrupted(
+        &mut self,
+        listening: bool,
+        answer: &mut Vec<String>,
+    ) -> Result<bool, Error> {
         let deadline = Instant::now() + COMMAND_WAIT;
         let mut stopped = false;
         loop {
@@ -1232,6 +1244,7 @@ impl<L: Link> Elm<L> {
                     stopped = true;
                     answer.push(text);
                 }
+                Some(Event::Line(text)) if listening && self.remote_frame(&text)? => {}
                 Some(Event::Line(text)) => {
                     // A reply the caller never read, checked as any other.
                     if self.reply_line(&text)?.is_some() {
