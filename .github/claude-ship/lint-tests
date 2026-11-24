@@ -69,3 +69,12 @@ miss pitfall-pin-test-tools .github/workflows/ci.yml       # uv tool install elm
 miss pitfall-pin-test-tools .github/workflows/ci.yml run: pip install -r requirements.txt
 miss pitfall-pin-test-tools .github/workflows/ci.yml run: echo "ELM327-emulator is pinned in ci.yml"
 miss pitfall-pin-test-tools docs/adapters.md uv tool install elm327-emulator
+
+# pitfall-stn-fc-clear: clearing the STN's flow control tables; the adding commands, comments, tests and docs are fine.
+hit pitfall-stn-fc-clear crates/obdcracker-transport/src/elm/mod.rs self.flow_control_command("STFFCC")?;
+hit pitfall-stn-fc-clear crates/obdcracker-transport/src/elm/mod.rs self.flow_control_command(&format!("STCFCPC {id:03X}"))?;
+miss pitfall-stn-fc-clear crates/obdcracker-transport/src/elm/mod.rs self.flow_control_command(&format!("STCFCPA {tx:03X},{rx:03X}"))?;
+miss pitfall-stn-fc-clear crates/obdcracker-transport/src/elm/mod.rs self.flow_control_command("STFFCA 7E8,7FF")?;
+miss pitfall-stn-fc-clear crates/obdcracker-transport/src/elm/mod.rs // Never send STFFCC or STCFCPC while the driver runs.
+miss pitfall-stn-fc-clear crates/obdcracker-transport/tests/elm.rs .any(|c| c == "STFFCC" || c == "STCFCPC"),
+miss pitfall-stn-fc-clear docs/elm327.md the driver never writes `STFFCC` while it runs

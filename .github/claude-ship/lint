@@ -118,3 +118,12 @@ ban pitfall-pin-test-tools warn *.yml,*.yaml,*.sh '(^|[^[:alnum:]_])(uv tool ins
 # pitfall: A wrapper that forgets a defaulted `Transport` method silently takes the default. -> none: every correct forwarding wrapper matches the same shape.
 # pitfall: Read a mode's paragraph, not just its summary chart. -> none: the prose meaning of a mode is not a line a lint can see.
 # pitfall: Trust what an adapter does, not what it says it is. -> none: the identity check spans lines; the fixed STN match is correct code too.
+ban pitfall-stn-fc-clear warn *.rs,!*/tests/*,!tests/* '(^|[^[:alnum:]_])(STFFCC|STCFCPC)([^[:alnum:]_]|$)' unless '^[[:space:]]*//' -- Never clear the STN's flow control pairs or filters (STFFCC, STCFCPC): clearing them turns off every other module's automatic flow control. Add a pair with STFFCA or STCFCPA once, and track what was added.
+# pitfall: Emulators have quirks too. -> none: emulator workaround notes are prose; no code signature.
+# pitfall: A mode switch changes only what its command says. -> none: AT CAF0 is correct in raw-frame modes; missing companions are data flow.
+# pitfall: Adapter-side ISO-TP state is global: adding one custom flow control pair on an STN turns off its automatic pairs for every other module (FRPM rev. F, section 13 p. 60). -> pitfall-stn-fc-clear
+# pitfall: A feature gated on state an earlier request sets never works as a process's only request. -> none: first-request ordering is control flow across calls; no literal.
+# pitfall: A read path that collects lines to fail on them must still log them. -> none: which lines a loop logs is data flow across the driver.
+# pitfall: A filter set for replies also hides what you sent. -> none: CAN_RAW_FILTER is correct; the echo fix is data flow.
+# pitfall: A loss counter shows only on the next delivery. -> none: SO_RXQ_OVFL is correct code; the missed-last-frame timing is data flow.
+# pitfall: A name from the user that becomes a path is validated first. -> none: the sysfs join is correct after validation (linux.rs:49).
