@@ -109,3 +109,12 @@ ban pitfall-link-io-bound warn crates/obdcracker-transport/src/link/serial*.rs '
 # pitfall: Bound what you collect, not just each piece. -> none: which loops accumulate is data flow; bounded loops are common.
 # pitfall: Timeouts must cover the link, not only the bus. -> none: sizing each timer from the data is data flow; no literal signature.
 # pitfall: A size measured on one ID width is wrong for the other. -> none: constants sized for the widest ID are data flow; no literal.
+ban pitfall-pin-test-tools warn *.yml,*.yaml,*.sh '(^|[^[:alnum:]_])(uv tool install|uvx|pip install)[[:space:]]+"?[[:alnum:]_][[:alnum:]_.-]*"?([[:space:]]|$)' unless '^[[:space:]]*#|(uv tool install|uvx|pip install)[[:space:]]+"?[[:alnum:]_][[:alnum:]_.-]*"?[[:space:]]*(@|==)' -- Pin the tool exactly (name==version, or a git commit with @) and check the pin installs from scratch: an unpinned or ranged install can resolve to a build uv refuses.
+# pitfall: A watchdog counts only the time you spend waiting, added up across calls. -> none: time summed across calls is control flow; no literal.
+# pitfall: A log of what was heard must cover what was half-used. -> none: which frames the log keeps is data flow across the driver.
+# pitfall: Don't hand back stale data to make a log complete. -> none: which replies a request returns is data flow; no literal.
+# pitfall: Pin external test tools exactly, and check the pin installs from scratch. -> pitfall-pin-test-tools
+# pitfall: A shared buffer fills at the sum of its sources' rates. -> none: summing rates across senders is data flow; no literal.
+# pitfall: A wrapper that forgets a defaulted `Transport` method silently takes the default. -> none: every correct forwarding wrapper matches the same shape.
+# pitfall: Read a mode's paragraph, not just its summary chart. -> none: the prose meaning of a mode is not a line a lint can see.
+# pitfall: Trust what an adapter does, not what it says it is. -> none: the identity check spans lines; the fixed STN match is correct code too.

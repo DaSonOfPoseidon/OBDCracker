@@ -58,3 +58,14 @@ miss pitfall-link-io-bound crates/obdcracker-transport/src/link/tcp.rs self.stre
 miss pitfall-link-io-bound crates/obdcracker-transport/src/link/serial.rs // a serial flush: .flush() waits with no timeout
 miss pitfall-link-io-bound crates/obdcracker-transport/src/link/serial.rs let note = "never call .flush() on a serial link";
 miss pitfall-link-io-bound crates/obdcracker-cli/src/live_cmd.rs out.flush()
+
+# pitfall-pin-test-tools: an install of an external tool with no version or commit pin; a whole-line comment, a pinned or @-pinned install, a requirements file and a docs path are fine.
+hit pitfall-pin-test-tools .github/workflows/ci.yml run: uv tool install elm327-emulator
+hit pitfall-pin-test-tools .github/workflows/ci.yml run: uv tool install "elm327-emulator"
+hit pitfall-pin-test-tools .github/workflows/ci.yml run: pip install ELM327-Emulator
+miss pitfall-pin-test-tools .github/workflows/ci.yml run: uv tool install "elm327-emulator==4.0.0"
+miss pitfall-pin-test-tools .github/workflows/ci.yml run: uv tool install "elm327-emulator @ git+https://github.com/Ircama/ELM327-emulator@ff34d2f72da58c05a1b1f00d04f043e8b6c856fb"
+miss pitfall-pin-test-tools .github/workflows/ci.yml       # uv tool install elm327-emulator
+miss pitfall-pin-test-tools .github/workflows/ci.yml run: pip install -r requirements.txt
+miss pitfall-pin-test-tools .github/workflows/ci.yml run: echo "ELM327-emulator is pinned in ci.yml"
+miss pitfall-pin-test-tools docs/adapters.md uv tool install elm327-emulator
