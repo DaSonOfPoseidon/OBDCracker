@@ -127,3 +127,11 @@ ban pitfall-stn-fc-clear warn *.rs,!*/tests/*,!tests/* '(^|[^[:alnum:]_])(STFFCC
 # pitfall: A filter set for replies also hides what you sent. -> none: CAN_RAW_FILTER is correct; the echo fix is data flow.
 # pitfall: A loss counter shows only on the next delivery. -> none: SO_RXQ_OVFL is correct code; the missed-last-frame timing is data flow.
 # pitfall: A name from the user that becomes a path is validated first. -> none: the sysfs join is correct after validation (linux.rs:49).
+# pitfall: A fake that returns early hides a deadline. -> none: a fake's timing contract is behaviour, no single-line signature.
+# pitfall: Writing no frame isn't being silent on the bus. -> none: controller listen-only mode is configuration, not a line signature.
+# pitfall: A frame is its length as well as its bytes. -> none: DLC matching is data flow across the echo check.
+# pitfall: A drain before a send must not eat the conversation it sits in. -> none: which drain is safe depends on channel state, not a literal.
+# pitfall: After every fix, re-read the doc comments on what changed -> none: review process, not a code line a lint can see.
+# pitfall: A comment moved into `docs/` loses the item it sat on. -> none: wording in reference prose; no code signature.
+# pitfall: A data change makes the docs' sample output false. -> none: stale sample output is prose; no code signature.
+# pitfall: A dropped check leaves its prose claim behind. -> none: stale prose claims need reading the docs, not one line.
