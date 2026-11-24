@@ -16,3 +16,11 @@ new-suppression off .github/claude-ship/lint-tests
 # pitfall: Duplicates. -> none: needs list-level checks; insert calls are common in correct code.
 # pitfall: Aliases of the same key. -> none: needs normalising values across a list; no single-line signature.
 # pitfall: `from_str_radix` accepts a leading `+`. -> none: correct code makes this call after its own digit check.
+# pitfall: Validate what was written, not what a filter leaves. -> none: filter-order logic; no single-line signature.
+# pitfall: Validate against the real decoder. -> none: round-trip design; no single-line signature.
+# pitfall: A fixed-size array field takes extra elements. -> none: fixed arrays are often length-checked (profile lib.rs:70).
+# pitfall: Respect the wire format's limits. -> none: the sim's unwrap_or(MAX) counts are fixture-guarded, so correct.
+# pitfall: A page limit fails only when a page past it has entries. -> none: off-by-one list logic; no single-line signature.
+# pitfall: Standard data has a format whether or not a profile lists it. -> none: needs a per-DID format check, not one literal line.
+# pitfall: Cross-check related sources, both ways. -> none: needs both directions of a test; no single-line signature.
+# pitfall: Check data against the real replies, not against another hand-made file. -> none: test-data sourcing; no single-line signature.
