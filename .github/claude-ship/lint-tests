@@ -88,3 +88,43 @@ miss pitfall-timeout-cargo-wrapper scripts/check.sh scripts/cargo.sh test --all-
 miss pitfall-timeout-cargo-wrapper .github/workflows/ci.yml       run: timeout 60 scripts/lint.sh
 miss pitfall-timeout-cargo-wrapper docs/CONTRIBUTING.md run: timeout 900 scripts/cargo.sh test
 miss pitfall-timeout-cargo-wrapper scripts/check.sh echo "timeout 900 scripts/cargo.sh is the bug"
+
+# pitfall-wall-clock-budget: a single-sample budget of tens of milliseconds in a test; a lower bound, a generous deadline (300 ms and up), a comment and a non-test file are fine.
+hit pitfall-wall-clock-budget crates/obdcracker-transport/src/raw/socketcan/port_tests.rs assert!(started.elapsed() < Duration::from_millis(5));
+hit pitfall-wall-clock-budget crates/obdcracker-transport/src/raw/tests/timing.rs assert!(start.elapsed() < 20 * MS);
+miss pitfall-wall-clock-budget crates/obdcracker-transport/src/raw/socketcan/port_tests.rs assert!(started.elapsed() >= Duration::from_millis(5));
+miss pitfall-wall-clock-budget crates/obdcracker-transport/tests/elm_listen.rs assert!(started.elapsed() < Duration::from_secs(10));
+miss pitfall-wall-clock-budget crates/obdcracker-transport/tests/elm.rs assert!(started.elapsed() < Duration::from_millis(500));
+miss pitfall-wall-clock-budget crates/obdcracker-transport/src/raw/socketcan/port_tests.rs // assert!(started.elapsed() < Duration::from_millis(5));
+miss pitfall-wall-clock-budget crates/obdcracker-transport/src/raw/socketcan/port.rs assert!(started.elapsed() < Duration::from_millis(5));
+
+# pitfall-transport-sim-dep: obdcracker-transport naming obdcracker-sim as a dependency or a use; comments, quoted paths and other crates are fine.
+hit pitfall-transport-sim-dep crates/obdcracker-transport/Cargo.toml obdcracker-sim = { workspace = true }
+hit pitfall-transport-sim-dep crates/obdcracker-transport/tests/elm.rs use obdcracker_sim::Fake;
+miss pitfall-transport-sim-dep crates/obdcracker-transport/tests/elm.rs // use obdcracker_sim::Fake;
+miss pitfall-transport-sim-dep crates/obdcracker-transport/src/raw/tests/tp20.rs #[path = "../../../../obdcracker-sim/src/tp20_module.rs"]
+miss pitfall-transport-sim-dep crates/obdcracker-transport/tests/elm.rs let name = "obdcracker-sim";
+miss pitfall-transport-sim-dep crates/obdcracker-cli/Cargo.toml obdcracker-sim.workspace = true
+
+# pitfall-commits-path-form: a commits/tags/ or commits/heads/ API path, which GitHub doesn't take for a ref; the full refs/ form, comments and docs are fine.
+hit pitfall-commits-path-form crates/obdcracker-cli/src/update.rs "https://api.github.com/repos/DaSonOfPoseidon/OBDCracker/commits/tags/v0.1.0"
+hit pitfall-commits-path-form scripts/tests/install-ref.sh url=https://api.github.com/repos/o/r/commits/heads/main
+miss pitfall-commits-path-form crates/obdcracker-cli/src/update.rs "https://api.github.com/repos/DaSonOfPoseidon/OBDCracker/commits/refs/tags/v0.1.0"
+miss pitfall-commits-path-form crates/obdcracker-cli/src/update.rs // GitHub's `commits/tags/<tag>` is a 422 for a tag
+miss pitfall-commits-path-form docs/pitfalls.md `commits/tags/v0.1.0` because the test wrote it
+
+# pitfall-install-cc-probe: a bare command -v cc in an install script; the link-probe line, comments and quoted messages are fine.
+hit pitfall-install-cc-probe scripts/install.sh if command -v cc >/dev/null 2>&1; then
+hit pitfall-install-cc-probe scripts/install.sh cc_path=$(command -v gcc)
+miss pitfall-install-cc-probe scripts/install.sh command -v cc >/dev/null 2>&1 &&
+miss pitfall-install-cc-probe scripts/install.sh # the old check used command -v cc
+miss pitfall-install-cc-probe scripts/install.sh die "need cc: see command -v cc"
+miss pitfall-install-cc-probe scripts/tests/install-ref.sh if command -v cc; then
+
+# pitfall-gate-commit-push: a check chained to a commit or push with ; instead of &&; a chain with && and quoted or commented mentions are fine.
+hit pitfall-gate-commit-push scripts/check.sh scripts/cargo.sh test --all-features; git push
+hit pitfall-gate-commit-push .github/workflows/release.yml run: cargo fmt --check; git commit -am fix
+miss pitfall-gate-commit-push scripts/check.sh scripts/cargo.sh test --all-features && git push
+miss pitfall-gate-commit-push scripts/check.sh # cargo test; git push
+miss pitfall-gate-commit-push scripts/check.sh echo "done"; git push
+miss pitfall-gate-commit-push docs/CONTRIBUTING.md cargo test; git push
