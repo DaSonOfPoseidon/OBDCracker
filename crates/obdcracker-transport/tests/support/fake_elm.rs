@@ -62,6 +62,9 @@ pub struct FakeElm {
     /// With `listen_raw`, the timeout runs out just as the host writes: the prompt comes
     /// first, and the byte is the first of the next line.
     pub listen_ends_on_write: bool,
+    /// Lines a monitor prints after the host's stop byte and before `STOPPED`: it prints until
+    /// it has read the byte.
+    pub before_stopped: Vec<String>,
     // Listening after a raw bus request (`listen_raw`), or after a reply (`listen_after_reply`).
     listening: bool,
     /// After a request that got a reply, keep listening for more until this long has passed, as
@@ -322,6 +325,7 @@ impl FakeElm {
             hang_after_request: false,
             listen_raw: false,
             listen_ends_on_write: false,
+            before_stopped: Vec::new(),
             listening: false,
             listen_after_reply: None,
             listen_until: None,
@@ -391,6 +395,9 @@ impl FakeElm {
                     self.printing = false;
                 } else {
                     self.interrupted += 1;
+                    for line in std::mem::take(&mut self.before_stopped) {
+                        self.print(&line);
+                    }
                     self.print("STOPPED");
                     self.prompt();
                     continue;
