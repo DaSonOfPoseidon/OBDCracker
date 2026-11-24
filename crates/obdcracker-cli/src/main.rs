@@ -1735,8 +1735,8 @@ fn did_list(dids: &[u16]) -> String {
         .join(" ")
 }
 
-// Each DID in request order: its value, shown as `scan` shows it, if it could be split, or that the reply left it out. Then
-// the DIDs the bytes of the rest hold, as the module sent them.
+// Each DID in request order: its value, shown as `scan` shows it, if it could be split, or that the reply left it
+// out. Then the DIDs the bytes of the rest hold, as the module sent them.
 fn print_dids_data(
     id: u32,
     name: &str,
@@ -1922,9 +1922,11 @@ fn print_sweep_found(module: &UdsModule, found: &sweep::Sweep) {
     );
 }
 
-// Bracketed hex for bytes, so binary data can't pass for text that looks like hex.
+// Bracketed hex for bytes, so binary data can't pass for text that looks like hex. Text that was only padding is
+// `(empty)`, not a blank line.
 fn did_value(value: &DidValue) -> String {
     match value {
+        DidValue::Text(text) if text.is_empty() => "(empty)".to_owned(),
         DidValue::Text(text) => text.clone(),
         bytes @ DidValue::Bytes(_) => format!("[{bytes}]"),
         DidValue::NotSet => "(not set)".to_owned(),
@@ -2978,9 +2980,7 @@ fn discover_pass<T: Transport>(
             |listed| format!(" (profile: {})", listed.name),
         );
         let part = match &module.part_number {
-            Ok(DidValue::Text(text)) => text.clone(),
-            Ok(bytes @ DidValue::Bytes(_)) => format!("[{bytes}]"),
-            Ok(DidValue::NotSet) => "(not set)".to_owned(),
+            Ok(value) => did_value(value),
             Err(e) => format!("({e})"),
         };
         progress!(

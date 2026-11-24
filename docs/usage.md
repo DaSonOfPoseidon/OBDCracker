@@ -466,11 +466,13 @@ none of them), so the reply may hold fewer DIDs than were asked for, still in th
 printed as `<ID> <module> <DID> (not in the reply)`, and the read still succeeds.
 
 The reply doesn't say where one DID's data ends, so it is split only as far as the profile gives lengths. Each DID
-whose length the profile gives is shown as `scan` shows it: a DID that is text (ISO 14229-1's identification names, or
-the profile's `decode = "text"`) as `<ID> <module> <DID> <text>` without its padding (`7E9 transmission F187
-4G0907401N`) when its data is printable, else as `<ID> <module> <DID> [bytes]` in hex. A DID the profile gives as `hex`
-(such as F18B) is always hex, F190 is text only if it is a VIN (17 bytes of one filler, such as dashes, is
-`(not set)`, and anything else is hex). Data that is only padding in a text DID is empty text. The `--json` document keeps the bytes. From the first DID in the reply with no
+whose length the profile gives is shown as `scan` shows it. A DID is text if ISO 14229-1 names it as text (F187, F188,
+F189, F191, F197 and F19E), else it takes the format its profile entry gives, else it is text if `scan` reads it by
+default and hex if not. Text is shown as `<ID> <module> <DID> <text>` without its padding (`7E9 transmission F187
+4G0907401N`) when its data is printable, else as `<ID> <module> <DID> [bytes]` in hex. Text whose data is only padding
+(spaces or NULs) is shown as `<ID> <module> <DID> (empty)`. A DID the profile gives as `hex` (such as F18B) is always
+hex. F190 is text only if it is a VIN (17 bytes of one filler, such as dashes, is `(not set)`, and anything else is
+hex). The `--json` document keeps the bytes. From the first DID in the reply with no
 length that isn't the last one asked for, the rest is printed whole, as `<ID> <module> <DIDs> not split, as the profile
 gives no length for the first [bytes]`, from that DID's echo on (a DID with no length that is the last one asked for
 takes the rest of the reply). The reply is checked exactly as far as it is split: each echo is one of the DIDs asked for

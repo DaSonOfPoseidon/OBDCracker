@@ -845,6 +845,35 @@ fn tcp_fingerprint_reads_a_multi_frame_part_number() {
 }
 
 #[test]
+fn fingerprint_and_scan_show_a_text_did_of_only_padding_as_empty() {
+    // The engine answers F187 with spaces and NULs, which the text decoder drops.
+    for (command, padding) in [("fingerprint", 0x20), ("scan", 0x00)] {
+        let addr = wifi_adapter_answering(move |header, request| match (header, request) {
+            (0x7E0, [0x22, 0xF1, 0x87]) => {
+                let mut reply = vec![0x62, 0xF1, 0x87];
+                reply.extend([padding; 11]);
+                vec![(0x7E8, reply)]
+            }
+            _ => Vec::new(),
+        });
+        let log = temp_log("did-padding");
+        let out = obdcracker(&[
+            "--tcp",
+            &addr.to_string(),
+            "--audit-log",
+            log.to_str().unwrap(),
+            command,
+        ]);
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert!(
+            stdout.lines().any(|l| l == "7E8 engine F187 (empty)"),
+            "{command}: {stdout}{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+}
+
+#[test]
 fn fingerprint_fails_when_nothing_answers() {
     let addr = wifi_adapter_answering(|_, _| Vec::new());
     let log = temp_log("fingerprint-silent");
@@ -2307,6 +2336,30 @@ mod read_dids {
                 ]
             );
         }
+    }
+
+    #[test]
+    fn a_text_did_of_only_padding_is_shown_as_empty() {
+        // F187 is all spaces and F189 all NULs: text with nothing in it, not a blank line.
+        let request = vec![0x22, 0xF1, 0x87, 0xF1, 0x89];
+        let mut reply = vec![0x62, 0xF1, 0x87];
+        reply.extend(data(0x20, 11));
+        reply.extend([0xF1, 0x89]);
+        reply.extend(data(0x00, 4));
+        let addr = wifi_elm(with_transmission(request, reply));
+        let log = temp_log("read-dids-padding");
+        let out = read_dids(addr, &log, &[], "F187,F189");
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(out.status.success(), "{stderr}");
+        assert_eq!(
+            String::from_utf8_lossy(&out.stdout)
+                .lines()
+                .collect::<Vec<_>>(),
+            [
+                "7E9 transmission F187 (empty)",
+                "7E9 transmission F189 (empty)"
+            ]
+        );
     }
 
     #[test]
