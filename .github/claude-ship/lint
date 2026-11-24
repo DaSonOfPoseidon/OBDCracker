@@ -42,3 +42,11 @@ ban pitfall-compare-before-incrementing warn *.rs,!*/tests/*,!tests/* '[[:alnum:
 # pitfall: A standard's rule for one class of vehicle isn't a rule for the region. -> none: needs VIN class semantics, not a literal signature.
 # pitfall: State computed on read must also be stored. -> none: write-back ordering is data flow; no single-line signature.
 # pitfall: Compare against a limit before incrementing. -> pitfall-compare-before-incrementing
+# pitfall: `Instant + Duration` panics on overflow. -> none: scan hits durations already clamped on another line, which is correct.
+# pitfall: Every wait on the bus must be bounded by something the ECU can't extend forever. -> none: waits and loops are in correct code too; no single-line signature.
+# pitfall: A command that can run without end isn't a short one. -> none: no literal marks an unbounded loop; bounded ones look the same.
+# pitfall: Keep limits per source, too. -> none: per-source counting is data flow, not one literal line.
+# pitfall: Keep timers per source. -> none: timer ownership is data flow; no single-line signature.
+# pitfall: Keep a multi-step broadcast's progress per source. -> none: progress tracking is data flow; no single-line signature.
+# pitfall: Deadlines must shrink back -> none: resetting a deadline is data flow; no single-line signature.
+# pitfall: Decode a reply as an answer to the request that got it. -> none: matching needs the request in scope; no literal signature.
