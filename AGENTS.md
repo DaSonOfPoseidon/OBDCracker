@@ -34,8 +34,8 @@ or anything CI already checks (rustfmt, clippy, tests, cargo-deny).
   `locks_clear_dtc_and_coding_in_read_only`. A read in one protocol must never be locked or banned in
   the other. Only T0 Read is unlocked; T3 Flash is banned.
 - Vehicle profiles can only narrow the policy, never widen it.
-- `obdcracker-core` stays `no_std` and IO-free.
-- All public items have docs (`missing_docs`); the facade doctest must keep working.
+- `obdcracker-core` stays `no_std` and IO-free (enforced by `.github/claude-ship/lint`).
+- All public items have docs (`missing_docs`, enforced by `.github/claude-ship/lint`); the facade doctest must keep working.
 - Comments follow `docs/CONTRIBUTING.md` › Comments: code comments only for a reason the code can't show;
   reference material lives in `docs/`.
 - The audit log logs requests before sending.

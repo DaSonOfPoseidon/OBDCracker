@@ -1,0 +1,17 @@
+# Cases for the rules of .github/claude-ship/lint, run by `hooks/lint.sh check`. Format: hooks/lint-rules.
+
+# core-no-std: std in the no_std crate; core:: and alloc:: are fine, and so is std outside it.
+hit core-no-std crates/obdcracker-core/src/lib.rs use std::collections::HashMap;
+hit core-no-std crates/obdcracker-core/src/isotp.rs     let now = std::time::Instant::now();
+hit core-no-std crates/obdcracker-core/src/lib.rs extern crate std;
+miss core-no-std crates/obdcracker-core/src/lib.rs use core::fmt;
+miss core-no-std crates/obdcracker-core/src/lib.rs use alloc::vec::Vec;
+miss core-no-std crates/obdcracker-core/src/lib.rs let n = stdout::len();
+miss core-no-std crates/obdcracker-transport/src/hex.rs use std::fmt;
+
+# missing-docs: allowing the lint instead of writing the doc comment.
+hit missing-docs crates/obdcracker-transport/src/lib.rs #![allow(missing_docs)]
+hit missing-docs crates/obdcracker-transport/src/lib.rs #[allow(clippy::pedantic, missing_docs)]
+miss missing-docs crates/obdcracker-transport/src/lib.rs #![warn(missing_docs)]
+miss missing-docs crates/obdcracker-transport/src/lib.rs #[allow(dead_code)]
+miss missing-docs README.md #![allow(missing_docs)] is not allowed

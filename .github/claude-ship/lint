@@ -1,0 +1,9 @@
+# OBDCracker's own hygiene rules, read by hooks/lint.sh from the default branch. Only added lines are checked.
+# Each rule is one AGENTS.md › Project invariant that a line pattern can show; the others (the safety allowlist, no raw
+# frames) are for the compiler and the tests. Cases are in lint-tests.
+
+ban core-no-std warn crates/obdcracker-core/src/* '(^|[^[:alnum:]_])(std::|extern[[:space:]]+crate[[:space:]]+std)' -- obdcracker-core stays no_std and IO-free: use core:: or alloc::, and put IO in obdcracker-transport.
+ban missing-docs warn *.rs 'allow\([^)]*missing_docs' -- Write the doc comment instead: public items need docs (missing_docs).
+
+# The cases quote the suppression markers on purpose.
+new-suppression off .github/claude-ship/lint-tests
