@@ -33,3 +33,12 @@ ban pitfall-escape-what-you-write-too warn *.rs,!*/tests/*,!tests/* ':([\\])?"[{
 # pitfall: Names are keys. -> none: case and space handling depends on lookup context, not one line.
 # pitfall: Escape what you write, too. -> pitfall-escape-what-you-write-too
 # pitfall: A document read back must say one thing, spelled one way. -> none: flatten is valid on structs; the enum shape isn't on the line.
+ban pitfall-compare-before-incrementing warn *.rs,!*/tests/*,!tests/* '[[:alnum:]_.]+[[:space:]]*\+=[[:space:]]*1[[:space:]]*;[[:space:]]*if[[:space:]]+[[:alnum:]_.]+[[:space:]]*>' unless '^[[:space:]]*//|"[^"]*\+=' -- Compare with the limit before incrementing: check the limit first, then add. Incrementing first overflows at the type's maximum.
+# pitfall: Quote for a shell with an allowlist, not a denylist. -> none: allowlist-versus-denylist is a design choice; no single literal signature.
+# pitfall: Don't over-restrict. -> none: protocol knowledge decides what to reject; no literal signature.
+# pitfall: A comparison must not pick between repeats. -> none: repeats need a whole-document check; no single-line signature.
+# pitfall: Two different values must never print the same. -> none: output pairs need golden tests; no single-line signature.
+# pitfall: A note about what was left out compares with what was asked for. -> none: covered-range data flow; no single-line signature.
+# pitfall: A standard's rule for one class of vehicle isn't a rule for the region. -> none: needs VIN class semantics, not a literal signature.
+# pitfall: State computed on read must also be stored. -> none: write-back ordering is data flow; no single-line signature.
+# pitfall: Compare against a limit before incrementing. -> pitfall-compare-before-incrementing

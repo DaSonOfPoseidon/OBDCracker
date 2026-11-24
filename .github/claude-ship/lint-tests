@@ -24,3 +24,11 @@ miss pitfall-escape-what-you-write-too crates/obdcracker-transport/src/audit.rs 
 miss pitfall-escape-what-you-write-too crates/obdcracker-transport/src/audit.rs // written by hand as "link":"{}" it breaks on a quote
 miss pitfall-escape-what-you-write-too crates/obdcracker-transport/src/audit.rs         r#""link":"{}""#,
 miss pitfall-escape-what-you-write-too crates/obdcracker-cli/tests/cli.rs &format!(r#""link":"{}""#, link)
+
+# pitfall-compare-before-incrementing: an increment and a limit check on one line, the increment first.
+hit pitfall-compare-before-incrementing crates/obdcracker-transport/src/elm/mod.rs pending += 1; if pending > max {
+hit pitfall-compare-before-incrementing crates/obdcracker-transport/src/exchange.rs self.pending+=1;if self.pending>=self.max {
+miss pitfall-compare-before-incrementing crates/obdcracker-transport/src/exchange.rs if pending >= max { return Err(Full) } pending += 1;
+miss pitfall-compare-before-incrementing crates/obdcracker-transport/src/exchange.rs // pending += 1; if pending > max
+miss pitfall-compare-before-incrementing crates/obdcracker-transport/src/exchange.rs let msg = "pending += 1; if pending > max";
+miss pitfall-compare-before-incrementing crates/obdcracker-transport/tests/exchange.rs pending += 1; if pending > max {
