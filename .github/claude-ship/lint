@@ -67,3 +67,11 @@ ban pitfall-compare-before-incrementing warn *.rs,!*/tests/*,!tests/* '[[:alnum:
 # pitfall: No answer isn't no effect. -> none: undo after a timeout is data flow across calls, not one line.
 ban pitfall-dtc-mask-ff warn *.rs,!*/tests/*,!tests/* '(^|[^[:alnum:]_])(0x19[^[:alnum:]_]+0x02[^[:alnum:]_]+0x[fF][fF]([^[:alnum:]_]|$)|"19 02 FF")' unless '^[[:space:]]*//' -- A mask of 0xFF returns every code, untested ones too: request FAULT_MASK (0xAF) and filter the reply by it.
 # pitfall: A DTC status mask of 0xFF isn't "every stored fault". -> pitfall-dtc-mask-ff
+# pitfall: Functional requests get fewer refusals. -> none: simulator silence for functional requests is behaviour; no literal.
+# pitfall: What an adapter prints is untrusted text that reaches a terminal. -> none: sanitising happens at intake; printing sites show no literal.
+# pitfall: An adapter can lose its settings mid-session -> none: reset and stale-state handling is data flow, not a line.
+# pitfall: Check for output the device shouldn't have sent before writing to it, -> none: buffered-output checks span read and write paths; no literal.
+# pitfall: Once the driver has failed closed, nothing more may reach the adapter, including any step that runs before the usual check. -> none: check order across calls is data flow; no literal signature.
+# pitfall: Don't ask for an answer that looks like a failure. -> none: sending ATI once is correct; a literal can't tell when.
+# pitfall: A truncated answer must not pass as a complete one. -> none: a complete-answer check is data flow across the parser.
+# pitfall: Output the driver could never have caused is evidence its assumptions broke. -> none: STOPPED is also an expected reply; no literal marks the bug.
