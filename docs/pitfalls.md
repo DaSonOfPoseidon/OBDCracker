@@ -387,6 +387,11 @@ Each entry names the class, what to check, and where it bit us.
   channel as a test it didn't expect. Make the adapter listen without sending (the driver monitors the bus, `STM` or
   `AT MA`), and check what a mode does with the filter you set: on an STN `AT MA` and `STMA` pass every ID. A state that has no prompt of its own (a monitor) makes every prompt a failure: check each path
   that reads one, not only the wait, or the adapter's cached state outlives a monitor that ended unseen (Codex).
+- **A monitor goes on printing until it reads the stop, so every line type the listen accepts must be accepted again
+  while it stops.** The listen skipped a remote frame (`123 RTR`) but `interrupt`'s drain, and the read between `X` and
+  `STOPPED`, passed it to `reply_line`, which failed the driver closed: a callback that stopped on a data frame with an
+  `RTR` line behind it got an error and a dead driver (#378). Test the stop with each such line already buffered after
+  the frame that stops it, and with a bad one (wrong width, outside the filter) that must still fail.
 - **An adapter prints its prompt only after its listen, so a fake that prints it at once hides a second of waiting.**
   The ELM327 keeps listening for more replies until `AT ST` runs out, about 1.02 s, so every request after a reply
   waited that second: 1040 ms between car session 11's warm-up reply and `ATCAF0`, though the module answered in 60 ms
