@@ -218,13 +218,13 @@ ensure_linker_linux() {
 		# shellcheck disable=SC2086 # $downloader is empty or one word
 		$SUDO env DEBIAN_FRONTEND=noninteractive apt-get install -y build-essential ca-certificates $downloader </dev/null
 	elif command -v dnf >/dev/null 2>&1; then
-		# shellcheck disable=SC2086
+		# shellcheck disable=SC2086 # $downloader is empty or one word
 		$SUDO dnf install -y gcc glibc-devel ca-certificates $downloader </dev/null
 	elif command -v pacman >/dev/null 2>&1; then
-		# shellcheck disable=SC2086
+		# shellcheck disable=SC2086 # $downloader is empty or one word
 		$SUDO pacman -S --needed --noconfirm base-devel ca-certificates $downloader </dev/null
 	elif command -v zypper >/dev/null 2>&1; then
-		# shellcheck disable=SC2086
+		# shellcheck disable=SC2086 # $downloader is empty or one word
 		$SUDO zypper --non-interactive install gcc glibc-devel ca-certificates $downloader </dev/null
 	else
 		die "no apt-get, dnf, pacman or zypper found: install a C compiler (gcc or clang) yourself, then run this again"

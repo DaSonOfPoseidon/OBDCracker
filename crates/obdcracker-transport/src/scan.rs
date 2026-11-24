@@ -1011,13 +1011,15 @@ fn read_dtc_details<T: Transport + ?Sized>(
     Ok(readings)
 }
 
+// One DID and what reading it gave.
+type DidReading = (u16, Result<DidValue, ReadError>);
+
 // Reads each DID in `requests`, and whether any multi-DID read got an answer, which the values
 // may not show.
-#[allow(clippy::type_complexity)]
 fn read_dids(
     asker: &mut impl Ask,
     requests: &DidRequests,
-) -> Result<(Vec<(u16, Result<DidValue, ReadError>)>, bool), ScanError> {
+) -> Result<(Vec<DidReading>, bool), ScanError> {
     let did_requests = &requests.dids;
     let mut values: Vec<Option<Result<DidValue, ReadError>>> = vec![None; did_requests.len()];
     let mut batch_answered = false;

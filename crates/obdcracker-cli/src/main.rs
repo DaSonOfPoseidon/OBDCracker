@@ -58,7 +58,10 @@ macro_rules! progress {
     };
 }
 
-#[allow(clippy::struct_excessive_bools)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "one switch per command-line flag"
+)]
 #[derive(Debug, Parser)]
 #[command(
     // The binary's name, not the package's (obdcracker-cli), which `--version` would print
@@ -1985,7 +1988,7 @@ fn scan_modules(cli: &Cli) -> Result<Vec<ScanModule>, String> {
     Ok(modules)
 }
 
-#[allow(clippy::struct_excessive_bools)]
+#[expect(clippy::struct_excessive_bools, reason = "one flag per discovery step")]
 #[derive(Debug, Clone, Copy)]
 struct Discovery {
     discover: bool,

@@ -250,7 +250,7 @@ impl<'a, T: Transport + ?Sized> ChannelSession<'a, T> {
             transport,
             policy,
             channel,
-            // Replaced by the module's own below.
+            // Placeholder until the module's own parameters arrive in its reply, below.
             parameters: Parameters {
                 block_size: 1,
                 t1: Duration::ZERO,
