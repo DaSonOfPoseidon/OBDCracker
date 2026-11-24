@@ -7,3 +7,12 @@ ban missing-docs warn *.rs 'allow\([^)]*missing_docs' -- Write the doc comment i
 
 # The cases quote the suppression markers on purpose.
 new-suppression off .github/claude-ship/lint-tests
+
+# pitfall: Review the whole diff on every push -> none: review process, not a line a lint can see.
+# pitfall: Sweep the whole class, not the one instance. -> none: review method, not a line a lint can see.
+# pitfall: Re-read your own fixes -> none: review habit, not a line a lint can see.
+# pitfall: On the third patch to the same logic, stop and rebuild it from the standard. -> none: design process, not a line a lint can see.
+# pitfall: Try the edge values -> none: test-design advice, not a line a lint can see.
+# pitfall: Duplicates. -> none: needs list-level checks; insert calls are common in correct code.
+# pitfall: Aliases of the same key. -> none: needs normalising values across a list; no single-line signature.
+# pitfall: `from_str_radix` accepts a leading `+`. -> none: correct code makes this call after its own digit check.
