@@ -15,3 +15,157 @@ hit missing-docs crates/obdcracker-transport/src/lib.rs #[allow(clippy::pedantic
 miss missing-docs crates/obdcracker-transport/src/lib.rs #![warn(missing_docs)]
 miss missing-docs crates/obdcracker-transport/src/lib.rs #[allow(dead_code)]
 miss missing-docs README.md #![allow(missing_docs)] is not allowed
+
+# pitfall-escape-what-you-write-too: a hand-built JSON line interpolates a string raw; escaped or whole-line-comment forms are fine.
+hit pitfall-escape-what-you-write-too crates/obdcracker-transport/src/audit.rs &format!(r#""link":"{}""#, link)
+hit pitfall-escape-what-you-write-too crates/obdcracker-cli/src/json.rs write!(out, "{{\"name\":\"{}\"}}", name)
+miss pitfall-escape-what-you-write-too crates/obdcracker-transport/src/audit.rs &format!(r#""dir":"unread","line":"{}""#, json_escape(&line))
+miss pitfall-escape-what-you-write-too crates/obdcracker-transport/src/audit.rs format!("{}: {}", name, value)
+miss pitfall-escape-what-you-write-too crates/obdcracker-transport/src/audit.rs // written by hand as "link":"{}" it breaks on a quote
+miss pitfall-escape-what-you-write-too crates/obdcracker-transport/src/audit.rs         r#""link":"{}""#,
+miss pitfall-escape-what-you-write-too crates/obdcracker-cli/tests/cli.rs &format!(r#""link":"{}""#, link)
+
+# pitfall-compare-before-incrementing: an increment and a limit check on one line, the increment first.
+hit pitfall-compare-before-incrementing crates/obdcracker-transport/src/elm/mod.rs pending += 1; if pending > max {
+hit pitfall-compare-before-incrementing crates/obdcracker-transport/src/exchange.rs self.pending+=1;if self.pending>=self.max {
+miss pitfall-compare-before-incrementing crates/obdcracker-transport/src/exchange.rs if pending >= max { return Err(Full) } pending += 1;
+miss pitfall-compare-before-incrementing crates/obdcracker-transport/src/exchange.rs // pending += 1; if pending > max
+miss pitfall-compare-before-incrementing crates/obdcracker-transport/src/exchange.rs let msg = "pending += 1; if pending > max";
+miss pitfall-compare-before-incrementing crates/obdcracker-transport/tests/exchange.rs pending += 1; if pending > max {
+
+# pitfall-dtc-mask-ff: a request with status mask 0xFF returns untested codes too; tests quote it on purpose.
+hit pitfall-dtc-mask-ff crates/obdcracker-transport/src/uds.rs let req = [0x19, 0x02, 0xFF];
+hit pitfall-dtc-mask-ff crates/obdcracker-transport/src/uds.rs let req = vec![0x19,0x02,0xff];
+hit pitfall-dtc-mask-ff crates/obdcracker-transport/src/elm/mod.rs const ALL: &str = "19 02 FF";
+miss pitfall-dtc-mask-ff crates/obdcracker-transport/src/uds.rs let req = [0x19, 0x02, FAULT_MASK];
+miss pitfall-dtc-mask-ff crates/obdcracker-transport/src/uds.rs // [0x19, 0x02, 0xFF] returns every code, untested ones too
+miss pitfall-dtc-mask-ff crates/obdcracker-transport/src/uds.rs let note = "send 19 02 FF to read all";
+miss pitfall-dtc-mask-ff crates/obdcracker-safety/tests/policy.rs &[0x19, 0x02, 0xFF],
+
+# pitfall-approve-from-raw-ids: an approval taking raw u16/u32 IDs instead of the reply's proof token; a comment or a test path quotes it.
+hit pitfall-approve-from-raw-ids crates/obdcracker-safety/src/lib.rs pub fn approve_tp20_disconnect(&self, receive: u32, send: u32) -> Result<Approved, Rejection> {
+hit pitfall-approve-from-raw-ids crates/obdcracker-safety/src/lib.rs     fn approve_tp20_ack(&self, id: u16) -> Result<Approved, Rejection> {
+miss pitfall-approve-from-raw-ids crates/obdcracker-safety/src/lib.rs     pub fn approve_tp20_disconnect(&self, channel: &OpenTp20Channel) -> Result<Approved, Rejection> {
+miss pitfall-approve-from-raw-ids crates/obdcracker-safety/src/lib.rs     pub fn approve_tp20_setup(&self, address: u8) -> Result<Approved, Rejection> {
+miss pitfall-approve-from-raw-ids crates/obdcracker-safety/src/lib.rs     // fn approve_tp20_disconnect(&self, receive: u32, send: u32)
+miss pitfall-approve-from-raw-ids crates/obdcracker-safety/src/lib.rs     let doc = "fn approve_tp20_ack(id: u16)";
+miss pitfall-approve-from-raw-ids crates/obdcracker-safety/tests/policy.rs fn approve_tp20_ack(id: u16) -> Result<Tier, Rejection> {
+
+# pitfall-link-io-bound: a serial link's flush waits with no timeout; the TCP link's flush is a no-op and the stdout flushes are fine.
+hit pitfall-link-io-bound crates/obdcracker-transport/src/link/serial.rs self.port.flush()?;
+hit pitfall-link-io-bound crates/obdcracker-transport/src/link/serial.rs port.flush().map_err(LinkError::Io)?;
+miss pitfall-link-io-bound crates/obdcracker-transport/src/link/tcp.rs self.stream.flush()
+miss pitfall-link-io-bound crates/obdcracker-transport/src/link/serial.rs // a serial flush: .flush() waits with no timeout
+miss pitfall-link-io-bound crates/obdcracker-transport/src/link/serial.rs let note = "never call .flush() on a serial link";
+miss pitfall-link-io-bound crates/obdcracker-cli/src/live_cmd.rs out.flush()
+
+# pitfall-pin-test-tools: an install of an external tool with no version or commit pin; a whole-line comment, a pinned or @-pinned install, a requirements file and a docs path are fine.
+hit pitfall-pin-test-tools .github/workflows/ci.yml run: uv tool install elm327-emulator
+hit pitfall-pin-test-tools .github/workflows/ci.yml run: uv tool install "elm327-emulator"
+hit pitfall-pin-test-tools .github/workflows/ci.yml run: pip install ELM327-Emulator
+miss pitfall-pin-test-tools .github/workflows/ci.yml run: uv tool install "elm327-emulator==4.0.0"
+miss pitfall-pin-test-tools .github/workflows/ci.yml run: uv tool install "elm327-emulator @ git+https://github.com/Ircama/ELM327-emulator@ff34d2f72da58c05a1b1f00d04f043e8b6c856fb"
+miss pitfall-pin-test-tools .github/workflows/ci.yml       # uv tool install elm327-emulator
+miss pitfall-pin-test-tools .github/workflows/ci.yml run: pip install -r requirements.txt
+miss pitfall-pin-test-tools .github/workflows/ci.yml run: echo "ELM327-emulator is pinned in ci.yml"
+miss pitfall-pin-test-tools docs/adapters.md uv tool install elm327-emulator
+
+# pitfall-stn-fc-clear: clearing the STN's flow control tables; the adding commands, comments, tests and docs are fine.
+hit pitfall-stn-fc-clear crates/obdcracker-transport/src/elm/mod.rs self.flow_control_command("STFFCC")?;
+hit pitfall-stn-fc-clear crates/obdcracker-transport/src/elm/mod.rs self.flow_control_command(&format!("STCFCPC {id:03X}"))?;
+miss pitfall-stn-fc-clear crates/obdcracker-transport/src/elm/mod.rs self.flow_control_command(&format!("STCFCPA {tx:03X},{rx:03X}"))?;
+miss pitfall-stn-fc-clear crates/obdcracker-transport/src/elm/mod.rs self.flow_control_command("STFFCA 7E8,7FF")?;
+miss pitfall-stn-fc-clear crates/obdcracker-transport/src/elm/mod.rs // Never send STFFCC or STCFCPC while the driver runs.
+miss pitfall-stn-fc-clear crates/obdcracker-transport/tests/elm.rs .any(|c| c == "STFFCC" || c == "STCFCPC"),
+miss pitfall-stn-fc-clear docs/elm327.md the driver never writes `STFFCC` while it runs
+
+# pitfall-timeout-cargo-wrapper: timeout in front of scripts/cargo.sh; a comment, a call without timeout, a doc path and a quoted mention are fine.
+hit pitfall-timeout-cargo-wrapper .github/workflows/ci.yml       run: timeout 900 scripts/cargo.sh test --all-features
+hit pitfall-timeout-cargo-wrapper scripts/check.sh timeout -k 10 600 ./scripts/cargo.sh test
+hit pitfall-timeout-cargo-wrapper .github/workflows/ci.yml       run: timeout 20m bash -c "scripts/cargo.sh test"
+miss pitfall-timeout-cargo-wrapper .github/workflows/ci.yml       # timeout 900 scripts/cargo.sh test
+miss pitfall-timeout-cargo-wrapper scripts/check.sh scripts/cargo.sh test --all-features
+miss pitfall-timeout-cargo-wrapper .github/workflows/ci.yml       run: timeout 60 scripts/lint.sh
+miss pitfall-timeout-cargo-wrapper docs/CONTRIBUTING.md run: timeout 900 scripts/cargo.sh test
+miss pitfall-timeout-cargo-wrapper scripts/check.sh echo "timeout 900 scripts/cargo.sh is the bug"
+
+# pitfall-wall-clock-budget: a single-sample budget of tens of milliseconds in a test; a lower bound, a generous deadline (300 ms and up), a comment and a non-test file are fine.
+hit pitfall-wall-clock-budget crates/obdcracker-transport/src/raw/socketcan/port_tests.rs assert!(started.elapsed() < Duration::from_millis(5));
+hit pitfall-wall-clock-budget crates/obdcracker-transport/src/raw/tests/timing.rs assert!(start.elapsed() < 20 * MS);
+miss pitfall-wall-clock-budget crates/obdcracker-transport/src/raw/socketcan/port_tests.rs assert!(started.elapsed() >= Duration::from_millis(5));
+miss pitfall-wall-clock-budget crates/obdcracker-transport/tests/elm_listen.rs assert!(started.elapsed() < Duration::from_secs(10));
+miss pitfall-wall-clock-budget crates/obdcracker-transport/tests/elm.rs assert!(started.elapsed() < Duration::from_millis(500));
+miss pitfall-wall-clock-budget crates/obdcracker-transport/src/raw/socketcan/port_tests.rs // assert!(started.elapsed() < Duration::from_millis(5));
+miss pitfall-wall-clock-budget crates/obdcracker-transport/src/raw/socketcan/port.rs assert!(started.elapsed() < Duration::from_millis(5));
+
+# pitfall-transport-sim-dep: obdcracker-transport naming obdcracker-sim as a dependency or a use; comments, quoted paths and other crates are fine.
+hit pitfall-transport-sim-dep crates/obdcracker-transport/Cargo.toml obdcracker-sim = { workspace = true }
+hit pitfall-transport-sim-dep crates/obdcracker-transport/tests/elm.rs use obdcracker_sim::Fake;
+miss pitfall-transport-sim-dep crates/obdcracker-transport/tests/elm.rs // use obdcracker_sim::Fake;
+miss pitfall-transport-sim-dep crates/obdcracker-transport/src/raw/tests/tp20.rs #[path = "../../../../obdcracker-sim/src/tp20_module.rs"]
+miss pitfall-transport-sim-dep crates/obdcracker-transport/tests/elm.rs let name = "obdcracker-sim";
+miss pitfall-transport-sim-dep crates/obdcracker-cli/Cargo.toml obdcracker-sim.workspace = true
+
+# pitfall-commits-path-form: a commits/tags/ or commits/heads/ API path, which GitHub doesn't take for a ref; the full refs/ form, comments and docs are fine.
+hit pitfall-commits-path-form crates/obdcracker-cli/src/update.rs "https://api.github.com/repos/DaSonOfPoseidon/OBDCracker/commits/tags/v0.1.0"
+hit pitfall-commits-path-form scripts/tests/install-ref.sh url=https://api.github.com/repos/o/r/commits/heads/main
+miss pitfall-commits-path-form crates/obdcracker-cli/src/update.rs "https://api.github.com/repos/DaSonOfPoseidon/OBDCracker/commits/refs/tags/v0.1.0"
+miss pitfall-commits-path-form crates/obdcracker-cli/src/update.rs // GitHub's `commits/tags/<tag>` is a 422 for a tag
+miss pitfall-commits-path-form docs/pitfalls.md `commits/tags/v0.1.0` because the test wrote it
+
+# pitfall-install-cc-probe: a bare command -v cc in an install script; the link-probe line, comments and quoted messages are fine.
+hit pitfall-install-cc-probe scripts/install.sh if command -v cc >/dev/null 2>&1; then
+hit pitfall-install-cc-probe scripts/install.sh cc_path=$(command -v gcc)
+miss pitfall-install-cc-probe scripts/install.sh command -v cc >/dev/null 2>&1 &&
+miss pitfall-install-cc-probe scripts/install.sh # the old check used command -v cc
+miss pitfall-install-cc-probe scripts/install.sh die "need cc: see command -v cc"
+miss pitfall-install-cc-probe scripts/tests/install-ref.sh if command -v cc; then
+
+# pitfall-gate-commit-push: a check chained to a commit or push with ; instead of &&; a chain with && and quoted or commented mentions are fine.
+hit pitfall-gate-commit-push scripts/check.sh scripts/cargo.sh test --all-features; git push
+hit pitfall-gate-commit-push .github/workflows/release.yml run: cargo fmt --check; git commit -am fix
+miss pitfall-gate-commit-push scripts/check.sh scripts/cargo.sh test --all-features && git push
+miss pitfall-gate-commit-push scripts/check.sh # cargo test; git push
+miss pitfall-gate-commit-push scripts/check.sh echo "done"; git push
+miss pitfall-gate-commit-push docs/CONTRIBUTING.md cargo test; git push
+
+# pitfall-pkill-f: pkill -f with a pattern (or --full) in a script or workflow; a comment, a quoted mention, -x and docs are fine.
+hit pitfall-pkill-f scripts/dev.sh pkill -f "cargo run"
+hit pitfall-pkill-f scripts/stop.bash pkill --full obdcracker-sim
+miss pitfall-pkill-f scripts/dev.sh # pkill -f cargo run
+miss pitfall-pkill-f scripts/dev.sh pkill -x cargo
+miss pitfall-pkill-f scripts/dev.sh echo "run pkill -f later"
+miss pitfall-pkill-f docs/pitfalls.md pkill -f <pattern>
+
+# pitfall-required-check-if: a job-level if: in a workflow; step-level ifs and the !cancelled() decider are fine.
+hit pitfall-required-check-if .github/workflows/release.yml     if: github.ref_type == 'tag'
+hit pitfall-required-check-if .github/workflows/ci.yml     if: always()
+miss pitfall-required-check-if .github/workflows/ci.yml       if: ${{ always() }}
+miss pitfall-required-check-if .github/workflows/ci.yml     if: ${{ !cancelled() }}
+miss pitfall-required-check-if docs/ci.md     if: always()
+
+# pitfall-diff-name-only-quoted: git diff --name-only without -z; a -z read, a quoted or commented mention and a non-workflow path are fine.
+hit pitfall-diff-name-only-quoted scripts/pr-gate.sh names="$(git diff --name-only "$base"...HEAD)"
+hit pitfall-diff-name-only-quoted .github/workflows/ci.yml git diff --name-only "$BASE_SHA" HEAD > "$RUNNER_TEMP/changed"
+hit pitfall-diff-name-only-quoted scripts/changed.bash git -C "$dir" diff --name-only origin/main
+miss pitfall-diff-name-only-quoted scripts/pr-gate.sh git diff -z --name-only --no-renames "$base"...HEAD >"$names"
+miss pitfall-diff-name-only-quoted scripts/pr-gate.sh echo "run git diff --name-only later"
+miss pitfall-diff-name-only-quoted scripts/pr-gate.sh # git diff --name-only was the old check
+miss pitfall-diff-name-only-quoted docs/CONTRIBUTING.md git diff --name-only origin/main
+
+# pitfall-diff-name-only-renames: git diff --name-only without --no-renames; a rename's source is then missing from the list.
+hit pitfall-diff-name-only-renames .github/workflows/ci.yml git diff -z --name-only "$BASE_SHA" HEAD
+hit pitfall-diff-name-only-renames scripts/changed.sh changed=$(git diff --name-only origin/main)
+hit pitfall-diff-name-only-renames scripts/changed.sh git -C "$dir" diff --name-only HEAD~1
+miss pitfall-diff-name-only-renames .github/workflows/ci.yml git diff -z --name-only --no-renames "$BASE_SHA" HEAD
+miss pitfall-diff-name-only-renames scripts/pr-gate.sh git diff --no-renames --name-only origin/main
+miss pitfall-diff-name-only-renames scripts/pr-gate.sh # git diff --name-only hides the source
+miss pitfall-diff-name-only-renames docs/pitfalls.md git diff --name-only origin/main
+
+# pitfall-grep-q-pipe: a pipe into grep -q in a workflow step (pipefail is on there); a here-string, || and a script are fine.
+hit pitfall-grep-q-pipe .github/workflows/ci.yml if printf '%s\n' "$files" | grep -q '^crates/'; then
+hit pitfall-grep-q-pipe .github/workflows/release.yml run: git tag | grep -qx "$TAG"
+miss pitfall-grep-q-pipe .github/workflows/ci.yml if grep -q '^crates/' <<< "$files"; then
+miss pitfall-grep-q-pipe .github/workflows/ci.yml cmd || grep -q '^crates/'
+miss pitfall-grep-q-pipe .github/workflows/ci.yml # printf x | grep -q y was the old check
+miss pitfall-grep-q-pipe scripts/install.sh id -nG | tr ' ' '\n' | grep -qx "$group"

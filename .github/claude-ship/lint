@@ -7,3 +7,179 @@ ban missing-docs warn *.rs 'allow\([^)]*missing_docs' -- Write the doc comment i
 
 # The cases quote the suppression markers on purpose.
 new-suppression off .github/claude-ship/lint-tests
+
+# pitfall: Review the whole diff on every push -> none: review process, not a line a lint can see.
+# pitfall: Sweep the whole class, not the one instance. -> none: review method, not a line a lint can see.
+# pitfall: Re-read your own fixes -> none: review habit, not a line a lint can see.
+# pitfall: On the third patch to the same logic, stop and rebuild it from the standard. -> none: design process, not a line a lint can see.
+# pitfall: Try the edge values -> none: test-design advice, not a line a lint can see.
+# pitfall: Duplicates. -> none: needs list-level checks; insert calls are common in correct code.
+# pitfall: Aliases of the same key. -> none: needs normalising values across a list; no single-line signature.
+# pitfall: `from_str_radix` accepts a leading `+`. -> none: correct code makes this call after its own digit check.
+# pitfall: Validate what was written, not what a filter leaves. -> none: filter-order logic; no single-line signature.
+# pitfall: Validate against the real decoder. -> none: round-trip design; no single-line signature.
+# pitfall: A fixed-size array field takes extra elements. -> none: fixed arrays are often length-checked (profile lib.rs:70).
+# pitfall: Respect the wire format's limits. -> none: the sim's unwrap_or(MAX) counts are fixture-guarded, so correct.
+# pitfall: A page limit fails only when a page past it has entries. -> none: off-by-one list logic; no single-line signature.
+# pitfall: Standard data has a format whether or not a profile lists it. -> none: needs a per-DID format check, not one literal line.
+# pitfall: Cross-check related sources, both ways. -> none: needs both directions of a test; no single-line signature.
+# pitfall: Check data against the real replies, not against another hand-made file. -> none: test-data sourcing; no single-line signature.
+ban pitfall-escape-what-you-write-too warn *.rs,!*/tests/*,!tests/* ':([\\])?"[{][}]' unless 'escape|^[[:space:]]*//|,[[:space:]]*$' -- Escape each string a hand-built JSON format interpolates (json_escape), or write it with serde_json: one quote or backslash breaks the file for every reader.
+# pitfall: An importer must fail on a line it can't read, not skip it. -> none: skip-or-fail behaviour; blank and comment skips are correct.
+# pitfall: A value with its prefix stripped doesn't say which request it answered. -> none: data flow, not a literal; stripping a prefix is often correct.
+# pitfall: Public fields bypass the parser. -> none: pub fields are normal in plain data; no literal signature.
+# pitfall: Empty, blank and padding-only values -> none: which values are padding needs semantic checks, not one literal.
+# pitfall: But check real modules before calling padding malformed. -> none: an empty slot is legitimate; needs a modelled None, not a pattern.
+# pitfall: Names are keys. -> none: case and space handling depends on lookup context, not one line.
+# pitfall: Escape what you write, too. -> pitfall-escape-what-you-write-too
+# pitfall: A document read back must say one thing, spelled one way. -> none: flatten is valid on structs; the enum shape isn't on the line.
+ban pitfall-compare-before-incrementing warn *.rs,!*/tests/*,!tests/* '[[:alnum:]_.]+[[:space:]]*\+=[[:space:]]*1[[:space:]]*;[[:space:]]*if[[:space:]]+[[:alnum:]_.]+[[:space:]]*>' unless '^[[:space:]]*//|"[^"]*\+=' -- Compare with the limit before incrementing: check the limit first, then add. Incrementing first overflows at the type's maximum.
+# pitfall: Quote for a shell with an allowlist, not a denylist. -> none: allowlist-versus-denylist is a design choice; no single literal signature.
+# pitfall: Don't over-restrict. -> none: protocol knowledge decides what to reject; no literal signature.
+# pitfall: A comparison must not pick between repeats. -> none: repeats need a whole-document check; no single-line signature.
+# pitfall: Two different values must never print the same. -> none: output pairs need golden tests; no single-line signature.
+# pitfall: A note about what was left out compares with what was asked for. -> none: covered-range data flow; no single-line signature.
+# pitfall: A standard's rule for one class of vehicle isn't a rule for the region. -> none: needs VIN class semantics, not a literal signature.
+# pitfall: State computed on read must also be stored. -> none: write-back ordering is data flow; no single-line signature.
+# pitfall: Compare against a limit before incrementing. -> pitfall-compare-before-incrementing
+# pitfall: `Instant + Duration` panics on overflow. -> none: scan hits durations already clamped on another line, which is correct.
+# pitfall: Every wait on the bus must be bounded by something the ECU can't extend forever. -> none: waits and loops are in correct code too; no single-line signature.
+# pitfall: A command that can run without end isn't a short one. -> none: no literal marks an unbounded loop; bounded ones look the same.
+# pitfall: Keep limits per source, too. -> none: per-source counting is data flow, not one literal line.
+# pitfall: Keep timers per source. -> none: timer ownership is data flow; no single-line signature.
+# pitfall: Keep a multi-step broadcast's progress per source. -> none: progress tracking is data flow; no single-line signature.
+# pitfall: Deadlines must shrink back -> none: resetting a deadline is data flow; no single-line signature.
+# pitfall: Decode a reply as an answer to the request that got it. -> none: matching needs the request in scope; no literal signature.
+# pitfall: Splitting a list to process it in groups reorders it. -> none: Ordering across groups is data flow; no single-line signature.
+# pitfall: Cleanup that runs on drop can't report a failure. -> none: Drop impls are common in correct code; no single-line signature.
+# pitfall: Report progress only for work that happened. -> none: progress calls are correct too; whether work happened is data flow.
+# pitfall: "Busy, repeat request" (NRC 0x21) isn't an answer. -> none: NRC 0x21 also appears in correct code; no single-line signature.
+# pitfall: A refusal doesn't say which request it refuses. -> none: Which request a refusal answers is data flow across calls.
+# pitfall: A repeated request can take its own earlier late reply. -> none: Matching a late reply needs the request history; no literal signature.
+# pitfall: A reply can't change what the request already fixed. -> none: Needs the request in scope to compare; no single-line signature.
+# pitfall: A count inside a reply must be backed by the bytes after it. -> none: Counts and loops look like correct code; the check is data flow.
+# pitfall: Match a reply to its request by what it echoes -> none: echo checks need the request in scope; no single-line signature.
+# pitfall: A deadline on the far side of the bus needs a margin for the trip, and the earliest safe time. -> none: timing margins are data flow across calls; no single-line signature.
+# pitfall: A host timestamp is not when the other side acted, and a bound must hold in the dangerous direction only. -> none: which clock a bound uses is data flow, not one line.
+# pitfall: Use the limits the other side declares. -> none: honouring a declared limit is data flow across requests.
+# pitfall: Keep cleanup armed until it has worked. -> none: disarm-before-send order is data flow, not one line.
+# pitfall: The suppress-positive-response bit (bit 7) is not echoed. -> none: correct code masks bit 7 too (response.rs:254); no line shows the bug.
+# pitfall: No answer isn't no effect. -> none: undo after a timeout is data flow across calls, not one line.
+ban pitfall-dtc-mask-ff warn *.rs,!*/tests/*,!tests/* '(^|[^[:alnum:]_])(0x19[^[:alnum:]_]+0x02[^[:alnum:]_]+0x[fF][fF]([^[:alnum:]_]|$)|"19 02 FF")' unless '^[[:space:]]*//' -- A mask of 0xFF returns every code, untested ones too: request FAULT_MASK (0xAF) and filter the reply by it.
+# pitfall: A DTC status mask of 0xFF isn't "every stored fault". -> pitfall-dtc-mask-ff
+# pitfall: Functional requests get fewer refusals. -> none: simulator silence for functional requests is behaviour; no literal.
+# pitfall: What an adapter prints is untrusted text that reaches a terminal. -> none: sanitising happens at intake; printing sites show no literal.
+# pitfall: An adapter can lose its settings mid-session -> none: reset and stale-state handling is data flow, not a line.
+# pitfall: Check for output the device shouldn't have sent before writing to it, -> none: buffered-output checks span read and write paths; no literal.
+# pitfall: Once the driver has failed closed, nothing more may reach the adapter, including any step that runs before the usual check. -> none: check order across calls is data flow; no literal signature.
+# pitfall: Don't ask for an answer that looks like a failure. -> none: sending ATI once is correct; a literal can't tell when.
+# pitfall: A truncated answer must not pass as a complete one. -> none: a complete-answer check is data flow across the parser.
+# pitfall: Output the driver could never have caused is evidence its assumptions broke. -> none: STOPPED is also an expected reply; no literal marks the bug.
+# pitfall: Widening a parser reclassifies lines other code diagnoses. -> none: behaviour across parser branches; no single-line signature.
+# pitfall: An ID's width is how it was printed, not its value. -> none: width is data carried between parser and driver; no literal.
+# pitfall: Check which chip version a command needs. -> none: AT CRA with X digits is correct behind a version gate.
+# pitfall: One flipped bit on a serial line can turn a command into a bus frame. -> none: corruption model is reasoning, not a line.
+# pitfall: A flipped bit can delete a character, not just change it. -> none: deletion versus substitution is reasoning, not a line.
+# pitfall: Don't rely on a device to throw away a half-written line. -> none: device discard behaviour is design; no literal signature.
+# pitfall: Weigh a mitigation against what it costs. -> none: a cost judgement; no literal signature.
+# pitfall: Datasheet examples aren't byte-exact. -> none: test-fidelity advice; no literal signature.
+# pitfall: A value a standard leaves to the manufacturer isn't a standard value. -> none: manufacturer-defined values need the standard's table; no literal.
+# pitfall: A new protocol reaches past the allowlist. -> none: matching a reply through each path is data flow; no literal.
+# pitfall: A fresh state machine takes any starting point, so give it the one the protocol fixes. -> none: the starting sequence is data flow, not a literal.
+# pitfall: After dropping a message, skip to its end. -> none: skip-to-end is control flow across calls; no literal.
+ban pitfall-approve-from-raw-ids warn crates/obdcracker-safety/src/* '^[[:space:]]*((pub|pub\(crate\))[[:space:]]+)?fn[[:space:]]+approve[[:alnum:]_]*\([^)]*:[[:space:]]*u(16|32)([^[:alnum:]_]|$)' unless '^[[:space:]]*//' -- Approve from the proof the reply gave (a token such as OpenTp20Channel), not from raw IDs a caller chose: the policy can't check where the request goes.
+# pitfall: A request built from a reply needs proof of that reply. -> pitfall-approve-from-raw-ids
+# pitfall: Don't confuse a transport limit with a protocol limit. -> none: 4095 is also correct ISO-TP code; the limit's meaning is data flow.
+# pitfall: A policy widened for one pass mustn't outlive it. -> none: policy reuse across passes is data flow; discovery narrowing is correct.
+# pitfall: An early exit skips what else was asked for. -> none: skipped passes are control flow across the function; no literal.
+# pitfall: A CAN ID means nothing without its width. -> none: ID-width check spans lines; bare ID comparisons are correct code too.
+# pitfall: A loop that waits on a flood needs its deadline checked after every frame it skips. -> none: deadline placement is control flow across the loop; no literal.
+# pitfall: A bounded drain that hits its bound hasn't drained. -> none: what a bound hit means is data flow; bounded loops are common.
+# pitfall: Handle every event before a limit rejects it. -> none: handling order spans lines; its one-line shape is pitfall-compare-before-incrementing.
+# pitfall: A transfer ends on every path that leaves the peer able to go on. -> none: which error paths drop a window is data flow across the function.
+# pitfall: Don't delete saved evidence when a later event completes. -> none: clearing on completion is data flow; the fixed code has the same literal.
+# pitfall: A multi-DID `22` reply may leave out the DIDs the module doesn't support. -> none: skipped-DID splitting is data flow; no single-line signature.
+# pitfall: An audit log that sees only what the code reads misses the evidence. -> none: which lines the log must keep is data flow across the driver.
+# pitfall: An adapter's learned timeout can hide a slow module. -> none: ATAT1 is also sent on purpose by correct code (elm/mod.rs:537).
+# pitfall: An adapter prints its prompt only after its listen, so a fake that prints it at once hides a second of waiting. -> none: a fake's prompt timing is test behaviour; no line signature.
+# pitfall: A silent listener on a bus where it's the only receiver makes the sender repeat and error out. -> none: the silent setting is correct in the listen-only monitor (#104).
+# pitfall: Check that a fix changes what the logs show. -> none: review method, not a line a lint can see.
+# pitfall: Every read and write on a link needs a bound, not just the bus waits. -> pitfall-link-io-bound
+ban pitfall-link-io-bound warn crates/obdcracker-transport/src/link/serial*.rs '[.]flush[(][)]' unless '^[[:space:]]*//|"[^"]*[.]flush' -- serial2's flush waits for the OS queue to drain with no timeout: keep the write timeout and don't flush a serial link.
+# pitfall: Bound what you collect, not just each piece. -> none: which loops accumulate is data flow; bounded loops are common.
+# pitfall: Timeouts must cover the link, not only the bus. -> none: sizing each timer from the data is data flow; no literal signature.
+# pitfall: A size measured on one ID width is wrong for the other. -> none: constants sized for the widest ID are data flow; no literal.
+ban pitfall-pin-test-tools warn *.yml,*.yaml,*.sh '(^|[^[:alnum:]_])(uv tool install|uvx|pip install)[[:space:]]+"?[[:alnum:]_][[:alnum:]_.-]*"?([[:space:]]|$)' unless '^[[:space:]]*#|(uv tool install|uvx|pip install)[[:space:]]+"?[[:alnum:]_][[:alnum:]_.-]*"?[[:space:]]*(@|==)' -- Pin the tool exactly (name==version, or a git commit with @) and check the pin installs from scratch: an unpinned or ranged install can resolve to a build uv refuses.
+# pitfall: A watchdog counts only the time you spend waiting, added up across calls. -> none: time summed across calls is control flow; no literal.
+# pitfall: A log of what was heard must cover what was half-used. -> none: which frames the log keeps is data flow across the driver.
+# pitfall: Don't hand back stale data to make a log complete. -> none: which replies a request returns is data flow; no literal.
+# pitfall: Pin external test tools exactly, and check the pin installs from scratch. -> pitfall-pin-test-tools
+# pitfall: A shared buffer fills at the sum of its sources' rates. -> none: summing rates across senders is data flow; no literal.
+# pitfall: A wrapper that forgets a defaulted `Transport` method silently takes the default. -> none: every correct forwarding wrapper matches the same shape.
+# pitfall: Read a mode's paragraph, not just its summary chart. -> none: the prose meaning of a mode is not a line a lint can see.
+# pitfall: Trust what an adapter does, not what it says it is. -> none: the identity check spans lines; the fixed STN match is correct code too.
+ban pitfall-stn-fc-clear warn *.rs,!*/tests/*,!tests/* '(^|[^[:alnum:]_])(STFFCC|STCFCPC)([^[:alnum:]_]|$)' unless '^[[:space:]]*//' -- Never clear the STN's flow control pairs or filters (STFFCC, STCFCPC): clearing them turns off every other module's automatic flow control. Add a pair with STFFCA or STCFCPA once, and track what was added.
+# pitfall: Emulators have quirks too. -> none: emulator workaround notes are prose; no code signature.
+# pitfall: A mode switch changes only what its command says. -> none: AT CAF0 is correct in raw-frame modes; missing companions are data flow.
+# pitfall: Adapter-side ISO-TP state is global: adding one custom flow control pair on an STN turns off its automatic pairs for every other module (FRPM rev. F, section 13 p. 60). -> pitfall-stn-fc-clear
+# pitfall: A feature gated on state an earlier request sets never works as a process's only request. -> none: first-request ordering is control flow across calls; no literal.
+# pitfall: A read path that collects lines to fail on them must still log them. -> none: which lines a loop logs is data flow across the driver.
+# pitfall: A filter set for replies also hides what you sent. -> none: CAN_RAW_FILTER is correct; the echo fix is data flow.
+# pitfall: A loss counter shows only on the next delivery. -> none: SO_RXQ_OVFL is correct code; the missed-last-frame timing is data flow.
+# pitfall: A name from the user that becomes a path is validated first. -> none: the sysfs join is correct after validation (linux.rs:49).
+# pitfall: A fake that returns early hides a deadline. -> none: a fake's timing contract is behaviour, no single-line signature.
+# pitfall: Writing no frame isn't being silent on the bus. -> none: controller listen-only mode is configuration, not a line signature.
+# pitfall: A frame is its length as well as its bytes. -> none: DLC matching is data flow across the echo check.
+# pitfall: A drain before a send must not eat the conversation it sits in. -> none: which drain is safe depends on channel state, not a literal.
+# pitfall: After every fix, re-read the doc comments on what changed -> none: review process, not a code line a lint can see.
+# pitfall: A comment moved into `docs/` loses the item it sat on. -> none: wording in reference prose; no code signature.
+# pitfall: A data change makes the docs' sample output false. -> none: stale sample output is prose; no code signature.
+# pitfall: A dropped check leaves its prose claim behind. -> none: stale prose claims need reading the docs, not one line.
+ban pitfall-timeout-cargo-wrapper warn *.sh,*.yml,*.yaml '(^|[^[:alnum:]_.-])timeout[[:space:]].*scripts/cargo[.]sh' unless '^[[:space:]]*#|^([^"]*"[^"]*")*[^"]*"[^"]*timeout[[:space:]]|^([^'']*''[^'']*'')*[^'']*''[^'']*timeout[[:space:]]' -- timeout stops only the Docker client and the test keeps running in the container: bound the test itself, and docker kill a hung rust:1-slim container.
+# pitfall: A message names one cause for a flag several causes set. -> none: which setters a message covers is review judgement; no literal.
+# pitfall: A test that never ends gets the container OOM-killed -> none: hang handling is test design; no single-line bug signature.
+# pitfall: A build that runs out of memory looks like a slow one. -> none: the OOM symptom is read from output, not a code line.
+# pitfall: `timeout` around `scripts/cargo.sh` stops only the Docker client. -> pitfall-timeout-cargo-wrapper
+# pitfall: A second guard hides the first. -> none: testing two guards separately is test design; no literal.
+# pitfall: Termination needs an adversarial transport -> none: a test transport's behaviour is design; no literal signature.
+# pitfall: Use values the standard leaves free for "unknown" cases. -> none: correct code uses the same PIDs when defined; no literal.
+# pitfall: Inject faults where the real device would produce them. -> none: fault placement is test design; no literal signature.
+# pitfall: A rule change can make old tests' scenarios illegal. -> none: re-reading tests after a change is process; no line signature.
+# pitfall: Timing tests need margins and repeat runs. -> none: test-run practice; margins are not a literal signature.
+# pitfall: A scripted delay measured from the request races the test thread. -> none: delay origin is data flow across the fake; no literal.
+# pitfall: A fake that counts module delays from our re-arm hides the frames lost while re-arming. -> none: fake timing is data flow; no single-line signature.
+# pitfall: A fake that starts a simulated adapter state from the wall clock when it handles an event loses frames to scheduling. -> none: `Instant::now()` is common in correct code; timing is data flow.
+# pitfall: A flag that allows a token once, in one place, must be cleared where that place ends, and a log entry must follow the write it records. -> none: flag clearing is data flow across adapter states; no literal.
+# pitfall: An error that says "not sent" must be true for every byte already written. -> none: "wasn't sent" is common in correct code; only the bytes decide.
+# pitfall: A separator in a line makes its first part a command of its own. -> none: `|STM` is in correct batched code too; check order is data flow.
+ban pitfall-wall-clock-budget warn *tests*.rs 'elapsed\(\)[[:space:]]*<[[:space:]]*(Duration::from_(millis\([0-9]{1,2}\)|micros\(|nanos\()|[0-9]{1,2}[[:space:]]*\*[[:space:]]*MS([^[:alnum:]_]|$))' unless '^[[:space:]]*//' -- A single wall-clock budget fails when a shared runner stalls: assert only the hard bound (never shorter than the work), and check the budget on the fastest of many runs, kept out of the required check job.
+ban pitfall-transport-sim-dep warn crates/obdcracker-transport/Cargo.toml,crates/obdcracker-transport/*.rs '(^|[^[:alnum:]_-])obdcracker[-_]sim([^[:alnum:]_-]|$)' unless '^[[:space:]]*(//|#)|^([^"]*"[^"]*")*[^"]*"[^"]*obdcracker[-_]sim' -- obdcracker-transport can't depend on obdcracker-sim (a dev-dependency cycle builds two copies of Transport): move the test into the downstream crate.
+ban pitfall-commits-path-form warn *.rs,*.sh,*.ps1 'commits/(tags|heads)/' unless '^[[:space:]]*(//|#)' -- GitHub doesn't take commits/tags/<name> or commits/heads/<name> for a ref (422): use the full name, commits/refs/tags/<name> or commits/refs/heads/<name>, and pin the exact URL in a test.
+ban pitfall-install-cc-probe warn scripts/install*.sh,scripts/install*.ps1 '(^|[^[:alnum:]_])command -v (cc|gcc|clang)([^[:alnum:]_-]|$)' unless '&&[[:space:]]*$|^[[:space:]]*#|^([^"]*"[^"]*")*[^"]*"[^"]*command -v' -- A cc on PATH isn't a working toolchain (gcc without libc, stale Command Line Tools): probe by linking a program, as can_link does.
+ban pitfall-gate-commit-push warn *.sh,*.bash,*.yml,*.yaml,*.ps1 '(^|[^[:alnum:]_])(cargo|test|check|clippy|fmt|lint|pytest|ruff|black)[^&|;#]*;[[:space:]]*git[[:space:]]+(commit|push)([[:space:]]|$)' unless '^[[:space:]]*#' -- Chain the check and the commit or push with && (never ;): a failing check must stop the commit and the push.
+# pitfall: A fake that only counts the failure case makes an ordering assertion vacuous. -> none: which calls a fake counts is test design; no literal.
+# pitfall: A wall-clock bound on a shared runner needs the fastest of many, not every one. -> pitfall-wall-clock-budget
+# pitfall: A CI job that runs tests by name filter passes when the filter matches nothing. -> none: the fix spans lines (list, count, floor); no single-line signature.
+# pitfall: No dev-dependency cycles across the `Transport` trait. -> pitfall-transport-sim-dep
+# pitfall: A fake service accepts any path, so check each path form against the real one. -> pitfall-commits-path-form
+# pitfall: Gate commit and push on the checks. -> pitfall-gate-commit-push
+# pitfall: Install scripts: check what the build will actually use. -> pitfall-install-cc-probe
+# pitfall: A bare ref can be a tag, a branch and a commit prefix. -> none: the bare lookup is the correct last fallback, after tag and branch.
+ban pitfall-pkill-f warn *.sh,*.bash,*.yml,*.yaml '(^|[^[:alnum:]_])pkill[[:space:]]([^#]*[[:space:]])?(-[[:alnum:]]*f|--full)([[:space:]]|$)' unless '^[[:space:]]*#|^([^"]*"[^"]*")*[^"]*"[^"]*pkill' -- pkill -f matches this shell when the pattern is in its own command line: save the PID when you start the process and kill that PID.
+ban pitfall-required-check-if warn .github/workflows/*.yml,.github/workflows/*.yaml '^[[:space:]]{4}if:' unless '^[[:space:]]*#|cancelled[(][)]' -- A job-level if: can skip a required check and leave the PR waiting: keep the job and put the condition on its steps (a decider runs on !cancelled()).
+# pitfall: `pkill -f <pattern>` matches the shell running it -> pitfall-pkill-f
+# pitfall: clap skips `requires` when the required argument conflicts with one that's present. -> none: clap's conflict lists span lines; line hits are correct args (main.rs:121).
+# pitfall: Keep commit subjects under 72 characters. -> none: commit subject length is commit metadata, not an added line.
+# pitfall: Run clippy before committing. -> none: a process step, not a code line; clippy already runs in checks.
+# pitfall: PR gate and blockers. -> none: blocker links are GitHub metadata, not a code line.
+# pitfall: An issue number alone doesn't name an issue. -> none: cross-repo references live in GitHub metadata, not code.
+# pitfall: Codex threads re-anchor. -> none: thread state is GitHub review data, not a code line.
+# pitfall: A required check must always report. -> pitfall-required-check-if
+ban pitfall-diff-name-only-quoted warn *.sh,*.bash,*.yml,*.yaml '(^|[^[:alnum:]_-])git([[:space:]]+-C[[:space:]]+[^[:space:]]+)?[[:space:]]+diff[^#|;&]*--name-only([[:space:]]|$)' unless '^[[:space:]]*#|^([^"]*"[^"]*")*[^"]*"[^"$]*git([[:space:]]+-C[[:space:]]+[^[:space:]]+)?[[:space:]]+diff|git([[:space:]]+-C[[:space:]]+[^[:space:]]+)?[[:space:]]+diff[^#|;&]*[[:space:]]-z([[:space:]]|$)' -- Read the names with -z (git diff -z --name-only): without it a non-ASCII or special name is C-quoted and a filter misses it.
+ban pitfall-diff-name-only-renames warn *.sh,*.bash,*.yml,*.yaml '(^|[^[:alnum:]_-])git([[:space:]]+-C[[:space:]]+[^[:space:]]+)?[[:space:]]+diff[^#|;&]*--name-only([[:space:]]|$)' unless '^[[:space:]]*#|--no-renames|^([^"]*"[^"]*")*[^"]*"[^"$]*git([[:space:]]+-C[[:space:]]+[^[:space:]]+)?[[:space:]]+diff' -- Add --no-renames: a rename lists only its destination, so the source drops out of the changed paths.
+ban pitfall-grep-q-pipe warn .github/workflows/*.yml,.github/workflows/*.yaml '(^|[^|])[|][[:space:]]*grep([[:space:]]+-[[:alnum:]]+)*[[:space:]]+(-[[:alnum:]]*q[[:alnum:]]*|--quiet|--silent)([[:space:]]|$)' unless '^[[:space:]]*#' -- A workflow step runs with pipefail, so grep -q can SIGPIPE its producer and fail the step: feed grep a here-string (grep -q ... <<< "$var").
+# pitfall: A skipped required check passes. -> pitfall-required-check-if
+# pitfall: A CI skip list must include every file the build pulls in. -> none: the fix is a skip list; include lines are correct code
+# pitfall: `git diff --name-only` C-quotes a name with non-ASCII or special characters. -> pitfall-diff-name-only-quoted
+# pitfall: `git diff --name-only` hides a rename's source. -> pitfall-diff-name-only-renames
+# pitfall: `grep -q` in a `pipefail` pipeline can fail on a match. -> pitfall-grep-q-pipe
