@@ -183,3 +183,4 @@ ban pitfall-grep-q-pipe warn .github/workflows/*.yml,.github/workflows/*.yaml '(
 # pitfall: `git diff --name-only` C-quotes a name with non-ASCII or special characters. -> pitfall-diff-name-only-quoted
 # pitfall: `git diff --name-only` hides a rename's source. -> pitfall-diff-name-only-renames
 # pitfall: `grep -q` in a `pipefail` pipeline can fail on a match. -> pitfall-grep-q-pipe
+# pitfall: A monitor goes on printing until it reads the stop, so every line type the listen accepts must be accepted again while it stops. -> none: needs a cross-path check of line types; no single-line literal.
