@@ -83,3 +83,12 @@ ban pitfall-dtc-mask-ff warn *.rs,!*/tests/*,!tests/* '(^|[^[:alnum:]_])(0x19[^[
 # pitfall: Don't rely on a device to throw away a half-written line. -> none: device discard behaviour is design; no literal signature.
 # pitfall: Weigh a mitigation against what it costs. -> none: a cost judgement; no literal signature.
 # pitfall: Datasheet examples aren't byte-exact. -> none: test-fidelity advice; no literal signature.
+# pitfall: A value a standard leaves to the manufacturer isn't a standard value. -> none: manufacturer-defined values need the standard's table; no literal.
+# pitfall: A new protocol reaches past the allowlist. -> none: matching a reply through each path is data flow; no literal.
+# pitfall: A fresh state machine takes any starting point, so give it the one the protocol fixes. -> none: the starting sequence is data flow, not a literal.
+# pitfall: After dropping a message, skip to its end. -> none: skip-to-end is control flow across calls; no literal.
+ban pitfall-approve-from-raw-ids warn crates/obdcracker-safety/src/* '^[[:space:]]*((pub|pub\(crate\))[[:space:]]+)?fn[[:space:]]+approve[[:alnum:]_]*\([^)]*:[[:space:]]*u(16|32)([^[:alnum:]_]|$)' unless '^[[:space:]]*//' -- Approve from the proof the reply gave (a token such as OpenTp20Channel), not from raw IDs a caller chose: the policy can't check where the request goes.
+# pitfall: A request built from a reply needs proof of that reply. -> pitfall-approve-from-raw-ids
+# pitfall: Don't confuse a transport limit with a protocol limit. -> none: 4095 is also correct ISO-TP code; the limit's meaning is data flow.
+# pitfall: A policy widened for one pass mustn't outlive it. -> none: policy reuse across passes is data flow; discovery narrowing is correct.
+# pitfall: An early exit skips what else was asked for. -> none: skipped passes are control flow across the function; no literal.

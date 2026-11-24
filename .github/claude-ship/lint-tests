@@ -41,3 +41,12 @@ miss pitfall-dtc-mask-ff crates/obdcracker-transport/src/uds.rs let req = [0x19,
 miss pitfall-dtc-mask-ff crates/obdcracker-transport/src/uds.rs // [0x19, 0x02, 0xFF] returns every code, untested ones too
 miss pitfall-dtc-mask-ff crates/obdcracker-transport/src/uds.rs let note = "send 19 02 FF to read all";
 miss pitfall-dtc-mask-ff crates/obdcracker-safety/tests/policy.rs &[0x19, 0x02, 0xFF],
+
+# pitfall-approve-from-raw-ids: an approval taking raw u16/u32 IDs instead of the reply's proof token; a comment or a test path quotes it.
+hit pitfall-approve-from-raw-ids crates/obdcracker-safety/src/lib.rs pub fn approve_tp20_disconnect(&self, receive: u32, send: u32) -> Result<Approved, Rejection> {
+hit pitfall-approve-from-raw-ids crates/obdcracker-safety/src/lib.rs     fn approve_tp20_ack(&self, id: u16) -> Result<Approved, Rejection> {
+miss pitfall-approve-from-raw-ids crates/obdcracker-safety/src/lib.rs     pub fn approve_tp20_disconnect(&self, channel: &OpenTp20Channel) -> Result<Approved, Rejection> {
+miss pitfall-approve-from-raw-ids crates/obdcracker-safety/src/lib.rs     pub fn approve_tp20_setup(&self, address: u8) -> Result<Approved, Rejection> {
+miss pitfall-approve-from-raw-ids crates/obdcracker-safety/src/lib.rs     // fn approve_tp20_disconnect(&self, receive: u32, send: u32)
+miss pitfall-approve-from-raw-ids crates/obdcracker-safety/src/lib.rs     let doc = "fn approve_tp20_ack(id: u16)";
+miss pitfall-approve-from-raw-ids crates/obdcracker-safety/tests/policy.rs fn approve_tp20_ack(id: u16) -> Result<Tier, Rejection> {
