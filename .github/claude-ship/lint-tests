@@ -78,3 +78,13 @@ miss pitfall-stn-fc-clear crates/obdcracker-transport/src/elm/mod.rs self.flow_c
 miss pitfall-stn-fc-clear crates/obdcracker-transport/src/elm/mod.rs // Never send STFFCC or STCFCPC while the driver runs.
 miss pitfall-stn-fc-clear crates/obdcracker-transport/tests/elm.rs .any(|c| c == "STFFCC" || c == "STCFCPC"),
 miss pitfall-stn-fc-clear docs/elm327.md the driver never writes `STFFCC` while it runs
+
+# pitfall-timeout-cargo-wrapper: timeout in front of scripts/cargo.sh; a comment, a call without timeout, a doc path and a quoted mention are fine.
+hit pitfall-timeout-cargo-wrapper .github/workflows/ci.yml       run: timeout 900 scripts/cargo.sh test --all-features
+hit pitfall-timeout-cargo-wrapper scripts/check.sh timeout -k 10 600 ./scripts/cargo.sh test
+hit pitfall-timeout-cargo-wrapper .github/workflows/ci.yml       run: timeout 20m bash -c "scripts/cargo.sh test"
+miss pitfall-timeout-cargo-wrapper .github/workflows/ci.yml       # timeout 900 scripts/cargo.sh test
+miss pitfall-timeout-cargo-wrapper scripts/check.sh scripts/cargo.sh test --all-features
+miss pitfall-timeout-cargo-wrapper .github/workflows/ci.yml       run: timeout 60 scripts/lint.sh
+miss pitfall-timeout-cargo-wrapper docs/CONTRIBUTING.md run: timeout 900 scripts/cargo.sh test
+miss pitfall-timeout-cargo-wrapper scripts/check.sh echo "timeout 900 scripts/cargo.sh is the bug"

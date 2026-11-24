@@ -135,3 +135,12 @@ ban pitfall-stn-fc-clear warn *.rs,!*/tests/*,!tests/* '(^|[^[:alnum:]_])(STFFCC
 # pitfall: A comment moved into `docs/` loses the item it sat on. -> none: wording in reference prose; no code signature.
 # pitfall: A data change makes the docs' sample output false. -> none: stale sample output is prose; no code signature.
 # pitfall: A dropped check leaves its prose claim behind. -> none: stale prose claims need reading the docs, not one line.
+ban pitfall-timeout-cargo-wrapper warn *.sh,*.yml,*.yaml '(^|[^[:alnum:]_.-])timeout[[:space:]].*scripts/cargo[.]sh' unless '^[[:space:]]*#|^([^"]*"[^"]*")*[^"]*"[^"]*timeout[[:space:]]|^([^'']*''[^'']*'')*[^'']*''[^'']*timeout[[:space:]]' -- timeout stops only the Docker client and the test keeps running in the container: bound the test itself, and docker kill a hung rust:1-slim container.
+# pitfall: A message names one cause for a flag several causes set. -> none: which setters a message covers is review judgement; no literal.
+# pitfall: A test that never ends gets the container OOM-killed -> none: hang handling is test design; no single-line bug signature.
+# pitfall: A build that runs out of memory looks like a slow one. -> none: the OOM symptom is read from output, not a code line.
+# pitfall: `timeout` around `scripts/cargo.sh` stops only the Docker client. -> pitfall-timeout-cargo-wrapper
+# pitfall: A second guard hides the first. -> none: testing two guards separately is test design; no literal.
+# pitfall: Termination needs an adversarial transport -> none: a test transport's behaviour is design; no literal signature.
+# pitfall: Use values the standard leaves free for "unknown" cases. -> none: correct code uses the same PIDs when defined; no literal.
+# pitfall: Inject faults where the real device would produce them. -> none: fault placement is test design; no literal signature.
