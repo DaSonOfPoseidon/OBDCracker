@@ -92,3 +92,11 @@ ban pitfall-approve-from-raw-ids warn crates/obdcracker-safety/src/* '^[[:space:
 # pitfall: Don't confuse a transport limit with a protocol limit. -> none: 4095 is also correct ISO-TP code; the limit's meaning is data flow.
 # pitfall: A policy widened for one pass mustn't outlive it. -> none: policy reuse across passes is data flow; discovery narrowing is correct.
 # pitfall: An early exit skips what else was asked for. -> none: skipped passes are control flow across the function; no literal.
+# pitfall: A CAN ID means nothing without its width. -> none: ID-width check spans lines; bare ID comparisons are correct code too.
+# pitfall: A loop that waits on a flood needs its deadline checked after every frame it skips. -> none: deadline placement is control flow across the loop; no literal.
+# pitfall: A bounded drain that hits its bound hasn't drained. -> none: what a bound hit means is data flow; bounded loops are common.
+# pitfall: Handle every event before a limit rejects it. -> none: handling order spans lines; its one-line shape is pitfall-compare-before-incrementing.
+# pitfall: A transfer ends on every path that leaves the peer able to go on. -> none: which error paths drop a window is data flow across the function.
+# pitfall: Don't delete saved evidence when a later event completes. -> none: clearing on completion is data flow; the fixed code has the same literal.
+# pitfall: A multi-DID `22` reply may leave out the DIDs the module doesn't support. -> none: skipped-DID splitting is data flow; no single-line signature.
+# pitfall: An audit log that sees only what the code reads misses the evidence. -> none: which lines the log must keep is data flow across the driver.
