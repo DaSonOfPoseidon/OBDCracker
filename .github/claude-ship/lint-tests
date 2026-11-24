@@ -15,3 +15,12 @@ hit missing-docs crates/obdcracker-transport/src/lib.rs #[allow(clippy::pedantic
 miss missing-docs crates/obdcracker-transport/src/lib.rs #![warn(missing_docs)]
 miss missing-docs crates/obdcracker-transport/src/lib.rs #[allow(dead_code)]
 miss missing-docs README.md #![allow(missing_docs)] is not allowed
+
+# pitfall-escape-what-you-write-too: a hand-built JSON line interpolates a string raw; escaped or whole-line-comment forms are fine.
+hit pitfall-escape-what-you-write-too crates/obdcracker-transport/src/audit.rs &format!(r#""link":"{}""#, link)
+hit pitfall-escape-what-you-write-too crates/obdcracker-cli/src/json.rs write!(out, "{{\"name\":\"{}\"}}", name)
+miss pitfall-escape-what-you-write-too crates/obdcracker-transport/src/audit.rs &format!(r#""dir":"unread","line":"{}""#, json_escape(&line))
+miss pitfall-escape-what-you-write-too crates/obdcracker-transport/src/audit.rs format!("{}: {}", name, value)
+miss pitfall-escape-what-you-write-too crates/obdcracker-transport/src/audit.rs // written by hand as "link":"{}" it breaks on a quote
+miss pitfall-escape-what-you-write-too crates/obdcracker-transport/src/audit.rs         r#""link":"{}""#,
+miss pitfall-escape-what-you-write-too crates/obdcracker-cli/tests/cli.rs &format!(r#""link":"{}""#, link)

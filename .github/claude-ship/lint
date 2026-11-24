@@ -24,3 +24,12 @@ new-suppression off .github/claude-ship/lint-tests
 # pitfall: Standard data has a format whether or not a profile lists it. -> none: needs a per-DID format check, not one literal line.
 # pitfall: Cross-check related sources, both ways. -> none: needs both directions of a test; no single-line signature.
 # pitfall: Check data against the real replies, not against another hand-made file. -> none: test-data sourcing; no single-line signature.
+ban pitfall-escape-what-you-write-too warn *.rs,!*/tests/*,!tests/* ':([\\])?"[{][}]' unless 'escape|^[[:space:]]*//|,[[:space:]]*$' -- Escape each string a hand-built JSON format interpolates (json_escape), or write it with serde_json: one quote or backslash breaks the file for every reader.
+# pitfall: An importer must fail on a line it can't read, not skip it. -> none: skip-or-fail behaviour; blank and comment skips are correct.
+# pitfall: A value with its prefix stripped doesn't say which request it answered. -> none: data flow, not a literal; stripping a prefix is often correct.
+# pitfall: Public fields bypass the parser. -> none: pub fields are normal in plain data; no literal signature.
+# pitfall: Empty, blank and padding-only values -> none: which values are padding needs semantic checks, not one literal.
+# pitfall: But check real modules before calling padding malformed. -> none: an empty slot is legitimate; needs a modelled None, not a pattern.
+# pitfall: Names are keys. -> none: case and space handling depends on lookup context, not one line.
+# pitfall: Escape what you write, too. -> pitfall-escape-what-you-write-too
+# pitfall: A document read back must say one thing, spelled one way. -> none: flatten is valid on structs; the enum shape isn't on the line.
