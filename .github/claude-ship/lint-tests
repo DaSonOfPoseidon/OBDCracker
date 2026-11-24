@@ -128,3 +128,18 @@ miss pitfall-gate-commit-push scripts/check.sh scripts/cargo.sh test --all-featu
 miss pitfall-gate-commit-push scripts/check.sh # cargo test; git push
 miss pitfall-gate-commit-push scripts/check.sh echo "done"; git push
 miss pitfall-gate-commit-push docs/CONTRIBUTING.md cargo test; git push
+
+# pitfall-pkill-f: pkill -f with a pattern (or --full) in a script or workflow; a comment, a quoted mention, -x and docs are fine.
+hit pitfall-pkill-f scripts/dev.sh pkill -f "cargo run"
+hit pitfall-pkill-f scripts/stop.bash pkill --full obdcracker-sim
+miss pitfall-pkill-f scripts/dev.sh # pkill -f cargo run
+miss pitfall-pkill-f scripts/dev.sh pkill -x cargo
+miss pitfall-pkill-f scripts/dev.sh echo "run pkill -f later"
+miss pitfall-pkill-f docs/pitfalls.md pkill -f <pattern>
+
+# pitfall-required-check-if: a job-level if: in a workflow; step-level ifs and the !cancelled() decider are fine.
+hit pitfall-required-check-if .github/workflows/release.yml     if: github.ref_type == 'tag'
+hit pitfall-required-check-if .github/workflows/ci.yml     if: always()
+miss pitfall-required-check-if .github/workflows/ci.yml       if: ${{ always() }}
+miss pitfall-required-check-if .github/workflows/ci.yml     if: ${{ !cancelled() }}
+miss pitfall-required-check-if docs/ci.md     if: always()

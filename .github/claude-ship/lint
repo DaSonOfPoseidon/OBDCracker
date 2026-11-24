@@ -165,3 +165,13 @@ ban pitfall-gate-commit-push warn *.sh,*.bash,*.yml,*.yaml,*.ps1 '(^|[^[:alnum:]
 # pitfall: Gate commit and push on the checks. -> pitfall-gate-commit-push
 # pitfall: Install scripts: check what the build will actually use. -> pitfall-install-cc-probe
 # pitfall: A bare ref can be a tag, a branch and a commit prefix. -> none: the bare lookup is the correct last fallback, after tag and branch.
+ban pitfall-pkill-f warn *.sh,*.bash,*.yml,*.yaml '(^|[^[:alnum:]_])pkill[[:space:]]([^#]*[[:space:]])?(-[[:alnum:]]*f|--full)([[:space:]]|$)' unless '^[[:space:]]*#|^([^"]*"[^"]*")*[^"]*"[^"]*pkill' -- pkill -f matches this shell when the pattern is in its own command line: save the PID when you start the process and kill that PID.
+ban pitfall-required-check-if warn .github/workflows/*.yml,.github/workflows/*.yaml '^[[:space:]]{4}if:' unless '^[[:space:]]*#|cancelled[(][)]' -- A job-level if: can skip a required check and leave the PR waiting: keep the job and put the condition on its steps (a decider runs on !cancelled()).
+# pitfall: `pkill -f <pattern>` matches the shell running it -> pitfall-pkill-f
+# pitfall: clap skips `requires` when the required argument conflicts with one that's present. -> none: clap's conflict lists span lines; line hits are correct args (main.rs:121).
+# pitfall: Keep commit subjects under 72 characters. -> none: commit subject length is commit metadata, not an added line.
+# pitfall: Run clippy before committing. -> none: a process step, not a code line; clippy already runs in checks.
+# pitfall: PR gate and blockers. -> none: blocker links are GitHub metadata, not a code line.
+# pitfall: An issue number alone doesn't name an issue. -> none: cross-repo references live in GitHub metadata, not code.
+# pitfall: Codex threads re-anchor. -> none: thread state is GitHub review data, not a code line.
+# pitfall: A required check must always report. -> pitfall-required-check-if
