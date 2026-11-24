@@ -216,8 +216,10 @@ impl StnSegmenting {
 /// and the caller must connect again.
 ///
 /// See [`docs/elm327.md#failure-states`](https://github.com/DaSonOfPoseidon/OBDCracker/blob/main/docs/elm327.md#failure-states), [`#flow-control-per-target`](https://github.com/DaSonOfPoseidon/OBDCracker/blob/main/docs/elm327.md#flow-control-per-target) and [`#receive-filter`](https://github.com/DaSonOfPoseidon/OBDCracker/blob/main/docs/elm327.md#receive-filter).
-// Each flag is an independent piece of the adapter's state.
-#[allow(clippy::struct_excessive_bools)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "each flag is an independent piece of the adapter's state"
+)]
 #[derive(Debug)]
 pub struct Elm<L> {
     link: L,

@@ -1,5 +1,5 @@
 //! #42 requirement 6: `STmin`. The first tests count sleeps with a stand-in for `thread::sleep`, so
-//! they are exact on every OS. The `#[ignore]`d ones read the real clock, which only means
+//! they are exact on every OS. The ignored ones read the real clock, which only means
 //! something on the OS whose timers are coarse: the CI job `timing-windows` runs them there (and
 //! `raw::pace`'s) with `--include-ignored`, and `scripts/cargo.sh test ... -- --ignored` runs them
 //! anywhere else.

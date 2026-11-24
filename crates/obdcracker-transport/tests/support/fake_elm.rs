@@ -2,7 +2,10 @@
 //! adapter. It takes the bytes the host writes and produces what the adapter would print.
 //! Shared by other crates' tests through `#[path]`, so it only uses public APIs.
 
-#![allow(dead_code)]
+#![allow(
+    dead_code,
+    reason = "each test crate that includes this file by path uses only part of it"
+)]
 
 use std::collections::VecDeque;
 use std::io;
@@ -22,7 +25,10 @@ pub type Delayed = Box<dyn FnMut(u32, &[u8]) -> Vec<(Duration, u32, Vec<u8>)> + 
 
 pub const BANNER: &str = "ELM327 v2.0";
 
-#[allow(clippy::struct_excessive_bools)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "one flag per adapter quirk the tests switch on"
+)]
 pub struct FakeElm {
     responder: Responder,
     input: Vec<u8>,
@@ -189,7 +195,10 @@ const PP_FACTORY: [u8; 0x30] = [
 ];
 
 /// The adapter settings an `ATZ` restores to their defaults.
-#[allow(clippy::struct_excessive_bools)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "one flag per adapter setting"
+)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Settings {
     pub echo: bool,
@@ -1294,7 +1303,6 @@ struct Partial {
 /// block, drops a transfer that waits longer than `n_cr` for its next frame, and records what
 /// reached it. What it prints reaches the host only while the adapter listens (`AT R1`) and the
 /// receive filter shows it.
-#[allow(clippy::struct_excessive_bools)]
 pub struct Module {
     /// The ID it listens on, which the adapter's header must be.
     pub request_id: u32,
