@@ -50,3 +50,11 @@ ban pitfall-compare-before-incrementing warn *.rs,!*/tests/*,!tests/* '[[:alnum:
 # pitfall: Keep a multi-step broadcast's progress per source. -> none: progress tracking is data flow; no single-line signature.
 # pitfall: Deadlines must shrink back -> none: resetting a deadline is data flow; no single-line signature.
 # pitfall: Decode a reply as an answer to the request that got it. -> none: matching needs the request in scope; no literal signature.
+# pitfall: Splitting a list to process it in groups reorders it. -> none: Ordering across groups is data flow; no single-line signature.
+# pitfall: Cleanup that runs on drop can't report a failure. -> none: Drop impls are common in correct code; no single-line signature.
+# pitfall: Report progress only for work that happened. -> none: progress calls are correct too; whether work happened is data flow.
+# pitfall: "Busy, repeat request" (NRC 0x21) isn't an answer. -> none: NRC 0x21 also appears in correct code; no single-line signature.
+# pitfall: A refusal doesn't say which request it refuses. -> none: Which request a refusal answers is data flow across calls.
+# pitfall: A repeated request can take its own earlier late reply. -> none: Matching a late reply needs the request history; no literal signature.
+# pitfall: A reply can't change what the request already fixed. -> none: Needs the request in scope to compare; no single-line signature.
+# pitfall: A count inside a reply must be backed by the bytes after it. -> none: Counts and loops look like correct code; the check is data flow.
