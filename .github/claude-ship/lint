@@ -144,3 +144,11 @@ ban pitfall-timeout-cargo-wrapper warn *.sh,*.yml,*.yaml '(^|[^[:alnum:]_.-])tim
 # pitfall: Termination needs an adversarial transport -> none: a test transport's behaviour is design; no literal signature.
 # pitfall: Use values the standard leaves free for "unknown" cases. -> none: correct code uses the same PIDs when defined; no literal.
 # pitfall: Inject faults where the real device would produce them. -> none: fault placement is test design; no literal signature.
+# pitfall: A rule change can make old tests' scenarios illegal. -> none: re-reading tests after a change is process; no line signature.
+# pitfall: Timing tests need margins and repeat runs. -> none: test-run practice; margins are not a literal signature.
+# pitfall: A scripted delay measured from the request races the test thread. -> none: delay origin is data flow across the fake; no literal.
+# pitfall: A fake that counts module delays from our re-arm hides the frames lost while re-arming. -> none: fake timing is data flow; no single-line signature.
+# pitfall: A fake that starts a simulated adapter state from the wall clock when it handles an event loses frames to scheduling. -> none: `Instant::now()` is common in correct code; timing is data flow.
+# pitfall: A flag that allows a token once, in one place, must be cleared where that place ends, and a log entry must follow the write it records. -> none: flag clearing is data flow across adapter states; no literal.
+# pitfall: An error that says "not sent" must be true for every byte already written. -> none: "wasn't sent" is common in correct code; only the bytes decide.
+# pitfall: A separator in a line makes its first part a command of its own. -> none: `|STM` is in correct batched code too; check order is data flow.
