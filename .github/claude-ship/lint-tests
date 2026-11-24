@@ -143,3 +143,29 @@ hit pitfall-required-check-if .github/workflows/ci.yml     if: always()
 miss pitfall-required-check-if .github/workflows/ci.yml       if: ${{ always() }}
 miss pitfall-required-check-if .github/workflows/ci.yml     if: ${{ !cancelled() }}
 miss pitfall-required-check-if docs/ci.md     if: always()
+
+# pitfall-diff-name-only-quoted: git diff --name-only without -z; a -z read, a quoted or commented mention and a non-workflow path are fine.
+hit pitfall-diff-name-only-quoted scripts/pr-gate.sh names="$(git diff --name-only "$base"...HEAD)"
+hit pitfall-diff-name-only-quoted .github/workflows/ci.yml git diff --name-only "$BASE_SHA" HEAD > "$RUNNER_TEMP/changed"
+hit pitfall-diff-name-only-quoted scripts/changed.bash git -C "$dir" diff --name-only origin/main
+miss pitfall-diff-name-only-quoted scripts/pr-gate.sh git diff -z --name-only --no-renames "$base"...HEAD >"$names"
+miss pitfall-diff-name-only-quoted scripts/pr-gate.sh echo "run git diff --name-only later"
+miss pitfall-diff-name-only-quoted scripts/pr-gate.sh # git diff --name-only was the old check
+miss pitfall-diff-name-only-quoted docs/CONTRIBUTING.md git diff --name-only origin/main
+
+# pitfall-diff-name-only-renames: git diff --name-only without --no-renames; a rename's source is then missing from the list.
+hit pitfall-diff-name-only-renames .github/workflows/ci.yml git diff -z --name-only "$BASE_SHA" HEAD
+hit pitfall-diff-name-only-renames scripts/changed.sh changed=$(git diff --name-only origin/main)
+hit pitfall-diff-name-only-renames scripts/changed.sh git -C "$dir" diff --name-only HEAD~1
+miss pitfall-diff-name-only-renames .github/workflows/ci.yml git diff -z --name-only --no-renames "$BASE_SHA" HEAD
+miss pitfall-diff-name-only-renames scripts/pr-gate.sh git diff --no-renames --name-only origin/main
+miss pitfall-diff-name-only-renames scripts/pr-gate.sh # git diff --name-only hides the source
+miss pitfall-diff-name-only-renames docs/pitfalls.md git diff --name-only origin/main
+
+# pitfall-grep-q-pipe: a pipe into grep -q in a workflow step (pipefail is on there); a here-string, || and a script are fine.
+hit pitfall-grep-q-pipe .github/workflows/ci.yml if printf '%s\n' "$files" | grep -q '^crates/'; then
+hit pitfall-grep-q-pipe .github/workflows/release.yml run: git tag | grep -qx "$TAG"
+miss pitfall-grep-q-pipe .github/workflows/ci.yml if grep -q '^crates/' <<< "$files"; then
+miss pitfall-grep-q-pipe .github/workflows/ci.yml cmd || grep -q '^crates/'
+miss pitfall-grep-q-pipe .github/workflows/ci.yml # printf x | grep -q y was the old check
+miss pitfall-grep-q-pipe scripts/install.sh id -nG | tr ' ' '\n' | grep -qx "$group"

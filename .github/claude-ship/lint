@@ -175,3 +175,11 @@ ban pitfall-required-check-if warn .github/workflows/*.yml,.github/workflows/*.y
 # pitfall: An issue number alone doesn't name an issue. -> none: cross-repo references live in GitHub metadata, not code.
 # pitfall: Codex threads re-anchor. -> none: thread state is GitHub review data, not a code line.
 # pitfall: A required check must always report. -> pitfall-required-check-if
+ban pitfall-diff-name-only-quoted warn *.sh,*.bash,*.yml,*.yaml '(^|[^[:alnum:]_-])git([[:space:]]+-C[[:space:]]+[^[:space:]]+)?[[:space:]]+diff[^#|;&]*--name-only([[:space:]]|$)' unless '^[[:space:]]*#|^([^"]*"[^"]*")*[^"]*"[^"$]*git([[:space:]]+-C[[:space:]]+[^[:space:]]+)?[[:space:]]+diff|git([[:space:]]+-C[[:space:]]+[^[:space:]]+)?[[:space:]]+diff[^#|;&]*[[:space:]]-z([[:space:]]|$)' -- Read the names with -z (git diff -z --name-only): without it a non-ASCII or special name is C-quoted and a filter misses it.
+ban pitfall-diff-name-only-renames warn *.sh,*.bash,*.yml,*.yaml '(^|[^[:alnum:]_-])git([[:space:]]+-C[[:space:]]+[^[:space:]]+)?[[:space:]]+diff[^#|;&]*--name-only([[:space:]]|$)' unless '^[[:space:]]*#|--no-renames|^([^"]*"[^"]*")*[^"]*"[^"$]*git([[:space:]]+-C[[:space:]]+[^[:space:]]+)?[[:space:]]+diff' -- Add --no-renames: a rename lists only its destination, so the source drops out of the changed paths.
+ban pitfall-grep-q-pipe warn .github/workflows/*.yml,.github/workflows/*.yaml '(^|[^|])[|][[:space:]]*grep([[:space:]]+-[[:alnum:]]+)*[[:space:]]+(-[[:alnum:]]*q[[:alnum:]]*|--quiet|--silent)([[:space:]]|$)' unless '^[[:space:]]*#' -- A workflow step runs with pipefail, so grep -q can SIGPIPE its producer and fail the step: feed grep a here-string (grep -q ... <<< "$var").
+# pitfall: A skipped required check passes. -> pitfall-required-check-if
+# pitfall: A CI skip list must include every file the build pulls in. -> none: the fix is a skip list; include lines are correct code
+# pitfall: `git diff --name-only` C-quotes a name with non-ASCII or special characters. -> pitfall-diff-name-only-quoted
+# pitfall: `git diff --name-only` hides a rename's source. -> pitfall-diff-name-only-renames
+# pitfall: `grep -q` in a `pipefail` pipeline can fail on a match. -> pitfall-grep-q-pipe
