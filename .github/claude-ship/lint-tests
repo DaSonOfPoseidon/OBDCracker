@@ -50,3 +50,11 @@ miss pitfall-approve-from-raw-ids crates/obdcracker-safety/src/lib.rs     pub fn
 miss pitfall-approve-from-raw-ids crates/obdcracker-safety/src/lib.rs     // fn approve_tp20_disconnect(&self, receive: u32, send: u32)
 miss pitfall-approve-from-raw-ids crates/obdcracker-safety/src/lib.rs     let doc = "fn approve_tp20_ack(id: u16)";
 miss pitfall-approve-from-raw-ids crates/obdcracker-safety/tests/policy.rs fn approve_tp20_ack(id: u16) -> Result<Tier, Rejection> {
+
+# pitfall-link-io-bound: a serial link's flush waits with no timeout; the TCP link's flush is a no-op and the stdout flushes are fine.
+hit pitfall-link-io-bound crates/obdcracker-transport/src/link/serial.rs self.port.flush()?;
+hit pitfall-link-io-bound crates/obdcracker-transport/src/link/serial.rs port.flush().map_err(LinkError::Io)?;
+miss pitfall-link-io-bound crates/obdcracker-transport/src/link/tcp.rs self.stream.flush()
+miss pitfall-link-io-bound crates/obdcracker-transport/src/link/serial.rs // a serial flush: .flush() waits with no timeout
+miss pitfall-link-io-bound crates/obdcracker-transport/src/link/serial.rs let note = "never call .flush() on a serial link";
+miss pitfall-link-io-bound crates/obdcracker-cli/src/live_cmd.rs out.flush()

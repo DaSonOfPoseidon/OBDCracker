@@ -100,3 +100,12 @@ ban pitfall-approve-from-raw-ids warn crates/obdcracker-safety/src/* '^[[:space:
 # pitfall: Don't delete saved evidence when a later event completes. -> none: clearing on completion is data flow; the fixed code has the same literal.
 # pitfall: A multi-DID `22` reply may leave out the DIDs the module doesn't support. -> none: skipped-DID splitting is data flow; no single-line signature.
 # pitfall: An audit log that sees only what the code reads misses the evidence. -> none: which lines the log must keep is data flow across the driver.
+# pitfall: An adapter's learned timeout can hide a slow module. -> none: ATAT1 is also sent on purpose by correct code (elm/mod.rs:537).
+# pitfall: An adapter prints its prompt only after its listen, so a fake that prints it at once hides a second of waiting. -> none: a fake's prompt timing is test behaviour; no line signature.
+# pitfall: A silent listener on a bus where it's the only receiver makes the sender repeat and error out. -> none: the silent setting is correct in the listen-only monitor (#104).
+# pitfall: Check that a fix changes what the logs show. -> none: review method, not a line a lint can see.
+# pitfall: Every read and write on a link needs a bound, not just the bus waits. -> pitfall-link-io-bound
+ban pitfall-link-io-bound warn crates/obdcracker-transport/src/link/serial*.rs '[.]flush[(][)]' unless '^[[:space:]]*//|"[^"]*[.]flush' -- serial2's flush waits for the OS queue to drain with no timeout: keep the write timeout and don't flush a serial link.
+# pitfall: Bound what you collect, not just each piece. -> none: which loops accumulate is data flow; bounded loops are common.
+# pitfall: Timeouts must cover the link, not only the bus. -> none: sizing each timer from the data is data flow; no literal signature.
+# pitfall: A size measured on one ID width is wrong for the other. -> none: constants sized for the widest ID are data flow; no literal.
