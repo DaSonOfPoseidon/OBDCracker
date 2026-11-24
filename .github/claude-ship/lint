@@ -75,3 +75,11 @@ ban pitfall-dtc-mask-ff warn *.rs,!*/tests/*,!tests/* '(^|[^[:alnum:]_])(0x19[^[
 # pitfall: Don't ask for an answer that looks like a failure. -> none: sending ATI once is correct; a literal can't tell when.
 # pitfall: A truncated answer must not pass as a complete one. -> none: a complete-answer check is data flow across the parser.
 # pitfall: Output the driver could never have caused is evidence its assumptions broke. -> none: STOPPED is also an expected reply; no literal marks the bug.
+# pitfall: Widening a parser reclassifies lines other code diagnoses. -> none: behaviour across parser branches; no single-line signature.
+# pitfall: An ID's width is how it was printed, not its value. -> none: width is data carried between parser and driver; no literal.
+# pitfall: Check which chip version a command needs. -> none: AT CRA with X digits is correct behind a version gate.
+# pitfall: One flipped bit on a serial line can turn a command into a bus frame. -> none: corruption model is reasoning, not a line.
+# pitfall: A flipped bit can delete a character, not just change it. -> none: deletion versus substitution is reasoning, not a line.
+# pitfall: Don't rely on a device to throw away a half-written line. -> none: device discard behaviour is design; no literal signature.
+# pitfall: Weigh a mitigation against what it costs. -> none: a cost judgement; no literal signature.
+# pitfall: Datasheet examples aren't byte-exact. -> none: test-fidelity advice; no literal signature.
