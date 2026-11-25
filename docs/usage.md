@@ -520,7 +520,9 @@ The time column shows when each poll really started.
 **What it shows.** Each sample is the PIDs each ECU answered (`7E8 0C 812.5 rpm`) and then each module's DIDs
 (`7E9 transmission F187 "4G0927158Q"`). On a terminal the table is drawn again in place, under a `sample 12 at 2950 ms`
 heading; on Windows, or when stdout isn't a terminal, each sample is one line instead, `2950 ms | 7E8 0C 812.5 rpm |
-7E8 0D 0 km/h | ...`, so a pipe or a file works with a line-by-line tool. Notes and warnings go to stderr.
+7E8 0D 0 km/h | ...`, so a pipe or a file works with a line-by-line tool. On a terminal a line wider than the window
+is cut at its edge, not wrapped, so the redraw stays aligned; widen the window to see the rest. Notes and warnings go to
+stderr.
 
 - **A PID an ECU doesn't have** gets no line. A PID that **no** ECU lists in its supported-PID bitmaps is said once
   (`note: no ECU lists PID 0B: it is not polled`) and never asked for. If none of the PIDs is listed and there are no

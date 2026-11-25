@@ -318,14 +318,22 @@ impl Screen {
         lines: &[Line],
     ) -> io::Result<()> {
         if self.redraw {
+            // A line wider than the terminal would wrap onto a second row and the cursor would
+            // climb too few rows, so autowrap is off while the table is drawn: a long line is cut
+            // at the edge and each line is one row. It is one write, so a Ctrl-C can't land
+            // between turning autowrap off and on again.
+            let mut table = Vec::new();
+            write!(table, "\x1b[?7l")?;
             if self.drawn > 0 {
                 // Up to the table's first line, then clear from there to the end of the screen.
-                write!(out, "\x1b[{}A\r\x1b[J", self.drawn)?;
+                write!(table, "\x1b[{}A\r\x1b[J", self.drawn)?;
             }
-            writeln!(out, "sample {number} at {elapsed_ms} ms")?;
+            writeln!(table, "sample {number} at {elapsed_ms} ms")?;
             for line in lines {
-                writeln!(out, "{}", line.text)?;
+                writeln!(table, "{}", line.text)?;
             }
+            write!(table, "\x1b[?7h")?;
+            out.write_all(&table)?;
             self.drawn = lines.len() + 1;
         } else {
             write!(out, "{elapsed_ms} ms")?;
@@ -990,27 +998,31 @@ mod tests {
             .unwrap();
         assert_eq!(
             String::from_utf8(out.clone()).unwrap(),
-            "sample 1 at 0 ms\na\nb\n"
+            "\x1b[?7lsample 1 at 0 ms\na\nb\n\x1b[?7h"
         );
         out.clear();
-        // Up three lines (the heading and two), clear, then the new table, which is shorter.
+        // Autowrap off, up three lines (the heading and two), clear, then the new table, which is
+        // shorter, and autowrap on.
         screen.show(&mut out, 2, 250, &[line("c")]).unwrap();
         assert_eq!(
             String::from_utf8(out.clone()).unwrap(),
-            "\x1b[3A\r\x1b[Jsample 2 at 250 ms\nc\n"
+            "\x1b[?7l\x1b[3A\r\x1b[Jsample 2 at 250 ms\nc\n\x1b[?7h"
         );
         out.clear();
         screen.show(&mut out, 3, 500, &[line("d")]).unwrap();
         assert!(
             String::from_utf8(out.clone())
                 .unwrap()
-                .starts_with("\x1b[2A")
+                .starts_with("\x1b[?7l\x1b[2A")
         );
         // Something printed on standard error between draws starts the next one below it.
         screen.drawn = 0;
         out.clear();
         screen.show(&mut out, 4, 750, &[line("e")]).unwrap();
-        assert_eq!(String::from_utf8(out).unwrap(), "sample 4 at 750 ms\ne\n");
+        assert_eq!(
+            String::from_utf8(out).unwrap(),
+            "\x1b[?7lsample 4 at 750 ms\ne\n\x1b[?7h"
+        );
     }
 
     #[test]
