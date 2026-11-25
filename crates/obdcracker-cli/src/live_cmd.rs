@@ -320,10 +320,11 @@ impl Screen {
         if self.redraw {
             // A line wider than the terminal would wrap onto a second row and the cursor would
             // climb too few rows, so autowrap is off while the table is drawn: a long line is cut
-            // at the edge and each line is one row. It is one write, so a Ctrl-C can't land
-            // between turning autowrap off and on again. Autowrap goes back on before the last
-            // newline, not after it: standard output is line-buffered, and what follows the last
-            // newline would wait for the flush.
+            // at the edge and each line is one row. The off and the on are in one write, and the
+            // on goes before the last newline, not after it: standard output is line-buffered and
+            // would hold what follows the last newline until the flush. Ctrl-C kills the process
+            // with no handler to run, so one that lands while the terminal is still taking this
+            // write (a table too big for its buffer) can leave autowrap off; `reset` restores it.
             let mut table = Vec::new();
             write!(table, "\x1b[?7l")?;
             if self.drawn > 0 {
