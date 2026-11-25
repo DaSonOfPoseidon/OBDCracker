@@ -178,11 +178,13 @@ it, so the method is right either way.
 
 - **Against:**
   - The FRPM's examples are OBD requests in `CAF1` (`0100 1`). That a raw `CAF0` frame is a valid element is
-    **unverified** (section 5, item 2). If the switch from listen to `STM` is slow the loss is rarer, not gone; session 12
-    measured about 80 ms from the module's ACK to its first data frame, and the answers read whole (section 5, item 5).
-  - Whether the car's firmware has it is **unverified**: rev. F "adds" section 16, the car's STN2232 reports v5.12.4
-    ([`elm327.md`](../elm327.md#timing), #54), and the manual doesn't say which firmware first took `STBC`. An STN
-    that answers `?` to `STBC 1` has no batch, and the driver then does what it does today.
+    **unverified** (section 5, item 2). If the switch from listen to `STM` is slow the loss is rarer, not gone. On this
+    car the module's first data frame came about 80 ms after its ACK and the answers read whole, so the switch is faster
+    than that (section 5, item 5).
+  - Session 12 (#334) confirmed that the car's OBDLink EX (STN2232, v5.12.4, [`elm327.md`](../elm327.md#timing), #54)
+    takes the batch (section 5, item 1). Other STN firmware may not: the manual doesn't say which firmware first took
+    `STBC` (rev. F "adds" section 16). An STN that answers `?` to `STBC 1` has no batch, and the driver then does what
+    it does today.
   - The output has a `|` where the monitor's first line starts (position **unverified**), so the driver's line parser
     must accept it from this one place and nowhere else.
   - A prompt no longer follows the frame's own answer: the driver knows it is monitoring from the moment it writes the
@@ -327,8 +329,10 @@ recorded results, so they stay open for session 13 (#359), whose goal 5 checks t
 4. **What does `X` do to a batch?** Send the next frame while the module's ACK is still pending (a slow module, or the
    `A3` right after a data frame): does the adapter print `STOPPED` and its prompt with no monitor (what the fake models), or
    does it go on to `STM` (the driver then fails closed after 2 s)?
-5. **Confirmed: how fast the STN goes from its listen to `STM`.** About 80 ms from the module's ACK to its first data
-   frame. `22 F1 87` on 52 and on 20 read whole (`62 F1 87` and 11 bytes on 52), in all three passes, with no framing error.
+5. **Confirmed: the answers read whole after the switch to `STM`.** `22 F1 87` on 52 and on 20 read whole (`62 F1 87`
+   and 11 bytes on 52), in all three passes, with no framing error. The module's first data frame came about 80 ms
+   after its ACK, so the switch was faster than that, since nothing was lost. The switch itself wasn't measured: the
+   80 ms is the module's time from its ACK, and only bounds the STN's switch from above.
 6. **No `CAN ERROR`, no repeated frame:** the monitor still acknowledges (`STCMM 1`, #301).
 7. **A module that never answers:** one timeout, the monitor still up, no frame written.
 8. **Raw mode ends with `STBC 0` and `OK`**, and the next ISO-TP request is read as before.
