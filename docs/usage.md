@@ -521,7 +521,10 @@ The time column shows when each poll really started.
 (`7E9 transmission F187 "4G0927158Q"`). On a terminal the table is drawn again in place, under a `sample 12 at 2950 ms`
 heading; on Windows, or when stdout isn't a terminal, each sample is one line instead, `2950 ms | 7E8 0C 812.5 rpm |
 7E8 0D 0 km/h | ...`, so a pipe or a file works with a line-by-line tool. On a terminal a line wider than the window
-is cut at its edge, not wrapped, so the redraw stays aligned; widen the window to see the rest. Autowrap is turned off for each
+is cut at the window's width, not wrapped, so the redraw stays aligned; widen the window to see the rest. The width is read
+for each draw, so a resize is picked up, and it counts characters, so a double-width character could still reach past the
+edge (autowrap off keeps the rows aligned then). Where the width can't be read (Windows has no redraw anyway), the line is
+written whole and the terminal cuts it. Autowrap is turned off for each
 draw and back on at its end; a Ctrl-C that lands in the middle of a draw too big for the terminal's buffer can leave it off,
 and `reset` brings it back. Notes and warnings go to stderr.
 

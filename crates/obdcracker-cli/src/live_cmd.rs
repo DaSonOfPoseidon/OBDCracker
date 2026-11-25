@@ -296,6 +296,9 @@ fn sample_lines(sample: &Sample, polls: &[DidPoll], texts: &TextDids) -> Vec<Lin
 // tool that works line by line.
 struct Screen {
     redraw: bool,
+    // The terminal's width in columns, asked again for each draw so a resize is picked up. `None`
+    // where it can't be told.
+    width: fn() -> Option<usize>,
     // The lines the last draw wrote.
     drawn: usize,
 }
@@ -307,7 +310,11 @@ impl Screen {
         let redraw = io::stdout().is_terminal()
             && !cfg!(windows)
             && std::env::var_os("TERM").is_some_and(|term| term != "dumb");
-        Self { redraw, drawn: 0 }
+        Self {
+            redraw,
+            width: terminal_width,
+            drawn: 0,
+        }
     }
 
     fn show(
@@ -331,9 +338,14 @@ impl Screen {
                 // Up to the table's first line, then clear from there to the end of the screen.
                 write!(table, "\x1b[{}A\r\x1b[J", self.drawn)?;
             }
-            write!(table, "sample {number} at {elapsed_ms} ms")?;
+            let width = (self.width)();
+            write!(
+                table,
+                "{}",
+                cut(&format!("sample {number} at {elapsed_ms} ms"), width)
+            )?;
             for line in lines {
-                write!(table, "\n{}", line.text)?;
+                write!(table, "\n{}", cut(&line.text, width))?;
             }
             writeln!(table, "\x1b[?7h")?;
             out.write_all(&table)?;
@@ -353,6 +365,28 @@ impl Screen {
         eprintln!("{text}");
         self.drawn = 0;
     }
+}
+
+// The first `width` characters of `text`, or all of it where the width is unknown. Autowrap is off
+// while the table is drawn, so a longer line would pile its tail onto the last column.
+fn cut(text: &str, width: Option<usize>) -> &str {
+    let Some(width) = width else { return text };
+    match text.char_indices().nth(width) {
+        Some((end, _)) => &text[..end],
+        None => text,
+    }
+}
+
+// The columns of the terminal behind standard output, or `None` if it can't be asked or says 0.
+#[cfg(unix)]
+fn terminal_width() -> Option<usize> {
+    let size = rustix::termios::tcgetwinsize(io::stdout()).ok()?;
+    Some(usize::from(size.ws_col)).filter(|&columns| columns > 0)
+}
+
+#[cfg(not(unix))]
+fn terminal_width() -> Option<usize> {
+    None
 }
 
 // The CSV file the samples are appended to. It is written a sample at a time, straight to the file,
@@ -965,6 +999,10 @@ mod tests {
         );
     }
 
+    fn no_width() -> Option<usize> {
+        None
+    }
+
     fn line(text: &str) -> Line {
         Line {
             text: text.to_owned(),
@@ -976,6 +1014,7 @@ mod tests {
     fn off_a_terminal_each_sample_is_one_line() {
         let mut screen = Screen {
             redraw: false,
+            width: no_width,
             drawn: 0,
         };
         let mut out = Vec::new();
@@ -993,6 +1032,7 @@ mod tests {
     fn on_a_terminal_the_table_is_drawn_again_over_itself() {
         let mut screen = Screen {
             redraw: true,
+            width: no_width,
             drawn: 0,
         };
         let mut out = Vec::new();
@@ -1028,6 +1068,56 @@ mod tests {
         );
     }
 
+    const TWELVE: fn() -> Option<usize> = || Some(12);
+
+    fn drawn_at(width: fn() -> Option<usize>, lines: &[Line]) -> String {
+        let mut screen = Screen {
+            redraw: true,
+            width,
+            drawn: 0,
+        };
+        let mut out = Vec::new();
+        screen.show(&mut out, 1, 0, lines).unwrap();
+        String::from_utf8(out).unwrap()
+    }
+
+    #[test]
+    fn a_line_wider_than_the_terminal_is_cut_at_its_width() {
+        let drawn = drawn_at(TWELVE, &[line("7E8 0C 812.5 rpm")]);
+        assert!(drawn.contains("\n7E8 0C 812.5\x1b[?7h"), "{drawn:?}");
+        assert!(!drawn.contains("rpm"), "{drawn:?}");
+    }
+
+    #[test]
+    fn a_line_of_exactly_the_width_is_unchanged_and_one_more_loses_a_character() {
+        let drawn = drawn_at(TWELVE, &[line("7E8 0C 812.5"), line("7E8 0C 812.5r")]);
+        assert!(
+            drawn.ends_with("\n7E8 0C 812.5\n7E8 0C 812.5\x1b[?7h\n"),
+            "{drawn:?}"
+        );
+    }
+
+    #[test]
+    fn a_line_is_cut_by_characters_not_bytes() {
+        // `°` is two bytes, so byte 12 falls inside the one that is the 12th character.
+        let drawn = drawn_at(TWELVE, &[line("7E8 05 9.0 °C more")]);
+        assert!(drawn.contains("\n7E8 05 9.0 °\x1b[?7h"), "{drawn:?}");
+        let drawn = drawn_at(TWELVE, &[line("7E8 05 9.0°C more")]);
+        assert!(drawn.contains("\n7E8 05 9.0°C\x1b[?7h"), "{drawn:?}");
+    }
+
+    #[test]
+    fn the_heading_is_cut_too() {
+        let drawn = drawn_at(TWELVE, &[]);
+        assert_eq!(drawn, "\x1b[?7lsample 1 at \x1b[?7h\n");
+    }
+
+    #[test]
+    fn with_no_known_width_a_line_is_written_whole() {
+        let drawn = drawn_at(no_width, &[line("7E8 0C 812.5 rpm")]);
+        assert!(drawn.contains("\n7E8 0C 812.5 rpm\x1b[?7h"), "{drawn:?}");
+    }
+
     // Standard output is line-buffered: what follows the last newline waits for the flush, so
     // turning autowrap back on there could be cut off by a Ctrl-C.
     #[test]
@@ -1044,6 +1134,7 @@ mod tests {
         }
         let mut screen = Screen {
             redraw: true,
+            width: no_width,
             drawn: 0,
         };
         let mut out = io::LineWriter::new(Recorder(Vec::new()));

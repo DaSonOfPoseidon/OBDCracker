@@ -20,6 +20,10 @@ clap = { version = "4.6.7", features = ["derive"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.145"
 
+# The terminal's width, for cutting a live line at the edge (`live`)
+[target.'cfg(unix)'.dependencies]
+rustix = { version = "1", default-features = false, features = ["std", "termios"] }
+
 [[bin]]
 name = "obdcracker"
 path = "src/main.rs"
