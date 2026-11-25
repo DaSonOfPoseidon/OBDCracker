@@ -288,8 +288,8 @@ smaller wins, and the design should be reopened before building either.
   and a transport still takes only `&Approved`. The suffix is a constant, so a caller can't put anything after the
   frame, and only a data frame or an ACK on a channel gets it.
 - **The frame's bytes don't change**, and the audit log still logs the request (its payload) before it is sent. The
-  `STM` it starts is logged as the command `|STM` when the line is written (`start_monitor`'s plain `STM` stays `STM`), the `STBC` probe and
-  its answer are logged as commands, and every frame the monitor prints is logged like any reply.
+  `STM` it starts is logged as the command `|STM` when the line is written (`start_monitor`'s plain `STM` stays `STM`),
+  the `STBC` probe and its answer are logged as commands, and every frame the monitor prints is logged like any reply.
 - **Every bit-flip is covered by the echo check, with one more case than before.** The digits are echoed and compared
   before `|STM` is written, and `|STM` before the carriage return; a mismatch ends the line with `XX\r`
   ([`elm327.md`](../elm327.md#safety)).
