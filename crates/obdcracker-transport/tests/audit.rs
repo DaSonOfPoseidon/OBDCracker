@@ -558,3 +558,102 @@ fn flow_control_through_two_audited_wrappers_is_logged_by_both() {
         );
     }
 }
+
+// Reports `events` on the first call that takes them, and fails the send with `error`.
+struct Scripted {
+    events: Vec<LinkEvent>,
+    error: Error,
+}
+
+impl Transport for Scripted {
+    fn send(&mut self, _: &Approved) -> Result<(), Error> {
+        Err(self.error.clone())
+    }
+
+    fn recv(&mut self, _: Duration) -> Result<Response, Error> {
+        Err(Error::Timeout)
+    }
+
+    fn take_events(&mut self) -> Vec<LinkEvent> {
+        std::mem::take(&mut self.events)
+    }
+}
+
+#[test]
+fn every_string_field_of_every_event_is_escaped() {
+    let log = temp_log("every-field");
+    let at = std::time::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+    let events = vec![
+        LinkEvent::Command {
+            at,
+            command: r#"AT "SH\7E0"#.to_owned(),
+            answer: vec![r#"a"b"#.to_owned(), r"c\d".to_owned()],
+        },
+        LinkEvent::Unread {
+            at,
+            line: r#"un"read\"#.to_owned(),
+        },
+        LinkEvent::Status {
+            at,
+            line: r#"sta"tus\"#.to_owned(),
+        },
+        LinkEvent::Frame {
+            at,
+            sent: true,
+            id: 0x7E0,
+            data: vec![0x02, 0x09, 0x02],
+        },
+        LinkEvent::Setting {
+            at,
+            name: r#"na"me\"#.to_owned(),
+            value: r#"va"lue\"#.to_owned(),
+        },
+        LinkEvent::Lost(3),
+    ];
+    let scripted = Scripted {
+        events,
+        error: Error::Adapter(r#"bad "x" \ y"#.to_owned()),
+    };
+    let mut audited = Audited::open(&log, scripted, r#"li"nk\"#).unwrap();
+    let vin = Policy::read_only()
+        .approve(Protocol::Uds, Target::Physical(0x7E0), &[0x09, 0x02])
+        .unwrap();
+    assert!(audited.send(&vin).is_err());
+    drop(audited);
+
+    let audit = std::fs::read_to_string(&log).unwrap();
+    let link = r#""link":"li\"nk\\""#;
+    let expected = [
+        r#"{"ts_ms":1700000000000,"dir":"cmd","cmd":"AT \"SH\\7E0","answer":"a\"b / c\\d","#,
+        r#"{"ts_ms":1700000000000,"dir":"unread","line":"un\"read\\","#,
+        r#"{"ts_ms":1700000000000,"dir":"status","line":"sta\"tus\\","#,
+        r#"{"ts_ms":1700000000000,"dir":"tx_frame","id":"7E0","payload":"02 09 02","#,
+        r#"{"ts_ms":1700000000000,"dir":"setting","name":"na\"me\\","value":"va\"lue\\","#,
+    ];
+    let lines: Vec<_> = audit.lines().collect();
+    // What the adapter did before the wrapper opened is logged at open, then the request, then
+    // the error sending it gave.
+    assert_eq!(lines.len(), 8, "{audit}");
+    for (line, prefix) in lines.iter().zip(expected) {
+        assert_eq!(*line, format!("{prefix}{link}}}"), "{audit}");
+    }
+    assert!(
+        lines[5].ends_with(&format!(r#""dir":"lost","count":3,{link}}}"#)),
+        "{audit}"
+    );
+    assert!(
+        lines[6].ends_with(&format!(
+            r#""dir":"tx","id":"7E0","payload":"09 02",{link}}}"#
+        )),
+        "{audit}"
+    );
+    assert!(
+        lines[7].ends_with(&format!(
+            r#""dir":"err","op":"send","id":"7E0","error":"adapter error: bad \"x\" \\ y",{link}}}"#
+        )),
+        "{audit}"
+    );
+    for line in lines {
+        serde_json::from_str::<serde_json::Value>(line).unwrap();
+    }
+}

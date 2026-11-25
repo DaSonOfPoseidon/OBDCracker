@@ -66,11 +66,12 @@ impl<T: Transport> Audited<T> {
 
     // Logs `error` from the `op` call, then returns it. `id` is the request's CAN ID, for a send.
     fn record_error(&mut self, op: &str, id: Option<u32>, error: Error) -> Error {
-        let id = id.map_or(String::new(), |id| format!(r#","id":"{id:03X}""#));
-        let fields = format!(
-            r#""dir":"err","op":"{op}"{id},"error":"{}""#,
-            json_escape(&error.to_string())
-        );
+        let text = error.to_string();
+        let id = id.map(|id| format!("{id:03X}"));
+        let mut pairs = vec![("dir", "err"), ("op", op)];
+        pairs.extend(id.as_deref().map(|id| ("id", id)));
+        pairs.push(("error", &text));
+        let fields = string_fields(&pairs);
         // The adapter's error matters more than the log's.
         let _ = self.write(&fields);
         error
@@ -85,31 +86,25 @@ impl<T: Transport> Audited<T> {
                     answer,
                 } => self.write_at(
                     at,
-                    &format!(
-                        r#""dir":"cmd","cmd":"{}","answer":"{}""#,
-                        json_escape(&command),
-                        json_escape(&answer.join(" / "))
-                    ),
+                    &string_fields(&[
+                        ("dir", "cmd"),
+                        ("cmd", &command),
+                        ("answer", &answer.join(" / ")),
+                    ]),
                 )?,
-                LinkEvent::Unread { at, line } => self.write_at(
-                    at,
-                    &format!(r#""dir":"unread","line":"{}""#, json_escape(&line)),
-                )?,
-                LinkEvent::Status { at, line } => self.write_at(
-                    at,
-                    &format!(r#""dir":"status","line":"{}""#, json_escape(&line)),
-                )?,
+                LinkEvent::Unread { at, line } => {
+                    self.write_at(at, &string_fields(&[("dir", "unread"), ("line", &line)]))?;
+                }
+                LinkEvent::Status { at, line } => {
+                    self.write_at(at, &string_fields(&[("dir", "status"), ("line", &line)]))?;
+                }
                 LinkEvent::Frame { at, sent, id, data } => self.write_at(
                     at,
                     &frame_fields(if sent { "tx_frame" } else { "rx_frame" }, id, &data),
                 )?,
                 LinkEvent::Setting { at, name, value } => self.write_at(
                     at,
-                    &format!(
-                        r#""dir":"setting","name":"{}","value":"{}""#,
-                        json_escape(&name),
-                        json_escape(&value)
-                    ),
+                    &string_fields(&[("dir", "setting"), ("name", &name), ("value", &value)]),
                 )?,
                 LinkEvent::Lost(count) => {
                     self.write(&format!(r#""dir":"lost","count":{count}"#))?;
@@ -128,11 +123,25 @@ impl<T: Transport> Audited<T> {
     }
 }
 
+// `"key":"value"` for each pair, in order, with every value escaped. Every string field of a line
+// goes through here, so none can be written raw.
+fn string_fields(pairs: &[(&str, &str)]) -> String {
+    let mut out = String::new();
+    for (i, (key, value)) in pairs.iter().enumerate() {
+        if i > 0 {
+            out.push(',');
+        }
+        let _ = write!(out, r#""{}":"{}""#, json_escape(key), json_escape(value));
+    }
+    out
+}
+
 fn frame_fields(dir: &str, id: u32, payload: &[u8]) -> String {
-    format!(
-        r#""dir":"{dir}","id":"{id:03X}","payload":"{}""#,
-        hex(payload)
-    )
+    string_fields(&[
+        ("dir", dir),
+        ("id", &format!("{id:03X}")),
+        ("payload", &hex(payload)),
+    ])
 }
 
 // A frame heard while listening. Its ID is written at the width it has, so `123` and `00000123`
@@ -143,10 +152,11 @@ fn heard_fields(heard: &Heard) -> String {
     } else {
         format!("{:03X}", heard.id)
     };
-    format!(
-        r#""dir":"heard","id":"{id}","payload":"{}""#,
-        hex(&heard.data)
-    )
+    string_fields(&[
+        ("dir", "heard"),
+        ("id", &id),
+        ("payload", &hex(&heard.data)),
+    ])
 }
 
 fn write_line(log: &mut File, link: &str, at: SystemTime, fields: &str) -> Result<(), Error> {
@@ -302,11 +312,7 @@ pub fn log_failure(
     error: &Error,
 ) -> io::Result<()> {
     let mut audited = Audited::open(path, Replay(events), link)?;
-    let fields = format!(
-        r#""dir":"err","op":"{}","error":"{}""#,
-        json_escape(op),
-        json_escape(&error.to_string())
-    );
+    let fields = string_fields(&[("dir", "err"), ("op", op), ("error", &error.to_string())]);
     audited.write(&fields).map_err(io::Error::other)
 }
 
