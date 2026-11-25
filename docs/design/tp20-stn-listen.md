@@ -118,7 +118,7 @@ message."
   *ISO-TP* messages, `STCFCPA` adds flow control address pairs (section 8.8, p. 38 of 78), and `STPTO` (section 8.6,
   p. 35: "0: timeout is infinite") sets how long the listen lasts, not why it ends after one frame.
 - **Verdict: rejected**, on the manual's silence. A session-12 probe would be needed only if the batch and `ATR0`
-  both fail, and the batch didn't fail on the OBDLink EX (`STBC 1` answered `OK`, section 5, item 1).
+  both fail; `STBC 1` answered `OK` on the OBDLink EX (section 5, item 1), so it isn't needed there.
 
 ### c. Periodic messages while monitoring
 
@@ -279,9 +279,11 @@ STBC1                             <OK        batching on (FRPM 8.15); only an ex
   frames is reworded to say which adapters still have the gap, not removed.
 
 **Fallback, if the batch isn't usable** (`STBC` refused, or a raw frame isn't a batch element, or the monitor
-starts late). Not needed on the OBDLink EX (session 12, #334); kept for other STN firmware: (d) for the data
-frames, with `ATR0` set when the channel's first data frame goes out and `ATR1` before anything else, and (a) as a refinement of the `STM` write only if the log shows the echo wait as the cause. Both are
-smaller wins, and the design should be reopened before building either.
+starts late). On the OBDLink EX, `STBC` was accepted and the reads came whole (session 12, #334, section 5, items 1
+and 5), so this fallback isn't needed for those two; whether a raw frame is a batch element is still open (item 2).
+It is kept for other STN firmware and for item 2's result: (d) for the data frames, with `ATR0` set when the
+channel's first data frame goes out and `ATR1` before anything else, and (a) as a refinement of the `STM` write only
+if the log shows the echo wait as the cause. Both are smaller wins, and the design should be reopened before building either.
 
 ## 4. Safety, policy and the audit log
 
