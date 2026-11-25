@@ -22,7 +22,8 @@ hit pitfall-escape-what-you-write-too crates/obdcracker-cli/src/json.rs write!(o
 miss pitfall-escape-what-you-write-too crates/obdcracker-transport/src/audit.rs &format!(r#""dir":"unread","line":"{}""#, json_escape(&line))
 miss pitfall-escape-what-you-write-too crates/obdcracker-transport/src/audit.rs format!("{}: {}", name, value)
 miss pitfall-escape-what-you-write-too crates/obdcracker-transport/src/audit.rs // written by hand as "link":"{}" it breaks on a quote
-miss pitfall-escape-what-you-write-too crates/obdcracker-transport/src/audit.rs         r#""link":"{}""#,
+hit pitfall-escape-what-you-write-too crates/obdcracker-transport/src/audit.rs         r#""link":"{}""#,
+miss pitfall-escape-what-you-write-too crates/obdcracker-transport/src/audit.rs         &string_fields(&[("dir", "unread"), ("line", &line)]),
 miss pitfall-escape-what-you-write-too crates/obdcracker-cli/tests/cli.rs &format!(r#""link":"{}""#, link)
 
 # pitfall-compare-before-incrementing: an increment and a limit check on one line, the increment first.

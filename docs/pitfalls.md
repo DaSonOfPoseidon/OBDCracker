@@ -85,7 +85,9 @@ Each entry names the class, what to check, and where it bit us.
   place only, and treat names that differ only in case as duplicates.
 - **Escape what you write, too.** A format built by hand (JSON Lines, TOML) must escape every string it
   interpolates, or one quote or backslash breaks the file for every reader. The audit log wrote the link name raw, so
-  a Windows port such as `\\.\COM10` made invalid JSON. Test by parsing the output back with a real parser (#2).
+  a Windows port such as `\\.\COM10` made invalid JSON. Test by parsing the output back with a real parser (#2). Write
+  every string field through one helper that escapes (the audit log's `string_fields`) rather than a `"{}"` in a format
+  string: a lint can't tell an escaped argument on the next line from a raw one (#381).
 - **A document read back must say one thing, spelled one way.** The JSON result types (`transport::json`, #100) first
   used `#[serde(flatten)]` on a `value`/`error` enum, which takes the first key and ignores the other, so an entry with
   both read as a value, and the derived enum that replaced it refused any key a later version adds, against the format's
