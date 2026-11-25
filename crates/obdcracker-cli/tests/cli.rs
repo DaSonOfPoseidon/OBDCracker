@@ -2363,6 +2363,31 @@ mod read_dids {
     }
 
     #[test]
+    fn text_that_looks_like_a_marker_or_bytes_is_quoted() {
+        // F187 holds the printable text "(empty)" and F189 the text "[01]": neither may read as
+        // the marker for no value or as bytes. Plain text and padding-only data stay as they are.
+        let request = vec![0x22, 0xF1, 0x87, 0xF1, 0x89];
+        let mut reply = vec![0x62, 0xF1, 0x87];
+        reply.extend(b"(empty)    ");
+        reply.extend([0xF1, 0x89]);
+        reply.extend(b"[01]");
+        let addr = wifi_elm(with_transmission(request, reply));
+        let log = temp_log("read-dids-marker-text");
+        let out = read_dids(addr, &log, &[], "F187,F189");
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(out.status.success(), "{stderr}");
+        assert_eq!(
+            String::from_utf8_lossy(&out.stdout)
+                .lines()
+                .collect::<Vec<_>>(),
+            [
+                "7E9 transmission F187 \"(empty)\"",
+                "7E9 transmission F189 \"[01]\""
+            ]
+        );
+    }
+
+    #[test]
     fn a_refusal_is_shown_by_name_and_fails() {
         let elm = FakeElm::new(Box::new(|header, request| match (header, request) {
             (0x7E1, [0x22, 0xF1, 0x87]) => vec![(0x7E9, vec![0x7F, 0x22, 0x31])],

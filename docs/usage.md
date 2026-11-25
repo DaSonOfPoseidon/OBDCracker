@@ -470,7 +470,8 @@ whose length the profile gives is shown as `scan` shows it. A DID is text if ISO
 F189, F191, F197 and F19E), else it takes the format its profile entry gives, else it is text if `scan` reads it by
 default and hex if not. Text is shown as `<ID> <module> <DID> <text>` without its padding (`7E9 transmission F187
 4G0907401N`) when its data is printable, else as `<ID> <module> <DID> [bytes]` in hex. Text whose data is only padding
-(spaces or NULs) is shown as `<ID> <module> <DID> (empty)`. A DID the profile gives as `hex` (such as F18B) is always
+(spaces or NULs) is shown as `<ID> <module> <DID> (empty)`, and text that starts with `(` or `[` is put in double quotes
+(`"(empty)"`) so it can't pass for a marker or for bytes. A DID the profile gives as `hex` (such as F18B) is always
 hex. F190 is text only if it is a VIN (17 bytes of one filler, such as dashes, is `(not set)`, and anything else is
 hex). The `--json` document keeps the bytes. From the first DID in the reply with no
 length that isn't the last one asked for, the rest is printed whole, as `<ID> <module> <DIDs> not split, as the profile
