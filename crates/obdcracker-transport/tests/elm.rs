@@ -2697,6 +2697,43 @@ mod requests {
     }
 
     #[test]
+    fn a_line_written_in_one_piece_that_fails_says_it_may_have_been_sent() {
+        // With no early echo the line and its carriage return go out in one write, which can
+        // fail after the link took the carriage return (#352).
+        for (what, kill) in [("every write fails", false), ("the link goes down", true)] {
+            let mut fake = car();
+            fake.echo_at_line_end = true;
+            let mut elm = connect(fake);
+            elm.send(&approve(Target::ObdFunctional, &[0x09, 0x02]))
+                .unwrap();
+            while elm.recv(Duration::from_secs(1)).is_ok() {}
+            if kill {
+                elm.link_mut().kill_after_writes = Some(0);
+            } else {
+                elm.link_mut().fail_writes = true;
+            }
+            let err = elm
+                .send(&approve(Target::ObdFunctional, &[0x09, 0x02]))
+                .unwrap_err()
+                .to_string();
+            assert!(
+                err.contains("the request may have been sent"),
+                "{what}: {err}"
+            );
+            // The failure ends the driver; nothing more is written.
+            elm.link_mut().fail_writes = false;
+            elm.link_mut().kill_after_writes = None;
+            elm.link_mut().closed = false;
+            let written = elm.link().written.len();
+            assert!(
+                elm.send(&approve(Target::ObdFunctional, &[0x09, 0x02]))
+                    .is_err()
+            );
+            assert_eq!(elm.link().written.len(), written, "{what}");
+        }
+    }
+
+    #[test]
     fn no_single_bit_error_in_the_kill_lets_the_line_out() {
         // A misheard line (any line of hex digits) ended with the driver's kill, `XX` and a
         // carriage return, with any one bit of the kill flipped: the adapter never sends it.

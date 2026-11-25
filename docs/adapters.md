@@ -35,9 +35,10 @@ neither refused nor stopped: the CLI says the battery isn't checked.
 
 The ELM driver sends single-frame requests (up to 7 bytes: the OBD-II reads, and UDS 0x22 with up to 3 DIDs), and on
 an adapter that echoes as it reads longer ones, up to 44 bytes: as `STPX` on an STN chip such as the OBDLink EX, to an
-emissions ECU at 0x7E0 to 0x7E7 ([details](elm327.md#multi-frame-requests); to any other module only with
-`--elm-segmenting stpx`, [flow control setup](elm327.md#flow-control-for-stpx)), and on a plain ELM327, and on an STN to
-any other module, as raw ISO-TP frames it writes itself with `AT CAF0`,
+emissions ECU at 0x7E0 to 0x7E7 ([details](elm327.md#multi-frame-requests); to any other module with
+`--elm-segmenting stpx`, or by default when the `AT CAF0` path can't run, for one when the adapter's `AT PPS` summary
+doesn't list PP 26, both with the [flow control setup](elm327.md#flow-control-for-stpx)), and on a plain ELM327, and on
+an STN to any other module by default, as raw ISO-TP frames it writes itself with `AT CAF0`,
 to a module whose reply ID is known ([details](elm327.md#multi-frame-requests-on-a-plain-elm327)). The second follows the
 datasheet and has not run on a plain ELM327 or a clone yet. It never lets the adapter search for a protocol, and stops if the
 adapter stops answering. On a plain ELM327 it paces a physical request's long reply to the link's speed, so its

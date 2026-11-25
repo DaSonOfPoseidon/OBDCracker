@@ -864,7 +864,10 @@ impl<L: Link> Elm<L> {
                 before_tail(self);
             }
             let sent_at = Instant::now();
-            self.write(format!("{line}\r").as_bytes())?;
+            // The carriage return goes with the line, so a failure can come after the link
+            // took it, whatever the line holds.
+            self.write(format!("{line}\r").as_bytes())
+                .map_err(|error| self.maybe_sent(error))?;
             return Ok(sent_at);
         }
         let (head, tail) = line.split_at(head_len);

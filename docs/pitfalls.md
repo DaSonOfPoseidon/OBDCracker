@@ -615,7 +615,9 @@ Each entry names the class, what to check, and where it bit us.
   parts, and the head's echo is checked before the tail goes out. Once the head was heard right it is a complete
   element a carriage return (a corrupted `M`, say) makes the adapter run, yet a tail failure still ended "the
   request wasn't sent" (#343). After the first part passed, any later failure of the same line says the request
-  *may have been sent*, and the caller must not resend it; test a flip in each part of the line.
+  *may have been sent*, and the caller must not resend it; test a flip in each part of the line. A line written in one
+  piece, carriage return included (an adapter that doesn't echo early), can fail after the link took the carriage
+  return, so every failure of that write says it too (#352).
 - **A separator in a line makes its first part a command of its own.** An STN runs `<hex>|STM` as two elements, left to
   right, so a misheard digit that the driver ended with `XX` would have left the damaged digits as a complete hex element
   to send, `XX` ending only the last one. Check the part that can become a request before the separator is written
