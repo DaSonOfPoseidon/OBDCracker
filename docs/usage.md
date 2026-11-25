@@ -465,20 +465,23 @@ A module leaves out of its reply the DIDs it doesn't support (ISO 14229-1; it re
 none of them), so the reply may hold fewer DIDs than were asked for, still in the order asked. Each DID it left out is
 printed as `<ID> <module> <DID> (not in the reply)`, and the read still succeeds.
 
-The reply doesn't say where one DID's data ends, so it is split only as far as the profile gives lengths. Each DID
-whose length the profile gives is shown as `scan` shows it: a DID that is text (ISO 14229-1's identification names, or
-the profile's `decode = "text"`) as `<ID> <module> <DID> <text>` without its padding (`7E9 transmission F187
-4G0907401N`) when its data is printable, else as `<ID> <module> <DID> [bytes]` in hex. A DID the profile gives as `hex`
-(such as F18B) is always hex, F190 is text only if it is a VIN (17 bytes of one filler, such as dashes, is
-`(not set)`, and anything else is hex). Data that is only padding in a text DID is empty text. The `--json` document keeps the bytes. From the first DID in the reply with no
-length that isn't the last one asked for, the rest is printed whole, as `<ID> <module> <DIDs> not split, as the profile
-gives no length for the first [bytes]`, from that DID's echo on (a DID with no length that is the last one asked for
-takes the rest of the reply). The reply is checked exactly as far as it is split: each echo is one of the DIDs asked for
-and comes in the order asked, with none repeated; each known length is held to; and nothing is left over once the last
-DID is split. The length of a DID the reply leaves out doesn't matter. The bytes after the first DID with no length
-aren't checked beyond that DID's echo and one data byte, so the DIDs after it aren't reported as left out: they are in the
-`not split` line. A reply that fails any check (a DID out of order, a DID not asked for, bytes after the last one, or a
-reply that leaves out every DID) is printed as `(reply is malformed: <bytes>)` and shows no values; a refusal is
+The reply doesn't say where one DID's data ends, so it is split only as far as the profile gives lengths. Each DID whose
+length the profile gives is shown as `scan` shows it. A DID is text if ISO 14229-1 names it as text (F187, F188, F189,
+F191, F197 and F19E), else it takes the format its profile entry gives, else it is text if `scan` reads it by default
+and hex if not. Text is shown as `<ID> <module> <DID> <text>` without its padding (`7E9 transmission F187 4G0907401N`)
+when its data is printable, else as `<ID> <module> <DID> [bytes]` in hex. Text whose data is only padding (spaces or
+NULs) is shown as `<ID> <module> <DID> (empty)`, and text that starts with `(`, `[` or `"` is put in double quotes
+(`"(empty)"`, with `\"` and `\\` inside) so it can't pass for a marker, for bytes or for quoted text. A DID the profile
+gives as `hex` (such as F18B) is always hex. F190 is text only if it is a VIN (17 bytes of one filler, such as dashes,
+is `(not set)`, and anything else is hex). The `--json` document keeps the bytes. From the first DID in the reply with
+no length that isn't the last one asked for, the rest is printed whole, as `<ID> <module> <DIDs> not split, as the
+profile gives no length for the first [bytes]`, from that DID's echo on (a DID with no length that is the last one asked
+for takes the rest of the reply). The reply is checked exactly as far as it is split: each echo is one of the DIDs asked
+for and comes in the order asked, with none repeated; each known length is held to; and nothing is left over once the
+last DID is split. The length of a DID the reply leaves out doesn't matter. The bytes after the first DID with no length
+aren't checked beyond that DID's echo and one data byte, so the DIDs after it aren't reported as left out: they are in
+the `not split` line. A reply that fails any check (a DID out of order, a DID not asked for, bytes after the last one,
+or a reply that leaves out every DID) is printed as `(reply is malformed: <bytes>)` and shows no values; a refusal is
 printed by name, as `scan` does. The command exits 0 when the module gave a good reply, left-out DIDs included, 1 when
 it didn't, refused or said nothing, and 2 for a bad command line (a DID that isn't four hex digits, a repeat, none or
 more than 21, a module the profile doesn't have, no profile).
