@@ -1900,12 +1900,14 @@ fn sim_scan_compares_the_gateways_list_with_the_modules_that_answered() {
         .unwrap_or_else(|| panic!("no gateway list in:\n{stdout}"));
     // The profile's VAG addresses 01, 02, 19, 82, 17, 03, 13, 8B, 3B, 44, 8E, 15, 08, 53, 55, 65, 6C
     // and 6D answer; the gateway lists 17 and 03 twice, so each counts for both of its slots.
+    // The profile's 29 TP2.0 addresses aren't probed without --discover-tp20, so they're not tried.
     assert_eq!(
         summary,
-        "gateway lists 73 installed modules: 20 found, 53 not in profile"
+        "gateway lists 73 installed modules: 20 found, 29 not tried, 24 not in profile"
     );
-    // The A7 profile has no module for 22 (request 0x71D) or 34 (request 0x755).
+    // The A7 profile has no module for 22 (request 0x71D) or 34 (request 0x755), and 05 is one of its TP2.0 addresses.
     for line in [
+        "  05 not tried",
         "  22 not in profile (request 0x71D)",
         "  34 not in profile (request 0x755)",
     ] {

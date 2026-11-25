@@ -285,7 +285,8 @@ bitmaps and each PID in it) and 1 or more for the mode 06 bitmaps. With no ECU k
 ### Gateway list
 
 If the profile has a `[gateway_list]` ([profiles](profiles.md#gateway-list)) and its gateway answered, scan ends by
-reading the gateway's installed-module list and comparing it with the modules it tried:
+reading the gateway's installed-module list and comparing it with the modules it tried (this example is a scan with
+`--discover-tp20`; without it the 29 `silent` addresses are `not tried`):
 
 ```
 gateway lists 73 installed modules: 20 found, 29 silent, 24 not in profile
@@ -300,7 +301,8 @@ twice. The statuses:
 
 - `found`: a profile module with that VAG address answered the scan, or a TP2.0 setup to it (`--discover-tp20`).
 - `silent`: it was tried and nothing answered. A TP2.0 setup counts as a try only with `--discover-tp20`.
-- `not tried`: a profile module has the address but scan skipped it, such as one that isn't plain UDS.
+- `not tried`: a profile module has the address but scan skipped it, such as one that isn't plain UDS, or the profile lists
+  it under `[discovery_tp20]` and scan wasn't given `--discover-tp20`.
 - `not in profile`: no profile module has that VAG address. That includes a module the profile lists without a
   `vag_address`.
 

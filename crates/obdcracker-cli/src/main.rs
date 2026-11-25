@@ -2095,6 +2095,13 @@ fn run_scan<T: Transport>(
         if cli.dry_run {
             println!("{TP20_DRY_RUN_NOTE}");
         }
+    } else if let Some(profile) = profile_of(cli) {
+        // Without --discover-tp20 the profile's TP2.0 addresses are modules this scan left alone.
+        tp20_tries = profile
+            .tp20_addresses()
+            .into_iter()
+            .map(|address| (address, Tried::NotTried))
+            .collect();
     }
     if let (Some(profile), Some(scanned)) = (profile_of(cli), &scanned) {
         show_gateway_list(
