@@ -117,7 +117,8 @@ message."
 - **Other settings that end a raw listen:** none in the FRPM. `STCSEGR` is receive segmentation of multi-frame
   *ISO-TP* messages, `STCFCPA` adds flow control address pairs (section 8.8, p. 38 of 78), and `STPTO` (section 8.6,
   p. 35: "0: timeout is infinite") sets how long the listen lasts, not why it ends after one frame.
-- **Verdict: rejected**, on the manual's silence. A session-12 probe could try it only if the batch and `ATR0` both fail.
+- **Verdict: rejected**, on the manual's silence. A session-12 probe would be needed only if the batch and `ATR0`
+  both fail, and the batch didn't fail on the OBDLink EX (`STBC 1` answered `OK`, section 5, item 1).
 
 ### c. Periodic messages while monitoring
 
@@ -176,9 +177,9 @@ host's reaction. If the STN doesn't end its listen early, the listen prints the 
 it, so the method is right either way.
 
 - **Against:**
-  - The FRPM's examples are OBD requests in `CAF1` (`0100 1`). That a raw `CAF0` frame is a valid element, and how long
-    the STN takes to go from a listen to `STM`, are **unverified**. If the switch isn't quick enough the loss is rarer,
-    not gone, and session 12 shows by how much.
+  - The FRPM's examples are OBD requests in `CAF1` (`0100 1`). That a raw `CAF0` frame is a valid element is
+    **unverified** (section 5, item 2). If the switch from listen to `STM` is slow the loss is rarer, not gone; session 12
+    measured about 80 ms from the module's ACK to its first data frame, and the answers read whole (section 5, item 5).
   - Whether the car's firmware has it is **unverified**: rev. F "adds" section 16, the car's STN2232 reports v5.12.4
     ([`elm327.md`](../elm327.md#timing), #54), and the manual doesn't say which firmware first took `STBC`. An STN
     that answers `?` to `STBC 1` has no batch, and the driver then does what it does today.
@@ -189,7 +190,8 @@ it, so the method is right either way.
   - An `X` that arrives while the frame's listen is still running has no documented effect on a batch. The manual
     says a monitor that is interrupted (`STOPPED`) may abort "the remainder of the batch" (16.1), which is the end of
     this one anyway. The driver assumes an `X` ends the whole batch, reads `STOPPED` and the prompt as `interrupt`
-    does today, and writes the next frame as a new batch; **unverified**, session 12 checks it.
+    does today, and writes the next frame as a new batch; **unverified**, and open for session 13 (#359, section 5,
+    item 4).
 - **Verdict: recommended.** It's the one candidate with no host round trip between the frame and the monitor, it is in
   the manual in terms ("safely place [...] STM at the end of the batch"), and it doesn't depend on the unexplained
   early prompt.
@@ -272,13 +274,13 @@ STBC1                             <OK        batching on (FRPM 8.15); only an ex
   `interrupt` does for a listen: the adapter is idle, the flags are cleared, and the next frame is a new batch. If the
   STN instead goes on to `STM`, no prompt comes and `interrupt` fails the adapter closed after `COMMAND_WAIT`, as for any
   adapter that doesn't stop. The fake models the worst case (`an_interrupt_before_the_batch_reaches_its_monitor_...`),
-  and session 12 shows which it is.
+  and session 13 (#359) shows which it is (section 5, item 4).
 - **Today's re-arm stays** for an STN that refuses `STBC` and for a plain ELM327, so `recv`'s comment about the lost
   frames is reworded to say which adapters still have the gap, not removed.
 
-**Fallback, if session 12 finds no usable batch** (`STBC` refused, or a raw frame isn't a batch element, or the monitor
-starts late): (d) for the data frames, with `ATR0` set when the channel's first data frame goes out and `ATR1` before
-anything else, and (a) as a refinement of the `STM` write only if the log shows the echo wait as the cause. Both are
+**Fallback, if the batch isn't usable** (`STBC` refused, or a raw frame isn't a batch element, or the monitor
+starts late). Not needed on the OBDLink EX (session 12, #334); kept for other STN firmware: (d) for the data
+frames, with `ATR0` set when the channel's first data frame goes out and `ATR1` before anything else, and (a) as a refinement of the `STM` write only if the log shows the echo wait as the cause. Both are
 smaller wins, and the design should be reopened before building either.
 
 ## 4. Safety, policy and the audit log
