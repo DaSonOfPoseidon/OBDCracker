@@ -2095,6 +2095,13 @@ fn run_scan<T: Transport>(
         if cli.dry_run {
             println!("{TP20_DRY_RUN_NOTE}");
         }
+    } else if let Some(profile) = profile_of(cli) {
+        // Without --discover-tp20 the profile's TP2.0 addresses are modules this scan left alone.
+        tp20_tries = profile
+            .tp20_addresses()
+            .into_iter()
+            .map(|address| (address, Tried::NotTried))
+            .collect();
     }
     if let (Some(profile), Some(scanned)) = (profile_of(cli), &scanned) {
         show_gateway_list(
@@ -2604,16 +2611,14 @@ const COMMON_ID_READ: u8 = 0x22;
 
 // A module's answer to the read of common identifier `id`, as a line. ECU replies are untrusted,
 // so it must be `62` and `id` echoed exactly; whatever follows is the module's data, shown as text
-// if it's printable (the way a UDS text DID is) and as bytes if not.
+// if it's printable (the way scan shows a UDS text DID, through `did_value`) and as bytes if not.
 fn show_common_id(id: u16, answer: &[u8]) -> String {
     match response::positive(COMMON_ID_READ, answer) {
         Err(ReplyError::Negative(refusal)) => format!("{id:04X} refused ({})", refusal.nrc),
         Err(e) => format!("{id:04X} not read ({e}) [{}]", hex(answer)),
         Ok(rest) => match rest.split_first_chunk::<2>() {
             Some((echo, data)) if *echo == id.to_be_bytes() => match uds::decode_text(data) {
-                // Nothing, or only padding: no value set.
-                Ok("") => format!("{id:04X} (empty)"),
-                Ok(text) => format!("{id:04X} \"{text}\""),
+                Ok(text) => format!("{id:04X} {}", did_value(&DidValue::Text(text.to_owned()))),
                 Err(_) => format!("{id:04X} [{}]", hex(data)),
             },
             _ => format!(
@@ -3636,10 +3641,7 @@ mod tests {
             read.shown
         );
         // The padding a module adds isn't part of the text.
-        assert_eq!(
-            read.common_ids,
-            ["F187 \"4G8959802B\"", "F19E \"8P0959802\""]
-        );
+        assert_eq!(read.common_ids, ["F187 4G8959802B", "F19E 8P0959802"]);
         // On the one channel, after the session and the refused read, one ID per request.
         let sent = bus.sent();
         assert_eq!(
@@ -3672,10 +3674,7 @@ mod tests {
             "{}",
             read.shown
         );
-        assert_eq!(
-            read.common_ids,
-            ["F187 \"4G8959802B\"", "F19E \"8P0959802\""]
-        );
+        assert_eq!(read.common_ids, ["F187 4G8959802B", "F19E 8P0959802"]);
     }
 
     #[test]
@@ -3738,7 +3737,15 @@ mod tests {
     #[test]
     fn a_common_id_answer_is_checked_exactly() {
         for (answer, shown) in [
-            (&[0x62, 0xF1, 0x87, 0x41, 0x42][..], "F187 \"AB\""),
+            (&[0x62, 0xF1, 0x87, 0x41, 0x42][..], "F187 AB"),
+            (&[0x62, 0xF1, 0x87, 0x34, 0x47, 0x30, 0x20], "F187 4G0"),
+            // Text that starts like a marker is quoted, as scan's DID lines do.
+            (
+                &[0x62, 0xF1, 0x87, 0x22, 0x61, 0x22, 0x62],
+                "F187 \"\\\"a\\\"b\"",
+            ),
+            (&[0x62, 0xF1, 0x87, 0x5B, 0x31], "F187 \"[1\""),
+            (&[0x62, 0xF1, 0x87, 0x61, 0x22, 0x62], "F187 a\"b"),
             (&[0x62, 0xF1, 0x87], "F187 (empty)"),
             (&[0x62, 0xF1, 0x87, 0x00, 0x20], "F187 (empty)"),
             (&[0x62, 0xF1, 0x87, 0x41, 0x00, 0x42], "F187 [41 00 42]"),
