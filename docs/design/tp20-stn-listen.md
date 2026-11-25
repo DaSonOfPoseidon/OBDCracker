@@ -16,7 +16,8 @@ frame, in all three passes.
    (`<frame digits>|STM`, OBDLink Batched Commands, `STBC 1`), so the STN starts monitoring itself when the frame's
    listen ends, with no round trip to the host in between. `STBC 1` is probed when raw mode starts and only an exact
    `OK` counts.
-2. **A fallback order (section 3)** if the car's firmware doesn't take the batch. Session 12 (#334) found that the OBDLink EX's does.
+2. **A fallback order (section 3)** if the car's firmware doesn't take the batch. Session 12 (#334) found that the
+   OBDLink EX answers `OK` to `STBC 1`.
 3. **What isn't changed:** the frame's bytes, the policy and audit path, and a plain ELM327's byte stream (section 4).
 4. **What session 12 (#334) checked, and what session 13 (#359) still checks** (section 5).
 
@@ -182,9 +183,9 @@ it, so the method is right either way.
     car the module's first data frame came about 80 ms after its ACK and the answers read whole, so the switch is faster
     than that (section 5, item 5).
   - Session 12 (#334) confirmed that the car's OBDLink EX (STN2232, v5.12.4, [`elm327.md`](../elm327.md#timing), #54)
-    takes the batch (section 5, item 1). Other STN firmware may not: the manual doesn't say which firmware first took
-    `STBC` (rev. F "adds" section 16). An STN that answers `?` to `STBC 1` has no batch, and the driver then does what
-    it does today.
+    answers `OK` to `STBC 1` (section 5, item 1). Other STN firmware may not: the manual doesn't say which firmware
+    first took `STBC` (rev. F "adds" section 16). An STN that answers `?` to `STBC 1` has no batch, and the driver then
+    does what it does today.
   - The output has a `|` where the monitor's first line starts (position **unverified**), so the driver's line parser
     must accept it from this one place and nowhere else.
   - A prompt no longer follows the frame's own answer: the driver knows it is monitoring from the moment it writes the
