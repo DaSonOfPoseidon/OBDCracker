@@ -1923,11 +1923,11 @@ fn print_sweep_found(module: &UdsModule, found: &sweep::Sweep) {
 }
 
 // Bracketed hex for bytes, so binary data can't pass for text that looks like hex. Text that was only padding is
-// `(empty)`, not a blank line, so text that starts like a marker or like bytes is quoted to stay distinct.
+// `(empty)`, not a blank line, so text that starts like a marker, like bytes or with a quote is quoted to stay distinct.
 fn did_value(value: &DidValue) -> String {
     match value {
         DidValue::Text(text) if text.is_empty() => "(empty)".to_owned(),
-        DidValue::Text(text) if text.starts_with(['(', '[']) => format!("{text:?}"),
+        DidValue::Text(text) if text.starts_with(['(', '[', '"']) => format!("{text:?}"),
         DidValue::Text(text) => text.clone(),
         bytes @ DidValue::Bytes(_) => format!("[{bytes}]"),
         DidValue::NotSet => "(not set)".to_owned(),

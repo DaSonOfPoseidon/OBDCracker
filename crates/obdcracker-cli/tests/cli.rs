@@ -2365,15 +2365,18 @@ mod read_dids {
     #[test]
     fn text_that_looks_like_a_marker_or_bytes_is_quoted() {
         // F187 holds the printable text "(empty)" and F189 the text "[01]": neither may read as
-        // the marker for no value or as bytes. Plain text and padding-only data stay as they are.
-        let request = vec![0x22, 0xF1, 0x87, 0xF1, 0x89];
+        // the marker for no value or as bytes, and text that starts with a quote is quoted too, so
+        // it can't pass for either.
+        let request = vec![0x22, 0xF1, 0x87, 0xF1, 0x89, 0xF1, 0x91];
         let mut reply = vec![0x62, 0xF1, 0x87];
         reply.extend(b"(empty)    ");
         reply.extend([0xF1, 0x89]);
         reply.extend(b"[01]");
+        reply.extend([0xF1, 0x91]);
+        reply.extend(b"\"(empty)\"  ");
         let addr = wifi_elm(with_transmission(request, reply));
         let log = temp_log("read-dids-marker-text");
-        let out = read_dids(addr, &log, &[], "F187,F189");
+        let out = read_dids(addr, &log, &[], "F187,F189,F191");
         let stderr = String::from_utf8_lossy(&out.stderr);
         assert!(out.status.success(), "{stderr}");
         assert_eq!(
@@ -2382,7 +2385,8 @@ mod read_dids {
                 .collect::<Vec<_>>(),
             [
                 "7E9 transmission F187 \"(empty)\"",
-                "7E9 transmission F189 \"[01]\""
+                "7E9 transmission F189 \"[01]\"",
+                "7E9 transmission F191 \"\\\"(empty)\\\"\""
             ]
         );
     }
